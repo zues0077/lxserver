@@ -33,17 +33,17 @@
 
 ### 方案二：基于 Docker 引擎的容器化部署
 
-镜像同时发布到 GitHub Packages（GHCR）与 Docker Hub，**每次更新都会打上版本号标签**，便于固定版本与回滚：
+镜像发布到 **GitHub Packages（GHCR）**，**每次更新都会打上版本号标签**，便于固定版本与回滚：
 
 | 标签 | 说明 |
 | :--- | :--- |
 | `latest` | 最新稳定版，跟随 `main` 分支 |
-| `v2.2.0` / `2.2.0` | 具体版本（与 `package.json` 的 `version` 一致），**生产环境建议用这个** |
-| `v2.1.3` 等历史版本 | 每个已发布版本都会保留 |
+| `v1.5.3` / `1.5.3` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
+| `v*` | 每个已发布版本都会保留，可随时回滚到历史版本 |
 
 ```bash
 # 固定版本（推荐）
-docker pull ghcr.io/zues0077/lxserver:2.2.0
+docker pull ghcr.io/zues0077/lxserver:1.5.3
 
 # 或跟随最新
 docker pull ghcr.io/zues0077/lxserver:latest
@@ -57,7 +57,7 @@ docker run -d \
   -v $(pwd)/data:/server/data \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:2.2.0
+  ghcr.io/zues0077/lxserver:1.5.3
 ```
 
 **容器挂载卷 (Volume Mappings) ：**
@@ -71,7 +71,7 @@ docker run -d \
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:2.2.0   # 或 :latest
+    image: ghcr.io/zues0077/lxserver:1.5.3   # 或 :latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:

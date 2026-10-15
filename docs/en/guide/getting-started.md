@@ -33,17 +33,17 @@ For desktop users, we strongly recommend using the **Desktop Client** based on E
 
 ### Option 2: Containerized Deployment Based on Docker Engine
 
-Images are published to both GitHub Packages (GHCR) and Docker Hub. **Every update also gets a version tag**, so you can pin a version and roll back easily:
+Images are published to **GitHub Packages (GHCR)**. **Every update also gets a version tag**, so you can pin a version and roll back easily:
 
 | Tag | Meaning |
 | :--- | :--- |
 | `latest` | Latest stable, tracking the `main` branch |
-| `v2.2.0` / `2.2.0` | Concrete version (matches `version` in `package.json`) — **recommended for production** |
-| e.g. `v2.1.3` | Previous releases are kept as well |
+| `v1.5.3` / `1.5.3` | Current version (matches `version` in `package.json`) — **pin to a concrete version in production** |
+| `v*` | Every published version is kept, so you can roll back at any time |
 
 ```bash
 # Pin a version (recommended)
-docker pull ghcr.io/zues0077/lxserver:2.2.0
+docker pull ghcr.io/zues0077/lxserver:1.5.3
 
 # Or follow the latest
 docker pull ghcr.io/zues0077/lxserver:latest
@@ -57,7 +57,7 @@ docker run -d \
   -v $(pwd)/data:/server/data \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:2.2.0
+  ghcr.io/zues0077/lxserver:1.5.3
 ```
 
 **Container Volume Mappings:**
@@ -71,7 +71,7 @@ For standardized long-term management in production implementation, create a def
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:2.2.0   # or :latest
+    image: ghcr.io/zues0077/lxserver:1.5.3   # or :latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:

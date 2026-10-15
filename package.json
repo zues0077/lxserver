@@ -1,9 +1,10 @@
 {
   "name": "lxserver",
-  "version": "2.2.0",
+  "version": "1.5.3",
   "private": true,
   "description": "LX Music 数据同步服务端（增强版）：内置 Web 播放器、自定义源自检护栏与平台可用性巡检",
   "scripts": {
+    "version:set": "node scripts/set-version.js",
     "prebuild": "node scripts/download-binary.js && node scripts/update-build-hash.js",
     "build": "rimraf server && tsc --project tsconfig.json && tsc-alias -p tsconfig.json",
     "test": "node --test test/*.test.cjs",

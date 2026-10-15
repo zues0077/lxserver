@@ -126,7 +126,7 @@ Third-party source scripts are a black box: some obfuscated scripts keep burning
 - **Recoverable**: quarantine only skips loading — it never deletes scripts or changes your toggles; updating a script (fingerprint change) lifts it automatically
 - Results and current idle CPU are exposed in the `/health` `sourceGuard` field
 
-> See [docs/guide/source-guard.md](docs/guide/source-guard.md) for grading rules, configuration and false-positive handling.
+> See [docs/guide/source-guard.md](docs/guide/source-guard.md) for grading rules, configuration and false-positive handling (Chinese only).
 
 ### 9. Custom Source Platform Availability Probe
 
@@ -137,10 +137,11 @@ Some platforms declared by a source script are simply broken (tightened anti-abu
 - **Auto-disable broken platforms**: only after `failThreshold` consecutive failures (2 by default); the state is written into the **same `states.json` as the panel's platform toggle**, so it stays visible and editable
 - **Auto-restore**: an auto-disabled platform is re-enabled as soon as it probes successfully; **platforms you disabled by hand are never re-checked nor auto-enabled**
 - **Auto-remove dead sources**: when every platform a source declares is dead, the source is moved to a sibling `.trash/` directory (recoverable) and the action is recorded in `probe-audit.log`
-- **Three anti-false-positive safeguards**: probe quality follows the script's own `qualitys`; up to 3 candidate tracks per platform are retried (any success counts as available); when a platform fails on most sources in the same round it is treated as a platform-side problem and only reported (`suspectPlatforms`)
+- **Three anti-false-positive safeguards**: ① probe quality follows the script's own `qualitys` instead of a hard-coded one; ② up to 3 candidate tracks per platform are retried, and any success counts as available; ③ when a link check gets a 4xx from `HEAD`, it is re-verified with a `Range: bytes=0-1` `GET`, so "does not support HEAD" is not mistaken for dead
+- **Platform-side anomaly protection**: when a platform fails on most sources within the same round it is treated as a platform-side issue (test tracks without rights, rate limiting, etc.) and only recorded as `suspectPlatforms` — no platform is disabled and no source is removed
 - Results live in the `/health` `sourceProbe` field (add `?probeDetail=1` for per-platform failure reasons)
 
-> See [docs/guide/source-probe.md](docs/guide/source-probe.md) for criteria, test-track sources, all options and how to restore a removed source.
+> See [docs/guide/source-probe.md](docs/guide/source-probe.md) for criteria, test-track sources, all options and how to restore a removed source (Chinese only).
 
 ## 🧩 Enhancements over Upstream
 
@@ -166,14 +167,22 @@ To protect your privacy, the Web Player supports password protection.
 
 ### Permission & Custom Source Matrix (when `user.enablePublicRestriction` is enabled)
 
-| User Type | View List | Use/Toggle (Personal) | Change Default Quality | Upload/Import Public | Delete/Modify Public |
+| User Type | View List | Use/Toggle (Personal) | Change Default Quality | Upload/Import Sources | Delete/Modify Public |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Admin** | ✅ Allowed | ✅ Allowed | ✅ Allowed | ✅ Allowed | ✅ Allowed |
-| **Logged-in** | ✅ Allowed | ✅ Allowed | ✅ Allowed | ❌ Denied | ❌ Denied |
+| **Logged-in** | ✅ Allowed | ✅ Allowed | ✅ Allowed | ✅ Allowed | ❌ Denied |
 | **Guest** | ❌ Hidden | ❌ Denied | ❌ Denied | ❌ Denied | ❌ Denied |
 
+> **Actual rule** (`server.ts` + `customSourceHandlers.ts`): with the restriction on, write operations under `/api/custom-source/*` require **either** the admin password (`x-frontend-auth`) **or** a valid user login credential (`x-user-token`); deleting/modifying a `_open` public source is additionally hard-gated to the admin password inside `handleDelete`. Guests always get 403.
+
 ## 📱 Mobile Adaptation
-The Web Player is deeply optimized for mobile devices, providing a native App-like experience in mobile browsers.
+
+The Web Player is deeply optimized for mobile devices, providing a near native App-like experience in mobile browsers:
+
+- **Responsive layout**: on narrow screens the sidebar collapses into a drawer, and lists, the player bar and dialogs reflow automatically.
+- **Gestures**: the lyrics page can be dismissed by swiping down, and tapping the bottom cover jumps straight to the lyrics.
+- **Car / Bluetooth**: a 512×512 raster cover is provided and AVRCP BIP is supported (it does not accept SVG), fixing black or missing covers on car head units.
+- **iOS note**: due to WebKit background limits, enabling the bottom waveform or EQ pauses playback when the screen locks — turn both off if you need background listening.
 
 ---
 
@@ -186,7 +195,7 @@ Built with **Node.js**, supporting multiple deployment methods.
 
 You can now run LX Music Sync Server more conveniently via our Desktop Client, available for Windows, macOS, and Linux.
 
-- **📦 Download Latest**: [GitHub Releases](https://github.com/zues0077/lxserver/releases/latest)
+- **📦 Download**: [GitHub Releases](https://github.com/zues0077/lxserver/releases) (desktop artifacts are built by `.github/workflows/release.yml` when a `v*` tag is pushed)
 - **✨ Key Advantages**:
     - **Single Window**: Integrated management dashboard and Web player for a unified experience.
     - **System Tray**: Minimizes to tray on close, ensuring the sync service stays active in the background.
@@ -196,17 +205,17 @@ You can now run LX Music Sync Server more conveniently via our Desktop Client, a
 
 ### Option 2: Containerized Deployment via Docker
 
-Images are published to both GitHub Packages (GHCR) and Docker Hub. **Every update also gets a version tag**, so you can pin a version and roll back easily:
+Images are published to **GitHub Packages (GHCR)**. **Every update also gets a version tag**, so you can pin a version and roll back easily:
 
 | Tag | Meaning |
 | :--- | :--- |
 | `latest` | Latest stable, tracking the `main` branch |
-| `v2.2.0` / `2.2.0` | Concrete version (matches `version` in `package.json`) — **recommended for production** |
-| e.g. `v2.1.3` | Previous releases are kept as well |
+| `v1.5.3` / `1.5.3` | Current version (matches `version` in `package.json`) — **pin to a concrete version in production** |
+| `v*` | Every published version is kept, so you can roll back at any time |
 
 ```bash
 # Pin a version (recommended)
-docker pull ghcr.io/zues0077/lxserver:2.2.0
+docker pull ghcr.io/zues0077/lxserver:1.5.3
 
 # Or follow the latest
 docker pull ghcr.io/zues0077/lxserver:latest
@@ -220,7 +229,7 @@ docker run -d \
   -v $(pwd)/data:/server/data \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:2.2.0
+  ghcr.io/zues0077/lxserver:1.5.3
 ```
 
 > **Mounting `/server/data` alone is enough.** It is the only volume the image declares and it holds
@@ -234,7 +243,7 @@ Create a `docker-compose.yml` file:
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:2.2.0   # or :latest
+    image: ghcr.io/zues0077/lxserver:1.5.3   # or :latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:
@@ -266,17 +275,19 @@ npm start
 ### Option 4: Using Release Build
 
 1. Download the archive from GitHub Releases.
-2. Extract and run `npm install --production`.
+2. Extract and run `npm install --omit=dev`.
 3. Execute `npm start`.
 
-### Service Connection & Client Setup Guide
+---
 
-#### ① Web Interface Access
+## 🔌 Service Connection & Client Setup
+
+### ① Web Interface Access
 - **Web Player**: `http://<server-ip>:9527` (Default root path `/`, customizable via `PLAYER_PATH` env or backend settings, e.g., `/music`).
   - If password authentication is enabled (`ENABLE_WEBPLAYER_AUTH`), enter your player password (default: `123456`).
 - **Sync Dashboard**: `http://<server-ip>:9527/admin` (Default path `/admin`, customizable via `ADMIN_PATH`, default admin password: `123456`).
 
-#### ② LX Music Client Sync Setup (Desktop / Mobile)
+### ② LX Music Client Sync Setup (Desktop / Mobile)
 Go to LX Music client "Settings → Sync Settings" and choose Custom Server:
 - **Mode 1: User Path Mode (Recommended, enabled by default `USER_ENABLE_PATH=true`)**
   - **Connection URL**: `http://<server-ip>:9527/<username>` (e.g., `http://192.168.1.100:9527/user1`)
@@ -287,7 +298,7 @@ Go to LX Music client "Settings → Sync Settings" and choose Custom Server:
   - **Connection Password**: Password of the corresponding user.
   - **Feature**: Connect without username in the URL; server auto-matches user by password. **Note: In this mode, all user passwords must be strictly unique**.
 
-#### ③ Subsonic Music Client Setup (Yinliu / Feishin / Symfonium, etc.)
+### ③ Subsonic Music Client Setup (Yinliu / Feishin / Symfonium, etc.)
 Fully compatible with Subsonic API protocol:
 - **Server Address (Server URL)**:
   - **Default Shared Port**: `http://<server-ip>:9527/rest` (Subpath configured via `SUBSONIC_PATH`, default `/rest`).
@@ -301,7 +312,7 @@ Fully compatible with Subsonic API protocol:
 
 Separated frontend and backend architecture based on Node.js:
 
-- **Backend (Express + WebSocket)**: Core sync logic and WebDAV backup.
+- **Backend (Node.js native http + WebSocket)**: Data sync, users & permissions, custom sources, Subsonic protocol, WebDAV backup.
 - **WebPlayer (Vanilla JS)**: Handles music playback, default access path is root `/`.
 - **Console (Vanilla JS)**: Located at `/admin` path, handles user and data management.
 
@@ -352,7 +363,7 @@ The configuration file is persisted by default in the data directory at `data/co
 | `CACHE_SIZE_LIMIT` | `user.cacheSizeLimit` | Cache size limit in MB | `2000` |
 | `CONFIG_BACKUP_ENABLE` | `configBackup.enable` | Enable automatic config.js backup (creates daily backup copy) | `true` |
 | `CONFIG_BACKUP_RETENTION_DAYS` | `configBackup.retentionDays` | Config backup retention period in days (auto cleans up expired backups) | `7` |
-| `CONFIG_BACKUP_DIR` | `configBackup.dir` | Custom storage directory for config backups (absolute or relative to `./data`) | `backups` |
+| `CONFIG_BACKUP_DIR` | `configBackup.dir` | Custom storage directory for config backups (absolute or relative to `./data`; empty means `<data>/backups`)| `-`       |
 | `SNAPSHOT_BACKUP_PATH` | `snapshot.backupPath` | Custom storage path for playlist snapshots (absolute or relative to `./data`) | - |
 | `LIST_ADD_MUSIC_LOCATION_TYPE` | `list.addMusicLocationType` | Position when adding songs to list (`top` / `bottom`) | `top` |
 | `PROXY_ALL_ENABLED` | `proxy.all.enabled` | Enable outgoing request proxy (for Music SDK) | `false` |
@@ -365,7 +376,7 @@ The configuration file is persisted by default in the data directory at `data/co
 | `SUBSONIC_ONLINE_SEARCH` | `subsonic.onlineSearch` | Enable Subsonic online search | `true` |
 | `SUBSONIC_ONLINE_SEARCH_MODE` | `subsonic.onlineSearchMode` | Subsonic online search mode (`fallback` / `merge` / `local_only`) | `fallback` |
 | `SUBSONIC_ONLINE_SEARCH_SOURCES` | `subsonic.onlineSearchSources` | Subsonic online search default platforms | `wy,tx,kw,kg,mg` |
-| `SUBSONIC_PUBLIC_LEADERBOARDS` | `subsonic.publicLeaderboards` | Enable Subsonic public leaderboards (map online charts to read-only playlists) | `true` |
+| `SUBSONIC_PUBLIC_LEADERBOARDS` | `subsonic.publicLeaderboards` | Enable Subsonic public leaderboards (map online charts to read-only playlists) | `false`|
 | `SUBSONIC_LEADERBOARD_SOURCE` | `subsonic.leaderboardSource` | Subsonic public leaderboard default platform (single platform, e.g., `tx`, `wy`) | `tx` |
 | `SUBSONIC_LYRIC_TRANSLATION` | `subsonic.lyricTranslation` | Include translations in Subsonic lyrics | `true` |
 | `SUBSONIC_CACHE_ON_PLAY` | `subsonic.cacheOnPlay` | Trigger server caching on Subsonic playback (cached to user dir) | `false` |

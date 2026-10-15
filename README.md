@@ -45,7 +45,9 @@
 - [相对上游的主要增强](#-相对上游的主要增强)
 - [Docker 部署](#-docker-部署)
 - [访问控制与安全](#-访问控制与安全)
+- [移动端适配](#-移动端适配)
 - [快速启动](#-快速启动)
+- [服务连接与客户端配置](#-服务连接与客户端配置)
 - [项目架构](#️-项目架构)
 - [配置说明](#️-配置说明)
 - [数据收集与隐私说明](#️-数据收集与隐私说明)
@@ -156,7 +158,8 @@
 - **自动关闭坏平台**：连续失败达阈值（默认 2 次）才关闭，单次失败只记状态；关闭状态写入 **与面板「平台禁用」同一份 `states.json`**，面板上可见可改
 - **自动恢复**：被自动关闭的平台一旦探测成功会自动重新开启；**你手动关闭的平台永不参与复检、也不会被自动打开**
 - **全平台失效自动移除音源**：默认移入同级 `.trash/` 目录（可恢复），并逐行写入 `probe-audit.log` 审计
-- **三道防误伤**：探测音质跟随脚本自己的 `qualitys` 声明；一个平台用多首测试曲目重试（任一成功即算可用）；某平台在多数音源上同时失败时判定为「平台侧异常」，本轮只记录不处置（`suspectPlatforms`），避免测试曲目不可播导致一次误关整个音源库
+- **三道防误伤**：① 探测音质跟随脚本自己声明的 `qualitys`，而不是硬编码；② 一个平台用多首候选曲目依次重试，任一成功即算可用；③ 链接校验在 `HEAD` 返回 4xx 时用 `Range: bytes=0-1` 的 `GET` 复核，避免把「不支持 HEAD」误判为失效
+- **平台侧系统性异常保护**：某平台在同一轮里于过半音源上同时失败时，判定为平台侧问题（测试曲目无版权、平台限流等），本轮只记录 `suspectPlatforms` 并暂缓处置 —— 不关闭平台、不移除音源，避免测试曲目不可播导致一次误关整个音源库
 - 结果在 `/health` 的 `sourceProbe` 字段（加 `?probeDetail=1` 可看逐平台失败原因），同时注册为后台任务 `custom_source_health_probe`
 
 > 详细说明（判定标准、测试曲目来源、全部配置项、被移除音源的恢复方式）见 [docs/guide/source-probe.md](docs/guide/source-probe.md)
@@ -175,23 +178,24 @@
 
 ## 🐳 Docker 部署
 
-镜像同时发布到 GitHub Packages（GHCR）与 Docker Hub，**每次更新都会打上版本号标签**，便于固定版本与回滚：
+镜像发布到 **GitHub Packages（GHCR）**，**每次更新都会打上版本号标签**，便于固定版本与回滚：
 
 | 标签 | 说明 |
 | :--- | :--- |
 | `latest` | 最新稳定版，跟随 `main` 分支 |
-| `v2.2.0` / `2.2.0` | 具体版本（与 `package.json` 的 `version` 一致），**生产环境建议用这个** |
-| `v2.1.3` 等历史版本 | 每个已发布版本都会保留 |
+| `v1.5.3` / `1.5.3` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
+| `v*` | 每个已发布版本都会保留，可随时回滚到历史版本 |
 
 ```bash
 # 固定版本（推荐）
-docker pull ghcr.io/zues0077/lxserver:2.2.0
+docker pull ghcr.io/zues0077/lxserver:1.5.3
 
 # 或跟随最新
 docker pull ghcr.io/zues0077/lxserver:latest
 ```
 
-> 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。
+> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.4`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
+> - 如果要另外发布到 Docker Hub，可使用备用工作流 `.github/workflows/docker.yml`（需自行配置 `DOCKER_USERNAME` / `DOCKER_PASSWORD` 密钥并手动触发，默认不参与自动发布）。
 
 ## 🔒 访问控制与安全
 
@@ -207,15 +211,22 @@ docker pull ghcr.io/zues0077/lxserver:latest
 
 ### 权限与公开源限制矩阵 (当 `user.enablePublicRestriction` 开启时)
 
-| 用户类型             | 查看列表 | 使用/切换(仅个人) | 修改默认音质 | 上传/导入公开源 | 删除/修改公开源 |
-| :------------------- | :------- | :---------------- | :----------- | :-------------- | :-------------- |
-| **管理员**     | ✅ 允许  | ✅ 允许           | ✅ 允许      | ✅ 允许         | ✅ 允许         |
-| **已登录用户** | ✅ 允许  | ✅ 允许           | ✅ 允许      | ❌ 禁止         | ❌ 禁止         |
-| **未登录访客** | ❌ 隐藏  | ❌ 禁止           | ❌ 禁止      | ❌ 禁止         | ❌ 禁止         |
+| 用户类型             | 查看列表 | 使用/切换(仅个人) | 修改默认音质 | 上传/导入音源 | 删除/修改公开源 |
+| :------------------- | :------- | :---------------- | :----------- | :------------ | :-------------- |
+| **管理员**     | ✅ 允许  | ✅ 允许           | ✅ 允许      | ✅ 允许       | ✅ 允许         |
+| **已登录用户** | ✅ 允许  | ✅ 允许           | ✅ 允许      | ✅ 允许       | ❌ 禁止         |
+| **未登录访客** | ❌ 隐藏  | ❌ 禁止           | ❌ 禁止      | ❌ 禁止       | ❌ 禁止         |
+
+> **实际判定规则**（源码 `server.ts` + `customSourceHandlers.ts`）：开启限制后，`/api/custom-source/*` 的写操作要求「管理员密码（`x-frontend-auth`）**或**有效用户登录凭证（`x-user-token`）任一通过」；而删除 / 修改 `_open` 公共源在 `handleDelete` 中另行强制校验管理员密码。未登录访客一律返回 403。
 
 ## 📱 移动端适配
 
-Web 播放器针对移动端进行了深度优化，手机浏览器访问也能获得原生 App 般的体验。
+Web 播放器针对移动端做了深度优化，手机浏览器访问也能接近原生 App 的体验：
+
+- **自适应布局**：窄屏下侧边栏收起为抽屉，列表、播放栏与弹窗排版自动调整。
+- **手势交互**：歌词详情页支持向下滑动收起，底部封面点击直达歌词。
+- **车载 / 蓝牙**：补齐 512×512 栅格封面并适配 AVRCP BIP 协议（该协议不支持 SVG），解决车载屏幕封面黑屏或不显示的问题。
+- **iOS 提示**：受 iOS WebKit 后台限制，开启底部波形或 EQ 音效会导致锁屏暂停；需要锁屏后台听歌时请关闭这两项。
 
 ---
 
@@ -227,7 +238,7 @@ Web 播放器针对移动端进行了深度优化，手机浏览器访问也能�
 
 可以通过桌面端更方便地运行 LX Music Sync Server，支持 Windows、macOS 和 Linux。
 
-- **📦 最新版本下载**: [GitHub Releases](https://github.com/zues0077/lxserver/releases/latest)
+- **📦 下载地址**: [GitHub Releases](https://github.com/zues0077/lxserver/releases)（桌面端产物由 `.github/workflows/release.yml` 在推送 `v*` 标签时自动构建）
 - **✨ 桌面端优势**:
   - **单窗口管理**: 服务器管理与 Web 播放器合二为一，界面更统一。
   - **托盘常驻**: 窗口关闭后自动缩回托盘，服务在后台始终运行。
@@ -235,11 +246,11 @@ Web 播放器针对移动端进行了深度优化，手机浏览器访问也能�
 
 ### 方式二：使用 Docker
 
-镜像地址：
+镜像地址（GitHub Packages / GHCR）：
 
-- **GitHub Packages (GHCR)**：`ghcr.io/zues0077/lxserver:latest`
-- **Docker Hub**：`zues0077/lxserver:latest`
-- 生产环境建议固定版本号，如 `ghcr.io/zues0077/lxserver:2.2.0`
+- 跟随最新：`ghcr.io/zues0077/lxserver:latest`
+- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.3`
+- 完整标签说明见上方 [Docker 部署](#-docker-部署)
 
 **Docker Run 示例：**
 
@@ -249,7 +260,7 @@ docker run -d \
   -v $(pwd)/data:/server/data \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:2.2.0
+  ghcr.io/zues0077/lxserver:1.5.3
 ```
 
 > **只要挂载 `/server/data` 一个目录就够了。** 它是容器声明的唯一数据卷，里面同时包含
@@ -263,7 +274,7 @@ docker run -d \
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:2.2.0   # 或 :latest
+    image: ghcr.io/zues0077/lxserver:1.5.3   # 或 :latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:
@@ -295,18 +306,20 @@ npm start
 ### 方式四：使用 Release 版本
 
 1. 在 GitHub Releases 下载压缩包。
-2. 解压后运行 `npm install --production`。
+2. 解压后运行 `npm install --omit=dev`。
 3. 执行 `npm start` 启动。
 
-### 服务连接与客户端配置指南
+---
 
-#### ① Web 界面访问
+## 🔌 服务连接与客户端配置
+
+### ① Web 界面访问
 
 - **Web 播放器**: `http://<服务器IP>:9527`（默认根路径，可通过 `PLAYER_PATH` 环境变量或后台配置自定义路径，如 `/music`）
   - 若启用了播放器访问密码认证（`ENABLE_WEBPLAYER_AUTH`），首次访问需输入播放器密码（默认 `123456`）。
 - **管理后台**: `http://<服务器IP>:9527/admin`（默认路径为 `/admin`，可通过 `ADMIN_PATH` 自定义，默认管理员密码: `123456`）。
 
-#### ② LX Music 客户端同步配置（桌面端 / 移动端）
+### ② LX Music 客户端同步配置（桌面端 / 移动端）
 
 进入客户端「设置 → 同步设置」，选择自定义连接：
 
@@ -319,7 +332,7 @@ npm start
   - **连接密码**: 对应用户的密码
   - **特点**: URL 无需携带用户名，服务端通过鉴权密码自动匹配用户。**注意：此模式下所有用户的密码必须唯一，不允许不同用户使用相同密码**。
 
-#### ③ Subsonic 音乐客户端配置（音流 / Feishin / Symfonium 等）
+### ③ Subsonic 音乐客户端配置（音流 / Feishin / Symfonium 等）
 
 全面兼容 Subsonic API 协议，客户端中填写：
 
@@ -386,7 +399,7 @@ npm start
 | `CACHE_SIZE_LIMIT`                         | `user.cacheSizeLimit`                      | 缓存空间限制大小 (单位: MB)                                                                        | `2000`             |
 | `CONFIG_BACKUP_ENABLE`                     | `configBackup.enable`                      | 是否启用配置文件自动备份功能 (每天生成一份历史配置副本)                                            | `true`             |
 | `CONFIG_BACKUP_RETENTION_DAYS`             | `configBackup.retentionDays`               | 配置文件备份保留天数 (自动清理过期备份)                                                            | `7`                |
-| `CONFIG_BACKUP_DIR`                        | `configBackup.dir`                         | 配置文件备份存储目录路径 (支持绝对路径或相对 `./data`)                                           | `backups`          |
+| `CONFIG_BACKUP_DIR`                        | `configBackup.dir`                         | 配置文件备份存储目录路径 (支持绝对路径或相对 `./data`)，留空则为 `<data>/backups`                     | `-`                |
 | `SNAPSHOT_BACKUP_PATH`                     | `snapshot.backupPath`                      | 歌单快照自定义存储路径 (支持绝对路径或相对 `./data`，各用户独立隔离)                             | -                    |
 | `LIST_ADD_MUSIC_LOCATION_TYPE`             | `list.addMusicLocationType`                | 添加歌曲到列表时的位置 (`top` / `bottom`)                                                      | `top`              |
 | `PROXY_ALL_ENABLED`                        | `proxy.all.enabled`                        | 是否启用外发请求代理 (针对 Music SDK)                                                              | `false`            |
@@ -399,7 +412,7 @@ npm start
 | `SUBSONIC_ONLINE_SEARCH`                   | `subsonic.onlineSearch`                    | 是否开启 Subsonic 在线全网搜索                                                                     | `true`             |
 | `SUBSONIC_ONLINE_SEARCH_MODE`              | `subsonic.onlineSearchMode`                | Subsonic 在线搜索模式 (`fallback` / `merge` / `local_only`)                                  | `fallback`         |
 | `SUBSONIC_ONLINE_SEARCH_SOURCES`           | `subsonic.onlineSearchSources`             | Subsonic 在线搜索默认音源列表                                                                      | `wy,tx,kw,kg,mg`   |
-| `SUBSONIC_PUBLIC_LEADERBOARDS`             | `subsonic.publicLeaderboards`              | 是否开启 Subsonic 公开排行榜 (将在线排行榜映射为只读歌单)                                          | `true`             |
+| `SUBSONIC_PUBLIC_LEADERBOARDS`             | `subsonic.publicLeaderboards`              | 是否开启 Subsonic 公开排行榜 (将在线排行榜映射为只读歌单)                                          | `false`            |
 | `SUBSONIC_LEADERBOARD_SOURCE`              | `subsonic.leaderboardSource`               | Subsonic 公开排行榜默认音源平台 (仅支持单选, 如 `tx`, `wy` 等)                                 | `tx`               |
 | `SUBSONIC_LYRIC_TRANSLATION`               | `subsonic.lyricTranslation`                | Subsonic 歌词中是否包含翻译                                                                        | `true`             |
 | `SUBSONIC_CACHE_ON_PLAY`                   | `subsonic.cacheOnPlay`                     | Subsonic 播放时是否触发服务器自动缓存保存 (落盘到用户目录)                                         | `false`            |
