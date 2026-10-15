@@ -24,7 +24,7 @@ import formidable from 'formidable'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
-import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount } from './userApi'
+import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount } from './userApi'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
 import * as customMusicManager from './customMusicManager'
@@ -1120,6 +1120,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
     // console.log(req.url)
     const urlObj = new URL(req.url ?? '', `http://${req.headers.host}`)
     const pathname = urlObj.pathname
+
+    // 轻量健康检查端点：Docker healthcheck 使用该路径，不经过播放器认证和静态资源路由。
+    if (req.method === 'GET' && pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({
+        status: 'ok',
+        uptimeSeconds: Math.floor(process.uptime()),
+        customSourceCount: getLoadedApisCount(),
+        lastReloadDurationMs: getLastReloadDurationMs(),
+        trackedSourceResources: getTrackedTimerCount(),
+        activeResources: getActiveResourceSummary()
+      }))
+      return
+    }
 
     // 读取路径配置（每次请求都重新读取，保存后立刻生效）
     const normalizePath = (p: string) => (p || '').replace(/\/+$/, '')

@@ -2,6 +2,7 @@ version: '3.8'
 
 services:
   lx-sync-server:
+    image: ghcr.io/zues0077/lxserver:latest
     build: .
     container_name: lx-sync-server
     restart: always
@@ -13,5 +14,13 @@ services:
     environment:
       # 环境变量配置，优先级高于 config.js
       - NODE_ENV=production
+      # 主事件循环卡死时由独立 worker 自动触发进程重启
+      - EVENT_LOOP_WATCHDOG_TIMEOUT_MS=120000
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9527/health',{signal:AbortSignal.timeout(10000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
       # 示例：通过环境变量设置用户
       # - LX_USER_myuser=mypassword

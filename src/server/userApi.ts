@@ -93,6 +93,39 @@ const loadedApis = new Map<string, any>()
 // API 初始化状态追踪 map<id, status>
 const apiStatus = new Map<string, ApiStatusInfo>()
 
+// 更新嗅探去重：同一音源在窗口期内重复上报同一条更新提示时只处理一次，
+// 避免脚本自身重试/重复请求导致的日志刷屏与状态抖动。
+const sniffDedupeMap = new Map<string, { sig: string; at: number }>()
+const SNIFF_DEDUPE_WINDOW_MS = 60 * 1000
+
+// 上次全量/增量重载耗时（毫秒），供 /health 与诊断日志使用
+let lastReloadDurationMs = 0
+export function getLastReloadDurationMs() { return lastReloadDurationMs }
+
+/** 汇总当前进程的活跃资源（定时器/句柄）数量，用于诊断定时器泄漏。 */
+export function getActiveResourceSummary(): Record<string, number> {
+    try {
+        const getInfo = (process as any).getActiveResourcesInfo
+        if (typeof getInfo !== 'function') return {}
+        const list: string[] = getInfo.call(process) || []
+        return list.reduce<Record<string, number>>((acc, name) => {
+            acc[name] = (acc[name] || 0) + 1
+            return acc
+        }, {})
+    } catch (e) {
+        return {}
+    }
+}
+
+/** 已加载音源实例中登记的定时器/在途请求总数，用于诊断泄漏。 */
+export function getTrackedTimerCount() {
+    let total = 0
+    for (const api of loadedApis.values()) {
+        total += (api?.timers?.size || 0) + (api?.pendingAborts?.size || 0)
+    }
+    return total
+}
+
 /** 返回已成功加载的 API 源数量，用于状态展示与健康检查。 */
 export function getLoadedApisCount() {
     return loadedApis.size
@@ -137,7 +170,13 @@ export function extractMetadata(script: string): Partial<UserApiInfo> {
 }
 
 // 创建 lx.request 包装器（使用 needle）
-async function createLxRequest(isUnsafe: boolean = false, onSniffUpdate?: (alert: { name?: string, log?: string, updateUrl?: string }) => void) {
+// pendingAborts: 由调用方传入的登记表，用于在音源卸载时中止其尚未返回的在途请求，
+// 避免脚本实例被释放后回调仍写入已失效的实例（也是定时器/请求泄漏的一部分）。
+async function createLxRequest(
+    isUnsafe: boolean = false,
+    onSniffUpdate?: (alert: { name?: string, log?: string, updateUrl?: string }) => void,
+    pendingAborts?: Set<() => void>
+) {
     // 自定义音源脚本调用 lx.request 是同步的，无法在调用时 await，
     // 因此这里预先按 http/https 各建一个 agent，调用时按目标协议取用。
     // 走 customSource 分类的独立开关（未配置时沿用 proxy.all.*）。
@@ -166,7 +205,10 @@ async function createLxRequest(isUnsafe: boolean = false, onSniffUpdate?: (alert
             requestOptions.json = false
         }
 
+        const abortHolder: { fn: (() => void) | null } = { fn: null }
+
         const request = needle.request(method, url, data, requestOptions, (err: any, resp: any, body: any) => {
+            if (abortHolder.fn) pendingAborts?.delete(abortHolder.fn)
             try {
                 if (err) {
                     callback.call(null, decontextify(err), null, null)
@@ -219,10 +261,15 @@ async function createLxRequest(isUnsafe: boolean = false, onSniffUpdate?: (alert
             }
         })
 
-        return () => {
+        const abortFn = () => {
             const reqObj = (request as any).request
             if (reqObj && !reqObj.aborted) reqObj.abort()
         }
+        abortHolder.fn = abortFn
+        if (pendingAborts) {
+            pendingAborts.add(abortFn)
+        }
+        return abortFn
     }
 }
 
@@ -235,6 +282,61 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
     // 创建事件处理映射
     const eventHandlers = new Map<string, Function>()
     let registeredSources: any = {}
+
+    // ===== 实例级资源登记（用于卸载时彻底释放，避免定时器/请求泄漏）=====
+    // 音源脚本运行在沙箱中，但 setTimeout/setInterval 用的是宿主真实实现。
+    // 若不在卸载时清理，每次重载都会遗留上一批实例的定时器：
+    //   CPU 随「重载次数」线性上涨、内存只增不减，最终拖死事件循环。
+    let disposed = false
+    const sandboxTimers = new Set<any>()
+    const pendingAborts = new Set<() => void>()
+    const trackedSetTimeout = (fn: Function, ms?: number, ...args: any[]) => {
+        const id = setTimeout(() => {
+            sandboxTimers.delete(id)
+            if (disposed) return
+            try { fn(...args) } catch (e: any) {
+                console.warn(`[自定义源-${fullApiInfo.name}] 定时器回调异常: ${e?.message || e}`)
+            }
+        }, ms)
+        sandboxTimers.add(id)
+        return id
+    }
+    const trackedSetInterval = (fn: Function, ms?: number, ...args: any[]) => {
+        const id = setInterval(() => {
+            if (disposed) return
+            try { fn(...args) } catch (e: any) {
+                console.warn(`[自定义源-${fullApiInfo.name}] 定时器回调异常: ${e?.message || e}`)
+            }
+        }, ms)
+        sandboxTimers.add(id)
+        return id
+    }
+    const trackedClearTimer = (id: any) => {
+        sandboxTimers.delete(id)
+        clearTimeout(id)
+        clearInterval(id)
+    }
+    const disposeInstance = () => {
+        if (disposed) return
+        disposed = true
+        const timerCount = sandboxTimers.size
+        for (const id of sandboxTimers) {
+            clearTimeout(id)
+            clearInterval(id)
+        }
+        sandboxTimers.clear()
+        const abortCount = pendingAborts.size
+        sniffDedupeMap.delete(`${fullApiInfo.owner}_${fullApiInfo.id}`)
+        for (const abort of pendingAborts) {
+            try { abort() } catch (e) { }
+        }
+        pendingAborts.clear()
+        eventHandlers.clear()
+        if (timerCount > 0 || abortCount > 0) {
+            console.log(`[自定义源] 已释放 ${fullApiInfo.name} 的资源: 定时器 ${timerCount} 个, 在途请求 ${abortCount} 个`)
+        }
+    }
+    // =================================================================
 
     // ========== 关键修改：提前创建 initPromise ==========
     let initResolve: (() => void) | null = null
@@ -297,17 +399,28 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
         request: await createLxRequest(
             !!apiInfo.allowUnsafeVM && !!global.lx.config['system.allowUnsafeVM'],
             (alert) => {
-                const currentStatus = apiStatus.get(`${fullApiInfo.owner}_${fullApiInfo.id}`) || { status: 'success' }
+                const apiKey = `${fullApiInfo.owner}_${fullApiInfo.id}`
+                const sig = `${alert.log}||${alert.updateUrl || ''}`
+                const now = Date.now()
+                const last = sniffDedupeMap.get(apiKey)
+                // 同一音源在窗口期内重复上报同一条更新提示时直接忽略：
+                // 音源脚本常会在初始化/重试中连续发起多次请求，导致同一条提示被反复记录。
+                if (last && last.sig === sig && now - last.at < SNIFF_DEDUPE_WINDOW_MS) return
+                sniffDedupeMap.set(apiKey, { sig, at: now })
+
+                const currentStatus = apiStatus.get(apiKey) || { status: 'success' }
                 currentStatus.updateAlert = {
                     name: alert.name || fullApiInfo.name,
                     log: alert.log,
                     updateUrl: alert.updateUrl
                 }
-                apiStatus.set(`${fullApiInfo.owner}_${fullApiInfo.id}`, currentStatus)
+                apiStatus.set(apiKey, currentStatus)
                 console.log(`[自定义源] [更新嗅探] 嗅探到源 ${fullApiInfo.name} 的更新提示: ${alert.log}`)
-            }
+            },
+            pendingAborts
         ),
         send: (eventName: string, data: any) => {
+            if (disposed) return
             const dData = decontextify(data)
             // console.log(`[自定义源-${fullApiInfo.name}] send:`, eventName)
             if (eventName === 'inited') {
@@ -386,19 +499,21 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
     })
 
     // 完整沙箱环境
+    // 注意：setTimeout/setInterval 使用被登记的包装版本，卸载时才能统一清理，
+    // 否则每次重载都会遗留下一个永不释放的定时器（CPU/内存泄漏的根源）。
     const sandbox: any = {
         console: sandboxConsole,
-        setTimeout,
-        clearTimeout,
-        setInterval,
-        clearInterval,
+        setTimeout: trackedSetTimeout,
+        clearTimeout: trackedClearTimer,
+        setInterval: trackedSetInterval,
+        clearInterval: trackedClearTimer,
         Buffer,
         URL,
         URLSearchParams,
         TextEncoder,
         TextDecoder,
         process: {
-            nextTick: (fn: Function, ...args: any[]) => setTimeout(() => fn(...args), 0),
+            nextTick: (fn: Function, ...args: any[]) => trackedSetTimeout(() => fn(...args), 0),
             env: { NODE_ENV: process.env.NODE_ENV || 'production' }
         },
         lx: lxObject,
@@ -444,18 +559,29 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
             }
         }
 
-        // 等待脚本调用 lx.send('inited')（最多等待 3 秒）
-        await Promise.race([
-            initPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('初始化超时，请确保脚本调用了 lx.send("inited", ...)')), 3000))
-        ])
+        // 等待脚本调用 lx.send('inited')，最多等待 3 秒；完成后清理超时定时器
+        let initTimeout: NodeJS.Timeout | undefined
+        try {
+            await Promise.race([
+                initPromise,
+                new Promise((_, reject) => {
+                    initTimeout = setTimeout(() => reject(new Error('初始化超时，请确保脚本调用了 lx.send("inited", ...)')), 3000)
+                })
+            ])
+        } finally {
+            if (initTimeout) clearTimeout(initTimeout)
+        }
 
         // 保存加载 of the API
         const apiInstance = {
             info: { ...fullApiInfo, sources: registeredSources },
             handlers: eventHandlers,
+            timers: sandboxTimers,
+            pendingAborts,
+            dispose: disposeInstance,
             callRequest: async (action: string, source: string, info: any) => {
                 try {
+                    if (disposed) throw new Error(`源 ${fullApiInfo.name} 已被卸载`)
                     const handler = eventHandlers.get('request')
                     if (!handler) throw new Error(`源 ${fullApiInfo.name} 未注册 request 处理器`)
 
@@ -474,11 +600,19 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
             }
         }
 
-        loadedApis.set(`${fullApiInfo.owner}_${apiInfo.id}`, apiInstance)
+        // 临时验证/分析实例只用于提取注册源信息，不加入运行时注册表，
+        // 且必须立即 dispose，防止验证脚本遗留更新嗅探定时器或网络请求。
+        if (fullApiInfo.owner === 'temp') {
+            disposeInstance()
+        } else {
+            loadedApis.set(`${fullApiInfo.owner}_${apiInfo.id}`, apiInstance)
+        }
         console.log(`[自定义源] ✓ 成功加载: ${fullApiInfo.name} v${fullApiInfo.version} (所属: ${fullApiInfo.owner})`)
         console.log(`[自定义源]   支持平台: ${Object.keys(registeredSources).join(', ')}`)
         return { success: true, apiInstance, error: null }
     } catch (error: any) {
+        // 加载失败时同样要回收已创建的定时器/在途请求，避免半成品实例泄漏
+        disposeInstance()
         console.error(`[自定义源] ✗ 加载失败 ${fullApiInfo.name}:`, error.message)
         if (error.stack && error.message !== 'REQUIRE_UNSAFE_VM') {
             console.error(`[自定义源] [错误堆栈] ${fullApiInfo.name}:`, error.stack)
@@ -848,6 +982,84 @@ export async function callUserApiGetMusicUrl(
     throw finalError
 }
 
+// 辅助函数：加载单个音源（全量加载与增量重载共用同一实现，保证行为一致）
+// 返回值 needsSave 表示该音源的元数据（支持平台列表/版本等）发生了变化，需要回写 sources.json
+async function loadOneSource(
+    dirPath: string,
+    owner: string,
+    source: any,
+    stats: { loadedCount: number }
+): Promise<{ needsSave: boolean }> {
+    const apiKey = `${owner}_${source.id}`
+
+    if (!source.enabled && owner !== 'open') {
+        console.log(`[自定义源] [${owner}] 跳过已禁用: ${source.name}`)
+        apiStatus.delete(apiKey)
+        // 增量场景下必须显式移除旧实例，否则禁用后仍会残留在 loadedApis 中被调用
+        unloadLoadedApi(apiKey)
+        return { needsSave: false }
+    }
+
+    const scriptPath = path.join(dirPath, source.id)
+    if (!fs.existsSync(scriptPath)) {
+        console.warn(`[自定义源] [${owner}] 脚本文件未找到: ${source.id}`)
+        unloadLoadedApi(apiKey)
+        return { needsSave: false }
+    }
+
+    try {
+        const script = fs.readFileSync(scriptPath, 'utf-8')
+        const metadata = extractMetadata(script)
+
+        const result = await loadUserApi({
+            id: source.id,
+            name: metadata.name || source.name,
+            description: metadata.description || '',
+            version: metadata.version || 1,
+            author: metadata.author || '',
+            homepage: metadata.homepage || '',
+            script,
+            sources: {},
+            enabled: source.enabled, // 传递原本的开关状态
+            allowUnsafeVM: source.allowUnsafeVM, // 传递不安全模式标志
+            owner: owner // 设置 owner
+        })
+
+        if (result.success) {
+            stats.loadedCount++
+            const prevStatus = apiStatus.get(apiKey)
+            apiStatus.set(apiKey, {
+                status: 'success',
+                updateAlert: result.updateAlert || prevStatus?.updateAlert
+            })
+
+            // [Self-Healing] 检查并修复 supportedSources
+            const runtimeSources = Object.keys(result.apiInstance.info.sources).sort();
+            const storedSources = (source.supportedSources || []).sort();
+
+            if (JSON.stringify(runtimeSources) !== JSON.stringify(storedSources)) {
+                console.log(`[自定义源] [自动修复] [${owner}] 更新源 ${source.name} 的支持列表: ${JSON.stringify(storedSources)} -> ${JSON.stringify(runtimeSources)}`);
+                source.supportedSources = runtimeSources;
+                if (metadata.version && source.version !== metadata.version) source.version = metadata.version;
+                if (metadata.author && source.author !== metadata.author) source.author = metadata.author;
+                if (metadata.description && source.description !== metadata.description) source.description = metadata.description;
+                if (metadata.homepage && source.homepage !== metadata.homepage) source.homepage = metadata.homepage;
+                return { needsSave: true };
+            }
+        } else {
+            console.error(`[自定义源] [${owner}] 加载 ${metadata.name || source.name} 失败: ${result.error}`)
+            apiStatus.set(apiKey, { status: 'failed', error: result.error, updateAlert: result.updateAlert })
+            // 加载失败时清掉旧实例，避免继续使用过期脚本
+            unloadLoadedApi(apiKey)
+        }
+    } catch (error: any) {
+        console.error(`[自定义源] [${owner}] 加载 ${source.name} 失败:`, error.message)
+        apiStatus.set(apiKey, { status: 'failed', error: error.message, updateAlert: error.updateAlert })
+        unloadLoadedApi(apiKey)
+    }
+    return { needsSave: false }
+}
+
 // 辅助函数：加载指定目录下的源
 async function loadSourcesFromDir(dirPath: string, owner: string, stats: { loadedCount: number }) {
     const metaPath = path.join(dirPath, 'sources.json')
@@ -877,65 +1089,8 @@ async function loadSourcesFromDir(dirPath: string, owner: string, stats: { loade
         // =========================================================================
 
         for (const source of sources) {
-            if (!source.enabled && owner !== 'open') {
-                console.log(`[自定义源] [${owner}] 跳过已禁用: ${source.name}`)
-                apiStatus.delete(`${owner}_${source.id}`)
-                continue
-            }
-
-            const scriptPath = path.join(dirPath, source.id)
-            if (!fs.existsSync(scriptPath)) {
-                console.warn(`[自定义源] [${owner}] 脚本文件未找到: ${source.id}`)
-                continue
-            }
-
-            try {
-                const script = fs.readFileSync(scriptPath, 'utf-8')
-                const metadata = extractMetadata(script)
-
-                const result = await loadUserApi({
-                    id: source.id,
-                    name: metadata.name || source.name,
-                    description: metadata.description || '',
-                    version: metadata.version || 1,
-                    author: metadata.author || '',
-                    homepage: metadata.homepage || '',
-                    script,
-                    sources: {},
-                    enabled: source.enabled, // 传递原本的开关状态
-                    allowUnsafeVM: source.allowUnsafeVM, // 传递不安全模式标志
-                    owner: owner // 设置 owner
-                })
-
-                if (result.success) {
-                    stats.loadedCount++
-                    const prevStatus = apiStatus.get(`${owner}_${source.id}`)
-                    apiStatus.set(`${owner}_${source.id}`, {
-                        status: 'success',
-                        updateAlert: result.updateAlert || prevStatus?.updateAlert
-                    })
-
-                    // [Self-Healing] 检查并修复 supportedSources
-                    const runtimeSources = Object.keys(result.apiInstance.info.sources).sort();
-                    const storedSources = (source.supportedSources || []).sort();
-
-                    if (JSON.stringify(runtimeSources) !== JSON.stringify(storedSources)) {
-                        console.log(`[自定义源] [自动修复] [${owner}] 更新源 ${source.name} 的支持列表: ${JSON.stringify(storedSources)} -> ${JSON.stringify(runtimeSources)}`);
-                        source.supportedSources = runtimeSources;
-                        if (metadata.version && source.version !== metadata.version) source.version = metadata.version;
-                        if (metadata.author && source.author !== metadata.author) source.author = metadata.author;
-                        if (metadata.description && source.description !== metadata.description) source.description = metadata.description;
-                        if (metadata.homepage && source.homepage !== metadata.homepage) source.homepage = metadata.homepage;
-                        needsSave = true;
-                    }
-                } else {
-                    console.error(`[自定义源] [${owner}] 加载 ${metadata.name || source.name} 失败: ${result.error}`)
-                    apiStatus.set(`${owner}_${source.id}`, { status: 'failed', error: result.error, updateAlert: result.updateAlert })
-                }
-            } catch (error: any) {
-                console.error(`[自定义源] [${owner}] 加载 ${source.name} 失败:`, error.message)
-                apiStatus.set(`${owner}_${source.id}`, { status: 'failed', error: error.message, updateAlert: error.updateAlert })
-            }
+            const res = await loadOneSource(dirPath, owner, source, stats)
+            if (res.needsSave) needsSave = true
         }
 
         if (needsSave) {
@@ -950,6 +1105,136 @@ async function loadSourcesFromDir(dirPath: string, owner: string, stats: { loade
         }
     } catch (error: any) {
         console.error(`[自定义源] [${owner}] 读取 sources.json 失败:`, error.message)
+    }
+}
+
+/** 从 loadedApis 中移除实例，并释放其登记的定时器与在途请求。 */
+function unloadLoadedApi(apiKey: string) {
+    const old = loadedApis.get(apiKey)
+    if (old) {
+        loadedApis.delete(apiKey)
+        try { old.dispose?.() } catch (e) { }
+    }
+}
+
+/** 释放某个用户空间下所有已加载实例（全量重载前调用）。 */
+function unloadOwnerApis(owner: string) {
+    const keys: string[] = []
+    for (const [key, api] of loadedApis.entries()) {
+        if (api?.info?.owner === owner) keys.push(key)
+    }
+    for (const key of keys) unloadLoadedApi(key)
+}
+
+/**
+ * 增量重载单个音源：仅卸载并重新解析目标音源，其余音源实例完全不受影响。
+ *
+ * 这是修复「每导入/启用/禁用/删除一个音源，都会把该空间全部音源重新解析一遍」
+ * 所导致的 O(n²) CPU 放大的核心改动：单次操作的解析成本由 O(n) 降为 O(1)。
+ */
+export async function reloadSingleSource(owner: string, sourceId: string): Promise<{ success: boolean; error?: string }> {
+    const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
+    const sourceRoot = path.join(dataPath, 'users', 'source')
+    const dirName = owner === 'open' ? '_open' : owner
+    const dirPath = path.join(sourceRoot, dirName)
+    const metaPath = path.join(dirPath, 'sources.json')
+    const apiKey = `${owner}_${sourceId}`
+    // 保留当前有效优先级；替换实例后再恢复 Map 顺序，避免单源更新意外改变回退顺序
+    const previousOrder = Array.from(loadedApis.values()).map(api => api?.info?.id).filter(Boolean)
+
+    lastReloadMap.set(owner, Date.now())
+
+    // 先卸载旧实例：既避免加载失败时残留旧脚本，也保证定时器被释放
+    unloadLoadedApi(apiKey)
+    apiStatus.delete(apiKey)
+
+    if (!fs.existsSync(metaPath)) return { success: true }
+
+    try {
+        const sources = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+        const source = sources.find((s: any) => s.id === sourceId)
+        // 源已被删除：卸载即完成
+        if (!source) return { success: true }
+
+        const stats = { loadedCount: 0 }
+        const { needsSave } = await loadOneSource(dirPath, owner, source, stats)
+
+        if (needsSave) {
+            lastReloadMap.set(owner, Date.now())
+            const originalSources = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+            const updatedMap = new Map([[source.id, source]])
+            const merged = originalSources.map((s: any) => updatedMap.get(s.id) || s)
+            fs.writeFileSync(metaPath, JSON.stringify(merged, null, 2))
+            console.log(`[自定义源] [${owner}] 已更新 sources.json 元数据`)
+        }
+        // reloadSingleSource 替换 Map 项时会把新实例放到末尾，这里恢复原来的源优先级
+        applyOrderToLoadedApis(previousOrder)
+        return { success: true }
+    } catch (error: any) {
+        console.error(`[自定义源] [${owner}] 增量重载 ${sourceId} 失败:`, error.message)
+        return { success: false, error: error.message }
+    }
+}
+
+/** 仅卸载指定音源实例（删除音源后调用，无需重新解析其余音源）。 */
+export function unloadSource(owner: string, sourceId: string) {
+    unloadLoadedApi(`${owner}_${sourceId}`)
+    apiStatus.delete(`${owner}_${sourceId}`)
+    lastReloadMap.set(owner, Date.now())
+}
+
+/**
+ * 按给定 ID 顺序在内存中重排已加载音源，不做任何脚本解析。
+ *
+ * 说明：音源优先级在每次解析时由 order.json 实时决定（见 callUserApiGetMusicUrl），
+ * 因此拖拽排序只需同步 Map 顺序即可，无需重新加载任何脚本。
+ */
+export function applyOrderToLoadedApis(orderedIds: string[]) {
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) return
+    const idx = new Map<string, number>()
+    orderedIds.forEach((id, i) => idx.set(id, i))
+    const decorated = Array.from(loadedApis.entries()).map(([key, api], seq) => ({
+        key,
+        api,
+        seq,
+        rank: idx.has(api?.info?.id) ? idx.get(api.info.id)! : Number.MAX_SAFE_INTEGER
+    }))
+    decorated.sort((a, b) => (a.rank - b.rank) || (a.seq - b.seq))
+    loadedApis.clear()
+    for (const d of decorated) loadedApis.set(d.key, d.api)
+}
+
+// ===== 全量重载的并发合并 =====
+// 同一 key（用户空间）同时只允许一个全量重载在跑；期间到来的请求只标记 dirty，
+// 由正在跑的那一轮在结束后再补跑一次，从而把 N 次请求压缩为最多 2 轮重载。
+interface ReloadGate { running: boolean; dirty: boolean; waiters: Array<() => void> }
+const reloadGates = new Map<string, ReloadGate>()
+
+async function runCoalescedReload(key: string, task: () => Promise<void>): Promise<void> {
+    let gate = reloadGates.get(key)
+    if (!gate) {
+        gate = { running: false, dirty: false, waiters: [] }
+        reloadGates.set(key, gate)
+    }
+
+    if (gate.running) {
+        gate.dirty = true
+        // 等待「本轮 + 合并后的下一轮」全部跑完，保证调用方拿到的是最新状态
+        await new Promise<void>(resolve => gate!.waiters.push(resolve))
+        return
+    }
+
+    gate.running = true
+    try {
+        do {
+            gate.dirty = false
+            await task()
+        } while (gate.dirty)
+    } finally {
+        gate.running = false
+        const waiters = gate.waiters
+        gate.waiters = []
+        for (const w of waiters) w()
     }
 }
 
@@ -998,16 +1283,29 @@ function startWatcher(sourceRoot: string) {
                     return
                 }
 
-                console.log(`[自定义源] [文件监控] 检测到文件变动 (${eventType}): ${filename} -> 重新加载 ${username}`)
+                const baseName = parts[parts.length - 1]
+
+                // 单个音源脚本变化：只重载该音源，避免「改一个文件重载全部音源」的放大
+                if (baseName.endsWith('.js')) {
+                    console.log(`[自定义源] [文件监控] 检测到音源脚本变动 (${eventType}): ${filename} -> 增量重载 ${username}/${baseName}`)
+                    reloadSingleSource(username, baseName).catch(err => {
+                        console.error(`[自定义源] [文件监控] 增量重载失败:`, err)
+                    })
+                    return
+                }
+
+                // 源清单 (sources.json) 变化：增删/启停集合可能已变，仍需全量重载
+                console.log(`[自定义源] [文件监控] 检测到源清单变动 (${eventType}): ${filename} -> 全量重载 ${username}`)
                 initUserApis(username).catch(err => {
                     console.error(`[自定义源] [文件监控] 重新加载失败:`, err)
                 })
             }, 2000)) // 2秒防抖，等待文件写入完成
         })
 
-        // 进程退出时关闭监听
+        // 进程退出时关闭监听，并释放所有音源实例登记的定时器
         process.on('exit', () => {
             if (fsWatcher) fsWatcher.close()
+            for (const key of Array.from(loadedApis.keys())) unloadLoadedApi(key)
         })
     } catch (e) {
         console.error('[自定义源] 启动文件监控失败:', e)
@@ -1017,6 +1315,13 @@ function startWatcher(sourceRoot: string) {
 // 从文件系统加载所有已启用的自定义源
 // 路径变更：DATA_PATH/users/source/{username} 和 DATA_PATH/users/source/_open
 export async function initUserApis(targetUser?: string) {
+    // 同一用户空间的全量重载合并执行，避免高频操作叠加触发多次全量解析
+    const gateKey = targetUser || '__all__'
+    await runCoalescedReload(gateKey, () => doInitUserApis(targetUser))
+}
+
+async function doInitUserApis(targetUser?: string) {
+    const startedAt = Date.now()
     const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
     const sourceRoot = path.join(dataPath, 'users', 'source')
     const stats = { loadedCount: 0 }
@@ -1045,11 +1350,9 @@ export async function initUserApis(targetUser?: string) {
     if (targetUser) {
         console.log(`[自定义源] 重新加载用户源: ${targetUser}`)
         // 清理该用户的旧源和状态
-        for (const [key, api] of loadedApis.entries()) {
-            if (api.info.owner === targetUser) {
-                loadedApis.delete(key)
-            }
-        }
+        // 注意：必须通过 unloadOwnerApis 逐个 dispose，才能释放各音源脚本注册的定时器，
+        // 否则每次重载都会遗留一批永不回收的定时器（CPU 持续占用 + 内存只增不减）。
+        unloadOwnerApis(targetUser)
         for (const key of apiStatus.keys()) {
             if (key.startsWith(`${targetUser}_`)) {
                 apiStatus.delete(key)
@@ -1071,6 +1374,10 @@ export async function initUserApis(targetUser?: string) {
 
     } else {
         console.log(`[自定义源] 初始化所有自定义源...`)
+        // 全量重建前先释放所有实例的定时器，避免泄漏
+        for (const key of Array.from(loadedApis.keys())) {
+            unloadLoadedApi(key)
+        }
         loadedApis.clear()
 
         // 扫描 sourceRoot 下的所有子目录
@@ -1093,8 +1400,12 @@ export async function initUserApis(targetUser?: string) {
         }
     }
 
+    lastReloadDurationMs = Date.now() - startedAt
+
     console.log(`[自定义源] 本次加载: ${stats.loadedCount} 个源`)
     console.log(`[自定义源] 当前总计: ${loadedApis.size} 个源`)
+    // [诊断] 重载耗时与活跃资源数量，便于用户自查定时器泄漏 / 重载放大
+    console.log(`[自定义源] 重载耗时: ${lastReloadDurationMs}ms | 活跃资源: ${JSON.stringify(getActiveResourceSummary())} | 已登记定时器: ${getTrackedTimerCount()}`)
     console.log(`[自定义源] ========================================`)
 }
 

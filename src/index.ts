@@ -4,6 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import moduleAlias from 'module-alias'
+import { Worker } from 'node:worker_threads'
 // @ts-ignore
 moduleAlias.addAliases({
   '@renderer': path.join(__dirname, 'modules'),
@@ -36,6 +37,46 @@ process.on('unhandledRejection', (reason: any) => {
     console.warn(`[异步警告] 脚本/网络未捕获异常: ${msg}`)
   }
 })
+
+// 独立于主事件循环的看门狗：若自定义源或同步任务卡死主线程，
+// worker 仍可发现心跳超时并退出进程，使 Docker restart: always 生效。
+const watchdogTimeoutMs = Number(process.env.EVENT_LOOP_WATCHDOG_TIMEOUT_MS ?? 120_000)
+if (Number.isFinite(watchdogTimeoutMs) && watchdogTimeoutMs > 0) {
+  const heartbeat = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
+  const watchdogWorker = new Worker(`
+    const { workerData } = require('node:worker_threads')
+    const heartbeat = new Int32Array(workerData.buffer)
+    const timeoutMs = workerData.timeoutMs
+    let lastValue = Atomics.load(heartbeat, 0)
+    let lastBeatAt = Date.now()
+    while (true) {
+      Atomics.wait(heartbeat, 0, lastValue, Math.min(10000, timeoutMs))
+      const currentValue = Atomics.load(heartbeat, 0)
+      if (currentValue !== lastValue) {
+        lastValue = currentValue
+        lastBeatAt = Date.now()
+        continue
+      }
+      if (Date.now() - lastBeatAt >= timeoutMs) {
+        console.error('[看门狗] 主事件循环心跳超时（' + timeoutMs + 'ms），正在退出进程以触发容器重启')
+        try { process.kill(process.pid, 'SIGTERM') } catch (e) {}
+        setTimeout(() => { try { process.kill(process.pid, 'SIGKILL') } catch (e) {} }, 5000)
+        break
+      }
+    }
+  `, { eval: true, workerData: { buffer: heartbeat.buffer, timeoutMs: watchdogTimeoutMs } })
+  watchdogWorker.on('error', (err: Error) => console.error('[看门狗] Worker 异常:', err.message))
+  watchdogWorker.unref()
+  const watchdogHeartbeat = setInterval(() => {
+    Atomics.add(heartbeat, 0, 1)
+    Atomics.notify(heartbeat, 0)
+  }, 5000)
+  if (typeof watchdogHeartbeat.unref === 'function') watchdogHeartbeat.unref()
+  process.on('exit', () => {
+    clearInterval(watchdogHeartbeat)
+    void watchdogWorker.terminate()
+  })
+}
 
 let envParams: Partial<Record<Exclude<ENV_PARAMS_Value_Type, 'LX_USER_'>, string>> = {}
 let envUsers: LX.User[] = []

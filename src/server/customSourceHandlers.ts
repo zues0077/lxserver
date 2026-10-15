@@ -1,6 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import { extractMetadata, loadUserApi, initUserApis, getApiStatus } from './userApi'
+import { extractMetadata, loadUserApi, getApiStatus, reloadSingleSource, unloadSource, applyOrderToLoadedApis } from './userApi'
 import type { IncomingMessage, ServerResponse } from 'http'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
@@ -242,7 +242,7 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
         fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
 
         // 重新加载该用户的API
-        await initUserApis(targetOwner)
+        await reloadSingleSource(targetOwner, id)
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))
@@ -402,8 +402,8 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
 
         fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
 
-        // 重新加载
-        await initUserApis(targetOwner)
+        // 仅增量加载新导入的源，避免重解析该用户空间中的全部音源
+        await reloadSingleSource(targetOwner, id)
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, filename: displayName, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))
@@ -647,9 +647,9 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
 
         fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
 
-        // 重新加载
+        // 仅重新解析被切换的音源，其他音源实例、定时器和请求均保持不变
         try {
-            await initUserApis(targetOwner)
+            await reloadSingleSource(targetOwner, targetId)
 
             // 如果是尝试启用，检查启用后的实时状态
             if (target.enabled) {
@@ -665,7 +665,8 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
                     target.enabled = oldEnabled
                     target.allowUnsafeVM = oldAllowUnsafeVM
                     fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
-                    await initUserApis(targetOwner)
+                    unloadSource(targetOwner, targetId)
+                    await reloadSingleSource(targetOwner, targetId)
 
                     // 如果系统已禁用 VM 模式，直接提示已禁用
                     if (!global.lx.config['system.allowUnsafeVM']) {
@@ -683,7 +684,7 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: true, enabled: target.enabled }))
         } catch (e: any) {
-            // initUserApis 本身不应抛出这个错误（内部已捕获并记录 status），但为了健壮性保留此判断
+            // 增量加载失败会记录 status，并通过状态检测与回滚逻辑处理
             const isRequireUnsafe = !allowUnsafeVM && !oldAllowUnsafeVM && !!(e && e.message && (
                 e.message === 'REQUIRE_UNSAFE_VM' ||
                 e.message.includes('初始化超时') ||
@@ -736,8 +737,7 @@ export async function handleReorder(req: IncomingMessage, res: ServerResponse) {
         // 保存混合列表的绝对顺序到 order.json（用于 handleList 展示排序）
         fs.writeFileSync(orderPath, JSON.stringify(sourceIds, null, 2))
 
-        // 同时尝试重排各自存在的 sources.json，并记录是否修改了 open 的源
-        let openSourcesModified = false
+        // 同时尝试重排各自存在的 sources.json；用户无私有清单时同步更新公开清单
 
         if (fs.existsSync(metaPath)) {
             const sources = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
@@ -774,18 +774,13 @@ export async function handleReorder(req: IncomingMessage, res: ServerResponse) {
                     newSources.push(source)
                 }
                 fs.writeFileSync(openMetaPath, JSON.stringify(newSources, null, 2))
-                // 同时把 order.json 写入 open 目录，供 loadSourcesFromDir 按序加载
+                // 同时把 order.json 写入 open 目录，供 loadSourcesFromDir 下次启动时按序加载
                 fs.writeFileSync(openOrderPath, JSON.stringify(sourceIds, null, 2))
-                openSourcesModified = true
             }
         }
 
-        // 重新加载 API，使新顺序立即生效于解析优先级
-        await initUserApis(targetOwner)
-        // 若修改了 open 的源顺序，也必须重载 open，否则 loadedApis 里顺序不变
-        if (openSourcesModified) {
-            await initUserApis('open')
-        }
+        // 排序只改变查找优先级：更新 Map 顺序即可，无需重新解析脚本
+        applyOrderToLoadedApis(sourceIds)
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true }))
@@ -871,7 +866,7 @@ export async function handleDelete(req: IncomingMessage, res: ServerResponse) {
         fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
 
         // 重新初始化
-        await initUserApis(targetOwner)
+        unloadSource(targetOwner, targetId)
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true }))

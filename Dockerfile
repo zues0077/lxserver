@@ -33,6 +33,9 @@ EXPOSE 9527
 ENV NODE_ENV='production'
 ENV PORT=9527
 ENV BIND_IP='0.0.0.0'
+# 主事件循环卡死时由独立 worker 自动退出，Docker restart 策略可重启进程
+ENV EVENT_LOOP_WATCHDOG_TIMEOUT_MS=120000
+HEALTHCHECK --interval=60s --timeout=15s --start-period=40s --retries=3 CMD node -e "fetch('http://127.0.0.1:9527/health',{signal:AbortSignal.timeout(10000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 # ENV PROXY_HEADER 'x-real-ip'
 # ENV SERVER_NAME 'My Sync Server'
 # ENV MAX_SNAPSHOT_NUM '10'
