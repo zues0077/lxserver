@@ -368,10 +368,16 @@ const normalizeProbeUrl = (raw: any): string | null => {
   return trimmed
 }
 
-/** 对解析出来的链接做一次轻量可达性校验（音源可能返回一个早就失效的链接） */
+/**
+ * 对解析出来的链接做一次轻量可达性校验。
+ *
+ * 刻意只用 HEAD：音频直链可能是几十 MB 的 flac，用 GET 时部分 CDN 会忽略 Range
+ * 而开始回传整个文件，巡检就成了流量炸弹。HEAD 只取响应头，不产生任何媒体流量。
+ * 少数 CDN 不支持 HEAD（405/501）时无法判定，按「保守放行」处理，避免误伤。
+ */
 const checkLinkReachable = async (url: string): Promise<{ ok: boolean; error?: string }> => {
   try {
-    const resp = await needle('get', url, null, {
+    const resp = await needle('head', url, null, {
       follow_max: 3,
       open_timeout: 6000,
       response_timeout: 6000,
@@ -380,11 +386,11 @@ const checkLinkReachable = async (url: string): Promise<{ ok: boolean; error?: s
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         Referer: (() => { try { return new URL(url).origin } catch { return '' } })(),
-        Range: 'bytes=0-1',
       },
     })
     const code = resp?.statusCode
     if (code === undefined) return { ok: false, error: '链接无响应' }
+    if (code === 405 || code === 501) return { ok: true } // 服务端不支持 HEAD，无法判定
     if (code >= 400) return { ok: false, error: `链接返回 ${code}` }
     return { ok: true }
   } catch (e: any) {
@@ -481,21 +487,29 @@ const getSongPool = (deps: ProbeDeps): ProbeTestSong[] => {
   return cachedSongPool
 }
 
+/** 已尝试过内置搜索的平台（含搜索失败），避免同一轮里对同一平台反复发起搜索 */
+const searchAttempted = new Set<string>()
+
 /** 为平台挑一首测试曲目：配置/缓存 → 内置 SDK 搜索 → 放弃（跳过，不判定为不可用） */
 const pickTestSong = async (platform: string, deps: ProbeDeps): Promise<ProbeTestSong | null> => {
   const fromPool = getSongPool(deps).find(s => s.source === platform)
   if (fromPool) return fromPool
-  if (deps.searchTestSong) {
-    try {
-      const found = await deps.searchTestSong(platform)
-      if (found && found.songmid) {
-        cachedSongPool.push(found)
-        return found
-      }
-    } catch { /* ignore */ }
-  }
+  if (!deps.searchTestSong) return null
+  if (searchAttempted.has(platform)) return null
+  searchAttempted.add(platform)
+  try {
+    const found = await deps.searchTestSong(platform)
+    if (found && found.songmid) {
+      cachedSongPool.push(found)
+      return found
+    }
+  } catch { /* ignore */ }
   return null
 }
+
+/** 错误信息可能很长（音源会把整个 HTML/堆栈抛出来），落盘前截断，避免状态文件膨胀 */
+const shorten = (text: string, max = 300): string =>
+  typeof text === 'string' && text.length > max ? `${text.slice(0, max)}…` : (text || '')
 
 // ============================ 音源移除 ============================
 
@@ -591,9 +605,11 @@ export function stopSourceProbe(): void {
 /**
  * 执行一轮巡检。
  * @param options.owner 只巡检该空间（不传则全部空间）
- * @param options.only  只巡检指定音源（用于「新添加的音源立即检测」）
+ * @param options.only  只巡检指定的一批音源（用于「新添加的音源立即检测」，支持批量导入合并）
  */
-export async function runSourceProbe(options: { owner?: string; only?: { owner: string; id: string } } = {}): Promise<ProbeRunResult> {
+export async function runSourceProbe(
+  options: { owner?: string; only?: Array<{ owner: string; id: string }> } = {},
+): Promise<ProbeRunResult> {
   const startedAt = Date.now()
   const empty: ProbeRunResult = {
     startedAt, durationMs: 0, sourcesChecked: 0, platformsChecked: 0,
@@ -611,6 +627,7 @@ export async function runSourceProbe(options: { owner?: string; only?: { owner: 
   running = true
   lastRunAt = startedAt
   statesCache.clear()
+  searchAttempted.clear() // 每轮重新允许一次内置搜索，平台恢复后仍能拿到测试曲目
   // 探测期间会有持续的解析与网络开销，标记为「忙碌」避免被自检护栏误判成异常空转
   markSourceBusy(conf.timeoutMs * 4)
   const busyTicker = setInterval(() => markSourceBusy(conf.timeoutMs * 2), Math.max(5000, conf.timeoutMs))
@@ -618,7 +635,10 @@ export async function runSourceProbe(options: { owner?: string; only?: { owner: 
   try {
     let targets = deps.listTargets()
     if (options.owner) targets = targets.filter(t => t.owner === options.owner)
-    if (options.only) targets = targets.filter(t => t.owner === options.only!.owner && t.id === options.only!.id)
+    if (options.only && options.only.length) {
+      const wanted = new Set(options.only.map(o => `${o.owner}_${o.id}`))
+      targets = targets.filter(t => wanted.has(`${t.owner}_${t.id}`))
+    }
 
     const result: ProbeRunResult = {
       startedAt, durationMs: 0, sourcesChecked: targets.length, platformsChecked: 0,
@@ -698,7 +718,7 @@ export async function runSourceProbe(options: { owner?: string; only?: { owner: 
           }
         } else {
           platformState.failCount++
-          platformState.lastError = outcome.error || '未知错误'
+          platformState.lastError = shorten(outcome.error || '未知错误')
           if (platformState.failCount >= conf.failThreshold) {
             platformState.status = 'down'
             result.platformsDown++
@@ -778,19 +798,31 @@ export async function runSourceProbe(options: { owner?: string; only?: { owner: 
   }
 }
 
+/** 待巡检的新音源（3 秒聚合窗口内合并批量导入，避免每个源各跑一轮） */
+const pendingNewSources = new Map<string, { owner: string; id: string }>()
+let pendingNewTimer: NodeJS.Timeout | null = null
+
 /**
  * 新添加的音源 → 立即巡检一次。
- * 刻意异步、不阻塞上传响应，且失败只记日志。
+ * 刻意异步、不阻塞上传响应；多个音源在同一窗口内被添加时合并成一轮，
+ * 既避免逐个巡检把 CPU/网络打满，也避免「上一轮还在跑 → 新源被整轮跳过」。
  */
 export function probeNewSource(owner: string, sourceId: string): void {
   const conf = configOf()
-  if (!conf.enabled || !conf.probeOnNewSource) return
-  if (!depsRef) return
-  // 等音源实例注册进 loadedApis 后再探测
-  setTimeout(() => {
-    void runSourceProbe({ only: { owner, id: sourceId } })
+  if (!conf.enabled || !conf.probeOnNewSource || !depsRef) return
+
+  pendingNewSources.set(`${owner}_${sourceId}`, { owner, id: sourceId })
+  if (pendingNewTimer) return
+
+  pendingNewTimer = setTimeout(() => {
+    pendingNewTimer = null
+    const batch = Array.from(pendingNewSources.values())
+    pendingNewSources.clear()
+    if (!batch.length) return
+    void runSourceProbe({ only: batch })
       .catch(err => syncLog.warn('[音源巡检] 新增音源巡检失败:', err?.message || err))
   }, 3000)
+  if (typeof (pendingNewTimer as any).unref === 'function') (pendingNewTimer as any).unref()
 }
 
 /** 注册到后台任务调度器 */
@@ -820,7 +852,8 @@ export function createSourceProbeTask(): ScheduledTask {
 export function getSourceProbeStatus(): ProbeStatusSnapshot {
   const conf = configOf()
   const autoDisabledPlatforms: ProbeStatusSnapshot['autoDisabledPlatforms'] = []
-  const owners = new Set<string>()
+  // 空间既可能来自「当前已加载的源」，也可能只有历史记录（源全被移除后），两边都覆盖
+  const owners = new Set<string>(['open', ...registeredUsers()])
   for (const target of depsRef ? depsRef.listTargets() : []) owners.add(target.owner)
   for (const owner of owners) {
     const status = readStatus(owner)
