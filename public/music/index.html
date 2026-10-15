@@ -3823,18 +3823,6 @@
                                 </p>
 
                                 <div class="space-y-4">
-                                    <!-- 总开关 -->
-                                    <div
-                                        class="t-bg-panel rounded-xl border t-border-main p-4 flex items-center justify-between">
-                                        <div>
-                                            <h4 class="text-sm font-bold t-text-main">启用小爱投播</h4>
-                                            <p class="text-xs t-text-muted mt-1">关闭后播放目标无法切换到小爱音箱</p>
-                                        </div>
-                                        <input type="checkbox" id="xiaoai-enabled-toggle"
-                                            class="w-4 h-4 accent-emerald-500 cursor-pointer"
-                                            onchange="xiaoAiSaveConfig()">
-                                    </div>
-
                                     <!-- 服务地址 -->
                                     <div class="t-bg-panel rounded-xl border t-border-main p-4 space-y-2">
                                         <h4 class="text-sm font-bold t-text-main flex items-center">
@@ -3981,14 +3969,25 @@
                                         </div>
 
                                         <div class="flex flex-wrap gap-2 pt-1">
-                                            <button onclick="xiaoAiTestPlay()"
-                                                class="px-3 py-1.5 text-xs md:text-sm t-bg-main border t-border-main rounded-lg hover:t-bg-track transition-colors">
-                                                把当前歌曲投送过去
-                                            </button>
                                             <button onclick="xiaoAiStop()"
                                                 class="px-3 py-1.5 text-xs md:text-sm t-bg-main border t-border-main rounded-lg hover:t-bg-track transition-colors">
                                                 停止小爱播放
                                             </button>
+                                        </div>
+
+                                        <!-- 自动续播 -->
+                                        <div class="pt-3 border-t t-border-main space-y-2">
+                                            <label class="flex items-center gap-2 cursor-pointer">
+                                                <input type="checkbox" id="xiaoai-auto-next-toggle"
+                                                    class="w-4 h-4 accent-emerald-500"
+                                                    onchange="xiaoAiToggleAutoNext(this.checked)">
+                                                <span class="text-sm t-text-main">播放完自动下一首</span>
+                                            </label>
+                                            <p class="text-xs t-text-muted">
+                                                开启后会持续读取音箱播放状态：接近结尾时提前切歌，因此两首歌之间几乎无缝。
+                                                随机 / 单曲循环 / 顺序播放等模式与播放器保持一致；页面关闭后不再续播。
+                                            </p>
+                                            <p id="xiaoai-watch-status" class="text-xs t-text-muted">自动续播待命（播放时生效）</p>
                                         </div>
                                     </div>
                                 </div>
@@ -6267,6 +6266,7 @@
     <script src="js/sync_download.js"></script>
     <script src="app.js"></script>
     <!-- 小爱音箱投播（依赖 app.js 里的播放器函数，必须在其后加载） -->
+    <script src="js/xiaoai_watchdog.js"></script>
     <script src="js/xiaoai.js"></script>
 </body>
 

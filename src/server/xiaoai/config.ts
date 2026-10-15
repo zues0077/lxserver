@@ -22,8 +22,6 @@ export interface XiaoAiDevice {
 }
 
 export interface XiaoAiConfig {
-  /** 总开关：关闭后播放器里的小爱播放目标不可用 */
-  enabled: boolean
   /** 音箱能访问到的服务地址，如 http://192.168.1.10:9527（留空则用请求来源自动推断） */
   serverBaseUrl: string
   /** 投播用的流地址路径 */
@@ -44,7 +42,6 @@ export interface XiaoAiConfig {
 export interface XiaoAiStoredToken extends TokenInfo {}
 
 const DEFAULT_CONFIG: XiaoAiConfig = {
-  enabled: false,
   serverBaseUrl: '',
   streamPath: '/api/music/xiaoai/stream',
   keepLight: true,

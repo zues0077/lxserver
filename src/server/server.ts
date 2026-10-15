@@ -43,6 +43,9 @@ import {
   parseStreamToken,
   serveXiaoAiStream,
   loadXiaoAiConfig,
+  buildTrackKey,
+  getCachedTrackUrl,
+  setCachedTrackUrl,
 } from './xiaoai'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
@@ -268,6 +271,69 @@ const getRequestOrigin = (req: IncomingMessage): string => {
   const fwdHost = req.headers['x-forwarded-host']
   const host = (Array.isArray(fwdHost) ? fwdHost[0] : fwdHost) || req.headers.host || ''
   return host ? `${proto}://${host}` : ''
+}
+
+/** 小爱投播接口的身份校验：返回 null 表示校验不通过，调用方应回 401 */
+const resolveXiaoAiUser = (req: IncomingMessage): string | null => {
+  const clientUsername = req.headers['x-user-name'] as string | undefined
+  if (!clientUsername || clientUsername === 'default' || clientUsername === 'open' || clientUsername === '_open') {
+    return 'open'
+  }
+  const verified = verifyUserAuth(req)
+  if (!verified || verified !== clientUsername) return null
+  return verified
+}
+
+/**
+ * 解析出可投送给小爱音箱的音频地址。三种来源：
+ *  1. 前端直接给的可播放地址
+ *  2. 站内相对地址（例如服务端缓存的音频文件）
+ *  3. 交给音源现解析
+ * 解析结果会写入短时缓存，供自动续播提前预解析时复用。
+ */
+const resolveXiaoAiTrack = async (
+  req: IncomingMessage,
+  songInfo: Record<string, any>,
+  quality: string,
+  verifiedUsername: string,
+  directStreamUrl = ''
+): Promise<{ url: string; filename: string; cached: boolean }> => {
+  const songName = String(songInfo.name || songInfo.title || 'track')
+  const singer = String(songInfo.singer || '')
+  const filename = `${singer ? `${singer} - ` : ''}${songName}.mp3`.replace(/[\\/:*?"<>|]/g, '_')
+
+  const directUrl = String(directStreamUrl || '').trim()
+  const rawSongUrl = String(songInfo.url || songInfo.streamUrl || songInfo.meta?.url || '').trim()
+  const httpUrl = /^https?:\/\//i.test(directUrl) ? directUrl : /^https?:\/\//i.test(rawSongUrl) ? rawSongUrl : ''
+
+  // 1. 已经是绝对可播放地址，直接用
+  if (httpUrl) return { url: httpUrl, filename, cached: false }
+
+  // 2. 站内相对地址：补全成绝对地址，并把播放器 token 带进查询串
+  if (rawSongUrl) {
+    const userToken = String(req.headers['x-user-token'] || '')
+    const absolute = `${getRequestOrigin(req)}${rawSongUrl.startsWith('/') ? '' : '/'}${rawSongUrl}`
+    const withToken = userToken && !absolute.includes('token=')
+      ? `${absolute}${absolute.includes('?') ? '&' : '?'}token=${encodeURIComponent(userToken)}`
+      : absolute
+    return { url: withToken, filename, cached: false }
+  }
+
+  // 3. 命中预解析缓存：自动续播切歌时走这条路径，省掉音源解析耗时
+  const cacheKey = buildTrackKey(songInfo, quality)
+  const cachedUrl = getCachedTrackUrl(cacheKey)
+  if (cachedUrl) return { url: cachedUrl, filename, cached: true }
+
+  // 4. 交给音源现解析
+  if (songInfo.source) {
+    const resolved = await callUserApiGetMusicUrl(songInfo.source, songInfo, quality, verifiedUsername)
+    const resolvedUrl = String(resolved?.url || '').trim()
+    if (!resolvedUrl) throw new Error('音源未返回可用播放地址')
+    setCachedTrackUrl(cacheKey, resolvedUrl)
+    return { url: resolvedUrl, filename, cached: false }
+  }
+
+  throw new Error('缺少可投送的歌曲信息（需要 source 或可播放地址）')
 }
 
 /** 小爱相关接口的鉴权：管理员口令，或已通过认证的播放器会话 */
@@ -6537,19 +6603,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
         // --- 投播 ---
         if (pathname === '/api/music/xiaoai/play' && req.method === 'POST') {
-          const clientUsername = req.headers['x-user-name'] as string | undefined
-          let verifiedUsername = 'open'
-          if (clientUsername && clientUsername !== 'default' && clientUsername !== 'open' && clientUsername !== '_open') {
-            const verified = verifyUserAuth(req)
-            if (!verified || verified !== clientUsername) {
-              sendJson({ success: false, message: 'Unauthorized' }, 401)
-              return
-            }
-            verifiedUsername = verified
-          }
-
           void readJsonBody().then(async payload => {
             try {
+              const verifiedUsername = resolveXiaoAiUser(req)
+              if (verifiedUsername === null) {
+                sendJson({ success: false, message: 'Unauthorized' }, 401)
+                return
+              }
               const songInfo = normalizeSongInfo(payload.songInfo || payload.song || {}) || {}
               const quality = String(payload.quality || songInfo.quality || '320k')
               const deviceIds = Array.isArray(payload.deviceIds) ? payload.deviceIds.map(String) : undefined
@@ -6558,34 +6618,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const streamPath = config.streamPath || '/api/music/xiaoai/stream'
               const songName = String(songInfo.name || songInfo.title || 'track')
               const singer = String(songInfo.singer || '')
-              const filename = `${singer ? `${singer} - ` : ''}${songName}.mp3`.replace(/[\\/:*?"<>|]/g, '_')
 
-              // 1. 前端直接给了可播放地址
-              let target: { url?: string; path?: string; filename?: string } | null = null
-              const directUrl = String(payload.streamUrl || '').trim()
-              const rawSongUrl = String(songInfo.url || songInfo.streamUrl || songInfo.meta?.url || '').trim()
-              const httpUrl = /^https?:\/\//i.test(directUrl) ? directUrl : /^https?:\/\//i.test(rawSongUrl) ? rawSongUrl : ''
-
-              if (httpUrl) {
-                target = { url: httpUrl, filename }
-              } else if (rawSongUrl) {
-                // 站内相对地址（例如服务端缓存的音频文件）：补全成绝对地址后中转
-                const userToken = String(req.headers['x-user-token'] || '')
-                const absolute = `${getRequestOrigin(req)}${rawSongUrl.startsWith('/') ? '' : '/'}${rawSongUrl}`
-                const withToken = userToken && !absolute.includes('token=')
-                  ? `${absolute}${absolute.includes('?') ? '&' : '?'}token=${encodeURIComponent(userToken)}`
-                  : absolute
-                target = { url: withToken, filename }
-              } else if (songInfo.source) {
-                // 交给音源解析出真实播放地址
-                const resolved = await callUserApiGetMusicUrl(songInfo.source, songInfo, quality, verifiedUsername)
-                const resolvedUrl = String(resolved?.url || '').trim()
-                if (!resolvedUrl) throw new Error('音源未返回可用播放地址')
-                target = { url: resolvedUrl, filename }
-              }
-
-              if (!target) throw new Error('缺少可投送的歌曲信息（需要 source 或可播放地址）')
-
+              const target = await resolveXiaoAiTrack(req, songInfo, quality, verifiedUsername, payload.streamUrl)
               const streamUrl = buildStreamUrl(baseUrl, streamPath, target)
               const result = await xiaoAiService.play({
                 streamUrl,
@@ -6595,11 +6629,32 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               sendJson({
                 success: result.success,
                 streamUrl,
+                cached: target.cached,
                 device: result.results,
                 message: result.success ? '' : '所有设备投送失败，请检查设备在线状态与登录态',
               })
             } catch (error: any) {
               failed(error, '投送小爱失败')
+            }
+          })
+          return
+        }
+
+        // --- 预解析下一首（自动续播用；失败不影响播放主流程）---
+        if (pathname === '/api/music/xiaoai/prefetch' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            const verifiedUsername = resolveXiaoAiUser(req)
+            if (verifiedUsername === null) {
+              sendJson({ success: false, message: 'Unauthorized' }, 401)
+              return
+            }
+            try {
+              const songInfo = normalizeSongInfo(payload.songInfo || payload.song || {}) || {}
+              const quality = String(payload.quality || songInfo.quality || '320k')
+              const target = await resolveXiaoAiTrack(req, songInfo, quality, verifiedUsername)
+              sendJson({ success: true, ready: !!target.url, cached: target.cached })
+            } catch (error: any) {
+              sendJson({ success: false, message: error?.message || '预解析失败' })
             }
           })
           return

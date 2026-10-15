@@ -21,7 +21,6 @@ export interface DeviceActionResult {
 
 /** 对外暴露的配置（含设备与登录状态，不含任何凭据） */
 export interface XiaoAiPublicConfig {
-  enabled: boolean
   configured: boolean
   loginState: 'none' | 'valid' | 'expired'
   loginMethod: string
@@ -61,7 +60,6 @@ class XiaoAiService {
     const config = loadConfig()
     const token = this.auth.getToken()
     return {
-      enabled: !!config.enabled,
       configured: !!token?.serviceToken,
       loginState: this.getLoginState(),
       loginMethod: token?.loginMethod || '',
@@ -78,7 +76,6 @@ class XiaoAiService {
 
   updateConfig(patch: Record<string, unknown>): XiaoAiPublicConfig {
     const next: Partial<XiaoAiConfig> = {}
-    if (patch.enabled !== undefined) next.enabled = !!patch.enabled
     if (patch.serverBaseUrl !== undefined) next.serverBaseUrl = String(patch.serverBaseUrl || '').trim()
     if (patch.streamPath !== undefined) next.streamPath = String(patch.streamPath || '').trim() || '/api/music/xiaoai/stream'
     if (patch.keepLight !== undefined) next.keepLight = !!patch.keepLight
@@ -231,7 +228,6 @@ class XiaoAiService {
     const streamUrl = String(params.streamUrl || '').trim()
     if (!streamUrl) throw new Error('缺少可投送的播放地址')
     const config = loadConfig()
-    if (!config.enabled) throw new Error('小爱播放未启用，请先在设置中开启')
     const results = await this.fanOut(params.deviceIds, 'play', (client, deviceId, hardware) =>
       client.playUrl(deviceId, streamUrl, hardware, { keepLight: config.keepLight !== false, disabledModels: config.disabledModels })
     )
@@ -286,13 +282,21 @@ class XiaoAiService {
         info = {}
       }
     }
+    const position = Number(info.position)
+    const duration = Number(info.duration)
+    const hasPosition = Number.isFinite(position) && position > 0
+    const hasDuration = Number.isFinite(duration) && duration > 0
     return {
       deviceId: target,
       playing: Number(info.status) === 1,
       volume: typeof info.volume === 'number' ? info.volume : -1,
       title: String(info.title || info.audioName || ''),
-      durationMs: Number(info.duration || 0),
-      positionMs: Number(info.position || 0),
+      durationMs: hasDuration ? duration : 0,
+      positionMs: hasPosition ? position : 0,
+      // 设备上报的位置/总长单位随固件而异（秒或毫秒），因此额外给出无量纲的播放进度比例。
+      // 自动续播的前端只看这个比例，就不必关心单位差异。
+      hasProgress: hasPosition && hasDuration,
+      progressRatio: hasPosition && hasDuration ? Math.min(1, position / duration) : -1,
       raw: info,
     }
   }

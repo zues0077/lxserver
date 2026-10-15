@@ -11,15 +11,36 @@
 (function () {
     const API = '/api/music/xiaoai';
     const TARGET_KEY = 'lx_xiaoai_target';
+    const AUTO_NEXT_KEY = 'lx_xiaoai_auto_next';
+    /** 轮询音箱状态的间隔（毫秒） */
+    const WATCH_INTERVAL = 3000;
+    /** 进度超过该比例时提前预解析下一首，减少切歌等待 */
+    const PREFETCH_RATIO = 0.6;
 
     const state = {
         config: null,
         target: localStorage.getItem(TARGET_KEY) === 'xiaoai' ? 'xiaoai' : 'local',
+        autoNext: localStorage.getItem(AUTO_NEXT_KEY) !== '0',
         qrTimer: null,
         qrPolling: false,
         loginTab: 'qrcode',
         remotePaused: false,
         lastVolume: 50,
+    };
+
+    /** 自动续播守望：投送成功后开始查询音箱状态，用于「自动下一首」 */
+    const watch = {
+        active: false,
+        deviceId: '',
+        song: null,
+        state: null,
+        hint: '',
+        timer: null,
+        worker: null,
+        workerBroken: false,
+        polling: false,
+        prefetchedKey: '',
+        lastAdvanceAt: 0,
     };
 
     const $ = id => document.getElementById(id);
@@ -51,7 +72,7 @@
     /** 是否应该把播放交给小爱 */
     const shouldRoute = () => {
         if (state.target !== 'xiaoai') return false;
-        if (!state.config || !state.config.enabled) return false;
+        if (!state.config) return false;
         return (state.config.selectedDeviceIds || []).length > 0;
     };
 
@@ -159,10 +180,10 @@
     const render = () => {
         const cfg = state.config;
         if (!cfg) return;
-        const enabledToggle = $('xiaoai-enabled-toggle');
-        if (enabledToggle) enabledToggle.checked = !!cfg.enabled;
         const baseInput = $('xiaoai-server-base-input');
         if (baseInput && document.activeElement !== baseInput) baseInput.value = cfg.serverBaseUrl || '';
+        const autoNextToggle = $('xiaoai-auto-next-toggle');
+        if (autoNextToggle) autoNextToggle.checked = !!state.autoNext;
         renderTarget();
         renderLoginState();
         renderDevices();
@@ -325,6 +346,7 @@
 
     const logout = async () => {
         try {
+            stopWatch();
             const data = await request('/logout', {});
             state.config = data.config || state.config;
             state.target = 'local';
@@ -377,8 +399,9 @@
 
     const stop = async () => {
         try {
+            stopWatch();
             await request('/stop', {});
-            setMessage('已停止小爱播放');
+            setWatchHint('已停止小爱播放');
             updatePlayButtonSafe(false);
         } catch (e) {
             setMessage(e.message, true);
@@ -390,6 +413,245 @@
             if (typeof window.updatePlayButton === 'function') window.updatePlayButton(playing);
         } catch (e) {
             /* 忽略 */
+        }
+    };
+
+    // ===== 自动续播守望 =====
+    //
+    // 音箱播完不会通知播放器，因此投送成功后由这里持续查询音箱状态：
+    //   - 接近结尾 → 提前切歌（利用播放器的队列规则，含随机/单曲/顺序）
+    //   - 已播完   → 切下一首
+    //   - 被暂停   → 不动，继续等待
+    // 心跳由 Worker 提供，避免页面切到后台后定时器被浏览器节流。
+
+    const setWatchHint = text => {
+        watch.hint = text || '';
+        const el = $('xiaoai-watch-status');
+        if (el) el.textContent = watch.hint || '自动续播待命（播放时生效）';
+    };
+
+    const startHeartbeat = () => {
+        try {
+            if (!watch.worker && !watch.workerBroken && typeof Worker === 'function') {
+                watch.worker = new Worker('js/xiaoai_watch_worker.js');
+                watch.worker.onmessage = event => {
+                    if (event.data && event.data.type === 'tick') void tick();
+                };
+                watch.worker.onerror = () => {
+                    // Worker 不可用（CSP 限制等）时退回主线程定时器
+                    watch.workerBroken = true;
+                    try {
+                        if (watch.worker) watch.worker.terminate();
+                    } catch (e) {
+                        /* 忽略 */
+                    }
+                    watch.worker = null;
+                    startFallbackTimer();
+                };
+            }
+        } catch (e) {
+            watch.workerBroken = true;
+            watch.worker = null;
+        }
+
+        if (watch.worker) {
+            try {
+                watch.worker.postMessage({ type: 'start', interval: WATCH_INTERVAL });
+                return;
+            } catch (e) {
+                watch.workerBroken = true;
+                try {
+                    watch.worker.terminate();
+                } catch (err) {
+                    /* 忽略 */
+                }
+                watch.worker = null;
+            }
+        }
+        startFallbackTimer();
+    };
+
+    const startFallbackTimer = () => {
+        if (watch.timer) clearInterval(watch.timer);
+        watch.timer = setInterval(() => {
+            void tick();
+        }, WATCH_INTERVAL);
+    };
+
+    const stopWatch = () => {
+        watch.active = false;
+        if (watch.timer) {
+            clearInterval(watch.timer);
+            watch.timer = null;
+        }
+        if (watch.worker) {
+            try {
+                watch.worker.postMessage({ type: 'stop' });
+            } catch (e) {
+                /* 忽略 */
+            }
+        }
+    };
+
+    /** 投送成功后开始守望（song 仅用于日志与界面提示） */
+    const startWatch = song => {
+        stopWatch();
+        if (!state.autoNext || !shouldRoute()) return;
+        const deviceId = selectedDevices()[0];
+        if (!deviceId) return;
+        const watchdog = window.XiaoAiWatchdog;
+        if (!watchdog || typeof watchdog.evaluate !== 'function') return;
+
+        watch.active = true;
+        watch.deviceId = deviceId;
+        watch.song = song || null;
+        watch.state = watchdog.createState(Date.now());
+        watch.prefetchedKey = '';
+        watch.polling = false;
+        startHeartbeat();
+        setWatchHint('自动续播监听中…');
+    };
+
+    /** 播放器自身暂停时不让守望继续判定，避免用户暂停被当成「播完」 */
+    const markRemotePaused = paused => {
+        state.remotePaused = !!paused;
+    };
+
+    const lockNextIndex = nextIndex => {
+        // 投送模式下播放器自身的预读不会执行，随机模式也就不会「预先抽定」下一首。
+        // 这里把预解析选中的索引钉住（播放器在每次换歌时会自动清空它），
+        // 保证「预解析的那首」就是「真正播的那首」，缓存不会白解析。
+        try {
+            if (typeof playMode !== 'undefined' && playMode === 'random' && typeof preSelectedNextIndex !== 'undefined') {
+                preSelectedNextIndex = nextIndex;
+            }
+        } catch (e) {
+            /* 忽略 */
+        }
+    };
+
+    const advanceToNext = reason => {
+        const previousIndex = typeof currentIndex !== 'undefined' ? currentIndex : -1;
+        stopWatch();
+        watch.lastAdvanceAt = Date.now();
+        console.info(`[小爱] 自动续播（${reason}）`);
+        if (typeof window.playNext !== 'function') {
+            setWatchHint('当前播放器不支持自动切歌');
+            return;
+        }
+        try {
+            window.playNext();
+            setWatchHint('正在切换下一首…');
+        } catch (e) {
+            console.error('[小爱] 自动切歌失败:', e.message);
+            setWatchHint(`自动切歌失败：${e.message}`);
+            return;
+        }
+
+        // 顺序播放到末尾时 playNext 不会有任何动作，提示一下免得用户以为是卡住了
+        if (typeof playMode !== 'undefined' && playMode === 'order') {
+            setTimeout(() => {
+                if (watch.active) return;
+                if (typeof currentIndex !== 'undefined' && currentIndex === previousIndex) {
+                    setWatchHint('已播放到歌单末尾，自动续播结束');
+                }
+            }, 3000);
+        }
+    };
+
+    /** 进度过半后提前把下一首解析好，切歌时直接命中缓存 */
+    const maybePrefetch = sample => {
+        if (!sample.ok || !sample.playing) return;
+        if (!Number.isFinite(sample.progressRatio) || sample.progressRatio < PREFETCH_RATIO) return;
+        if (typeof window.getNextIndex !== 'function' || typeof currentPlaylist === 'undefined') return;
+        const nextIndex = window.getNextIndex();
+        if (nextIndex === -1 || !currentPlaylist[nextIndex]) return;
+        const nextSong = currentPlaylist[nextIndex];
+        const songKey = `${nextSong.source || ''}|${nextSong.songmid || nextSong.songId || nextSong.id || ''}`;
+        if (!songKey || songKey === '|' || watch.prefetchedKey === songKey) return;
+        watch.prefetchedKey = songKey;
+        lockNextIndex(nextIndex);
+        request('/prefetch', { songInfo: nextSong, quality: nextSong.quality || undefined }).catch(() => {
+            /* 预解析失败不影响主流程，切歌时会再解析一次 */
+        });
+    };
+
+    const applyWatchSample = sample => {
+        if (!watch.active) return;
+        const watchdog = window.XiaoAiWatchdog;
+        if (!watchdog) return;
+
+        const decision = watchdog.evaluate(watch.state, sample, {});
+        watch.state = decision.state;
+
+        // 设备确实在响时，纠正可能已经过期的暂停标记
+        if (sample.ok && sample.playing && state.remotePaused) {
+            markRemotePaused(false);
+            updatePlayButtonSafe(true);
+        }
+
+        if (decision.action === 'advance') {
+            advanceToNext(decision.reason);
+            return;
+        }
+        if (decision.action === 'giveup') {
+            const messages = {
+                'start-timeout': '音箱没有开始播放，已停止自动续播',
+                'status-unavailable': '无法读取音箱状态，已停止自动续播',
+                'idle-timeout': '音箱已停止播放，自动续播结束',
+            };
+            stopWatch();
+            setWatchHint(messages[decision.reason] || '自动续播已停止');
+            return;
+        }
+
+        maybePrefetch(sample);
+
+        if (!sample.ok) {
+            setWatchHint('读取音箱状态失败，重试中…');
+        } else if (!sample.playing) {
+            setWatchHint('检测到音箱已暂停，等待恢复…');
+        } else if (Number.isFinite(sample.progressRatio) && sample.progressRatio >= 0) {
+            setWatchHint(`自动续播监听中（进度 ${Math.round(sample.progressRatio * 100)}%）`);
+        } else {
+            setWatchHint('自动续播监听中…');
+        }
+    };
+
+    const tick = async () => {
+        if (!watch.active || watch.polling) return;
+        if (!shouldRoute()) {
+            stopWatch();
+            return;
+        }
+        watch.polling = true;
+        let sample;
+        try {
+            const data = await request(`/status?deviceId=${encodeURIComponent(watch.deviceId)}`);
+            sample = {
+                ok: data.success === true,
+                at: Date.now(),
+                playing: data.playing === true,
+                hasProgress: data.hasProgress === true,
+                progressRatio: typeof data.progressRatio === 'number' ? data.progressRatio : -1,
+                userPaused: !!state.remotePaused,
+            };
+        } catch (e) {
+            sample = { ok: false, at: Date.now() };
+        } finally {
+            watch.polling = false;
+        }
+        applyWatchSample(sample);
+    };
+
+    const toggleAutoNext = checked => {
+        state.autoNext = !!checked;
+        localStorage.setItem(AUTO_NEXT_KEY, state.autoNext ? '1' : '0');
+        if (!state.autoNext) {
+            stopWatch();
+            setWatchHint('自动续播已关闭');
+        } else {
+            setWatchHint('自动续播已开启，播放时生效');
         }
     };
 
@@ -406,34 +668,35 @@
         return data;
     };
 
-    const testPlay = async () => {
-        const song = (typeof window.getCurrentSong === 'function' && window.getCurrentSong())
-            || (typeof currentPlaylist !== 'undefined' && currentIndex >= 0 ? currentPlaylist[currentIndex] : null);
-        if (!song) return setMessage('当前没有正在播放的歌曲', true);
-        setMessage('正在投送…');
-        try {
-            await pushSong(song, null);
-            setMessage(`已投送到小爱音箱：${song.name || ''}`);
-        } catch (e) {
-            setMessage(e.message, true);
-        }
-    };
-
     const toggleTarget = async () => {
         if (state.target === 'xiaoai') {
             state.target = 'local';
             localStorage.setItem(TARGET_KEY, 'local');
+            stopWatch();
+            setWatchHint('已切回本机播放，自动续播停止');
             render();
             setMessage('已切回本机播放');
             return;
         }
-        if (!state.config?.enabled) return setMessage('请先启用小爱投播', true);
         if (!state.config?.configured) return setMessage('请先登录小米账号', true);
         if (!selectedDevices().length) return setMessage('请至少选择一台小爱设备', true);
         state.target = 'xiaoai';
         localStorage.setItem(TARGET_KEY, 'xiaoai');
         render();
-        setMessage('播放目标已切换为小爱音箱，点击播放即可投送');
+
+        // 切换目标的同时立即把当前歌曲投过去（有歌才投）
+        const song = (typeof window.getCurrentSong === 'function' && window.getCurrentSong())
+            || (typeof currentPlaylist !== 'undefined' && currentIndex >= 0 ? currentPlaylist[currentIndex] : null);
+        if (!song) {
+            setMessage('播放目标已切换为小爱音箱，点击播放即可投送');
+            return;
+        }
+        await playSongViaXiaoAi(
+            song,
+            typeof currentIndex === 'number' ? currentIndex : -1,
+            song.quality || null,
+            typeof playSong === 'function' ? playSong : undefined,
+        );
     };
 
     /**
@@ -450,11 +713,14 @@
         }
         try {
             await pushSong(song, quality);
-            state.remotePaused = false;
+            markRemotePaused(false);
             updatePlayButtonSafe(true);
             if (typeof setPlayerStatus === 'function') setPlayerStatus(`正在小爱音箱播放：${song.name || ''}`, false);
+            // 投送成功后开始守望，用于自动下一首
+            startWatch(song);
         } catch (e) {
             console.error('[小爱] 投送失败:', e.message);
+            stopWatch();
             if (typeof setPlayerStatus === 'function') setPlayerStatus(`小爱投送失败：${e.message}`, false);
             state.target = 'local';
             localStorage.setItem(TARGET_KEY, 'local');
@@ -467,12 +733,16 @@
         try {
             if (state.remotePaused) {
                 await request('/resume', {});
-                state.remotePaused = false;
+                markRemotePaused(false);
                 updatePlayButtonSafe(true);
+                // 恢复播放后重新开始守望（暂停期间不轮询，省掉无谓的云端请求）
+                startWatch(watch.song);
             } else {
                 await request('/pause', {});
-                state.remotePaused = true;
+                markRemotePaused(true);
                 updatePlayButtonSafe(false);
+                stopWatch();
+                setWatchHint('已暂停，点播放恢复后继续自动续播');
             }
         } catch (e) {
             console.error('[小爱] 播放控制失败:', e.message);
@@ -489,6 +759,9 @@
                 valueEl.textContent = range.value;
             });
         }
+        const autoNextToggle = $('xiaoai-auto-next-toggle');
+        if (autoNextToggle) autoNextToggle.checked = !!state.autoNext;
+        setWatchHint(state.autoNext ? '自动续播待命（播放时生效）' : '自动续播已关闭');
         // 打开设置页时刷新一次登录态（服务端可能已自动续期）
         const settingsEntry = document.querySelector('[data-view="settings"], a[onclick*="view-settings"]');
         if (settingsEntry) settingsEntry.addEventListener('click', () => { void loadConfig(); });
@@ -500,7 +773,6 @@
         toggleRemotePlay,
         init,
         saveConfig: () => saveConfig({
-            enabled: !!$('xiaoai-enabled-toggle')?.checked,
             serverBaseUrl: ($('xiaoai-server-base-input')?.value || '').trim(),
         }),
         switchLoginTab,
@@ -513,10 +785,12 @@
         fetchDevices,
         toggleDevice,
         applyVolume,
-        testPlay,
         stop,
         toggleTarget,
+        toggleAutoNext,
         reload: loadConfig,
+        // 供调试/自动化测试查看守望状态
+        watchState: () => ({ active: watch.active, hint: watch.hint, deviceId: watch.deviceId }),
     };
 
     // 对外暴露成全局函数，供 index.html 的内联事件调用
@@ -530,9 +804,9 @@
     window.xiaoAiLogout = logout;
     window.xiaoAiFetchDevices = fetchDevices;
     window.xiaoAiApplyVolume = applyVolume;
-    window.xiaoAiTestPlay = testPlay;
     window.xiaoAiStop = stop;
     window.xiaoAiToggleTarget = toggleTarget;
+    window.xiaoAiToggleAutoNext = toggleAutoNext;
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
