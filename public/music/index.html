@@ -1781,6 +1781,10 @@
                                 class="px-6 py-2 text-sm font-medium text-gray-500 hover:text-emerald-600 border-b-2 border-transparent transition-colors focus:outline-none flex-shrink-0">
                                 逻辑
                             </button>
+                            <button onclick="switchSettingsTab('xiaoai')" id="settings-tab-xiaoai"
+                                class="px-6 py-2 text-sm font-medium text-gray-500 hover:text-emerald-600 border-b-2 border-transparent transition-colors focus:outline-none flex-shrink-0">
+                                小爱音箱
+                            </button>
                             <button onclick="switchSettingsTab('logs')" id="settings-tab-logs"
                                 class="px-6 py-2 text-sm font-medium text-gray-500 hover:text-emerald-600 border-b-2 border-transparent transition-colors focus:outline-none flex-shrink-0">
                                 日志
@@ -3805,6 +3809,190 @@
                             </div>
                             <!-- Mobile bottom spacer -->
                             <div class="pb-36 md:pb-4"></div>
+                        </div>
+
+                        <!-- 小爱音箱投播设置 -->
+                        <div id="settings-panel-xiaoai" class="hidden space-y-6 animate-fade-in">
+                            <div>
+                                <h3 class="font-bold t-text-main text-lg mb-4 flex items-center">
+                                    <i class="fas fa-volume-up mr-2 text-emerald-500"></i> 小爱音箱投播
+                                </h3>
+                                <p class="text-xs t-text-muted mb-4">
+                                    登录小米账号后，可把当前歌曲投送到一台或多台小爱音箱播放。
+                                    音箱需要能访问本服务地址（局域网使用时请填写本机的局域网 IP）。
+                                </p>
+
+                                <div class="space-y-4">
+                                    <!-- 总开关 -->
+                                    <div
+                                        class="t-bg-panel rounded-xl border t-border-main p-4 flex items-center justify-between">
+                                        <div>
+                                            <h4 class="text-sm font-bold t-text-main">启用小爱投播</h4>
+                                            <p class="text-xs t-text-muted mt-1">关闭后播放目标无法切换到小爱音箱</p>
+                                        </div>
+                                        <input type="checkbox" id="xiaoai-enabled-toggle"
+                                            class="w-4 h-4 accent-emerald-500 cursor-pointer"
+                                            onchange="xiaoAiSaveConfig()">
+                                    </div>
+
+                                    <!-- 服务地址 -->
+                                    <div class="t-bg-panel rounded-xl border t-border-main p-4 space-y-2">
+                                        <h4 class="text-sm font-bold t-text-main flex items-center">
+                                            <i class="fas fa-network-wired mr-2 text-emerald-500"></i> 服务地址
+                                        </h4>
+                                        <input type="text" id="xiaoai-server-base-input"
+                                            class="w-full t-bg-main border t-border-main rounded-lg px-3 py-2 text-sm t-text-main"
+                                            placeholder="http://192.168.1.10:9527" onchange="xiaoAiSaveConfig()">
+                                        <p class="text-xs t-text-muted">
+                                            留空则按当前页面地址自动推断。填错会导致音箱能收到指令但拉不到音频。
+                                        </p>
+                                    </div>
+
+                                    <!-- 播放目标 -->
+                                    <div
+                                        class="t-bg-panel rounded-xl border t-border-main p-4 flex items-center justify-between">
+                                        <div>
+                                            <h4 class="text-sm font-bold t-text-main">播放目标</h4>
+                                            <p class="text-xs t-text-muted mt-1" id="xiaoai-target-hint">当前：本机浏览器</p>
+                                        </div>
+                                        <button id="xiaoai-target-btn" onclick="xiaoAiToggleTarget()"
+                                            class="px-3 py-1.5 text-xs md:text-sm t-bg-main border t-border-main rounded-lg hover:t-bg-track transition-colors">
+                                            投送到小爱
+                                        </button>
+                                    </div>
+
+                                    <!-- 登录 -->
+                                    <div class="t-bg-panel rounded-xl border t-border-main p-4 space-y-3">
+                                        <div class="flex items-center justify-between">
+                                            <h4 class="text-sm font-bold t-text-main flex items-center">
+                                                <i class="fas fa-user-shield mr-2 text-emerald-500"></i> 小米账号
+                                            </h4>
+                                            <span id="xiaoai-login-state" class="text-xs t-text-muted">未登录</span>
+                                        </div>
+
+                                        <div class="flex flex-wrap gap-2">
+                                            <button onclick="xiaoAiSwitchLoginTab('qrcode')" id="xiaoai-login-tab-qrcode"
+                                                class="px-3 py-1.5 text-xs rounded-lg bg-emerald-500 text-white transition-colors">
+                                                扫码登录
+                                            </button>
+                                            <button onclick="xiaoAiSwitchLoginTab('password')" id="xiaoai-login-tab-password"
+                                                class="px-3 py-1.5 text-xs rounded-lg t-bg-main border t-border-main t-text-main transition-colors">
+                                                账号密码
+                                            </button>
+                                            <button onclick="xiaoAiSwitchLoginTab('cookie')" id="xiaoai-login-tab-cookie"
+                                                class="px-3 py-1.5 text-xs rounded-lg t-bg-main border t-border-main t-text-main transition-colors">
+                                                Cookie
+                                            </button>
+                                        </div>
+
+                                        <!-- 扫码 -->
+                                        <div id="xiaoai-login-pane-qrcode" class="space-y-2">
+                                            <button onclick="xiaoAiStartQr()"
+                                                class="px-3 py-1.5 text-xs md:text-sm bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors">
+                                                获取二维码
+                                            </button>
+                                            <div id="xiaoai-qr-box" class="hidden flex-col items-center gap-2 pt-2">
+                                                <img id="xiaoai-qr-img" alt="扫码登录二维码"
+                                                    class="w-44 h-44 rounded-lg bg-white p-1 shadow-sm">
+                                                <span id="xiaoai-qr-status" class="text-xs t-text-muted">请使用米家 App 扫码</span>
+                                            </div>
+                                        </div>
+
+                                        <!-- 账号密码 -->
+                                        <div id="xiaoai-login-pane-password" class="hidden space-y-2">
+                                            <input type="text" id="xiaoai-account-input" autocomplete="off"
+                                                class="w-full t-bg-main border t-border-main rounded-lg px-3 py-2 text-sm t-text-main"
+                                                placeholder="小米账号（手机号 / 邮箱 / 小米 ID）">
+                                            <input type="password" id="xiaoai-password-input" autocomplete="new-password"
+                                                class="w-full t-bg-main border t-border-main rounded-lg px-3 py-2 text-sm t-text-main"
+                                                placeholder="密码">
+                                            <button onclick="xiaoAiLoginPassword()"
+                                                class="px-3 py-1.5 text-xs md:text-sm bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors">
+                                                登录
+                                            </button>
+
+                                            <div id="xiaoai-captcha-box" class="hidden space-y-2 pt-2">
+                                                <img id="xiaoai-captcha-img" alt="图形验证码"
+                                                    class="h-12 rounded bg-white">
+                                                <input type="text" id="xiaoai-captcha-input"
+                                                    class="w-full t-bg-main border t-border-main rounded-lg px-3 py-2 text-sm t-text-main"
+                                                    placeholder="输入图片中的验证码">
+                                                <button onclick="xiaoAiSubmitCaptcha()"
+                                                    class="px-3 py-1.5 text-xs rounded-lg border t-border-main t-text-main">
+                                                    提交验证码
+                                                </button>
+                                            </div>
+
+                                            <div id="xiaoai-verify-box" class="hidden space-y-2 pt-2">
+                                                <p id="xiaoai-verify-hint" class="text-xs t-text-muted"></p>
+                                                <input type="text" id="xiaoai-verify-input"
+                                                    class="w-full t-bg-main border t-border-main rounded-lg px-3 py-2 text-sm t-text-main"
+                                                    placeholder="短信 / 邮箱验证码">
+                                                <button onclick="xiaoAiSubmitVerify()"
+                                                    class="px-3 py-1.5 text-xs rounded-lg border t-border-main t-text-main">
+                                                    提交验证码
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <!-- Cookie -->
+                                        <div id="xiaoai-login-pane-cookie" class="hidden space-y-2">
+                                            <p class="text-xs t-text-muted">
+                                                从浏览器已登录的小米账号中取 userId 与 passToken（账号密码登录被风控时可用）。
+                                            </p>
+                                            <input type="text" id="xiaoai-userid-input" autocomplete="off"
+                                                class="w-full t-bg-main border t-border-main rounded-lg px-3 py-2 text-sm t-text-main"
+                                                placeholder="userId">
+                                            <input type="password" id="xiaoai-passtoken-input" autocomplete="new-password"
+                                                class="w-full t-bg-main border t-border-main rounded-lg px-3 py-2 text-sm t-text-main"
+                                                placeholder="passToken">
+                                            <button onclick="xiaoAiLoginCookie()"
+                                                class="px-3 py-1.5 text-xs md:text-sm border t-border-main rounded-lg t-text-main">
+                                                使用 Cookie 登录
+                                            </button>
+                                        </div>
+
+                                        <p id="xiaoai-login-message" class="text-xs t-text-muted break-all"></p>
+                                        <button onclick="xiaoAiLogout()" class="text-xs text-red-500 hover:underline">
+                                            退出登录
+                                        </button>
+                                    </div>
+
+                                    <!-- 设备与音量 -->
+                                    <div class="t-bg-panel rounded-xl border t-border-main p-4 space-y-3">
+                                        <div class="flex items-center justify-between">
+                                            <h4 class="text-sm font-bold t-text-main flex items-center">
+                                                <i class="fas fa-tv mr-2 text-emerald-500"></i> 播放设备（可多选，同时播放）
+                                            </h4>
+                                            <button onclick="xiaoAiFetchDevices(true)"
+                                                class="text-xs text-emerald-600 hover:underline">刷新设备</button>
+                                        </div>
+                                        <div id="xiaoai-device-list" class="space-y-1 text-sm t-text-main">
+                                            <p class="text-xs t-text-muted">登录后点击「刷新设备」获取设备列表</p>
+                                        </div>
+
+                                        <div class="flex items-center gap-3 pt-2">
+                                            <span class="text-xs t-text-muted flex-shrink-0">音量</span>
+                                            <input type="range" id="xiaoai-volume-range" min="0" max="100" value="50"
+                                                class="flex-1 accent-emerald-500">
+                                            <span id="xiaoai-volume-value" class="text-xs t-text-muted w-8 text-right">50</span>
+                                            <button onclick="xiaoAiApplyVolume()"
+                                                class="px-2 py-1 text-xs rounded-lg border t-border-main t-text-main">应用</button>
+                                        </div>
+
+                                        <div class="flex flex-wrap gap-2 pt-1">
+                                            <button onclick="xiaoAiTestPlay()"
+                                                class="px-3 py-1.5 text-xs md:text-sm t-bg-main border t-border-main rounded-lg hover:t-bg-track transition-colors">
+                                                把当前歌曲投送过去
+                                            </button>
+                                            <button onclick="xiaoAiStop()"
+                                                class="px-3 py-1.5 text-xs md:text-sm t-bg-main border t-border-main rounded-lg hover:t-bg-track transition-colors">
+                                                停止小爱播放
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
 
                         <!-- Logs Settings Panel -->
@@ -6078,6 +6266,8 @@
     <script src="js/common_ui.js"></script>
     <script src="js/sync_download.js"></script>
     <script src="app.js"></script>
+    <!-- 小爱音箱投播（依赖 app.js 里的播放器函数，必须在其后加载） -->
+    <script src="js/xiaoai.js"></script>
 </body>
 
 <!-- 同步下载面板 Modal -->

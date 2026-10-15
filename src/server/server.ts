@@ -37,6 +37,13 @@ import { getDownloadQualityCandidates } from './downloadQuality'
 import crypto from 'node:crypto'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
+import {
+  xiaoAiService,
+  buildStreamUrl,
+  parseStreamToken,
+  serveXiaoAiStream,
+  loadXiaoAiConfig,
+} from './xiaoai'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
 /** 当前生效的 dislike 匹配选项，下发给前端保证前后端判定一致 */
@@ -253,6 +260,21 @@ const checkPlayerAuth = (req: IncomingMessage): boolean => {
   const user = verifyUserAuth(req)
   if (user) return true
   return false
+}
+
+/** 推断本次请求对应的服务对外地址（用于给小爱音箱下发可访问的播放链接） */
+const getRequestOrigin = (req: IncomingMessage): string => {
+  const proto = isHttpsRequest(req) ? 'https' : 'http'
+  const fwdHost = req.headers['x-forwarded-host']
+  const host = (Array.isArray(fwdHost) ? fwdHost[0] : fwdHost) || req.headers.host || ''
+  return host ? `${proto}://${host}` : ''
+}
+
+/** 小爱相关接口的鉴权：管理员口令，或已通过认证的播放器会话 */
+const isXiaoAiRequestAuthorized = (req: IncomingMessage): boolean => {
+  const auth = req.headers['x-frontend-auth']
+  if (auth && auth === global.lx.config['admin.password']) return true
+  return checkPlayerAuth(req)
 }
 
 /** 定期清理过期 Session（每小时） */
@@ -6334,6 +6356,326 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         req.on('close', () => {
           musicProgressClients.delete(reqId)
         })
+        return
+      }
+
+      // ===== 小爱同学（米家云）投播 API =====
+      // 播放流地址：音箱本身没有登录态，只能靠 URL 里的签名 token 授权，因此这里不做会话鉴权
+      if (pathname === '/api/music/xiaoai/stream' && req.method === 'GET') {
+        try {
+          const streamPayload = parseStreamToken(urlObj.searchParams.get('token') || '')
+          void serveXiaoAiStream(req, res, streamPayload)
+        } catch (error: any) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: error?.message || 'Invalid XiaoAi token' }))
+        }
+        return
+      }
+
+      if (pathname.startsWith('/api/music/xiaoai/')) {
+        if (!isXiaoAiRequestAuthorized(req)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+
+        const sendJson = (data: any, status = 200) => {
+          if (res.writableEnded) return
+          res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' })
+          res.end(JSON.stringify(data))
+        }
+        const readJsonBody = async (): Promise<any> => {
+          const body = await readBody(req)
+          try {
+            return JSON.parse(body || '{}')
+          } catch {
+            return {}
+          }
+        }
+        const failed = (error: any, fallback: string) => {
+          sendJson({ success: false, message: error?.message || fallback }, 400)
+        }
+
+        // --- 配置读写 ---
+        if (pathname === '/api/music/xiaoai/config' && req.method === 'GET') {
+          sendJson({ success: true, config: xiaoAiService.getPublicConfig() })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/config' && req.method === 'POST') {
+          void readJsonBody().then(payload => {
+            try {
+              sendJson({ success: true, config: xiaoAiService.updateConfig(payload) })
+            } catch (error: any) {
+              failed(error, '保存小爱配置失败')
+            }
+          })
+          return
+        }
+
+        // --- 扫码登录 ---
+        if (pathname === '/api/music/xiaoai/login/qrcode' && req.method === 'POST') {
+          void xiaoAiService
+            .startQrLogin()
+            .then(info =>
+              sendJson({
+                success: true,
+                qrcodeUrl: info.qrcodeUrl,
+                qrcodeImage: info.qrcodeImage,
+                loginUrl: info.loginUrl,
+              })
+            )
+            .catch((error: any) => failed(error, '获取二维码失败'))
+          return
+        }
+        if (pathname === '/api/music/xiaoai/login/qrcode/poll' && req.method === 'POST') {
+          void xiaoAiService
+            .pollQrLogin()
+            .then(result =>
+              sendJson({
+                success: true,
+                state: result.state,
+                message: result.message,
+                config: xiaoAiService.getPublicConfig(),
+              })
+            )
+            .catch((error: any) => failed(error, '轮询扫码状态失败'))
+          return
+        }
+
+        // --- 账号密码 / 图形验证码 / 二次验证 / Cookie 登录 ---
+        if (pathname === '/api/music/xiaoai/login/password' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              const result = await xiaoAiService.loginWithPassword(
+                String(payload.account || '').trim(),
+                String(payload.password || '')
+              )
+              sendJson({
+                success: result.state === 'success',
+                state: result.state,
+                message: result.error || '',
+                captchaImage: result.captchaImage || '',
+                verifyUrl: result.verifyUrl || '',
+                verifyType: result.verifyType || '',
+                config: xiaoAiService.getPublicConfig(),
+              })
+            } catch (error: any) {
+              failed(error, '登录失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/login/captcha' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              const result = await xiaoAiService.loginWithCaptcha(String(payload.captcha || '').trim())
+              sendJson({
+                success: result.state === 'success',
+                state: result.state,
+                message: result.error || '',
+                captchaImage: result.captchaImage || '',
+                verifyUrl: result.verifyUrl || '',
+                verifyType: result.verifyType || '',
+                config: xiaoAiService.getPublicConfig(),
+              })
+            } catch (error: any) {
+              failed(error, '验证码登录失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/login/verify' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              const result = await xiaoAiService.loginWithVerifyCode(String(payload.code || '').trim())
+              sendJson({
+                success: result.state === 'success',
+                state: result.state,
+                message: result.error || '',
+                config: xiaoAiService.getPublicConfig(),
+              })
+            } catch (error: any) {
+              failed(error, '二次验证失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/login/cookie' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              const result = await xiaoAiService.loginByCookie({
+                passToken: String(payload.passToken || '').trim(),
+                userId: String(payload.userId || '').trim(),
+                cUserId: String(payload.cUserId || '').trim(),
+              })
+              sendJson({
+                success: result.state === 'success',
+                state: result.state,
+                message: result.error || '',
+                config: xiaoAiService.getPublicConfig(),
+              })
+            } catch (error: any) {
+              failed(error, 'Cookie 登录失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/logout' && req.method === 'POST') {
+          sendJson({ success: true, config: (xiaoAiService.logout(), xiaoAiService.getPublicConfig()) })
+          return
+        }
+
+        // --- 设备列表 ---
+        if (pathname === '/api/music/xiaoai/devices' && req.method === 'GET') {
+          const refresh = ['1', 'true'].includes(String(urlObj.searchParams.get('refresh') || '').toLowerCase())
+          void xiaoAiService
+            .listDevices(refresh)
+            .then(result => sendJson({ success: true, ...result, config: xiaoAiService.getPublicConfig() }))
+            .catch((error: any) => failed(error, '获取小爱设备失败'))
+          return
+        }
+
+        // --- 投播 ---
+        if (pathname === '/api/music/xiaoai/play' && req.method === 'POST') {
+          const clientUsername = req.headers['x-user-name'] as string | undefined
+          let verifiedUsername = 'open'
+          if (clientUsername && clientUsername !== 'default' && clientUsername !== 'open' && clientUsername !== '_open') {
+            const verified = verifyUserAuth(req)
+            if (!verified || verified !== clientUsername) {
+              sendJson({ success: false, message: 'Unauthorized' }, 401)
+              return
+            }
+            verifiedUsername = verified
+          }
+
+          void readJsonBody().then(async payload => {
+            try {
+              const songInfo = normalizeSongInfo(payload.songInfo || payload.song || {}) || {}
+              const quality = String(payload.quality || songInfo.quality || '320k')
+              const deviceIds = Array.isArray(payload.deviceIds) ? payload.deviceIds.map(String) : undefined
+              const config = loadXiaoAiConfig()
+              const baseUrl = String(config.serverBaseUrl || '').trim() || getRequestOrigin(req)
+              const streamPath = config.streamPath || '/api/music/xiaoai/stream'
+              const songName = String(songInfo.name || songInfo.title || 'track')
+              const singer = String(songInfo.singer || '')
+              const filename = `${singer ? `${singer} - ` : ''}${songName}.mp3`.replace(/[\\/:*?"<>|]/g, '_')
+
+              // 1. 前端直接给了可播放地址
+              let target: { url?: string; path?: string; filename?: string } | null = null
+              const directUrl = String(payload.streamUrl || '').trim()
+              const rawSongUrl = String(songInfo.url || songInfo.streamUrl || songInfo.meta?.url || '').trim()
+              const httpUrl = /^https?:\/\//i.test(directUrl) ? directUrl : /^https?:\/\//i.test(rawSongUrl) ? rawSongUrl : ''
+
+              if (httpUrl) {
+                target = { url: httpUrl, filename }
+              } else if (rawSongUrl) {
+                // 站内相对地址（例如服务端缓存的音频文件）：补全成绝对地址后中转
+                const userToken = String(req.headers['x-user-token'] || '')
+                const absolute = `${getRequestOrigin(req)}${rawSongUrl.startsWith('/') ? '' : '/'}${rawSongUrl}`
+                const withToken = userToken && !absolute.includes('token=')
+                  ? `${absolute}${absolute.includes('?') ? '&' : '?'}token=${encodeURIComponent(userToken)}`
+                  : absolute
+                target = { url: withToken, filename }
+              } else if (songInfo.source) {
+                // 交给音源解析出真实播放地址
+                const resolved = await callUserApiGetMusicUrl(songInfo.source, songInfo, quality, verifiedUsername)
+                const resolvedUrl = String(resolved?.url || '').trim()
+                if (!resolvedUrl) throw new Error('音源未返回可用播放地址')
+                target = { url: resolvedUrl, filename }
+              }
+
+              if (!target) throw new Error('缺少可投送的歌曲信息（需要 source 或可播放地址）')
+
+              const streamUrl = buildStreamUrl(baseUrl, streamPath, target)
+              const result = await xiaoAiService.play({
+                streamUrl,
+                deviceIds,
+                song: { name: songName, singer },
+              })
+              sendJson({
+                success: result.success,
+                streamUrl,
+                device: result.results,
+                message: result.success ? '' : '所有设备投送失败，请检查设备在线状态与登录态',
+              })
+            } catch (error: any) {
+              failed(error, '投送小爱失败')
+            }
+          })
+          return
+        }
+
+        // --- 播放控制 ---
+        if (pathname === '/api/music/xiaoai/pause' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              sendJson({ ...(await xiaoAiService.pause(payload.deviceIds)) })
+            } catch (error: any) {
+              failed(error, '暂停失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/resume' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              sendJson({ ...(await xiaoAiService.resume(payload.deviceIds)) })
+            } catch (error: any) {
+              failed(error, '继续播放失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/stop' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              sendJson({ ...(await xiaoAiService.stop(payload.deviceIds)) })
+            } catch (error: any) {
+              failed(error, '停止失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/next' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              sendJson({ ...(await xiaoAiService.next(payload.deviceIds)) })
+            } catch (error: any) {
+              failed(error, '下一首失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/prev' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              sendJson({ ...(await xiaoAiService.prev(payload.deviceIds)) })
+            } catch (error: any) {
+              failed(error, '上一首失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/volume' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              sendJson({ ...(await xiaoAiService.setVolume(payload.volume, payload.deviceIds)) })
+            } catch (error: any) {
+              failed(error, '设置音量失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/status' && req.method === 'GET') {
+          const deviceId = String(urlObj.searchParams.get('deviceId') || '')
+          void xiaoAiService
+            .getStatus(deviceId)
+            .then(result => sendJson({ success: true, ...result }))
+            .catch((error: any) => failed(error, '查询小爱状态失败'))
+          return
+        }
+
+        sendJson({ success: false, message: '未知的小爱接口' }, 404)
         return
       }
 

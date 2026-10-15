@@ -6685,6 +6685,10 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
 }
 
 async function playSong(song, index, forceQuality = null, noPlay = false, isRetry = false, shouldAddToDefault = null) {
+    // [小爱音箱] 播放目标为小爱时，交给小爱模块把这首歌推送到音箱（本模块在 app.js 之后加载）
+    if (window.XiaoAi && !noPlay && !isRetry && window.XiaoAi.shouldRoute()) {
+        return window.XiaoAi.playSong(song, index, forceQuality, playSong);
+    }
     // 1. Debounce / Lock: If already loading this song, ignore click
     // [Fix] Allow retry to bypass this check
     if (currentLoadingSongId === song.id && !isRetry) {
@@ -7525,6 +7529,10 @@ function updatePlayerInfo(song, actualQuality) {
 }
 
 async function togglePlay() {
+    // [小爱音箱] 播放目标为小爱时，播放/暂停下发给音箱
+    if (window.XiaoAi && window.XiaoAi.shouldRoute()) {
+        return window.XiaoAi.toggleRemotePlay();
+    }
     // 忽略因为长按触发的 click 事件
     if (window.playBtnIsLongPress) {
         window.playBtnIsLongPress = false;

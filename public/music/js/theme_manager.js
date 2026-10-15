@@ -94,7 +94,7 @@ function updateAppearanceUI(activeMode) {
 }
 
 function switchSettingsTab(tabName) {
-    const panels = ['system', 'display', 'logic', 'logs'];
+    const panels = ['system', 'display', 'logic', 'xiaoai', 'logs'];
 
     // Deactivate all first
     panels.forEach(p => {
