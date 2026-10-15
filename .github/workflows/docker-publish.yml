@@ -37,6 +37,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 版本号统一以 package.json 为准，镜像 tag 直接用版本号，不再用 commit sha
+      - name: Read version from package.json
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "镜像版本号: $VERSION"
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -44,12 +52,14 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/lxserver
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=v${{ steps.pkg.outputs.version }}
+            type=raw,value=${{ steps.pkg.outputs.version }}
             type=ref,event=tag
-            type=sha,format=short,prefix=
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.description=LX Music Sync Server with incremental custom-source reload and event-loop watchdog
             org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.version=${{ steps.pkg.outputs.version }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
