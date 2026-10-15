@@ -1,37 +1,39 @@
-# LX Music Sync Server (Enhanced Edition)
+# lxserver · LX Music Sync Server (Enhanced Edition)
 
-![lxserver](https://socialify.git.ci/XCQ0607/lxserver/image?description=1&forks=0&issues=0&logo=https://raw.githubusercontent.com/XCQ0607/lxserver/refs/heads/main/public/icon.svg&owner=1&pulls=0&stargazers=0&theme=Auto)
+![lxserver](https://socialify.git.ci/zues0077/lxserver/image?description=1&forks=0&issues=0&logo=https://raw.githubusercontent.com/zues0077/lxserver/refs/heads/main/public/icon.svg&owner=1&pulls=0&stargazers=0&theme=Auto)
 
 <div align="center">
   <p>
     <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build Status">
-    <img src="https://img.shields.io/github/package-json/v/XCQ0607/lxserver?style=flat-square" alt="Version">
+    <img src="https://img.shields.io/github/package-json/v/zues0077/lxserver?style=flat-square" alt="Version">
     <img src="https://img.shields.io/badge/node-%3E%3D20-green?style=flat-square" alt="Node Version">
-    <img src="https://img.shields.io/github/license/XCQ0607/lxserver?style=flat-square" alt="License">
+    <img src="https://img.shields.io/github/license/zues0077/lxserver?style=flat-square" alt="License">
     <br>
     <br>
-    <a href="https://github.com/XCQ0607/lxserver/stargazers"><img src="https://img.shields.io/github/stars/XCQ0607/lxserver?style=flat-square&color=ffe16b" alt="GitHub stars"></a>
-    <a href="https://github.com/XCQ0607/lxserver/network/members"><img src="https://img.shields.io/github/forks/XCQ0607/lxserver?style=flat-square" alt="GitHub forks"></a>
-    <a href="https://github.com/XCQ0607/lxserver/issues"><img src="https://img.shields.io/github/issues/XCQ0607/lxserver?style=flat-square&color=red" alt="GitHub issues"></a>
-    <a href="https://github.com/XCQ0607/lxserver/commits/main"><img src="https://img.shields.io/github/last-commit/XCQ0607/lxserver?style=flat-square&color=blueviolet" alt="Last Commit"></a>
-    <img src="https://img.shields.io/github/commit-activity/m/XCQ0607/lxserver?style=flat-square&color=ff69b4" alt="Commit Activity">
-    <a href="https://github.com/XCQ0607/lxserver/releases"><img src="https://img.shields.io/github/downloads/XCQ0607/lxserver/total?style=flat-square&color=blue" alt="Total Downloads"></a>
+    <a href="https://github.com/zues0077/lxserver/stargazers"><img src="https://img.shields.io/github/stars/zues0077/lxserver?style=flat-square&color=ffe16b" alt="GitHub stars"></a>
+    <a href="https://github.com/zues0077/lxserver/network/members"><img src="https://img.shields.io/github/forks/zues0077/lxserver?style=flat-square" alt="GitHub forks"></a>
+    <a href="https://github.com/zues0077/lxserver/issues"><img src="https://img.shields.io/github/issues/zues0077/lxserver?style=flat-square&color=red" alt="GitHub issues"></a>
+    <a href="https://github.com/zues0077/lxserver/commits/main"><img src="https://img.shields.io/github/last-commit/zues0077/lxserver?style=flat-square&color=blueviolet" alt="Last Commit"></a>
+    <img src="https://img.shields.io/github/commit-activity/m/zues0077/lxserver?style=flat-square&color=ff69b4" alt="Commit Activity">
+    <a href="https://github.com/zues0077/lxserver/releases"><img src="https://img.shields.io/github/downloads/zues0077/lxserver/total?style=flat-square&color=blue" alt="Total Downloads"></a>
   </p>
   <p>
-    <a href="https://www.star-history.com/xcq0607/lxserver">
+    <a href="https://www.star-history.com/zues0077/lxserver">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=XCQ0607/lxserver&type=trending&theme=dark" />
-        <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/badge?repo=XCQ0607/lxserver&type=trending" />
-        <img alt="GitHub Trending Repository of the Day" src="https://api.star-history.com/badge?repo=XCQ0607/lxserver&type=trending" />
+        <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=zues0077/lxserver&type=trending&theme=dark" />
+        <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/badge?repo=zues0077/lxserver&type=trending" />
+        <img alt="GitHub Trending Repository of the Day" src="https://api.star-history.com/badge?repo=zues0077/lxserver&type=trending" />
       </picture>
     </a>
   </p>
 </div>
 
-[Documentation](https://xcq0607.github.io/lxserver/) | [SyncServer](md/lxserver_EN.md) | [Changelog](changelog.md) | [中文版](README.md)
+[Documentation](https://zues0077.github.io/lxserver/) | [SyncServer](md/lxserver_EN.md) | [Changelog](changelog.md) | [中文版](README.md)
 
 ---
-This project features a powerful built-in **Web Player**, allowing you to enjoy music anywhere in your browser. It also serves as an enhanced [LX Music Data Sync Server](md/lxserver_EN.md).
+**lxserver** turns a plain data-sync relay into a ready-to-use personal cloud music platform: a full-featured built-in **Web Player**, a multi-user **sync and permission system**, and stability governance for **custom music sources** (script self-check guard + platform availability probe). No extra client needed — just open it in a browser.
+
+> This project is a fork of [xcq0607/lxserver](https://github.com/xcq0607/lxserver), which in turn is based on [lyswhut/lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server). Thanks to the original authors. Released under Apache-2.0.
 
 ## ✨ Web Player Key Features
 
@@ -104,6 +106,54 @@ Fully compatible with the Subsonic API. Connect using third-party clients (such 
   <img src="md/subsonic-search.png" width="300" alt="Subsonic Online Search">
 </p>
 
+### 7. Xiaoai Speaker Casting
+
+Cast the currently playing track from the Web Player straight to a Xiaoai speaker, with **multiple devices playing at the same time**.
+
+- Sign-in: QR code (Mi Home app, no password) / account password / browser cookie
+- Devices: picks up all Xiaoai speakers on the account automatically
+- Controls: play, pause, next/previous, volume and stop — all inside the player
+- **Auto-continue**: resolves the next track ahead of time and switches near the end, making playlist playback nearly seamless
+- Server-side audio relay: avoids hotlink protection and http/https mixed-content issues
+
+### 8. Custom Source Self-Check Guard
+
+Third-party source scripts are a black box: some obfuscated scripts keep burning **~60% of a CPU core and grow to 270MB of memory** after loading successfully, with nothing suspicious in the logs. The guard inspects scripts before and after loading to surface this kind of silent spinning.
+
+- **Static inspection** (before loading): detects empty infinite loops, `debugger` anti-debug traps, sandbox escapes and busy polling; high-risk (level A) scripts are quarantined by policy
+- **Obfuscation only flagged** (level B): obfuscation is not malicious by itself — among 46 common sources, 12 were obfuscated yet perfectly fine, so these are only logged
+- **Runtime sampling**: only sustained idle CPU usage counts as abnormal, then candidate sources are unloaded one by one to attribute the culprit
+- **Recoverable**: quarantine only skips loading — it never deletes scripts or changes your toggles; updating a script (fingerprint change) lifts it automatically
+- Results and current idle CPU are exposed in the `/health` `sourceGuard` field
+
+> See [docs/guide/source-guard.md](docs/guide/source-guard.md) for grading rules, configuration and false-positive handling.
+
+### 9. Custom Source Platform Availability Probe
+
+Some platforms declared by a source script are simply broken (tightened anti-abuse, retired APIs, the author not catching up). Broken platforms make the playback path try and fail before switching, which users feel as "a few seconds of silence after pressing play". The probe finds and disables them:
+
+- **Probe new sources immediately**: after upload/import every platform is resolved once for real; sources added within a 3-second window are merged into one round, and a round that collides with a running one is **queued** and re-run afterwards (`pendingNewSources` in `/health`) instead of being dropped
+- **Scheduled re-check**: re-probes remaining usable platforms every `customSource.probe.intervalMinutes` (3 hours by default)
+- **Auto-disable broken platforms**: only after `failThreshold` consecutive failures (2 by default); the state is written into the **same `states.json` as the panel's platform toggle**, so it stays visible and editable
+- **Auto-restore**: an auto-disabled platform is re-enabled as soon as it probes successfully; **platforms you disabled by hand are never re-checked nor auto-enabled**
+- **Auto-remove dead sources**: when every platform a source declares is dead, the source is moved to a sibling `.trash/` directory (recoverable) and the action is recorded in `probe-audit.log`
+- **Three anti-false-positive safeguards**: probe quality follows the script's own `qualitys`; up to 3 candidate tracks per platform are retried (any success counts as available); when a platform fails on most sources in the same round it is treated as a platform-side problem and only reported (`suspectPlatforms`)
+- Results live in the `/health` `sourceProbe` field (add `?probeDetail=1` for per-platform failure reasons)
+
+> See [docs/guide/source-probe.md](docs/guide/source-probe.md) for criteria, test-track sources, all options and how to restore a removed source.
+
+## 🧩 Enhancements over Upstream
+
+| Area | Detail |
+| :--- | :--- |
+| **Source self-check guard** | Static inspection plus runtime CPU attribution to expose and quarantine "obfuscated script spinning silently"; quarantine is in-memory and lifts when the script changes |
+| **Platform availability probe** | Immediate check for new sources, scheduled re-checks, auto-disable/auto-restore of platforms, auto-removal of fully dead sources (recoverable) |
+| **Three anti-false-positive safeguards** | Quality follows the script's declaration, multi-track retries, Range GET re-check when HEAD returns 4xx |
+| **Platform-side anomaly protection** | When a platform fails on most sources in one round it is only reported, never acted on |
+| **Xiaoai speaker casting** | QR sign-in, multi-device playback, auto-continue, server-side audio relay |
+| **Hot-reload optimisation** | A single changed script reloads only that source instead of the whole space |
+| **Observability** | `/health` exposes guard and probe state, `?probeDetail=1` gives per-platform failure details, and destructive actions are logged to `probe-audit.log` |
+
 ## 🔒 Access Control & Security
 To protect your privacy, the Web Player supports password protection.
 ### How to Enable
@@ -136,7 +186,7 @@ Built with **Node.js**, supporting multiple deployment methods.
 
 You can now run LX Music Sync Server more conveniently via our Desktop Client, available for Windows, macOS, and Linux.
 
-- **📦 Download Latest**: [GitHub Releases](https://github.com/XCQ0607/lxserver/releases/latest)
+- **📦 Download Latest**: [GitHub Releases](https://github.com/zues0077/lxserver/releases/latest)
 - **✨ Key Advantages**:
     - **Single Window**: Integrated management dashboard and Web player for a unified experience.
     - **System Tray**: Minimizes to tray on close, ensuring the sync service stays active in the background.
@@ -146,9 +196,21 @@ You can now run LX Music Sync Server more conveniently via our Desktop Client, a
 
 ### Option 2: Containerized Deployment via Docker
 
-This project supports pulling images from Docker Hub or GitHub Packages:
-- **Docker Hub**: `xcq0607/lxserver:latest`
-- **GitHub Packages**: `ghcr.io/xcq0607/lxserver:latest`
+Images are published to both GitHub Packages (GHCR) and Docker Hub. **Every update also gets a version tag**, so you can pin a version and roll back easily:
+
+| Tag | Meaning |
+| :--- | :--- |
+| `latest` | Latest stable, tracking the `main` branch |
+| `v2.2.0` / `2.2.0` | Concrete version (matches `version` in `package.json`) — **recommended for production** |
+| e.g. `v2.1.3` | Previous releases are kept as well |
+
+```bash
+# Pin a version (recommended)
+docker pull ghcr.io/zues0077/lxserver:2.2.0
+
+# Or follow the latest
+docker pull ghcr.io/zues0077/lxserver:latest
+```
 
 **Docker Run Example:**
 
@@ -156,46 +218,43 @@ This project supports pulling images from Docker Hub or GitHub Packages:
 docker run -d \
   -p 9527:9527 \
   -v $(pwd)/data:/server/data \
-  -v $(pwd)/logs:/server/logs \
-  -v $(pwd)/cache:/server/cache \
-  -v $(pwd)/music:/server/music \
   --name lx-sync-server \
   --restart unless-stopped \
-  xcq0607/lxserver:latest
+  ghcr.io/zues0077/lxserver:2.2.0
 ```
+
+> **Mounting `/server/data` alone is enough.** It is the only volume the image declares and it holds
+> the config (`data/config.js`), logs (`data/logs`) and each user's cache/downloads
+> (`data/<user>/cache`, `data/<user>/music`). Separate `logs`, `cache` or `music` mounts are not needed.
 
 **Docker Compose Example:**
 
 Create a `docker-compose.yml` file:
 
 ```yaml
-version: '3'
 services:
   lx-sync-server:
-    image: xcq0607/lxserver:latest
+    image: ghcr.io/zues0077/lxserver:2.2.0   # or :latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:
       - "9527:9527"
     volumes:
       - ./data:/server/data
-      - ./logs:/server/logs
-      - ./cache:/server/cache
-      - ./music:/server/music
     environment:
       - NODE_ENV=production
-      # - ADMIN_PASSWORD=123456
+      # - ADMIN_PASSWORD=yourpassword
       # - ENABLE_WEBPLAYER_AUTH=true
       # - WEBPLAYER_PASSWORD=yourpassword
-      # - ADMIN_PATH=
-      # - PLAYER_PATH=/music
+      # - ADMIN_PATH=/admin
+      # - PLAYER_PATH=/
 ```
 
 ### Option 3: Manual Run (Git Clone)
 
 ```bash
 # 1. Clone project
-git clone https://github.com/XCQ0607/lxserver.git && cd lxserver
+git clone https://github.com/zues0077/lxserver.git && cd lxserver
 
 # 2. Install dependencies and build
 npm ci && npm run build
@@ -210,7 +269,7 @@ npm start
 2. Extract and run `npm install --production`.
 3. Execute `npm start`.
 
-### 3. Service Connection & Client Setup Guide
+### Service Connection & Client Setup Guide
 
 #### ① Web Interface Access
 - **Web Player**: `http://<server-ip>:9527` (Default root path `/`, customizable via `PLAYER_PATH` env or backend settings, e.g., `/music`).
@@ -340,23 +399,24 @@ Anonymous telemetry via PostHog is used for:
 
 ## 🤝 Credits & Acknowledgements
 
-- Forked from [lyswhut/lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server).
+- This project is a fork of [xcq0607/lxserver](https://github.com/xcq0607/lxserver), which is based on [lyswhut/lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server).
 - Web player logic inspired by [lx-music-desktop](https://github.com/lyswhut/lx-music-desktop).
+- Thanks to the authors and contributors of the projects above.
 
 ### 👥 Contributors
 
-<a href="https://github.com/xcq0607/lxserver/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=xcq0607/lxserver" />
+<a href="https://github.com/zues0077/lxserver/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=zues0077/lxserver" />
 </a>
 
 ## 📈 Star History
 
 
-<a href="https://www.star-history.com/?repos=xcq0607%2Flxserver&type=timeline&logscale=&releases=&legend=bottom-right">
+<a href="https://www.star-history.com/?repos=zues0077%2Flxserver&type=timeline&logscale=&releases=&legend=bottom-right">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=xcq0607/lxserver&type=timeline&theme=dark&logscale&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=xcq0607/lxserver&type=timeline&logscale&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=xcq0607/lxserver&type=timeline&logscale&legend=bottom-right" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=zues0077/lxserver&type=timeline&theme=dark&logscale&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=zues0077/lxserver&type=timeline&logscale&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=zues0077/lxserver&type=timeline&logscale&legend=bottom-right" />
  </picture>
 </a>
 
@@ -367,7 +427,7 @@ Anonymous telemetry via PostHog is used for:
 
 This project is released under the Apache License 2.0. The following agreement is a supplement to the Apache License 2.0. In case of conflict, this agreement shall prevail.
 
-Apache License 2.0 copyright (c) 2026 [xcq0607](https://github.com/xcq0607)
+Apache License 2.0 copyright (c) 2026 [zues0077](https://github.com/zues0077) (original copyright belongs to [xcq0607](https://github.com/xcq0607); attribution retained per Apache-2.0)
 
 **Terminology**: "This Project" refers to LX Music Web Player; "User" refers to the user who agrees to this agreement; "Official Music Platforms" refers to the collective official platforms of the music sources built into this project, including Kuwo, Kugou, Migu, etc.; "Copyrighted Data" refers to data owned by others, including but not limited to images, audio, names, etc.
 

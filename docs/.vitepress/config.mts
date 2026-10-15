@@ -10,7 +10,7 @@ export default defineConfig({
   themeConfig: {
     logo: '/icon.svg',
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/XCQ0607/lxserver' }
+      { icon: 'github', link: 'https://github.com/zues0077/lxserver' }
     ],
     search: {
       provider: 'local'
@@ -32,10 +32,10 @@ export default defineConfig({
           {
             text: `v${pkg.version}`,
             items: [
-              { text: `最新版本: v${pkg.version}`, link: 'https://github.com/XCQ0607/lxserver/releases' },
-              { text: '更新日志 (Changelog)', link: 'https://github.com/XCQ0607/lxserver/blob/main/changelog.md' },
-              { text: '发布历史 (Releases)', link: 'https://github.com/XCQ0607/lxserver/releases' },
-              { text: '源码仓库 (GitHub)', link: 'https://github.com/XCQ0607/lxserver' }
+              { text: `最新版本: v${pkg.version}`, link: 'https://github.com/zues0077/lxserver/releases' },
+              { text: '更新日志 (Changelog)', link: 'https://github.com/zues0077/lxserver/blob/main/changelog.md' },
+              { text: '发布历史 (Releases)', link: 'https://github.com/zues0077/lxserver/releases' },
+              { text: '源码仓库 (GitHub)', link: 'https://github.com/zues0077/lxserver' }
             ]
           }
         ],
@@ -79,12 +79,12 @@ export default defineConfig({
           next: '下一页'
         },
         editLink: {
-          pattern: 'https://github.com/XCQ0607/lxserver/edit/main/docs/:path',
+          pattern: 'https://github.com/zues0077/lxserver/edit/main/docs/:path',
           text: '在 GitHub 上编辑此页'
         },
         footer: {
           message: `Released under the Apache-2.0 License. (v${pkg.version})`,
-          copyright: 'Copyright © 2026 xcq0607 & Contributors'
+          copyright: 'Copyright © 2026 zues0077 (基于 xcq0607/lxserver) & Contributors'
         }
       }
     },
@@ -104,10 +104,10 @@ export default defineConfig({
           {
             text: `v${pkg.version}`,
             items: [
-              { text: `Latest: v${pkg.version}`, link: 'https://github.com/XCQ0607/lxserver/releases' },
-              { text: 'Changelog', link: 'https://github.com/XCQ0607/lxserver/blob/main/changelog.md' },
-              { text: 'Release History', link: 'https://github.com/XCQ0607/lxserver/releases' },
-              { text: 'Repository', link: 'https://github.com/XCQ0607/lxserver' }
+              { text: `Latest: v${pkg.version}`, link: 'https://github.com/zues0077/lxserver/releases' },
+              { text: 'Changelog', link: 'https://github.com/zues0077/lxserver/blob/main/changelog.md' },
+              { text: 'Release History', link: 'https://github.com/zues0077/lxserver/releases' },
+              { text: 'Repository', link: 'https://github.com/zues0077/lxserver' }
             ]
           }
         ],
@@ -151,12 +151,12 @@ export default defineConfig({
           next: 'Next page'
         },
         editLink: {
-          pattern: 'https://github.com/XCQ0607/lxserver/edit/main/docs/:path',
+          pattern: 'https://github.com/zues0077/lxserver/edit/main/docs/:path',
           text: 'Edit this page on GitHub'
         },
         footer: {
           message: `Released under the Apache-2.0 License. (v${pkg.version})`,
-          copyright: 'Copyright © 2026 xcq0607 & Contributors'
+          copyright: 'Copyright © 2026 zues0077 (基于 xcq0607/lxserver) & Contributors'
         }
       }
     }

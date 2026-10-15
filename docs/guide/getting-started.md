@@ -24,7 +24,7 @@
 
 对于桌面用户，我们强烈推荐使用基于 Electron 的**桌面客户端**。它集成了服务器管理与播放器，且具备系统托盘常驻功能。
 
-1. **前往下载**: [GitHub Releases](https://github.com/XCQ0607/lxserver/releases/latest)
+1. **前往下载**: [GitHub Releases](https://github.com/zues0077/lxserver/releases/latest)
 2. **选择版本**:
    - **Windows**: 下载 `Universal.exe` (全架构合一) 或 `portable.exe` (绿色版)。
    - **macOS**: 下载 `universal.dmg` (支持 Intel/M1/M2)。
@@ -33,10 +33,21 @@
 
 ### 方案二：基于 Docker 引擎的容器化部署
 
-本项目支持从 Docker Hub 或 GitHub Packages 拉取镜像：
+镜像同时发布到 GitHub Packages（GHCR）与 Docker Hub，**每次更新都会打上版本号标签**，便于固定版本与回滚：
 
-- **Docker Hub**: `xcq0607/lxserver:latest`
-- **GitHub Packages**: `ghcr.io/xcq0607/lxserver:latest`
+| 标签 | 说明 |
+| :--- | :--- |
+| `latest` | 最新稳定版，跟随 `main` 分支 |
+| `v2.2.0` / `2.2.0` | 具体版本（与 `package.json` 的 `version` 一致），**生产环境建议用这个** |
+| `v2.1.3` 等历史版本 | 每个已发布版本都会保留 |
+
+```bash
+# 固定版本（推荐）
+docker pull ghcr.io/zues0077/lxserver:2.2.0
+
+# 或跟随最新
+docker pull ghcr.io/zues0077/lxserver:latest
+```
 
 执行以下指令启动容器：
 
@@ -44,38 +55,29 @@
 docker run -d \
   -p 9527:9527 \
   -v $(pwd)/data:/server/data \
-  -v $(pwd)/logs:/server/logs \
-  -v $(pwd)/cache:/server/cache \
-  -v $(pwd)/music:/server/music \
   --name lx-sync-server \
   --restart unless-stopped \
-  xcq0607/lxserver:latest
+  ghcr.io/zues0077/lxserver:2.2.0
 ```
 
 **容器挂载卷 (Volume Mappings) ：**
 
-- `-v $(pwd)/data:/server/data`：该项配置为**核心必选项**。负责将实例内生成的所有应用层状态数据导出宿主机持久保存。
-- `-v $(pwd)/logs:/server/logs`：用于承接并输出服务应用层所有分级审计日志的物理挂载点。
-- `-v $(pwd)/cache:/server/cache`：用于存放音乐缓存文件，极大提升重复播放时的加载速度。
-- `-v $(pwd)/music:/server/music`：用于存放仅下载歌曲文件。
+- `-v $(pwd)/data:/server/data`：**唯一需要挂载的目录**。镜像只声明了这一个数据卷，它同时包含配置（`data/config.js`）、日志（`data/logs`）以及各用户的缓存与下载文件（`data/<用户名>/cache`、`data/<用户名>/music`）。
+- 因此**不需要**再单独映射 `logs`、`cache`、`music` —— 容器内并不存在 `/server/logs`、`/server/cache`、`/server/music` 这些路径，多余映射不会生效。
 
 **声明式 Docker Compose ：**
 针对需标准化长久管理的生产实施，创建名为 `docker-compose.yml` 的定义配置：
 
 ```yaml
-version: '3'
 services:
   lx-sync-server:
-    image: xcq0607/lxserver:latest
+    image: ghcr.io/zues0077/lxserver:2.2.0   # 或 :latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:
       - "9527:9527"
     volumes:
       - ./data:/server/data
-      - ./logs:/server/logs
-      - ./cache:/server/cache
-      - ./music:/server/music
     environment:
       - NODE_ENV=production
       # - ADMIN_PASSWORD=123456
@@ -91,7 +93,7 @@ services:
 
 ```bash
 # 1. 由远端代码仓库提取代码的 Main 主线状态至当前目录
-git clone https://github.com/XCQ0607/lxserver.git 
+git clone https://github.com/zues0077/lxserver.git 
 cd lxserver
 
 # 2. 调用严格解析流程初始化模块依赖库

@@ -371,15 +371,15 @@
         `<i class="fas fa-play"></i>`
         `<span>`打开 Web 播放器
       `</a>`
-      `<a href="https://xcq0607.github.io/lxserver/" target="_blank" class="about-btn about-btn-secondary">`
+      `<a href="https://zues0077.github.io/lxserver/" target="_blank" class="about-btn about-btn-secondary">`
         `<i class="fas fa-book"></i>`
         `<span>`帮助与使用文档
       `</a>`
-      `<a href="https://github.com/XCQ0607/lxserver" target="_blank" class="about-btn about-btn-secondary">`
+      `<a href="https://github.com/zues0077/lxserver" target="_blank" class="about-btn about-btn-secondary">`
         `<i class="fab fa-github"></i>`
         `<span>`GitHub 源码仓库
       `</a>`
-      `<a href="https://github.com/XCQ0607/lxserver/issues" target="_blank" class="about-btn about-btn-secondary">`
+      `<a href="https://github.com/zues0077/lxserver/issues" target="_blank" class="about-btn about-btn-secondary">`
         `<i class="fas fa-circle-exclamation"></i>`
         `<span>`提交问题与建议
       `</a>`
@@ -624,6 +624,6 @@
   </div>
 
 <div class="about-footer">
-    Copyright © 2026 <a href="https://github.com/XCQ0607/lxserver" target="_blank" style="color: inherit; font-weight: 600;">XCQ0607 / LX Music Server Project</a>. All rights reserved.
+    Copyright © 2026 <a href="https://github.com/zues0077/lxserver" target="_blank" style="color: inherit; font-weight: 600;">zues0077 / LX Music Server Project</a>（基于 <a href="https://github.com/xcq0607/lxserver" target="_blank" style="color: inherit;">xcq0607/lxserver</a>）. All rights reserved.
   </div>
 </div>

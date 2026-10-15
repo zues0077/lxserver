@@ -6,11 +6,11 @@
 
 | 项目信息 | 说明 |
 | :--- | :--- |
-| **最新版本** | ![Version](https://img.shields.io/github/package-json/v/XCQ0607/lxserver?style=flat-square) (动态识别 `package.json`) |
+| **最新版本** | ![Version](https://img.shields.io/github/package-json/v/zues0077/lxserver?style=flat-square) (动态识别 `package.json`) |
 | **运行时要求** | Node.js >= 20 |
 | **开源协议** | Apache-2.0 License |
-| **更新日志** | [查看 Changelog](https://github.com/XCQ0607/lxserver/blob/main/changelog.md) |
-| **源码仓库** | [GitHub: XCQ0607/lxserver](https://github.com/XCQ0607/lxserver) |
+| **更新日志** | [查看 Changelog](https://github.com/zues0077/lxserver/blob/main/changelog.md) |
+| **源码仓库** | [GitHub: zues0077/lxserver](https://github.com/zues0077/lxserver) |
 | **文档更新** | 文档底部自动基于 Git Commit 提交记录生成最后更新时间（已格式化为北京时间 UTC+8） |
 
 ## 开发意图

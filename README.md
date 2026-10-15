@@ -1,6 +1,6 @@
-# LX Music Sync Server (Enhanced Edition)
+# lxserver · LX Music 数据同步服务端（增强版）
 
-![lxserver](https://socialify.git.ci/XCQ0607/lxserver/image?description=1&forks=0&issues=0&logo=https://raw.githubusercontent.com/XCQ0607/lxserver/refs/heads/main/public/icon.svg&owner=1&pulls=0&stargazers=0&theme=Auto)
+![lxserver](https://socialify.git.ci/zues0077/lxserver/image?description=1&forks=0&issues=0&logo=https://raw.githubusercontent.com/zues0077/lxserver/refs/heads/main/public/icon.svg&owner=1&pulls=0&stargazers=0&theme=Auto)
 
 <div align="center">
   <!-- <img src="public/icon.svg" width="120" height="120" alt="Icon"> -->
@@ -8,36 +8,51 @@
   <h1>LX Sync Server</h1> -->
   <p>
     <img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build Status">
-    <img src="https://img.shields.io/github/package-json/v/XCQ0607/lxserver?style=flat-square" alt="Version">
+    <img src="https://img.shields.io/github/package-json/v/zues0077/lxserver?style=flat-square" alt="Version">
     <img src="https://img.shields.io/badge/node-%3E%3D20-green?style=flat-square" alt="Node Version">
-    <img src="https://img.shields.io/github/license/XCQ0607/lxserver?style=flat-square" alt="License">
+    <img src="https://img.shields.io/github/license/zues0077/lxserver?style=flat-square" alt="License">
     <br>
     <br>
-    <a href="https://github.com/XCQ0607/lxserver/stargazers"><img src="https://img.shields.io/github/stars/XCQ0607/lxserver?style=flat-square&color=ffe16b" alt="GitHub stars"></a>
-    <a href="https://github.com/XCQ0607/lxserver/network/members"><img src="https://img.shields.io/github/forks/XCQ0607/lxserver?style=flat-square" alt="GitHub forks"></a>
-    <a href="https://github.com/XCQ0607/lxserver/issues"><img src="https://img.shields.io/github/issues/XCQ0607/lxserver?style=flat-square&color=red" alt="GitHub issues"></a>
-    <a href="https://github.com/XCQ0607/lxserver/commits/main"><img src="https://img.shields.io/github/last-commit/XCQ0607/lxserver?style=flat-square&color=blueviolet" alt="Last Commit"></a>
-    <img src="https://img.shields.io/github/commit-activity/m/XCQ0607/lxserver?style=flat-square&color=ff69b4" alt="Commit Activity">
-    <a href="https://github.com/XCQ0607/lxserver/releases"><img src="https://img.shields.io/github/downloads/XCQ0607/lxserver/total?style=flat-square&color=blue" alt="Total Downloads"></a>
+    <a href="https://github.com/zues0077/lxserver/stargazers"><img src="https://img.shields.io/github/stars/zues0077/lxserver?style=flat-square&color=ffe16b" alt="GitHub stars"></a>
+    <a href="https://github.com/zues0077/lxserver/network/members"><img src="https://img.shields.io/github/forks/zues0077/lxserver?style=flat-square" alt="GitHub forks"></a>
+    <a href="https://github.com/zues0077/lxserver/issues"><img src="https://img.shields.io/github/issues/zues0077/lxserver?style=flat-square&color=red" alt="GitHub issues"></a>
+    <a href="https://github.com/zues0077/lxserver/commits/main"><img src="https://img.shields.io/github/last-commit/zues0077/lxserver?style=flat-square&color=blueviolet" alt="Last Commit"></a>
+    <img src="https://img.shields.io/github/commit-activity/m/zues0077/lxserver?style=flat-square&color=ff69b4" alt="Commit Activity">
+    <a href="https://github.com/zues0077/lxserver/releases"><img src="https://img.shields.io/github/downloads/zues0077/lxserver/total?style=flat-square&color=blue" alt="Total Downloads"></a>
   </p>
   <p>
-    <a href="https://www.star-history.com/xcq0607/lxserver">
+    <a href="https://www.star-history.com/zues0077/lxserver">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=XCQ0607/lxserver&type=trending&theme=dark" />
-        <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/badge?repo=XCQ0607/lxserver&type=trending" />
-        <img alt="GitHub Trending Repository of the Day" src="https://api.star-history.com/badge?repo=XCQ0607/lxserver&type=trending" />
+        <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=zues0077/lxserver&type=trending&theme=dark" />
+        <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/badge?repo=zues0077/lxserver&type=trending" />
+        <img alt="GitHub Trending Repository of the Day" src="https://api.star-history.com/badge?repo=zues0077/lxserver&type=trending" />
       </picture>
     </a>
   </p>
 </div>
 
-[帮助文档 Documentation](https://xcq0607.github.io/lxserver/) | [同步服务器 SyncServer](md/lxserver.md) | [更新日志 Changelog](changelog.md) | [English](README_EN.md)
+[帮助文档 Documentation](https://zues0077.github.io/lxserver/) | [同步服务器 SyncServer](md/lxserver.md) | [更新日志 Changelog](changelog.md) | [English](README_EN.md)
 
 ---
 
-本项目内置了一个功能强大的 **Web 播放器**，让你可以随时随地在浏览器中享受音乐。同时，它也是一个增强版的 [LX Music 数据同步服务端](md/lxserver.md)。
+**lxserver** 把一个单纯的数据同步中转站，扩展成了开箱即用的私人云音乐平台：内置功能完整的 **Web 播放器**、面向多用户的 **同步与权限体系**，以及围绕 **自定义音源** 的稳定性治理（脚本自检护栏 + 平台可用性巡检）。无需额外客户端，浏览器打开即可听歌、管理歌单、连接 Subsonic 客户端。
 
-## ✨ Web 播放器核心特性
+> 本项目基于 [xcq0607/lxserver](https://github.com/xcq0607/lxserver) 二次开发，其上游为 [lyswhut/lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server)。感谢原作者的工作，本项目以 Apache-2.0 协议继续开源。
+
+## 📖 目录
+
+- [核心特性](#-核心特性)
+- [相对上游的主要增强](#-相对上游的主要增强)
+- [Docker 部署](#-docker-部署)
+- [访问控制与安全](#-访问控制与安全)
+- [快速启动](#-快速启动)
+- [项目架构](#️-项目架构)
+- [配置说明](#️-配置说明)
+- [数据收集与隐私说明](#️-数据收集与隐私说明)
+- [贡献与致谢](#-贡献与致谢)
+- [开源协议](#-开源协议)
+
+## ✨ 核心特性
 
 ### 1. 现代化界面与全能播放控制
 
@@ -146,6 +161,38 @@
 
 > 详细说明（判定标准、测试曲目来源、全部配置项、被移除音源的恢复方式）见 [docs/guide/source-probe.md](docs/guide/source-probe.md)
 
+## 🧩 相对上游的主要增强
+
+| 方向 | 内容 |
+| :--- | :--- |
+| **自定义源自检护栏** | 加载前静态体检 + 运行期 CPU 归因，把「混淆脚本静默空转吃 CPU」暴露并隔离；隔离为内存态，脚本更新自动解除 |
+| **自定义源平台可用性巡检** | 新音源立即体检、定时复检、坏平台自动关闭、恢复自动开启、全平台失效自动移除（可恢复） |
+| **三道防误伤** | 探测音质跟随脚本声明、多首测试曲目重试、链接 4xx 时 Range GET 复核 |
+| **平台侧异常保护** | 某平台在同轮过半音源上同时失败时只报告不处置，避免一次误关整个音源库 |
+| **小爱音箱投播** | 扫码登录、多设备同时播放、自动续播；服务端中转音频流绕开防盗链 |
+| **音源热重载优化** | 单文件变动只增量重载该音源，不再全量重载整个空间 |
+| **观测能力** | `/health` 暴露护栏与巡检状态，`?probeDetail=1` 查看逐平台失败明细；破坏性动作写入 `probe-audit.log` |
+
+## 🐳 Docker 部署
+
+镜像同时发布到 GitHub Packages（GHCR）与 Docker Hub，**每次更新都会打上版本号标签**，便于固定版本与回滚：
+
+| 标签 | 说明 |
+| :--- | :--- |
+| `latest` | 最新稳定版，跟随 `main` 分支 |
+| `v2.2.0` / `2.2.0` | 具体版本（与 `package.json` 的 `version` 一致），**生产环境建议用这个** |
+| `v2.1.3` 等历史版本 | 每个已发布版本都会保留 |
+
+```bash
+# 固定版本（推荐）
+docker pull ghcr.io/zues0077/lxserver:2.2.0
+
+# 或跟随最新
+docker pull ghcr.io/zues0077/lxserver:latest
+```
+
+> 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。
+
 ## 🔒 访问控制与安全
 
 为了保护你的隐私，Web 播放器支持开启访问密码。
@@ -180,7 +227,7 @@ Web 播放器针对移动端进行了深度优化，手机浏览器访问也能�
 
 可以通过桌面端更方便地运行 LX Music Sync Server，支持 Windows、macOS 和 Linux。
 
-- **📦 最新版本下载**: [GitHub Releases](https://github.com/XCQ0607/lxserver/releases/latest)
+- **📦 最新版本下载**: [GitHub Releases](https://github.com/zues0077/lxserver/releases/latest)
 - **✨ 桌面端优势**:
   - **单窗口管理**: 服务器管理与 Web 播放器合二为一，界面更统一。
   - **托盘常驻**: 窗口关闭后自动缩回托盘，服务在后台始终运行。
@@ -188,10 +235,11 @@ Web 播放器针对移动端进行了深度优化，手机浏览器访问也能�
 
 ### 方式二：使用 Docker
 
-本项目支持从 Docker Hub 或 GitHub Packages 拉取镜像：
+镜像地址：
 
-- **Docker Hub**: `xcq0607/lxserver:latest`
-- **GitHub Packages**: `ghcr.io/xcq0607/lxserver:latest`
+- **GitHub Packages (GHCR)**：`ghcr.io/zues0077/lxserver:latest`
+- **Docker Hub**：`zues0077/lxserver:latest`
+- 生产环境建议固定版本号，如 `ghcr.io/zues0077/lxserver:2.2.0`
 
 **Docker Run 示例：**
 
@@ -199,38 +247,35 @@ Web 播放器针对移动端进行了深度优化，手机浏览器访问也能�
 docker run -d \
   -p 9527:9527 \
   -v $(pwd)/data:/server/data \
-  -v $(pwd)/logs:/server/logs \
-  -v $(pwd)/cache:/server/cache \
-  -v $(pwd)/music:/server/music \
   --name lx-sync-server \
   --restart unless-stopped \
-  xcq0607/lxserver:latest
+  ghcr.io/zues0077/lxserver:2.2.0
 ```
+
+> **只要挂载 `/server/data` 一个目录就够了。** 它是容器声明的唯一数据卷，里面同时包含
+> 配置（会自动落到 `data/config.js`）、日志（`data/logs`）以及各用户的缓存与下载文件
+> （`data/<用户名>/cache`、`data/<用户名>/music`）。不需要再单独映射 `logs`、`cache`、`music`。
 
 **Docker Compose 示例：**
 
 新建 `docker-compose.yml` 文件：
 
 ```yaml
-version: '3'
 services:
   lx-sync-server:
-    image: xcq0607/lxserver:latest
+    image: ghcr.io/zues0077/lxserver:2.2.0   # 或 :latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:
       - "9527:9527"
     volumes:
       - ./data:/server/data
-      - ./logs:/server/logs
-      - ./cache:/server/cache
-      - ./music:/server/music
     environment:
       - NODE_ENV=production
-      # - ADMIN_PASSWORD=123456
+      # - ADMIN_PASSWORD=yourpassword
       # - ENABLE_WEBPLAYER_AUTH=true
       # - WEBPLAYER_PASSWORD=yourpassword
-      # - ADMIN_PATH=/music
+      # - ADMIN_PATH=/admin
       # - PLAYER_PATH=/
 ```
 
@@ -238,7 +283,7 @@ services:
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/XCQ0607/lxserver.git && cd lxserver
+git clone https://github.com/zues0077/lxserver.git && cd lxserver
 
 # 2. 安装依赖并编译
 npm ci && npm run build
@@ -253,7 +298,7 @@ npm start
 2. 解压后运行 `npm install --production`。
 3. 执行 `npm start` 启动。
 
-### 3. 服务连接与客户端配置指南
+### 服务连接与客户端配置指南
 
 #### ① Web 界面访问
 
@@ -290,9 +335,9 @@ npm start
 
 本项目基于 Node.js 采用前后端分离架构：
 
-- **Backend (Express + WebSocket)**: 核心同步逻辑与 WebDAV 备份。
-- **WebPlayer (Vanilla JS)**: 负责音乐播放业务，默认访问路径为根路径 `/`。
-- **Console (Vanilla JS)**: 位于 `/admin` 路径，负责用户与数据管理。
+- **Backend (Node.js 原生 http + WebSocket)**：数据同步、用户与权限、自定义源管理、Subsonic 协议、WebDAV 备份。
+- **WebPlayer (Vanilla JS)**：音乐播放业务，默认访问路径为根路径 `/`。
+- **Console (Vanilla JS)**：位于 `/admin` 路径，负责用户与数据管理。
 
 ---
 
@@ -365,6 +410,11 @@ npm start
 | `CACHE_NAMING_PATTERN`                     | `cache.namingPattern`                      | 缓存文件命名规则 (`simple` / `custom`)                                                         | `simple`           |
 | `SYSTEM_ALLOW_UNSAFE_VM`                   | `system.allowUnsafeVM`                     | 是否允许运行 VM 模式自定义源脚本 (需注意安全风险)                                                  | `false`            |
 | `LX_USER_<用户名>`                         | `users` 数组                               | 快速添加用户，值为该用户的密码 (如 `LX_USER_test=123`)                                           | -                    |
+| `SOURCE_PROBE_ENABLED`                     | `customSource.probe.enabled`               | 是否启用自定义源平台可用性巡检                                                                     | `true`             |
+| `SOURCE_PROBE_INTERVAL_MINUTES`            | `customSource.probe.intervalMinutes`       | 平台复检间隔（分钟）                                                                               | `180`              |
+| `SOURCE_PROBE_FAIL_THRESHOLD`              | `customSource.probe.failThreshold`         | 连续失败多少次判定平台不可用                                                                       | `2`                |
+| `SOURCE_PROBE_AUTO_DISABLE`                | `customSource.probe.autoDisablePlatform`   | 判定不可用后是否自动关闭该平台的解析                                                               | `true`             |
+| `SOURCE_PROBE_AUTO_REMOVE`                 | `customSource.probe.autoRemoveSource`      | 某音源全部平台失效时是否自动移除该音源（默认移入 `.trash/` 可恢复）                                | `true`             |
 
 > **高级用户配置说明**：环境变量 `LX_USER_<用户名>` 仅用于快速添加用户及设置密码。若需为特定用户配置独立的高级选项（如开启个人自定义音乐目录、分配操作权限 `allowOperateCustomMusicDir` 或写入权限 `allowWriteCustomMusicDir`、调整快照数量等），请直接在 `config.js` 的 `users` 数组中手动配置对应字段，或者在后台管理界面的“用户管理”面板中通过图形界面修改。
 
@@ -388,22 +438,23 @@ npm start
 
 ## 🤝 贡献与致谢
 
-- 修改自 [lyswhut/lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server)。
+- 本项目修改自 [xcq0607/lxserver](https://github.com/xcq0607/lxserver)，后者修改自 [lyswhut/lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server)。
 - Web 播放器逻辑参考 [lx-music-desktop](https://github.com/lyswhut/lx-music-desktop)。
+- 感谢以上项目的作者与贡献者。
 
 ### 👥 贡献者 (Contributors)
 
-<a href="https://github.com/xcq0607/lxserver/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=xcq0607/lxserver" />
+<a href="https://github.com/zues0077/lxserver/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=zues0077/lxserver" />
 </a>
 
 ## 📈 Star History
 
-<a href="https://www.star-history.com/?repos=xcq0607%2Flxserver&type=timeline&logscale=&releases=&legend=bottom-right">
+<a href="https://www.star-history.com/?repos=zues0077%2Flxserver&type=timeline&logscale=&releases=&legend=bottom-right">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=xcq0607/lxserver&type=timeline&theme=dark&logscale&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=xcq0607/lxserver&type=timeline&logscale&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=xcq0607/lxserver&type=timeline&logscale&legend=bottom-right" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=zues0077/lxserver&type=timeline&theme=dark&logscale&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=zues0077/lxserver&type=timeline&logscale&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=zues0077/lxserver&type=timeline&logscale&legend=bottom-right" />
  </picture>
 </a>
 
@@ -411,7 +462,7 @@ npm start
 
 本项目基于 Apache License 2.0 许可证发行，以下协议是对于 Apache License 2.0 的补充，如有冲突，以以下协议为准。
 
-Apache License 2.0 copyright (c) 2026 [xcq0607](https://github.com/xcq0607)
+Apache License 2.0 copyright (c) 2026 [zues0077](https://github.com/zues0077)（原始版权归 [xcq0607](https://github.com/xcq0607)，遵循 Apache-2.0 保留署名）
 
 **词语约定**：本协议中的“本项目”指 LX Music Web 播放器；“使用者”指签署本协议的使用者；“官方音乐平台”指对本项目内置的包括酷我、酷狗、咪咕等音乐源的官方平台统称；“版权数据”指包括但不限于图像、音频、名字等在内的他人拥有所属版权的数据。
 

@@ -24,7 +24,7 @@ Before starting this service project, please ensure that the host system (or vir
 
 For desktop users, we strongly recommend using the **Desktop Client** based on Electron. It integrates the server management and player, featuring system tray support.
 
-1. **Download**: [GitHub Releases](https://github.com/XCQ0607/lxserver/releases/latest)
+1. **Download**: [GitHub Releases](https://github.com/zues0077/lxserver/releases/latest)
 2. **Choose Version**:
    - **Windows**: Download `Universal.exe` (All-in-one) or `portable.exe` (Portable version).
    - **macOS**: Download `universal.dmg` (Supports Intel/M1/M2).
@@ -33,10 +33,21 @@ For desktop users, we strongly recommend using the **Desktop Client** based on E
 
 ### Option 2: Containerized Deployment Based on Docker Engine
 
-This project supports pulling images from Docker Hub or GitHub Packages:
+Images are published to both GitHub Packages (GHCR) and Docker Hub. **Every update also gets a version tag**, so you can pin a version and roll back easily:
 
-- **Docker Hub**: `xcq0607/lxserver:latest`
-- **GitHub Packages**: `ghcr.io/xcq0607/lxserver:latest`
+| Tag | Meaning |
+| :--- | :--- |
+| `latest` | Latest stable, tracking the `main` branch |
+| `v2.2.0` / `2.2.0` | Concrete version (matches `version` in `package.json`) — **recommended for production** |
+| e.g. `v2.1.3` | Previous releases are kept as well |
+
+```bash
+# Pin a version (recommended)
+docker pull ghcr.io/zues0077/lxserver:2.2.0
+
+# Or follow the latest
+docker pull ghcr.io/zues0077/lxserver:latest
+```
 
 Execute the following command to start the container:
 
@@ -44,38 +55,29 @@ Execute the following command to start the container:
 docker run -d \
   -p 9527:9527 \
   -v $(pwd)/data:/server/data \
-  -v $(pwd)/logs:/server/logs \
-  -v $(pwd)/cache:/server/cache \
-  -v $(pwd)/music:/server/music \
   --name lx-sync-server \
   --restart unless-stopped \
-  xcq0607/lxserver:latest
+  ghcr.io/zues0077/lxserver:2.2.0
 ```
 
 **Container Volume Mappings:**
 
-- `-v $(pwd)/data:/server/data`: This configuration is a **core mandatory item**. It is responsible for exporting all application-layer state data generated within the instance to the host for persistent storage.
-- `-v $(pwd)/logs:/server/logs`: A physical mount point used to receive and output all graded audit logs of the service.
-- `-v $(pwd)/cache:/server/cache`: Used to store music cache files, significantly improving loading speed during repeated playback.
-- `-v $(pwd)/music:/server/music`: **Used exclusively for storing downloaded songs.**
+- `-v $(pwd)/data:/server/data`: **The only volume you need.** It is the single volume the image declares and it holds the config (`data/config.js`), logs (`data/logs`) and each user's cache/downloads (`data/<user>/cache`, `data/<user>/music`).
+- Mounting `logs`, `cache` or `music` separately is **not needed** — those container paths (`/server/logs`, `/server/cache`, `/server/music`) do not exist, so such mounts have no effect.
 
 **Declarative Docker Compose:**
 For standardized long-term management in production implementation, create a definition configuration named `docker-compose.yml`:
 
 ```yaml
-version: '3'
 services:
   lx-sync-server:
-    image: xcq0607/lxserver:latest
+    image: ghcr.io/zues0077/lxserver:2.2.0   # or :latest
     container_name: lx-sync-server
     restart: unless-stopped
     ports:
       - "9527:9527"
     volumes:
       - ./data:/server/data
-      - ./logs:/server/logs
-      - ./cache:/server/cache
-      - ./music:/server/music
     environment:
       - NODE_ENV=production
       # - ADMIN_PASSWORD=123456
@@ -91,7 +93,7 @@ For restricted non-containerized environments or secondary research and developm
 
 ```bash
 # 1. Extract the code from the remote code repository to the current directory in the Main branch state
-git clone https://github.com/XCQ0607/lxserver.git 
+git clone https://github.com/zues0077/lxserver.git 
 cd lxserver
 
 # 2. Call the strict analysis process to initialize the module dependency library
