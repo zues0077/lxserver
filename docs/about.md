@@ -1,6 +1,8 @@
 # 关于
 
-**LX Music Sync Server** 修改自原版的 [lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server)，并在原版基础上，额外集成和改进了各项能力，使其从一个简单的本地数据交换中转站变为了全功能的个人私有云音乐平台。
+**LX Sync Server** 修改自 [xcq0607/lxserver](https://github.com/xcq0607/lxserver)，后者修改自原版的 [lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server)。在两者的基础上，本项目额外集成和改进了各项能力，使其从一个简单的本地数据交换中转站变为了全功能的个人私有云音乐平台。
+
+本仓库（[zues0077/lxserver](https://github.com/zues0077/lxserver)）在上游之上重点增强了**自定义音源的稳定性治理**：脚本自检护栏与平台可用性巡检。详见 [自定义源平台可用性巡检](/guide/source-probe) 与 [自定义源自检护栏](/guide/source-guard)。
 
 ## 项目信息
 

@@ -1,6 +1,8 @@
 # About
 
-**LX Music Sync Server** is modified from the original [lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server), and integrates the extraction and improvement of various capabilities on the basis of the original version, making it go from a simple local data exchange transit station to a fully functional personal private cloud music platform.
+**LX Sync Server** is a fork of [xcq0607/lxserver](https://github.com/xcq0607/lxserver), which in turn is modified from the original [lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server). On top of both, this project integrates and improves various capabilities, turning a simple local data exchange transit station into a fully functional personal private cloud music platform.
+
+This repository ([zues0077/lxserver](https://github.com/zues0077/lxserver)) focuses on **stability governance for custom music sources**: a script self-check guard and platform availability probe. (These guides are currently available in Chinese only: [平台可用性巡检](/guide/source-probe) / [自检护栏](/guide/source-guard).)
 
 ## Project Information
 

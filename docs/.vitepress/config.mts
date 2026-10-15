@@ -50,7 +50,15 @@ export default defineConfig({
             text: '核心功能',
             items: [
               { text: '同步服务器设置', link: '/guide/sync-server' },
-              { text: 'Web 播放器指南', link: '/guide/web-player' }
+              { text: 'Web 播放器指南', link: '/guide/web-player' },
+              { text: '小爱音箱投播', link: '/guide/xiaoai' }
+            ]
+          },
+          {
+            text: '自定义源治理',
+            items: [
+              { text: '音源自检护栏', link: '/guide/source-guard' },
+              { text: '平台可用性巡检', link: '/guide/source-probe' }
             ]
           },
           {
