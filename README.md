@@ -141,7 +141,8 @@
 - **自动关闭坏平台**：连续失败达阈值（默认 2 次）才关闭，单次失败只记状态；关闭状态写入 **与面板「平台禁用」同一份 `states.json`**，面板上可见可改
 - **自动恢复**：被自动关闭的平台一旦探测成功会自动重新开启；**你手动关闭的平台永不参与复检、也不会被自动打开**
 - **全平台失效自动移除音源**：默认移入同级 `.trash/` 目录（可恢复），并逐行写入 `probe-audit.log` 审计
-- 结果在 `/health` 的 `sourceProbe` 字段，同时注册为后台任务 `custom_source_health_probe`
+- **三道防误伤**：探测音质跟随脚本自己的 `qualitys` 声明；一个平台用多首测试曲目重试（任一成功即算可用）；某平台在多数音源上同时失败时判定为「平台侧异常」，本轮只记录不处置（`suspectPlatforms`），避免测试曲目不可播导致一次误关整个音源库
+- 结果在 `/health` 的 `sourceProbe` 字段（加 `?probeDetail=1` 可看逐平台失败原因），同时注册为后台任务 `custom_source_health_probe`
 
 > 详细说明（判定标准、测试曲目来源、全部配置项、被移除音源的恢复方式）见 [docs/guide/source-probe.md](docs/guide/source-probe.md)
 

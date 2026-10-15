@@ -168,6 +168,7 @@ export function getProbeTargets(): Array<{
     id: string
     name: string
     platforms: string[]
+    qualities: Record<string, string[]>
     callRequest: (action: string, source: string, info: any) => Promise<any>
 }> {
     const targets: Array<{
@@ -175,16 +176,24 @@ export function getProbeTargets(): Array<{
         id: string
         name: string
         platforms: string[]
+        qualities: Record<string, string[]>
         callRequest: (action: string, source: string, info: any) => Promise<any>
     }> = []
     for (const api of loadedApis.values()) {
         const info = api?.info
         if (!info?.id || typeof api.callRequest !== 'function') continue
+        const sources: Record<string, any> = info.sources || {}
+        const qualities: Record<string, string[]> = {}
+        for (const [platform, meta] of Object.entries(sources)) {
+            const list = (meta as any)?.qualitys
+            if (Array.isArray(list)) qualities[platform] = list.filter((q: any) => typeof q === 'string' && q)
+        }
         targets.push({
             owner: String(info.owner || 'open'),
             id: String(info.id),
             name: String(info.name || info.id),
-            platforms: Object.keys(info.sources || {}),
+            platforms: Object.keys(sources),
+            qualities,
             callRequest: api.callRequest,
         })
     }

@@ -137,6 +137,7 @@ const config: LX.Config = {
   'customSource.probe.removeMode': 'trash', // 移除方式：trash 移入回收站 / delete 直接删除
   'customSource.probe.probeOnNewSource': true, // 新增音源是否立即巡检
   'customSource.probe.testSongs': {}, // 各平台测试曲目覆盖（留空则用缓存/内置搜索）
+  'customSource.probe.systemicFailureRatio': 0.5, // 某平台在超过该比例的音源上同时失败 → 判定为平台侧异常，本轮只记录不自动处置
 }
 
 export default config

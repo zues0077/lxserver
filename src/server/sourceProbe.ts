@@ -70,6 +70,8 @@ export interface ProbeTarget {
   id: string
   name: string
   platforms: string[]
+  /** 各平台声明的音质列表（脚本 send 时自报）；探测时优先挑它支持的音质，避免因「不支持该音质」被误判为失效 */
+  qualities?: Record<string, string[]>
   callRequest: (action: string, source: string, info: any) => Promise<any>
 }
 
@@ -111,6 +113,14 @@ export interface ProbeRunResult {
   restored: string[]
   /** 本次移除的音源 */
   removed: string[]
+  /**
+   * 本轮被判定为「平台侧系统性异常」而暂缓处置的平台。
+   *
+   * 判据：该平台在多数音源上同时失败。此时更可能是测试曲目不可播、
+   * 平台侧限流等外部原因，而不是某个音源坏了 —— 自动关闭/删除会造成大面积误伤，
+   * 因此本轮只记录、不处置，交由使用者判断。
+   */
+  suspectPlatforms: Array<{ platform: string; checked: number; failed: number }>
   message: string
 }
 
@@ -160,10 +170,23 @@ interface ProbeConfig {
   removeMode: 'trash' | 'delete'
   probeOnNewSource: boolean
   testSongs: Record<string, Partial<ProbeTestSong>>
+  /** 平台失败率超过该比例即视为「平台侧系统性异常」，本轮暂缓自动处置 */
+  systemicFailureRatio: number
 }
+
+/** 判定「平台侧系统性异常」的最少样本量：声明该平台的音源太少时不下此结论 */
+const SYSTEMIC_MIN_SAMPLES = 3
+/** 单个平台每轮最多尝试几首测试曲目（第一首失败后换歌重试，降低单曲失灵的误判） */
+const MAX_SONG_ATTEMPTS = 3
 
 const positiveNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
+
+/** 取 [0,1] 区间的比例配置 */
+const ratioNumber = (value: unknown, fallback: number): number => {
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) && n > 0 && n <= 1 ? n : fallback
+}
 
 const configOf = (): ProbeConfig => {
   const c: any = (global.lx && global.lx.config) || {}
@@ -180,6 +203,7 @@ const configOf = (): ProbeConfig => {
     removeMode: c['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash',
     probeOnNewSource: c['customSource.probe.probeOnNewSource'] !== false,
     testSongs: rawTestSongs && typeof rawTestSongs === 'object' && !Array.isArray(rawTestSongs) ? rawTestSongs : {},
+    systemicFailureRatio: ratioNumber(c['customSource.probe.systemicFailureRatio'], 0.5),
   }
 }
 
@@ -359,6 +383,10 @@ const clearSourceState = (owner: string, sourceId: string) => {
 
 // ============================ 探测实现 ============================
 
+/** 错误信息可能很长（音源会把整个 HTML/堆栈抛出来），落盘前截断，避免状态文件膨胀 */
+const shorten = (text: string, max = 300): string =>
+  typeof text === 'string' && text.length > max ? `${text.slice(0, max)}…` : (text || '')
+
 const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> =>
   new Promise<T>((resolve, reject) => {
     let settled = false
@@ -386,34 +414,105 @@ const normalizeProbeUrl = (raw: any): string | null => {
   return trimmed
 }
 
+/** 链接所在的域名，仅用于把失败原因写清楚（便于判断是 CDN/域名问题还是音源问题） */
+const hostOf = (url: string): string => {
+  try { return new URL(url).host } catch { return '未知域名' }
+}
+
+const LINK_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+/**
+ * 用「取到响应头就断开」的 GET 复核链接。
+ *
+ * 只发 Range: bytes=0-1 且一拿到响应头立刻 abort，理论上不下载任何音频数据体；
+ * 即便 CDN 忽略 Range 开始回传整个文件，也会在第一个数据块到达时被掐断。
+ */
+const confirmLinkByGet = (url: string, agent: any): Promise<{ ok: boolean; code?: number; error?: string }> =>
+  new Promise(resolve => {
+    let settled = false
+    const done = (v: { ok: boolean; code?: number; error?: string }) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(v)
+    }
+    const timer = setTimeout(() => {
+      try { stream?.abort() } catch { /* ignore */ }
+      done({ ok: false, error: `GET 复核超时（${hostOf(url)}）` })
+    }, 8000)
+    if (typeof (timer as any).unref === 'function') (timer as any).unref()
+
+    let stream: any
+    try {
+      stream = needle.get(url, {
+        follow_max: 3,
+        open_timeout: 6000,
+        response_timeout: 6000,
+        agent,
+        headers: {
+          'User-Agent': LINK_UA,
+          Referer: (() => { try { return new URL(url).origin } catch { return '' } })(),
+          Range: 'bytes=0-1',
+        },
+      })
+    } catch (e: any) {
+      done({ ok: false, error: `GET 复核失败（${hostOf(url)}）: ${e?.message || e}` })
+      return
+    }
+
+    // 拿到响应头即可判定，立刻断开，绝不下完整个音频文件
+    stream.on('header', (code: number) => {
+      try { stream.abort() } catch { /* ignore */ }
+      done({ ok: code >= 200 && code < 400, code })
+    })
+    // 兜底：万一 header 事件没拿到就已经有数据体，也立即断开
+    stream.on('data', () => { try { stream.abort() } catch { /* ignore */ } })
+    stream.on('error', (e: any) => done({ ok: false, error: `GET 复核失败（${hostOf(url)}）: ${e?.message || e}` }))
+  })
+
 /**
  * 对解析出来的链接做一次轻量可达性校验。
  *
- * 刻意只用 HEAD：音频直链可能是几十 MB 的 flac，用 GET 时部分 CDN 会忽略 Range
- * 而开始回传整个文件，巡检就成了流量炸弹。HEAD 只取响应头，不产生任何媒体流量。
- * 少数 CDN 不支持 HEAD（405/501）时无法判定，按「保守放行」处理，避免误伤。
+ * 用 HEAD 是刻意的：音频直链可能是几十 MB 的 flac，普通 GET 会变成流量炸弹。
+ * 但 HEAD 的结果有两类天然歧义，处理方式如下：
+ *   - 405/501：服务端不支持 HEAD → 无法判定，保守放行；
+ *   - 4xx：部分 CDN 对 HEAD 一律回 403/404，而正常 GET 却能播 → 用一次
+ *     「取到响应头就断开」的 GET 复核，两者都 4xx 才判定链接不可用。
+ * 连接层失败（DNS 解析不到、拒绝连接、TLS 过期、超时）没有歧义，直接判定不可用 ——
+ * 这类失败用户点播同样放不出来。
  */
 const checkLinkReachable = async (url: string): Promise<{ ok: boolean; error?: string }> => {
+  const host = hostOf(url)
+  let agent: any
+  try {
+    agent = await getProxyAgent(url, 'customSource')
+  } catch { /* 代理不可用时退回直连 */ }
+
+  let code: number | undefined
   try {
     const resp = await needle('head', url, null, {
       follow_max: 3,
       open_timeout: 6000,
       response_timeout: 6000,
       read_timeout: 6000,
-      agent: await getProxyAgent(url, 'customSource'),
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        Referer: (() => { try { return new URL(url).origin } catch { return '' } })(),
-      },
+      agent,
+      headers: { 'User-Agent': LINK_UA, Referer: (() => { try { return new URL(url).origin } catch { return '' } })() },
     })
-    const code = resp?.statusCode
-    if (code === undefined) return { ok: false, error: '链接无响应' }
-    if (code === 405 || code === 501) return { ok: true } // 服务端不支持 HEAD，无法判定
-    if (code >= 400) return { ok: false, error: `链接返回 ${code}` }
-    return { ok: true }
+    code = resp?.statusCode
   } catch (e: any) {
-    return { ok: false, error: `链接探测失败: ${e?.message || e}` }
+    return { ok: false, error: `链接探测失败（${host}）: ${shorten(e?.message || String(e), 120)}` }
   }
+
+  if (code === undefined) return { ok: false, error: `链接无响应（${host}）` }
+  if (code === 405 || code === 501) return { ok: true } // 服务端不支持 HEAD，无法判定
+  if (code < 400) return { ok: true }
+  if (code >= 500) return { ok: false, error: `链接返回 ${code}（${host}）` }
+
+  // 4xx：HEAD 结果存疑，用截断式 GET 复核一次
+  const confirm = await confirmLinkByGet(url, agent)
+  if (confirm.ok) return { ok: true }
+  if (confirm.code !== undefined) return { ok: false, error: `链接返回 ${code}/GET ${confirm.code}（${host}）` }
+  return { ok: false, error: confirm.error || `链接返回 ${code}（${host}）` }
 }
 
 const buildMusicInfo = (platform: string, song: ProbeTestSong) => {
@@ -432,6 +531,21 @@ const buildMusicInfo = (platform: string, song: ProbeTestSong) => {
 }
 
 /**
+ * 挑选探测用的音质。
+ *
+ * 音源脚本会声明每个平台支持哪些音质（`qualitys`）。若我们固定用 128k，
+ * 而某个脚本只支持 320k/flac，请求会被它拒绝，表现为「参数错误 / 未返回链接」——
+ * 那是我们请求得不对，不是平台坏了。所以优先用脚本自己声明的音质。
+ */
+const pickQuality = (target: ProbeTarget, platform: string): string => {
+  const list = (target.qualities && target.qualities[platform]) || []
+  if (!Array.isArray(list) || !list.length) return '128k'
+  if (list.includes('128k')) return '128k'
+  const first = list.find(q => typeof q === 'string' && !!q)
+  return first || '128k'
+}
+
+/**
  * 探测单个音源的单个平台。
  * 判定顺序：音源能否返回链接 → 链接本身是否可达（可配置关闭）。
  */
@@ -441,13 +555,14 @@ const probePlatform = async (
   song: ProbeTestSong,
   conf: ProbeConfig,
 ): Promise<{ ok: boolean; error?: string }> => {
+  const quality = pickQuality(target, platform)
   let rawUrl: any
   try {
     rawUrl = await withTimeout(
       target.callRequest('musicUrl', platform, {
         musicInfo: buildMusicInfo(platform, song),
-        quality: '128k',
-        type: '128k',
+        quality,
+        type: quality,
       }),
       conf.timeoutMs,
       `${target.name}/${platform}`,
@@ -468,19 +583,22 @@ const probePlatform = async (
 
 // ============================ 测试曲目 ============================
 
-let cachedSongPool: ProbeTestSong[] = []
+/** 平台 → 候选测试曲目列表（多首，按优先级）。单曲可能恰好无版权/需会员，多候选能显著降低误判。 */
+let cachedSongPool: Map<string, ProbeTestSong[]> = new Map()
 let cachedSongPoolAt = 0
 
-const buildSongPool = (deps: ProbeDeps): ProbeTestSong[] => {
+const buildSongPool = (deps: ProbeDeps): Map<string, ProbeTestSong[]> => {
   const conf = configOf()
-  const pool: ProbeTestSong[] = []
+  const map = new Map<string, ProbeTestSong[]>()
   const seen = new Set<string>()
   const push = (song: ProbeTestSong) => {
     if (!song || !song.source || !song.songmid) return
     const key = `${song.source}_${song.songmid}`
     if (seen.has(key)) return
     seen.add(key)
-    pool.push(song)
+    const list = map.get(song.source)
+    if (list) list.push(song)
+    else map.set(song.source, [song])
   }
 
   // 1) 配置里的覆盖优先
@@ -494,11 +612,11 @@ const buildSongPool = (deps: ProbeDeps): ProbeTestSong[] => {
     for (const item of deps.getCachedSongs()) push(item)
   } catch { /* ignore */ }
 
-  return pool
+  return map
 }
 
-const getSongPool = (deps: ProbeDeps): ProbeTestSong[] => {
-  if (Date.now() - cachedSongPoolAt > 5 * 60 * 1000 || !cachedSongPool.length) {
+const getSongPool = (deps: ProbeDeps): Map<string, ProbeTestSong[]> => {
+  if (Date.now() - cachedSongPoolAt > 5 * 60 * 1000 || !cachedSongPool.size) {
     cachedSongPool = buildSongPool(deps)
     cachedSongPoolAt = Date.now()
   }
@@ -507,27 +625,38 @@ const getSongPool = (deps: ProbeDeps): ProbeTestSong[] => {
 
 /** 已尝试过内置搜索的平台（含搜索失败），避免同一轮里对同一平台反复发起搜索 */
 const searchAttempted = new Set<string>()
+/** 本轮是否已因「池中缺该平台」补刷过曲目池（每轮最多一次，避免重复扫描缓存索引） */
+let poolRefreshedThisRound = false
 
-/** 为平台挑一首测试曲目：配置/缓存 → 内置 SDK 搜索 → 放弃（跳过，不判定为不可用） */
-const pickTestSong = async (platform: string, deps: ProbeDeps): Promise<ProbeTestSong | null> => {
-  const fromPool = getSongPool(deps).find(s => s.source === platform)
-  if (fromPool) return fromPool
-  if (!deps.searchTestSong) return null
-  if (searchAttempted.has(platform)) return null
+/**
+ * 为平台取候选测试曲目：配置/缓存（可能多首）→ 内置 SDK 搜索兜底（1 首）。
+ * 返回空数组表示取不到曲目，此时该平台本轮「跳过」，不参与可用性判定。
+ */
+const pickTestSongs = async (platform: string, deps: ProbeDeps): Promise<ProbeTestSong[]> => {
+  let list = getSongPool(deps).get(platform)
+  if ((!list || !list.length) && !poolRefreshedThisRound) {
+    // 池子有 5 分钟缓存期，期间用户可能刚播放过新的歌；池中缺该平台时本轮补刷一次
+    poolRefreshedThisRound = true
+    cachedSongPool = buildSongPool(deps)
+    cachedSongPoolAt = Date.now()
+    list = cachedSongPool.get(platform)
+  }
+  if (list && list.length) return list.slice(0, MAX_SONG_ATTEMPTS)
+  if (!deps.searchTestSong) return []
+  if (searchAttempted.has(platform)) return []
   searchAttempted.add(platform)
   try {
     const found = await deps.searchTestSong(platform)
     if (found && found.songmid) {
-      cachedSongPool.push(found)
-      return found
+      // 兜底搜索到的曲目也放进池子，后续轮次可直接复用
+      const exist = cachedSongPool.get(platform)
+      if (exist) exist.push(found)
+      else cachedSongPool.set(platform, [found])
+      return [found]
     }
   } catch { /* ignore */ }
-  return null
+  return []
 }
-
-/** 错误信息可能很长（音源会把整个 HTML/堆栈抛出来），落盘前截断，避免状态文件膨胀 */
-const shorten = (text: string, max = 300): string =>
-  typeof text === 'string' && text.length > max ? `${text.slice(0, max)}…` : (text || '')
 
 // ============================ 音源移除 ============================
 
@@ -632,7 +761,7 @@ export async function runSourceProbe(
   const empty: ProbeRunResult = {
     startedAt, durationMs: 0, sourcesChecked: 0, platformsChecked: 0,
     platformsOk: 0, platformsDown: 0, platformsSkipped: 0,
-    newlyDisabled: [], restored: [], removed: [],
+    newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [],
     message: '未执行',
   }
 
@@ -646,6 +775,7 @@ export async function runSourceProbe(
   lastRunAt = startedAt
   statesCache.clear()
   searchAttempted.clear() // 每轮重新允许一次内置搜索，平台恢复后仍能拿到测试曲目
+  poolRefreshedThisRound = false
   // 探测期间会有持续的解析与网络开销，标记为「忙碌」避免被自检护栏误判成异常空转
   markSourceBusy(conf.timeoutMs * 4)
   const busyTicker = setInterval(() => markSourceBusy(conf.timeoutMs * 2), Math.max(5000, conf.timeoutMs))
@@ -661,7 +791,7 @@ export async function runSourceProbe(
     const result: ProbeRunResult = {
       startedAt, durationMs: 0, sourcesChecked: targets.length, platformsChecked: 0,
       platformsOk: 0, platformsDown: 0, platformsSkipped: 0,
-      newlyDisabled: [], restored: [], removed: [],
+      newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [],
       message: '',
     }
 
@@ -672,7 +802,7 @@ export async function runSourceProbe(
       return s
     }
 
-    interface Job { target: ProbeTarget; platform: string; song: ProbeTestSong | null }
+    interface Job { target: ProbeTarget; platform: string; songs: ProbeTestSong[] }
     const jobs: Job[] = []
 
     for (const target of targets) {
@@ -693,19 +823,20 @@ export async function runSourceProbe(
           continue
         }
 
-        const song = await pickTestSong(platform, deps)
-        if (!song) {
+        const songs = await pickTestSongs(platform, deps)
+        if (!songs.length) {
           platformState.status = 'skipped'
           platformState.lastCheckAt = Date.now()
           platformState.lastError = '无可用测试曲目'
           result.platformsSkipped++
           continue
         }
-        jobs.push({ target, platform, song })
+        jobs.push({ target, platform, songs })
       }
     }
 
-    // 并发消费探测任务
+    // 并发消费探测任务。同一个平台会按候选测试曲目依次重试，任意一首成功即视为该平台可用 ——
+    // 单曲常常恰好是无版权/需会员的歌，只探一首会把「歌不可播」错判成「平台不可用」。
     let cursor = 0
     const worker = async () => {
       while (true) {
@@ -716,17 +847,22 @@ export async function runSourceProbe(
         const platformState = status.sources[job.target.id].platforms[job.platform]
         result.platformsChecked++
 
-        const outcome = await probePlatform(job.target, job.platform, job.song!, conf)
+        let ok = false
+        let lastError = ''
+        for (const song of job.songs) {
+          const outcome = await probePlatform(job.target, job.platform, song, conf)
+          if (outcome.ok) { ok = true; break }
+          lastError = outcome.error || '未知错误'
+        }
         platformState.lastCheckAt = Date.now()
 
-        if (outcome.ok) {
-          platformState.status = 'ok'
+        if (ok) {
           platformState.failCount = 0
           platformState.lastOkAt = Date.now()
           platformState.lastError = ''
           result.platformsOk++
 
-          // 之前被自动关闭的平台恢复可用 → 自动重新开启
+          // 之前被自动关闭的平台恢复可用 → 立即自动重新开启（恢复一定是安全的，不必等后置校验）
           if (platformState.autoDisabled) {
             platformState.autoDisabled = false
             setPlatformDisabled(job.target.owner, job.target.id, job.platform, false)
@@ -734,30 +870,69 @@ export async function runSourceProbe(
             audit(job.target.owner, 'restore-platform', { sourceId: job.target.id, sourceName: job.target.name, platform: job.platform })
             console.log(`[音源巡检] ✓ 平台已恢复，自动重新开启: ${job.target.name} / ${job.platform}`)
           }
+          platformState.status = 'ok'
         } else {
           platformState.failCount++
-          platformState.lastError = shorten(outcome.error || '未知错误')
-          if (platformState.failCount >= conf.failThreshold) {
-            platformState.status = 'down'
-            result.platformsDown++
-            if (conf.autoDisablePlatform && !platformState.autoDisabled) {
-              platformState.autoDisabled = true
-              setPlatformDisabled(job.target.owner, job.target.id, job.platform, true)
-              result.newlyDisabled.push(`${job.target.name}/${job.platform}`)
-              audit(job.target.owner, 'disable-platform', {
-                sourceId: job.target.id, sourceName: job.target.name,
-                platform: job.platform, failCount: platformState.failCount, error: platformState.lastError,
-              })
-              console.warn(`[音源巡检] ⚠ 已关闭平台解析: ${job.target.name} / ${job.platform}（连续失败 ${platformState.failCount} 次，原因：${platformState.lastError}）`)
-            }
-          } else {
-            platformState.status = 'unknown'
-          }
+          platformState.lastError = shorten(lastError)
+          // 是否「不可用」要等平台侧系统性判定后再落定，这里先按证据不足处理
+          platformState.status = 'unknown'
         }
       }
     }
 
     await Promise.all(Array.from({ length: Math.min(conf.concurrency, Math.max(1, jobs.length)) }, () => worker()))
+
+    // ---- 平台侧系统性异常判定 ----
+    // 同一个平台如果在「多数音源」上同时失败，那么更可能是测试曲目不可播、平台侧限流/风控等外部原因，
+    // 而不是某个音源自己坏了。此时若继续按「连续失败达阈值」自动关闭，会一次性误伤大量可用音源，
+    // 甚至因为「全部平台都失败」把这些音源整个删掉。因此这类平台本轮只记录、不处置，交由人工判断。
+    const platformStats = new Map<string, { checked: number; failed: number }>()
+    for (const job of jobs) {
+      const ps = statusFor(job.target.owner).sources[job.target.id].platforms[job.platform]
+      const stat = platformStats.get(job.platform) || { checked: 0, failed: 0 }
+      stat.checked++
+      if (!ps || ps.failCount > 0) stat.failed++
+      platformStats.set(job.platform, stat)
+    }
+    const suspectPlatforms = new Set<string>()
+    for (const [platform, stat] of platformStats) {
+      if (stat.checked >= SYSTEMIC_MIN_SAMPLES && stat.failed / stat.checked >= conf.systemicFailureRatio) {
+        suspectPlatforms.add(platform)
+        result.suspectPlatforms.push({ platform, checked: stat.checked, failed: stat.failed })
+      }
+    }
+    if (suspectPlatforms.size) {
+      result.suspectPlatforms.sort((a, b) => b.failed / b.checked - a.failed / a.checked)
+      console.warn('[音源巡检] ⚠ 以下平台在多数音源上同时失败，疑似平台侧问题（测试曲目不可播/平台限流），' +
+        `本轮暂缓自动处置：${result.suspectPlatforms.map(s => `${s.platform} ${s.failed}/${s.checked}`).join('、')}`)
+    }
+
+    // ---- 落定每个平台的结论并执行自动关闭 ----
+    for (const target of targets) {
+      const sourceState = statusFor(target.owner).sources[target.id]
+      for (const platform of target.platforms) {
+        const ps = sourceState.platforms[platform]
+        if (!ps || ps.status === 'skipped' || ps.status === 'ok') continue
+        if (ps.failCount < conf.failThreshold) { ps.status = 'unknown'; continue }
+        if (suspectPlatforms.has(platform)) {
+          // 平台本身可疑：证据不足以归罪这个音源，不判定不可用、更不自动关闭
+          ps.status = 'unknown'
+          continue
+        }
+        ps.status = 'down'
+        result.platformsDown++
+        if (conf.autoDisablePlatform && !ps.autoDisabled) {
+          ps.autoDisabled = true
+          setPlatformDisabled(target.owner, target.id, platform, true)
+          result.newlyDisabled.push(`${target.name}/${platform}`)
+          audit(target.owner, 'disable-platform', {
+            sourceId: target.id, sourceName: target.name,
+            platform, failCount: ps.failCount, error: ps.lastError,
+          })
+          console.warn(`[音源巡检] ⚠ 已关闭平台解析: ${target.name} / ${platform}（连续失败 ${ps.failCount} 次，原因：${ps.lastError}）`)
+        }
+      }
+    }
 
     // 全平台不可用 → 移除音源
     if (conf.autoRemoveSource) {
@@ -799,7 +974,8 @@ export async function runSourceProbe(
       `可用 ${result.platformsOk}、不可用 ${result.platformsDown}、跳过 ${result.platformsSkipped}` +
       (result.newlyDisabled.length ? `；新关闭 ${result.newlyDisabled.length} 个平台` : '') +
       (result.restored.length ? `；恢复 ${result.restored.length} 个平台` : '') +
-      (result.removed.length ? `；移除 ${result.removed.length} 个音源` : '')
+      (result.removed.length ? `；移除 ${result.removed.length} 个音源` : '') +
+      (result.suspectPlatforms.length ? `；${result.suspectPlatforms.length} 个平台疑似平台侧异常已暂缓处置` : '')
 
     lastRun = result
     console.log(`[音源巡检] 本轮完成（${result.durationMs}ms）：${result.message}`)

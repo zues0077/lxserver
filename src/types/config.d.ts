@@ -575,5 +575,13 @@ declare namespace LX {
       strMediaMid?: string
       interval?: string
     }>
+    /**
+     * 平台侧系统性异常的判定比例 (默认 0.5)。
+     *
+     * 某平台本轮在 [该比例] 以上的音源上同时失败 (样本数 >= 3) 时,判定为「平台侧异常」,
+     * 本轮只记录不自动关闭该平台的解析 —— 这种情况更可能是测试曲目不可播、平台限流等外部原因,
+     * 而不是音源本身坏了。调低该值会更保守 (更多平台被暂缓处置), 调高会更激进。
+     */
+    'customSource.probe.systemicFailureRatio'?: number
   }
 }
