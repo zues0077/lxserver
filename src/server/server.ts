@@ -1212,7 +1212,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
     const pathname = urlObj.pathname
 
     // 轻量健康检查端点：Docker healthcheck 使用该路径，不经过播放器认证和静态资源路由。
+    // 加 ?probeDetail=1 时额外返回逐平台巡检明细（默认不返回，避免常规轮询被撑大）。
     if (req.method === 'GET' && pathname === '/health') {
+      const probeDetail = urlObj.searchParams.get('probeDetail') === '1'
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify({
         status: 'ok',
@@ -1222,7 +1224,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         trackedSourceResources: getTrackedTimerCount(),
         activeResources: getActiveResourceSummary(),
         sourceGuard: getSourceGuardStatus(),
-        sourceProbe: getSourceProbeStatus()
+        sourceProbe: getSourceProbeStatus(probeDetail)
       }))
       return
     }

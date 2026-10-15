@@ -165,6 +165,35 @@ module.exports = {
 }
 ```
 
+### 逐平台明细（排查用）
+
+默认 `/health` 只返回上面的汇总，不会带上每个平台的明细，避免被 Docker healthcheck 之类的
+高频轮询撑大。需要排查「某个平台为什么被判不可用」时，加上 `?probeDetail=1`：
+
+```bash
+curl -s 'http://<你的服务地址>/health?probeDetail=1' | jq '.sourceProbe.details'
+```
+
+```json
+[
+  {
+    "owner": "open",
+    "sourceId": "某某音源.js",
+    "sourceName": "某某音源",
+    "platform": "tx",
+    "status": "down",
+    "autoDisabled": true,
+    "failCount": 2,
+    "lastCheckAt": 1760538600000,
+    "lastOkAt": 0,
+    "lastError": "链接返回 403"
+  }
+]
+```
+
+明细按「失败优先」排序（`down` → 有失败计数 → 正常 → 跳过），`lastError` 就是判定依据，
+可直接看出是音源侧问题还是链接校验不通过。
+
 巡检同时作为后台任务注册到任务调度器，任务 ID 为 `custom_source_health_probe`，
 可在面板的任务列表里看到执行记录。
 

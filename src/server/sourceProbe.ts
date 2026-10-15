@@ -114,6 +114,22 @@ export interface ProbeRunResult {
   message: string
 }
 
+/** 单个「音源 × 平台」的巡检明细，用于排查某个平台为什么被判不可用 */
+export interface ProbePlatformDetail {
+  owner: string
+  sourceId: string
+  sourceName: string
+  platform: string
+  status: PlatformProbeStatus
+  /** 是否由本次巡检自动关闭（区别于用户在面板上手动关闭） */
+  autoDisabled: boolean
+  /** 连续失败次数（成功即归零） */
+  failCount: number
+  lastCheckAt: number
+  lastOkAt: number
+  lastError: string
+}
+
 export interface ProbeStatusSnapshot {
   enabled: boolean
   running: boolean
@@ -126,6 +142,8 @@ export interface ProbeStatusSnapshot {
   lastRun: ProbeRunResult | null
   /** 当前生效的「自动关闭」平台清单 */
   autoDisabledPlatforms: Array<{ owner: string; sourceId: string; sourceName: string; platform: string; since: number }>
+  /** 逐平台明细：仅在 includeDetail=true 时返回，避免 /health 常规轮询被撑大 */
+  details?: ProbePlatformDetail[]
 }
 
 // ============================ 配置 ============================
@@ -849,9 +867,10 @@ export function createSourceProbeTask(): ScheduledTask {
   return task
 }
 
-export function getSourceProbeStatus(): ProbeStatusSnapshot {
+export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot {
   const conf = configOf()
   const autoDisabledPlatforms: ProbeStatusSnapshot['autoDisabledPlatforms'] = []
+  const details: ProbePlatformDetail[] = []
   // 空间既可能来自「当前已加载的源」，也可能只有历史记录（源全被移除后），两边都覆盖
   const owners = new Set<string>(['open', ...registeredUsers()])
   for (const target of depsRef ? depsRef.listTargets() : []) owners.add(target.owner)
@@ -870,8 +889,31 @@ export function getSourceProbeStatus(): ProbeStatusSnapshot {
             since: platformState.lastCheckAt,
           })
         }
+        if (includeDetail) {
+          details.push({
+            owner,
+            sourceId,
+            sourceName: sourceState.name,
+            platform,
+            status: platformState.status,
+            autoDisabled: !!platformState.autoDisabled,
+            failCount: platformState.failCount || 0,
+            lastCheckAt: platformState.lastCheckAt || 0,
+            lastOkAt: platformState.lastOkAt || 0,
+            lastError: platformState.lastError || '',
+          })
+        }
       }
     }
+  }
+  if (includeDetail) {
+    // 便于排查：失败的排在前面，其次按连续失败次数降序
+    details.sort((a, b) => {
+      const rank = (d: ProbePlatformDetail) => (d.status === 'down' ? 0 : d.failCount > 0 ? 1 : d.status === 'skipped' ? 3 : 2)
+      const ra = rank(a)
+      const rb = rank(b)
+      return ra !== rb ? ra - rb : b.failCount - a.failCount
+    })
   }
   return {
     enabled: conf.enabled,
@@ -884,5 +926,6 @@ export function getSourceProbeStatus(): ProbeStatusSnapshot {
     lastRunAt,
     lastRun,
     autoDisabledPlatforms,
+    ...(includeDetail ? { details } : {}),
   }
 }
