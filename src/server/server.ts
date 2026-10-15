@@ -9347,7 +9347,12 @@ export const startServer = async (port: number, ip: string) => {
         return null
       }
       // [Fix] Strip source prefix from songmid (e.g. "tx_004bd0..." -> "004bd0...")
-      let songmid: string = songInfo.songmid || songInfo.id || ''
+      // 归一化为字符串：网易云等平台的 songmid 是纯数字（如 1903149553），
+      // 直接调用 .startsWith 会抛 "songmid.startsWith is not a function"，导致歌词抓取整体失败。
+      // 少数平台把 id 包在对象里（{ songmid }），这里一并展平。
+      let rawId: any = songInfo.songmid ?? songInfo.id ?? ''
+      if (rawId && typeof rawId === 'object') rawId = rawId.songmid ?? rawId.id ?? ''
+      let songmid: string = String(rawId)
       const sourcePrefix = `${source}_`
       if (songmid.startsWith(sourcePrefix)) songmid = songmid.slice(sourcePrefix.length)
       if (!songmid) {
