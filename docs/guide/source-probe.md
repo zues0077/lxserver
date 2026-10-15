@@ -93,7 +93,8 @@ module.exports = {
   // 单个平台单次探测超时（毫秒）
   'customSource.probe.timeoutMs': 15000,
 
-  // 探测并发数
+  // 探测并发数（音源多、平台数量大时调高：实测 36 个源 / 136 个平台在并发 2 下
+  // 单轮约 3.6 分钟，调高可明显缩短；上限 8）
   'customSource.probe.concurrency': 2,
 
   // 是否对返回链接做可达性校验
@@ -114,7 +115,8 @@ module.exports = {
   // 各平台测试曲目覆盖（见下一节）
   'customSource.probe.testSongs': {},
 
-  // 平台侧系统性异常判定比例：某平台在超过该比例的音源上同时失败即暂缓自动处置
+  // 平台侧系统性异常判定比例：某平台本轮在【达到或超过】该比例的音源上失败，
+  // 即判定为平台侧异常并暂缓自动处置
   // 调低 = 更保守（更多平台被暂缓），调高 = 更激进
   'customSource.probe.systemicFailureRatio': 0.5,
 }
