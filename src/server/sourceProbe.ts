@@ -729,6 +729,7 @@ const removeSource = (owner: string, sourceId: string, sourceName: string, reaso
     trashedTo,
   })
   console.warn(`[音源巡检] ⚠ 已移除音源: ${sourceName} (${sourceId}) —— ${reason}${trashedTo ? `（脚本已移至 ${TRASH_DIR}/ 可恢复）` : ''}`)
+  syncLog.warn(`[音源巡检] ⚠ 已移除音源: ${sourceName} (${sourceId}) —— ${reason}${trashedTo ? `（脚本已移至 ${TRASH_DIR}/ 可恢复）` : ''}`)
   return true
 }
 
@@ -749,6 +750,8 @@ export function startSourceProbe(deps: ProbeDeps): void {
     return
   }
   console.log(`[音源巡检] 已启用：间隔=${conf.intervalMinutes} 分钟，连续失败 ${conf.failThreshold} 次判定不可用，` +
+    `自动关闭平台=${conf.autoDisablePlatform ? '开' : '关'}，全平台失效自动移除=${conf.autoRemoveSource ? '开' : '关'}（${conf.removeMode}）`)
+  syncLog.info(`[音源巡检] 已启用：间隔=${conf.intervalMinutes} 分钟，连续失败 ${conf.failThreshold} 次判定不可用，` +
     `自动关闭平台=${conf.autoDisablePlatform ? '开' : '关'}，全平台失效自动移除=${conf.autoRemoveSource ? '开' : '关'}（${conf.removeMode}）`)
 }
 
@@ -933,6 +936,7 @@ export async function runSourceProbe(
             result.restored.push(`${job.target.name}/${job.platform}`)
             audit(job.target.owner, 'restore-platform', { sourceId: job.target.id, sourceName: job.target.name, platform: job.platform })
             console.log(`[音源巡检] ✓ 平台已恢复，自动重新开启: ${job.target.name} / ${job.platform}`)
+            syncLog.info(`[音源巡检] ✓ 平台已恢复，自动重新开启: ${job.target.name} / ${job.platform}`)
           }
           platformState.status = 'ok'
         } else {
@@ -995,6 +999,7 @@ export async function runSourceProbe(
             platform, failCount: ps.failCount, error: ps.lastError,
           })
           console.warn(`[音源巡检] ⚠ 已关闭平台解析: ${target.name} / ${platform}（连续失败 ${ps.failCount} 次，原因：${ps.lastError}）`)
+          syncLog.warn(`[音源巡检] ⚠ 已关闭平台解析: ${target.name} / ${platform}（连续失败 ${ps.failCount} 次，原因：${ps.lastError}）`)
         }
       }
     }
@@ -1044,10 +1049,27 @@ export async function runSourceProbe(
 
     lastRun = result
     console.log(`[音源巡检] 本轮完成（${result.durationMs}ms）：${result.message}`)
+    // 同时写入 log4js（app.log）：console 只进 stdout，容器外看不到；
+    // 这样管理面板的日志查看器与 /api/logs?type=app 里都能追溯巡检历史
+    syncLog.info(`[音源巡检] 本轮完成（${result.durationMs}ms）：${result.message}`)
+    if (result.newlyDisabled.length) {
+      syncLog.warn(`[音源巡检] 自动关闭平台：${result.newlyDisabled.join('、')}`)
+    }
+    if (result.restored.length) {
+      syncLog.info(`[音源巡检] 自动恢复平台：${result.restored.join('、')}`)
+    }
+    if (result.removed.length) {
+      syncLog.warn(`[音源巡检] 自动移除音源：${result.removed.join('、')}`)
+    }
+    if (result.suspectPlatforms.length) {
+      syncLog.warn(`[音源巡检] 疑似平台侧异常（仅报告、不处置）：` +
+        result.suspectPlatforms.map(s => `${s.platform} ${s.failed}/${s.checked} 失败`).join('、'))
+    }
     return result
   } catch (e: any) {
     const message = `巡检异常: ${(e && e.message) || e}`
     console.error(`[音源巡检] ${message}`)
+    syncLog.error(`[音源巡检] ${message}`)
     const failed: ProbeRunResult = { ...empty, durationMs: Date.now() - startedAt, message }
     lastRun = failed
     return failed
