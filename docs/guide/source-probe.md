@@ -44,14 +44,18 @@
 任意一首能解析成功就认为该平台可用。这样「恰好选到一首无版权/需会员的歌」不会变成平台的锅。
 
 **③ 平台侧系统性异常保护（关键）。** 一轮结束后会统计每个平台的整体失败率：
-若某平台在 **≥ 3 个音源** 上被探测、且失败率 **≥ `systemicFailureRatio`（默认 0.5）**，
-就判定为「平台侧系统性异常」——这种情况几乎都是测试曲目不可播、平台限流/风控等外部原因，
-而不是某个音源坏了。此时本轮对这些平台：
+若某平台 **失败率 ≥ `systemicFailureRatio`（默认 0.5）**，就判定为「平台侧系统性异常」——
+这种情况几乎都是测试曲目不可播、平台限流/风控等外部原因，而不是某个音源坏了。
+此时本轮对这些平台：
 
 - 状态记为 `unknown`（不计入「不可用」）；
 - **不自动关闭**任何音源的该平台；
 - 因为状态不是 `down`，也**不会触发「全平台失效 → 移除音源」**；
 - 在 `/health` 的 `suspectPlatforms` 里列出来，并在日志中告警，交由人工判断。
+
+> 这里刻意**不设「最少样本数」门槛**。小音源库（某平台只有 1~2 个音源声明）恰恰最经不起误伤，
+> 而单个样本失败本来也无法区分「平台坏了」和「测试曲目不可播」——证据不足时宁可只报告、不自动处置。
+> 代价是：某平台若真的只剩一两个音源且确实全坏，会停留在 `unknown` 不自动关闭，需要人工确认后再关。
 
 这条保护来自一次真实踩坑：早期版本在 NAS 上用真实音源库跑巡检时，
 因为探测用的 `wy` 测试曲目恰好不可播，31 个声明了 `wy` 的音源里有 28 个被判定失败 ——
@@ -185,15 +189,18 @@ module.exports = {
     "lastRunAt": 1760538600000,
     "lastRun": {
       "sourcesChecked": 36,
-      "platformsChecked": 152,
-      "platformsOk": 138,
-      "platformsDown": 14,
-      "platformsSkipped": 6,
-      "newlyDisabled": ["某某音源/tx"],
+      "platformsChecked": 136,
+      "platformsOk": 50,
+      "platformsDown": 12,
+      "platformsSkipped": 9,
+      "newlyDisabled": ["全豆要/tx", "长青SVIP音源/tx", "幻音音源/tx"],
       "restored": [],
       "removed": [],
-      "suspectPlatforms": [{ "platform": "wy", "checked": 31, "failed": 28 }],
-      "message": "巡检 36 个音源的 152 个平台：可用 138、不可用 14、跳过 6；新关闭 1 个平台；1 个平台疑似平台侧异常已暂缓处置"
+      "suspectPlatforms": [
+        { "platform": "wy", "checked": 31, "failed": 28, "ok": 3 },
+        { "platform": "mg", "checked": 22, "failed": 16, "ok": 6 }
+      ],
+      "message": "巡检 36 个音源的 136 个平台：可用 50、不可用 12、跳过 9；新关闭 12 个平台；4 个平台疑似平台侧异常已暂缓处置"
     },
     "autoDisabledPlatforms": [
       { "owner": "open", "sourceId": "某某音源.js", "sourceName": "某某音源", "platform": "tx", "since": 1760538600000 }
@@ -250,5 +257,8 @@ curl -s 'http://<你的服务地址>/health?probeDetail=1' | jq '.sourceProbe.de
 - 巡检会**真实发起解析请求**，间隔别设太短（默认 3 小时），否则会给音源接口带来不必要的压力和风控风险。
 - 关闭自动移除（`customSource.probe.autoRemoveSource: false`）时，全平台失效的音源只会被关闭全部平台，
   不会被删除——只想让它安静下来、不想动文件的场景可以这样配。
+- 判定「全平台失效」时要求**每个平台都有明确的失败结论**：任何平台处于 `skipped`（用户在面板上手关、
+  或无测试曲目可用）或 `unknown`（疑似平台侧异常被保护）都视为证据不足，**不删音源**。
+  也就是说删除的前提至少有一个平台被明确判为 `down`，其余平台也全都 `down`。
 - 首次启动（或刚开启功能时）会跑一轮全量探测，`/health` 的 `lastRun` 会显示结果；
   探测过程中日志前缀为 `[音源巡检]`。

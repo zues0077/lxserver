@@ -120,7 +120,7 @@ export interface ProbeRunResult {
    * 平台侧限流等外部原因，而不是某个音源坏了 —— 自动关闭/删除会造成大面积误伤，
    * 因此本轮只记录、不处置，交由使用者判断。
    */
-  suspectPlatforms: Array<{ platform: string; checked: number; failed: number }>
+  suspectPlatforms: Array<{ platform: string; checked: number; failed: number; ok: number }>
   message: string
 }
 
@@ -174,8 +174,14 @@ interface ProbeConfig {
   systemicFailureRatio: number
 }
 
-/** 判定「平台侧系统性异常」的最少样本量：声明该平台的音源太少时不下此结论 */
-const SYSTEMIC_MIN_SAMPLES = 3
+/**
+ * 判定「平台侧系统性异常」的默认比例：某平台本轮在 [该比例] 以上的音源上失败即视为平台侧问题。
+ *
+ * 刻意不设「最少样本数」门槛：小音源库（某平台只有 1~2 个音源声明）恰恰最经不起误伤，
+ * 而单个样本失败本来也无法区分「平台坏了」和「测试曲目不可播」——
+ * 证据不足时宁可只报告、不自动处置。
+ */
+const DEFAULT_SYSTEMIC_RATIO = 0.5
 /** 单个平台每轮最多尝试几首测试曲目（第一首失败后换歌重试，降低单曲失灵的误判） */
 const MAX_SONG_ATTEMPTS = 3
 
@@ -203,7 +209,7 @@ const configOf = (): ProbeConfig => {
     removeMode: c['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash',
     probeOnNewSource: c['customSource.probe.probeOnNewSource'] !== false,
     testSongs: rawTestSongs && typeof rawTestSongs === 'object' && !Array.isArray(rawTestSongs) ? rawTestSongs : {},
-    systemicFailureRatio: ratioNumber(c['customSource.probe.systemicFailureRatio'], 0.5),
+    systemicFailureRatio: ratioNumber(c['customSource.probe.systemicFailureRatio'], DEFAULT_SYSTEMIC_RATIO),
   }
 }
 
@@ -886,25 +892,26 @@ export async function runSourceProbe(
     // 同一个平台如果在「多数音源」上同时失败，那么更可能是测试曲目不可播、平台侧限流/风控等外部原因，
     // 而不是某个音源自己坏了。此时若继续按「连续失败达阈值」自动关闭，会一次性误伤大量可用音源，
     // 甚至因为「全部平台都失败」把这些音源整个删掉。因此这类平台本轮只记录、不处置，交由人工判断。
-    const platformStats = new Map<string, { checked: number; failed: number }>()
+    const platformStats = new Map<string, { checked: number; failed: number; ok: number }>()
     for (const job of jobs) {
       const ps = statusFor(job.target.owner).sources[job.target.id].platforms[job.platform]
-      const stat = platformStats.get(job.platform) || { checked: 0, failed: 0 }
+      const stat = platformStats.get(job.platform) || { checked: 0, failed: 0, ok: 0 }
       stat.checked++
       if (!ps || ps.failCount > 0) stat.failed++
+      else stat.ok++
       platformStats.set(job.platform, stat)
     }
     const suspectPlatforms = new Set<string>()
     for (const [platform, stat] of platformStats) {
-      if (stat.checked >= SYSTEMIC_MIN_SAMPLES && stat.failed / stat.checked >= conf.systemicFailureRatio) {
+      if (stat.checked > 0 && stat.failed / stat.checked >= conf.systemicFailureRatio) {
         suspectPlatforms.add(platform)
-        result.suspectPlatforms.push({ platform, checked: stat.checked, failed: stat.failed })
+        result.suspectPlatforms.push({ platform, checked: stat.checked, failed: stat.failed, ok: stat.ok })
       }
     }
     if (suspectPlatforms.size) {
       result.suspectPlatforms.sort((a, b) => b.failed / b.checked - a.failed / a.checked)
-      console.warn('[音源巡检] ⚠ 以下平台在多数音源上同时失败，疑似平台侧问题（测试曲目不可播/平台限流），' +
-        `本轮暂缓自动处置：${result.suspectPlatforms.map(s => `${s.platform} ${s.failed}/${s.checked}`).join('、')}`)
+      console.warn('[音源巡检] ⚠ 以下平台在过半音源上同时失败，疑似平台侧问题（测试曲目不可播/平台限流），' +
+        `本轮暂缓自动处置：${result.suspectPlatforms.map(s => `${s.platform}(失败${s.failed}/探测${s.checked}，可用${s.ok})`).join('、')}`)
     }
 
     // ---- 落定每个平台的结论并执行自动关闭 ----
