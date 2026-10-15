@@ -25,6 +25,7 @@ import formidable from 'formidable'
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
 import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount } from './userApi'
+import { getSourceGuardStatus } from './sourceGuard'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
 import * as customMusicManager from './customMusicManager'
@@ -1218,7 +1219,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         customSourceCount: getLoadedApisCount(),
         lastReloadDurationMs: getLastReloadDurationMs(),
         trackedSourceResources: getTrackedTimerCount(),
-        activeResources: getActiveResourceSummary()
+        activeResources: getActiveResourceSummary(),
+        sourceGuard: getSourceGuardStatus()
       }))
       return
     }

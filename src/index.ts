@@ -902,6 +902,22 @@ cleanOldConfigBackups()
 const configBackupTimer = setInterval(cleanOldConfigBackups, 24 * 60 * 60 * 1000)
 if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
 
+// [自检护栏] 启动自定义源脚本自检。
+// 静态特征扫描在每次音源加载时生效；这里的运行期采样负责发现「加载成功但持续空转」的脚本，
+// 空闲 CPU 持续超标时逐个卸载候选音源做归因（若确认则保持卸载，未确认立即恢复）。
+// 依赖注入而非直接 import，既避免循环依赖，也保证模块加载顺序不变。
+{
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { startSourceGuard } = require('@/server/sourceGuard')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { getLoadedApiRefs, unloadSource, reloadSingleSource } = require('@/server/userApi')
+  startSourceGuard({
+    listLoaded: getLoadedApiRefs,
+    unload: unloadSource,
+    reload: reloadSingleSource,
+  })
+}
+
 startServer(global.lx.config.port, '0.0.0.0')
 
 // 监控配置文件变动以实现热重载 (由于 nodemon 已忽略该文件)

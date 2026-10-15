@@ -1,6 +1,11 @@
 import { VM } from 'vm2'
 import * as fs from 'fs'
 import * as path from 'path'
+import {
+    beginSourceReload,
+    markSourceBusy,
+    reviewSourceScript,
+} from './sourceGuard'
 
 import needle from 'needle'
 import * as crypto from 'crypto'
@@ -129,6 +134,24 @@ export function getTrackedTimerCount() {
 /** 返回已成功加载的 API 源数量，用于状态展示与健康检查。 */
 export function getLoadedApisCount() {
     return loadedApis.size
+}
+
+/**
+ * 列出当前已加载的音源。自检护栏的复检归因需要知道「现在都有谁在跑」，
+ * 才能逐个卸载并观察 CPU 是否回落。
+ */
+export function getLoadedApiRefs(): Array<{ owner: string; id: string; name: string }> {
+    const refs: Array<{ owner: string; id: string; name: string }> = []
+    for (const api of loadedApis.values()) {
+        const info = api?.info
+        if (!info?.id) continue
+        refs.push({
+            owner: String(info.owner || 'open'),
+            id: String(info.id),
+            name: String(info.name || info.id),
+        })
+    }
+    return refs
 }
 
 export function getApiStatus(owner: string, id: string): ApiStatusInfo | undefined {
@@ -507,6 +530,12 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
         clearTimeout: trackedClearTimer,
         setInterval: trackedSetInterval,
         clearInterval: trackedClearTimer,
+        // 未被登记的调度原语同样会造成「卸载后仍在空转」：部分混淆脚本用
+        // setImmediate / queueMicrotask 做自旋，这里统一映射到可追踪的定时器，
+        // 使其在实例卸载时能被一并清理（与 setTimeout 同一登记集合）。
+        setImmediate: (fn: Function, ...args: any[]) => trackedSetTimeout(() => fn(...args), 0),
+        clearImmediate: trackedClearTimer,
+        queueMicrotask: (fn: Function) => trackedSetTimeout(() => fn(), 0),
         Buffer,
         URL,
         URLSearchParams,
@@ -988,7 +1017,7 @@ async function loadOneSource(
     dirPath: string,
     owner: string,
     source: any,
-    stats: { loadedCount: number }
+    stats: { loadedCount: number; isolatedCount?: number }
 ): Promise<{ needsSave: boolean }> {
     const apiKey = `${owner}_${source.id}`
 
@@ -1010,6 +1039,30 @@ async function loadOneSource(
     try {
         const script = fs.readFileSync(scriptPath, 'utf-8')
         const metadata = extractMetadata(script)
+
+        // [自检护栏] 加载前体检：命中 A 级特征（反调试自旋 / 空死循环 / 沙箱逃逸）时按策略隔离。
+        // 隔离只是内存态跳过加载，不改写 sources.json、不删除脚本文件；
+        // 脚本内容一更新（指纹变化）隔离会自动解除。
+        const guardDecision = reviewSourceScript(
+            { owner, id: source.id, name: metadata.name || source.name },
+            script
+        )
+        if (guardDecision.flag) {
+            const guardReasons = guardDecision.flag.reasons.join('+')
+            if (guardDecision.isolate) {
+                console.warn(`[自检护栏] ⚠ 命中高危特征，已隔离: ${guardDecision.flag.name} (${source.id}) 原因=${guardDecision.reason}`)
+            } else if (guardDecision.flag.level === 'A') {
+                console.warn(`[自检护栏] ⚠ 命中高危特征（告警模式，未隔离）: ${guardDecision.flag.name} (${source.id}) 原因=${guardReasons}`)
+            } else {
+                console.warn(`[自检护栏] ⓘ 命中可疑特征（仅标记，不隔离）: ${guardDecision.flag.name} (${source.id}) 原因=${guardReasons}`)
+            }
+        }
+        if (guardDecision.isolate) {
+            apiStatus.set(apiKey, { status: 'failed', error: `已被自检护栏隔离（${guardDecision.reason}）` })
+            unloadLoadedApi(apiKey)
+            stats.isolatedCount = (stats.isolatedCount || 0) + 1
+            return { needsSave: false }
+        }
 
         const result = await loadUserApi({
             id: source.id,
@@ -1061,7 +1114,7 @@ async function loadOneSource(
 }
 
 // 辅助函数：加载指定目录下的源
-async function loadSourcesFromDir(dirPath: string, owner: string, stats: { loadedCount: number }) {
+async function loadSourcesFromDir(dirPath: string, owner: string, stats: { loadedCount: number; isolatedCount?: number }) {
     const metaPath = path.join(dirPath, 'sources.json')
     if (!fs.existsSync(metaPath)) {
         return
@@ -1142,6 +1195,8 @@ export async function reloadSingleSource(owner: string, sourceId: string): Promi
     // 保留当前有效优先级；替换实例后再恢复 Map 顺序，避免单源更新意外改变回退顺序
     const previousOrder = Array.from(loadedApis.values()).map(api => api?.info?.id).filter(Boolean)
 
+    // [自检护栏] 增量重载同样属于正常负载，标记忙碌避免误判
+    markSourceBusy()
     lastReloadMap.set(owner, Date.now())
 
     // 先卸载旧实例：既避免加载失败时残留旧脚本，也保证定时器被释放
@@ -1325,6 +1380,10 @@ async function doInitUserApis(targetUser?: string) {
     const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
     const sourceRoot = path.join(dataPath, 'users', 'source')
     const stats = { loadedCount: 0 }
+
+    // [自检护栏] 新一轮全量加载：清空上一轮的标记与隔离快照，并标记为「忙碌」，
+    // 避免加载动作自身的 CPU 开销被后续的采样判定误认为空闲热点。
+    beginSourceReload()
 
     // 更新最后加载时间
     if (targetUser) {
