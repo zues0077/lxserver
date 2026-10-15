@@ -150,6 +150,8 @@ export interface ProbeStatusSnapshot {
   removeMode: 'trash' | 'delete'
   lastRunAt: number | null
   lastRun: ProbeRunResult | null
+  /** 已排队、等待巡检的「新增音源」数量（撞上正在跑的轮次时会排队，不会丢） */
+  pendingNewSources: number
   /** 当前生效的「自动关闭」平台清单 */
   autoDisabledPlatforms: Array<{ owner: string; sourceId: string; sourceName: string; platform: string; since: number }>
   /** 逐平台明细：仅在 includeDetail=true 时返回，避免 /health 常规轮询被撑大 */
@@ -753,15 +755,69 @@ export function startSourceProbe(deps: ProbeDeps): void {
 export function stopSourceProbe(): void {
   if (scheduledTimer) { clearTimeout(scheduledTimer); scheduledTimer = null }
   if (periodicTimer) { clearInterval(periodicTimer); periodicTimer = null }
+  if (pendingNewTimer) { clearTimeout(pendingNewTimer); pendingNewTimer = null }
+}
+
+/** 「新增音源立即检测」的聚合窗口：窗口内多次上传/导入合并成一轮，而不是每个源各跑一轮 */
+const NEW_SOURCE_DEBOUNCE_MS = 3000
+/**
+ * 新音源撞上「正在巡检」时的兜底重排间隔。
+ * 正常路径是等本轮跑完由 finally 唤醒，这个定时器只为「finally 因意外没走到」兜底。
+ */
+const NEW_SOURCE_FALLBACK_MS = 60000
+
+/** 待巡检的新音源（按 owner_id 去重，批量导入只会合并成一轮） */
+const pendingNewSources = new Map<string, { owner: string; id: string }>()
+let pendingNewTimer: NodeJS.Timeout | null = null
+
+/**
+ * 排队并（延迟）执行一批新音源的巡检。
+ *
+ * 关键点：`runSourceProbe` 有全局 `running` 锁，撞上一轮巡检（可能跑几分钟）时**只会返回
+ * 「跳过本次」**。如果此时把这一批源当作已处理，它们就会**被静默丢弃**，
+ * 一直等到下一轮周期巡检（默认 3 小时）才被探到 —— 所以这里发现锁被占时
+ * 把这批源留在队列里，等本轮结束后重排。
+ */
+function armNewSourceTimer(delayMs: number): void {
+  if (pendingNewTimer) return
+  pendingNewTimer = setTimeout(() => {
+    pendingNewTimer = null
+    if (!pendingNewSources.size) return
+
+    // 上一轮还在跑：留在队列里，等本轮结束（见 wakePendingNewSources）
+    if (running) {
+      armNewSourceTimer(NEW_SOURCE_FALLBACK_MS)
+      return
+    }
+
+    const batch = Array.from(pendingNewSources.values())
+    pendingNewSources.clear()
+    void runSourceProbe({ only: batch, firstProbe: true })
+      .catch(err => syncLog.warn('[音源巡检] 新增音源巡检失败:', err?.message || err))
+      .finally(() => {
+        // 探测期间可能又有新源进来（其定时器被 running 挡回），兜底唤醒一次
+        if (pendingNewSources.size) wakePendingNewSources()
+      })
+  }, delayMs)
+  if (typeof (pendingNewTimer as any).unref === 'function') (pendingNewTimer as any).unref()
+}
+
+/** 一轮巡检结束 → 唤醒排队中的新音源：撤掉兜底定时器，改挂短延迟立即执行 */
+function wakePendingNewSources(): void {
+  if (!pendingNewSources.size) return
+  if (pendingNewTimer) { clearTimeout(pendingNewTimer); pendingNewTimer = null }
+  armNewSourceTimer(NEW_SOURCE_DEBOUNCE_MS)
 }
 
 /**
  * 执行一轮巡检。
  * @param options.owner 只巡检该空间（不传则全部空间）
  * @param options.only  只巡检指定的一批音源（用于「新添加的音源立即检测」，支持批量导入合并）
+ * @param options.firstProbe 新增音源的首次探测：每个平台只试 1 首候选曲目（快），
+ *        多曲目重试留给后续周期巡检做确认 —— 批量导入时不至于把单轮拖长数倍
  */
 export async function runSourceProbe(
-  options: { owner?: string; only?: Array<{ owner: string; id: string }> } = {},
+  options: { owner?: string; only?: Array<{ owner: string; id: string }>; firstProbe?: boolean } = {},
 ): Promise<ProbeRunResult> {
   const startedAt = Date.now()
   const empty: ProbeRunResult = {
@@ -837,7 +893,9 @@ export async function runSourceProbe(
           result.platformsSkipped++
           continue
         }
-        jobs.push({ target, platform, songs })
+        // 新增音源的首次探测只试 1 首候选曲目：批量导入时不至于被「每平台 3 首重试」放大数倍；
+        // 首轮失败只是累计 failCount（默认要连续 2 轮），真正的定罪与重试留给后续周期巡检
+        jobs.push({ target, platform, songs: options.firstProbe ? songs.slice(0, 1) : songs })
       }
     }
 
@@ -996,12 +1054,10 @@ export async function runSourceProbe(
   } finally {
     running = false
     clearInterval(busyTicker)
+    // 轮次结束是唤醒排队中「新音源」的可靠时机（它们在探测期间被 running 挡了回去）
+    wakePendingNewSources()
   }
 }
-
-/** 待巡检的新音源（3 秒聚合窗口内合并批量导入，避免每个源各跑一轮） */
-const pendingNewSources = new Map<string, { owner: string; id: string }>()
-let pendingNewTimer: NodeJS.Timeout | null = null
 
 /**
  * 新添加的音源 → 立即巡检一次。
@@ -1013,17 +1069,7 @@ export function probeNewSource(owner: string, sourceId: string): void {
   if (!conf.enabled || !conf.probeOnNewSource || !depsRef) return
 
   pendingNewSources.set(`${owner}_${sourceId}`, { owner, id: sourceId })
-  if (pendingNewTimer) return
-
-  pendingNewTimer = setTimeout(() => {
-    pendingNewTimer = null
-    const batch = Array.from(pendingNewSources.values())
-    pendingNewSources.clear()
-    if (!batch.length) return
-    void runSourceProbe({ only: batch })
-      .catch(err => syncLog.warn('[音源巡检] 新增音源巡检失败:', err?.message || err))
-  }, 3000)
-  if (typeof (pendingNewTimer as any).unref === 'function') (pendingNewTimer as any).unref()
+  armNewSourceTimer(NEW_SOURCE_DEBOUNCE_MS)
 }
 
 /** 注册到后台任务调度器 */
@@ -1108,6 +1154,7 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
     removeMode: conf.removeMode,
     lastRunAt,
     lastRun,
+    pendingNewSources: pendingNewSources.size,
     autoDisabledPlatforms,
     ...(includeDetail ? { details } : {}),
   }
