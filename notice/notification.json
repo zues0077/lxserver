@@ -18,9 +18,9 @@
         }
     },
     {
-        "comment": "=== 版本更新 v2.1.3 ===",
+        "comment": "=== 版本更新 v2.1.3（已归档：版本号重置为 1.5.x 线，此条目会让 ≤1.5.3 的客户端误报「发现新版本 v2.1.3」） ===",
         "id": "update_v2_1_3",
-        "status": "active",
+        "status": "archived",
         "type": "version",
         "logic": {
             "target_version": "v2.1.3",

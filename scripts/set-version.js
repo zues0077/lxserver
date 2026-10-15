@@ -49,13 +49,56 @@ console.log(`✓ package.json            ${oldVersion} → ${version}`);
 for (const file of configPaths) {
   if (!fs.existsSync(file)) continue;
   const src = fs.readFileSync(file, 'utf-8');
-  const next = src.replace(/(\n\s*version:\s*)'[^']*'(\s*,)/, `$1'v${version}'$2`);
-  if (next === src) {
+  const re = /(\n\s*version:\s*)'[^']*'(\s*,)/;
+  if (!re.test(src)) {
     console.warn(`⚠ ${path.relative(root, file)} 里没找到 version 字段，请检查格式`);
+    continue;
+  }
+  const next = src.replace(re, `$1'v${version}'$2`);
+  if (next === src) {
+    console.log(`✓ ${path.relative(root, file).padEnd(24)} 已是 v${version}，无需修改`);
     continue;
   }
   fs.writeFileSync(file, next, 'utf-8');
   console.log(`✓ ${path.relative(root, file).padEnd(24)} v${oldVersion} → v${version}`);
+}
+
+// ---- 更新通知一致性检查 ----
+// 通知引擎按 `compareVersions(当前版本, target) >= 0` 判断 operator '<' 的条目是否要弹窗。
+// 若存在 target 高于新版本的活跃更新通知（典型场景：版本号从 2.x 回退到 1.5.x），
+// 新版本客户端会误弹「发现新版本 v2.1.3」。这里自动把它们归档。
+function cmpVersion(a, b) {
+  const pa = String(a).replace(/^v/i, '').split(/[.+-]/).map(x => parseInt(x, 10) || 0);
+  const pb = String(b).replace(/^v/i, '').split(/[.+-]/).map(x => parseInt(x, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+const noticePath = path.join(root, 'notice', 'notification.json');
+if (fs.existsSync(noticePath)) {
+  try {
+    const notices = JSON.parse(fs.readFileSync(noticePath, 'utf-8'));
+    let archived = 0;
+    for (const item of Array.isArray(notices) ? notices : []) {
+      if (item && item.type === 'version' && item.status === 'active'
+          && item.logic && item.logic.target_version
+          && cmpVersion(item.logic.target_version, version) > 0) {
+        item.status = 'archived';
+        archived++;
+        console.log(`✓ notice/notification.json  通知 ${item.id}（target ${item.logic.target_version} > ${version}）已自动归档，避免误报升级`);
+      }
+    }
+    if (archived > 0) {
+      fs.writeFileSync(noticePath, JSON.stringify(notices, null, 4) + '\n', 'utf-8');
+    } else {
+      console.log(`✓ notice/notification.json  检查通过：没有 target 高于 v${version} 的活跃更新通知`);
+    }
+  } catch (e) {
+    console.warn(`⚠ notice/notification.json 检查失败: ${e.message}`);
+  }
 }
 
 console.log('\n接下来：');

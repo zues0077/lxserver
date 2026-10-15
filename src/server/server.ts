@@ -1300,6 +1300,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         pathname.startsWith(`${normalizedPrefix}/img/`) ||
         pathname === `${normalizedPrefix}/manifest.json` ||
         pathname === `${normalizedPrefix}/sw.js` ||
+        // 版本更新通知配置：前端 notification-engine 的本地优先源，需匿名可读
+        pathname === '/notice/notification.json' ||
         isLegacyPlayerAsset
 
       // 认证检查

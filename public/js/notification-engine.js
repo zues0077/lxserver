@@ -641,6 +641,21 @@
     }
 
     async function checkUpdates(isManual = false) {
+        // [本地优先] 先读镜像自带的 /notice/notification.json（本 fork 的版本线与上游分叉后
+        // 各自发布，在线 flag 源仍指向上游项目，会对低版本号误报「发现新版本」；
+        // 本地源读取成功即以其为准，失败或为空时才回落在线源）。
+        try {
+            const localRes = await fetch('/notice/notification.json?t=' + Date.now(), { cache: 'no-store' });
+            if (localRes.ok) {
+                const localData = await localRes.json();
+                const hasItems = Array.isArray(localData) ? localData.some(x => x && x.type) : !!(localData && localData.type);
+                if (hasItems) {
+                    await handlePayload(localData, 'local_notice', isManual);
+                    return;
+                }
+            }
+        } catch (e) { /* 本地源不可用或不是合法 JSON，继续走在线源 */ }
+
         // 如果是手动检查，增加一个主动探测逻辑来判断 PostHog 是否被拦截
         let adBlocked = !!window._ph_blocked;
         if (isManual && !adBlocked) {
