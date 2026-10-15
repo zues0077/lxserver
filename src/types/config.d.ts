@@ -518,5 +518,62 @@ declare namespace LX {
      * 是否允许运行 VM 模式自定义源脚本
      */
     'system.allowUnsafeVM'?: boolean
+
+    // ===================== 自定义源「平台可用性巡检」 =====================
+    /**
+     * 巡检总开关 (默认 true)。关闭后不再定时探测音源平台可用性。
+     */
+    'customSource.probe.enabled'?: boolean
+    /**
+     * 巡检间隔(分钟, 默认 180)。定时对「剩余可用平台」重新探测。
+     */
+    'customSource.probe.intervalMinutes'?: number
+    /**
+     * 连续失败多少次才判定某平台不可用 (默认 2),避免网络抖动误伤。
+     */
+    'customSource.probe.failThreshold'?: number
+    /**
+     * 单个平台单次探测超时(毫秒, 默认 15000)。
+     */
+    'customSource.probe.timeoutMs'?: number
+    /**
+     * 探测并发数 (默认 2),防止同时解析把 CPU/网络打满。
+     */
+    'customSource.probe.concurrency'?: number
+    /**
+     * 是否对音源返回的播放链接做可达性校验 (默认 true)。
+     * 开启更准(能识别返回了失效链接的平台),但每平台多一次网络请求。
+     */
+    'customSource.probe.verifyLink'?: boolean
+    /**
+     * 平台不可用时是否自动关闭该平台的解析 (默认 true)。写入 states.json 的 disabledSources。
+     */
+    'customSource.probe.autoDisablePlatform'?: boolean
+    /**
+     * 某音源全部平台都不可用时,是否自动移除该音源 (默认 true)。
+     */
+    'customSource.probe.autoRemoveSource'?: boolean
+    /**
+     * 自动移除音源的方式 (默认 'trash')。'trash' 移入同目录 .trash/ 便于恢复,'delete' 直接删除。
+     */
+    'customSource.probe.removeMode'?: 'trash' | 'delete'
+    /**
+     * 新添加(上传/导入)的音源是否立即巡检一次 (默认 true)。
+     */
+    'customSource.probe.probeOnNewSource'?: boolean
+    /**
+     * 各平台探测用测试曲目覆盖,如 { wy: { songmid: '1903149553', name: '无名的人', singer: '毛不易' } }。
+     * 未配置的平台会优先使用用户缓存中实际播放过的同平台歌曲,再退化为内置搜索。
+     */
+    'customSource.probe.testSongs'?: Record<string, {
+      songmid: string
+      name?: string
+      singer?: string
+      hash?: string
+      albumId?: string
+      copyrightId?: string
+      strMediaMid?: string
+      interval?: string
+    }>
   }
 }

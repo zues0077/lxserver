@@ -121,6 +121,22 @@ const config: LX.Config = {
   'artist.maxFetchPages': 20, // 歌手歌曲最大抓取页数
   'cache.namingPattern': 'simple', // 缓存命名规则
   'system.allowUnsafeVM': false, // 是否允许运行 VM 模式自定义源脚本
+
+  // ===== 自定义源「平台可用性巡检」 =====
+  // 新添加的音源会立即逐个平台探测；之后按 intervalMinutes 定时对「剩余可用平台」复检。
+  // 平台连续 failThreshold 次失败 → 自动写入 states.json 的 disabledSources 关闭该平台解析；
+  // 某音源全部平台都不可用 → 按 removeMode 自动移除该音源（默认移入 .trash，可恢复）。
+  'customSource.probe.enabled': true, // 巡检总开关
+  'customSource.probe.intervalMinutes': 180, // 复检间隔（分钟）
+  'customSource.probe.failThreshold': 2, // 连续失败多少次判定不可用
+  'customSource.probe.timeoutMs': 15000, // 单平台单次探测超时（毫秒）
+  'customSource.probe.concurrency': 2, // 探测并发数
+  'customSource.probe.verifyLink': true, // 是否对返回链接做可达性校验
+  'customSource.probe.autoDisablePlatform': true, // 不可用是否自动关闭该平台
+  'customSource.probe.autoRemoveSource': true, // 全平台不可用是否自动移除音源
+  'customSource.probe.removeMode': 'trash', // 移除方式：trash 移入回收站 / delete 直接删除
+  'customSource.probe.probeOnNewSource': true, // 新增音源是否立即巡检
+  'customSource.probe.testSongs': {}, // 各平台测试曲目覆盖（留空则用缓存/内置搜索）
 }
 
 export default config

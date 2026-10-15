@@ -4,6 +4,7 @@ import { syncLog } from '@/utils/log4js'
 import { ScheduledTask, TaskExecutionResult } from './task/types'
 import { createNetworkListTask } from './task/networkListTask'
 import { createSyncDownloadTask, syncDownloadForAllUsers } from './task/syncDownloadTask'
+import { createSourceProbeTask } from './sourceProbe'
 
 export * from './task/types'
 export { parseIntervalMs, checkAllUsersNetworkLists } from './task/networkListTask'
@@ -199,6 +200,11 @@ export const startScheduler = () => {
   // 注册歌曲同步下载任务（从 task/syncDownloadTask.ts 加载）
   const syncDownloadTask = createSyncDownloadTask()
   registerTask(syncDownloadTask)
+
+  // 注册自定义源平台可用性巡检任务（从 sourceProbe.ts 加载）
+  // 关闭（customSource.probe.enabled = false）时任务仍会注册但 enabled=false，面板上可见、可单独改间隔
+  const sourceProbeTask = createSourceProbeTask()
+  registerTask(sourceProbeTask)
 
   syncLog.info('[任务调度] 后台任务调度器已启动')
 

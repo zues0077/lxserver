@@ -158,6 +158,39 @@ export function getApiStatus(owner: string, id: string): ApiStatusInfo | undefin
     return apiStatus.get(`${owner}_${id}`)
 }
 
+/**
+ * 供「平台可用性巡检」（sourceProbe.ts）使用：返回已加载音源实例及其沙箱调用入口。
+ * 只暴露巡检所需的最小面（owner/id/name/支持平台/callRequest），
+ * 外部无法借此改动实例内部状态，也避免把 loadedApis 整个泄漏出去。
+ */
+export function getProbeTargets(): Array<{
+    owner: string
+    id: string
+    name: string
+    platforms: string[]
+    callRequest: (action: string, source: string, info: any) => Promise<any>
+}> {
+    const targets: Array<{
+        owner: string
+        id: string
+        name: string
+        platforms: string[]
+        callRequest: (action: string, source: string, info: any) => Promise<any>
+    }> = []
+    for (const api of loadedApis.values()) {
+        const info = api?.info
+        if (!info?.id || typeof api.callRequest !== 'function') continue
+        targets.push({
+            owner: String(info.owner || 'open'),
+            id: String(info.id),
+            name: String(info.name || info.id),
+            platforms: Object.keys(info.sources || {}),
+            callRequest: api.callRequest,
+        })
+    }
+    return targets
+}
+
 
 // 从脚本注释中提取元数据
 export function extractMetadata(script: string): Partial<UserApiInfo> {

@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { extractMetadata, loadUserApi, getApiStatus, reloadSingleSource, unloadSource, applyOrderToLoadedApis } from './userApi'
+import { probeNewSource } from './sourceProbe'
 import type { IncomingMessage, ServerResponse } from 'http'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
@@ -244,6 +245,9 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
         // 重新加载该用户的API
         await reloadSingleSource(targetOwner, id)
 
+        // [音源巡检] 新上传的音源：立即逐个平台探测可用性（异步，不阻塞响应）
+        probeNewSource(targetOwner, id)
+
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))
     } catch (err: any) {
@@ -404,6 +408,9 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
 
         // 仅增量加载新导入的源，避免重解析该用户空间中的全部音源
         await reloadSingleSource(targetOwner, id)
+
+        // [音源巡检] 新导入的音源：立即逐个平台探测可用性（异步，不阻塞响应）
+        probeNewSource(targetOwner, id)
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, filename: displayName, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))

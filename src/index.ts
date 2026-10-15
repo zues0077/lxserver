@@ -587,6 +587,24 @@ if (envParams.SNAPSHOT_BACKUP_PATH !== undefined) {
 if (envParams.SERVER_NAME) {
   global.lx.config.serverName = envParams.SERVER_NAME
 }
+// 自定义源平台可用性巡检
+if (envParams.SOURCE_PROBE_ENABLED !== undefined) {
+  setBoolConfig('customSource.probe.enabled', envParams.SOURCE_PROBE_ENABLED)
+}
+if (envParams.SOURCE_PROBE_INTERVAL_MINUTES) {
+  const minutes = parseInt(envParams.SOURCE_PROBE_INTERVAL_MINUTES, 10)
+  if (!isNaN(minutes) && minutes > 0) global.lx.config['customSource.probe.intervalMinutes'] = minutes
+}
+if (envParams.SOURCE_PROBE_FAIL_THRESHOLD) {
+  const threshold = parseInt(envParams.SOURCE_PROBE_FAIL_THRESHOLD, 10)
+  if (!isNaN(threshold) && threshold > 0) global.lx.config['customSource.probe.failThreshold'] = threshold
+}
+if (envParams.SOURCE_PROBE_AUTO_DISABLE !== undefined) {
+  setBoolConfig('customSource.probe.autoDisablePlatform', envParams.SOURCE_PROBE_AUTO_DISABLE)
+}
+if (envParams.SOURCE_PROBE_AUTO_REMOVE !== undefined) {
+  setBoolConfig('customSource.probe.autoRemoveSource', envParams.SOURCE_PROBE_AUTO_REMOVE)
+}
 
 // 代理地址合法性校验与清洗（支持 http:, https:, socks:, socks4:, socks5:）
 const sanitizeProxyAddress = (address: any, fieldName: string): string => {
@@ -918,6 +936,74 @@ if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
   })
 }
 
+// [音源巡检] 自定义源「平台可用性巡检」。
+// 定时探测每个音源声明的各个平台是否还能解析出可用链接：
+// 不可用平台自动关闭其解析（写 states.json，与面板的平台开关同源），
+// 音源全部平台失效时自动移除（默认移入 .trash 可恢复）。
+// 具体执行由后台任务调度器（scheduler）按配置间隔驱动，这里只做依赖注入与初始化。
+{
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { startSourceProbe } = require('@/server/sourceProbe')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { getProbeTargets, unloadSource } = require('@/server/userApi')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { indexManager } = require('@/server/fileCache')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const musicSdk = require('@/modules/utils/musicSdk').default
+  const probeUsers: string[] = (global.lx.config.users || []).map((u: any) => u.name).filter(Boolean)
+
+  startSourceProbe({
+    listTargets: getProbeTargets,
+    unload: unloadSource,
+    // 测试曲目来源之一：用户实际播放成功过的歌（零配置，且最贴近真实场景）
+    getCachedSongs: () => {
+      const pool: any[] = []
+      for (const space of ['_open', ...probeUsers]) {
+        for (const folder of ['cache', 'music'] as const) {
+          try {
+            for (const item of indexManager.getAll(space, folder)) {
+              if (!item || !item.source || !item.songmid) continue
+              pool.push({
+                source: String(item.source),
+                songmid: String(item.songmid),
+                name: item.name,
+                singer: item.singer,
+                hash: item.hash,
+                albumId: item.albumId,
+                interval: item.interval,
+              })
+            }
+          } catch { /* 索引缺失时忽略 */ }
+        }
+      }
+      return pool
+    },
+    // 测试曲目来源之二：内置 SDK 搜索兜底（缓存里没有该平台的歌时使用）
+    searchTestSong: async (platform: string) => {
+      try {
+        const api = musicSdk?.[platform]
+        const search = api?.musicSearch?.search
+        if (typeof search !== 'function') return null
+        const res = await search.call(api.musicSearch, '周杰伦', 1, 3)
+        const list = Array.isArray(res?.list) ? res.list : []
+        const pick = list.find((it: any) => it && it.songmid)
+        if (!pick) return null
+        return {
+          source: platform,
+          songmid: String(pick.songmid),
+          name: pick.name,
+          singer: pick.singer,
+          hash: pick.hash,
+          albumId: pick.albumId,
+          interval: pick.interval,
+        }
+      } catch {
+        return null
+      }
+    },
+  })
+}
+
 startServer(global.lx.config.port, '0.0.0.0')
 
 // 监控配置文件变动以实现热重载 (由于 nodemon 已忽略该文件)
@@ -950,6 +1036,17 @@ if (fs.existsSync(activeWatcherConfigPath)) {
               backupInterval: global.lx.config['sync.backupInterval'],
             })
           }
+          // 「音源巡检」的间隔与开关改动后立即生效，无需重启进程
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { updateTaskConfig } = require('@/server/scheduler')
+            const probeEnabled = global.lx.config['customSource.probe.enabled'] !== false
+            const probeMinutes = Number(global.lx.config['customSource.probe.intervalMinutes']) || 180
+            updateTaskConfig('custom_source_health_probe', {
+              enabled: probeEnabled,
+              intervalMs: probeMinutes * 60 * 1000,
+            })
+          } catch { /* 调度器尚未启动时忽略 */ }
         } catch (e) {
           console.error('Hot-reload config file failed:', e)
         }
