@@ -742,8 +742,18 @@ if (fs.existsSync(usersJsonPath)) {
 
 checkUserConfig(global.lx.config.users)
 
+// 安全：启动日志绝不能打印密码明文 —— stdout 会同时落进 app.log，
+// 用户一旦分享日志（提 issue / 贴群）即等于公开面板密码。
+// 这里只保留首字符 + 长度，既能确认配置读取正常，又不泄露实际口令。
+const maskPasswordForLog = (pw: any): string => {
+  const s = typeof pw === 'string' ? pw : (pw === undefined || pw === null ? '' : String(pw))
+  if (!s) return '(未设置)'
+  const head = s.length > 2 ? s.slice(0, 1) : ''
+  return `${head}${'*'.repeat(Math.max(3, s.length - head.length))} (长度 ${s.length})`
+}
+
 console.log(`[用户] 已注册用户:
-${global.lx.config.users.map(user => `  ${user.name}: ${user.password}`).join('\n') || '  (暂无用户)'}
+${global.lx.config.users.map(user => `  ${user.name}: ${maskPasswordForLog(user.password)}`).join('\n') || '  (暂无用户)'}
 `)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { getUserDirname } = require('@/user')

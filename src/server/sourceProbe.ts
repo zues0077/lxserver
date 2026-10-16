@@ -30,6 +30,7 @@ import needle from 'needle'
 import { getProxyAgent } from '@/modules/utils/proxy.js'
 import { syncLog } from '@/utils/log4js'
 import { markSourceBusy } from './sourceGuard'
+import { beginProbeQuiet, endProbeQuiet } from './probeQuiet'
 import type { ScheduledTask, TaskExecutionResult } from './task/types'
 
 export const PROBE_TASK_ID = 'custom_source_health_probe'
@@ -841,6 +842,8 @@ export async function runSourceProbe(
   statesCache.clear()
   searchAttempted.clear() // 每轮重新允许一次内置搜索，平台恢复后仍能拿到测试曲目
   poolRefreshedThisRound = false
+  // 巡检期会触发大量「预期内的失败解析」，开启静默把逐条错误聚合到轮末摘要
+  beginProbeQuiet()
   // 探测期间会有持续的解析与网络开销，标记为「忙碌」避免被自检护栏误判成异常空转
   markSourceBusy(conf.timeoutMs * 4)
   const busyTicker = setInterval(() => markSourceBusy(conf.timeoutMs * 2), Math.max(5000, conf.timeoutMs))
@@ -1076,6 +1079,17 @@ export async function runSourceProbe(
   } finally {
     running = false
     clearInterval(busyTicker)
+    // 退出静默，并把抑制掉的源错误日志汇总成少量几行（巡检期失败属预期内噪音）
+    try {
+      const quiet = endProbeQuiet()
+      if (quiet.total > 0) {
+        console.log(`[音源巡检] 静默期抑制 ${quiet.total} 条源错误日志，按来源汇总：`)
+        for (const line of quiet.lines) console.log(`[音源巡检]   ${line}`)
+        syncLog.info(`[音源巡检] 静默期抑制 ${quiet.total} 条源错误日志（明细见 stdout）`)
+      }
+    } catch {
+      // 汇总失败不影响巡检本身
+    }
     // 轮次结束是唤醒排队中「新音源」的可靠时机（它们在探测期间被 running 挡了回去）
     wakePendingNewSources()
   }

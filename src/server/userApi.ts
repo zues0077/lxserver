@@ -6,6 +6,7 @@ import {
     markSourceBusy,
     reviewSourceScript,
 } from './sourceGuard'
+import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 
 import needle from 'needle'
 import * as crypto from 'crypto'
@@ -16,6 +17,44 @@ import * as tunnel from 'tunnel'
 import { getProxyAgent } from '../modules/utils/proxy.js'
 const inflate = promisify(zlib.inflate)
 const deflate = promisify(zlib.deflate)
+
+/**
+ * 把任意「抛出物」转成可读的错误描述。
+ *
+ * 自定义源脚本抛出的往往不是标准 Error 对象：可能是纯字符串、undefined、
+ * 或跨 vm 上下文后丢失 message 的对象。直接读 `e.message` 会打出
+ * `调用请求异常: undefined`（日志里很常见），排障时等于没有信息。
+ * 这里统一兜底：message → msg → code → JSON → 类型标签，保证日志始终可读。
+ */
+export function describeError(e: any): string {
+    if (e === undefined) return 'undefined（源未提供错误信息）'
+    if (e === null) return 'null'
+    if (typeof e === 'string') return e || '(空字符串)'
+    if (typeof e === 'number' || typeof e === 'boolean') return String(e)
+    if (typeof e === 'object') {
+        const rawMsg = typeof e.message === 'string' ? e.message : (typeof e.msg === 'string' ? e.msg : '')
+        const code = e.code !== undefined ? ` [code=${e.code}]` : ''
+        if (rawMsg) {
+            const name = typeof e.name === 'string' && e.name && e.name !== 'Error' ? `${e.name}: ` : ''
+            return `${name}${rawMsg}${code}`
+        }
+        try {
+            const s = JSON.stringify(e)
+            if (s && s !== '{}') return `${s}${code}`
+        } catch {
+            // 循环引用 / 含 Buffer 等无法序列化，落到类型标签
+        }
+        return `${Object.prototype.toString.call(e)}${code}`
+    }
+    return String(e)
+}
+
+/** 把沙箱日志的多个参数拼成一行文本（非字符串参数走 describeError 兜底） */
+function formatLogArgs(args: any[]): string {
+    return args
+        .map(a => (typeof a === 'string' ? a : describeError(a)))
+        .join(' ')
+}
 
 // 彻底切断与沙箱上下文的联系
 function decontextify(obj: any): any {
@@ -544,7 +583,15 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
         assert: (condition?: boolean, ...data: any[]) => { if (global.lx.config['debug.enabled']) console.assert(condition, ...data) },
         dir: (...args: any[]) => { if (global.lx.config['debug.enabled']) console.dir(...args) },
         dirxml: (...args: any[]) => { if (global.lx.config['debug.enabled']) (console as any).dirxml?.(...args) },
-        error: (...args: any[]) => { console.error(...args) }
+        error: (...args: any[]) => {
+            // 巡检期间源脚本自身的报错属于「预期内的失败探测」，静默并聚合，
+            // 避免单轮数百行刷屏；非巡检期间 error 一律原样输出（通常值得看）。
+            if (isProbeQuiet()) {
+                recordSuppressed(fullApiInfo.name, formatLogArgs(args))
+                return
+            }
+            console.error(...args)
+        }
     }
 
     const sandboxConsole = new Proxy(rawSandboxConsole, {
@@ -665,7 +712,12 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                     const result = await handler(inputData)
                     return decontextify(result)
                 } catch (e: any) {
-                    console.error(`[自定义源-${fullApiInfo.name}] 调用请求异常:`, e.message)
+                    if (isProbeQuiet()) {
+                        // 巡检期的失败是「预期内噪音」，聚合到摘要里，不逐条打印
+                        recordSuppressed(fullApiInfo.name, describeError(e))
+                    } else {
+                        console.error(`[自定义源-${fullApiInfo.name}] 调用请求异常:`, describeError(e))
+                    }
                     throw e
                 }
             }
