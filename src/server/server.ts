@@ -29,6 +29,7 @@ import { getSourceGuardStatus } from './sourceGuard'
 import { getSourceProbeStatus } from './sourceProbe'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
+import { checkPersistentVolumes } from './volumeCheck'
 import * as customMusicManager from './customMusicManager'
 import * as serverDownloadQueue from './serverDownloadQueue'
 import * as remasterQueue from './remasterQueue'
@@ -9217,6 +9218,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
     }
     const bind = typeof addr == 'string' ? `pipe ${addr}` : `port ${addr.port}`
     startupLog.info(`Listening on ${ip} ${bind}`)
+    // 启动自检：缓存/下载目录若未挂载到独立卷，会写进容器可写层（宿主看不到、重建即丢）
+    try {
+      checkPersistentVolumes()
+    } catch (e: any) {
+      console.warn('[挂载自检] 检查失败（不影响服务运行）:', e?.message || e)
+    }
     resolve(null)
     void registerLocalSyncEvent(wss as LX.SocketServer)
   })
