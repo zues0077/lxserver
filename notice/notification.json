@@ -60,5 +60,27 @@
             "type": "link",
             "url": "https://github.com/zues0077/lxserver/releases/tag/v1.5.3"
         }
+    },
+    {
+        "comment": "=== 版本更新 v1.5.4 ===",
+        "id": "update_v1_5_4",
+        "status": "active",
+        "type": "version",
+        "logic": {
+            "target_version": "v1.5.4",
+            "operator": "<",
+            "interval_hours": 24
+        },
+        "ui": {
+            "title": "发现新版本 v1.5.4",
+            "date": "2026-10-16",
+            "message": "本次更新聚焦部署正确性与日志可读性：\n1. [修复] 下载文件丢失: 修正 docker-compose 与文档的卷映射 —— 缓存与下载位于 /server/cache、/server/music，此前只挂 /server/data 会让下载完成的歌曲写进容器可写层，宿主机看不到、容器重建后丢失；现在需同时映射 cache 与 music。\n2. [安全] 启动日志密码脱敏: 不再把面板密码原文打印到日志，改为掩码显示，避免分享日志时泄露。\n3. [优化] 巡检日志降噪: 巡检期大量「预期内的失败」聚合为轮末一段汇总，不再逐条刷屏。\n4. [优化] 异常信息补全: 消除「调用请求异常: undefined」，统一兜底 message/code，排障更清晰。",
+            "confirm_text": "查看日志",
+            "cancel_text": "稍后提醒"
+        },
+        "action": {
+            "type": "link",
+            "url": "https://github.com/zues0077/lxserver/releases/tag/v1.5.4"
+        }
     }
 ]
