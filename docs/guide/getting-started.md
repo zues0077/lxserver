@@ -55,6 +55,8 @@ docker pull ghcr.io/zues0077/lxserver:latest
 docker run -d \
   -p 9527:9527 \
   -v $(pwd)/data:/server/data \
+  -v $(pwd)/cache:/server/cache \
+  -v $(pwd)/music:/server/music \
   --name lx-sync-server \
   --restart unless-stopped \
   ghcr.io/zues0077/lxserver:1.5.3
@@ -62,8 +64,10 @@ docker run -d \
 
 **容器挂载卷 (Volume Mappings) ：**
 
-- `-v $(pwd)/data:/server/data`：**唯一需要挂载的目录**。镜像只声明了这一个数据卷，它同时包含配置（`data/config.js`）、日志（`data/logs`）以及各用户的缓存与下载文件（`data/<用户名>/cache`、`data/<用户名>/music`）。
-- 因此**不需要**再单独映射 `logs`、`cache`、`music` —— 容器内并不存在 `/server/logs`、`/server/cache`、`/server/music` 这些路径，多余映射不会生效。
+- `-v $(pwd)/data:/server/data`：**必须挂载**。存放配置（`data/config.js`）、用户数据、日志（`data/logs`）与备份。
+- `-v $(pwd)/cache:/server/cache`：**建议挂载**。播放缓存。默认缓存位置为 `root`，缓存实际写在容器内的 `/server/cache/<用户名>`。
+- `-v $(pwd)/music:/server/music`：**建议挂载**。下载目录。点「下载」或「移入下载目录」后，文件会从缓存目录移到这里，即容器内的 `/server/music/<用户名>`。
+- 若**不**挂 `cache` / `music`，这两类文件会写进容器的可写层 —— 宿主目录里看不到，容器重建即丢失。另一种做法是在面板把「缓存位置」由 `root` 切换为 `data`，缓存与下载会改为落在 `/server/data/cache/<用户名>`、`/server/data/music/<用户名>`，此时只挂 `data` 即可；代价是这部分数据会纳入数据同步，数据卷体积会明显变大。
 
 **声明式 Docker Compose ：**
 针对需标准化长久管理的生产实施，创建名为 `docker-compose.yml` 的定义配置：
@@ -78,6 +82,9 @@ services:
       - "9527:9527"
     volumes:
       - ./data:/server/data
+      # 默认 root 缓存模式下必须一并挂载，否则缓存/下载会留在容器可写层
+      - ./cache:/server/cache
+      - ./music:/server/music
     environment:
       - NODE_ENV=production
       # - ADMIN_PASSWORD=123456

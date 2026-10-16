@@ -258,14 +258,25 @@ Web 播放器针对移动端做了深度优化，手机浏览器访问也能接�
 docker run -d \
   -p 9527:9527 \
   -v $(pwd)/data:/server/data \
+  -v $(pwd)/cache:/server/cache \
+  -v $(pwd)/music:/server/music \
   --name lx-sync-server \
   --restart unless-stopped \
   ghcr.io/zues0077/lxserver:1.5.3
 ```
 
-> **只要挂载 `/server/data` 一个目录就够了。** 它是容器声明的唯一数据卷，里面同时包含
-> 配置（会自动落到 `data/config.js`）、日志（`data/logs`）以及各用户的缓存与下载文件
-> （`data/<用户名>/cache`、`data/<用户名>/music`）。不需要再单独映射 `logs`、`cache`、`music`。
+> **建议同时挂载 `data`、`cache`、`music` 三个目录。**
+>
+> - `/server/data`（必须）：配置（会自动落到 `data/config.js`）、用户数据、日志（`data/logs`）、备份。
+> - `/server/cache`（建议）：播放缓存。默认缓存位置为 `root`，缓存实际写在容器内的
+>   `/server/cache/<用户名>`。
+> - `/server/music`（建议）：下载目录。点「下载」或「移入下载目录」后，文件会从缓存目录移到
+>   这里，即容器内的 `/server/music/<用户名>`。
+>
+> 若**不**挂 `cache` / `music`，这两类文件会写进容器的可写层 —— 宿主目录里看不到，容器重建即丢失。
+> 另一种做法是在面板把「缓存位置」由 `root` 切换为 `data`，缓存与下载会改为落在
+> `/server/data/cache/<用户名>`、`/server/data/music/<用户名>`，此时只挂 `data` 即可；
+> 代价是这部分数据会纳入数据同步，数据卷体积会明显变大。
 
 **Docker Compose 示例：**
 
@@ -281,6 +292,9 @@ services:
       - "9527:9527"
     volumes:
       - ./data:/server/data
+      # 默认 root 缓存模式下必须一并挂载，否则缓存/下载会留在容器可写层
+      - ./cache:/server/cache
+      - ./music:/server/music
     environment:
       - NODE_ENV=production
       # - ADMIN_PASSWORD=yourpassword

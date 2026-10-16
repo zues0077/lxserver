@@ -9,8 +9,12 @@ services:
     ports:
       - "9527:9527"
     volumes:
-      # 数据持久化
+      # 数据持久化：配置、用户、日志、备份（必须）
       - ./data:/server/data
+      # 播放缓存目录（默认缓存位置为 root，缓存写在 /server/cache，不挂会留在容器可写层）
+      - ./cache:/server/cache
+      # 音乐下载目录（"仅下载"与"移入下载目录"的文件最终落点）
+      - ./music:/server/music
     environment:
       # 环境变量配置，优先级高于 config.js
       - NODE_ENV=production

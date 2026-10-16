@@ -227,14 +227,26 @@ docker pull ghcr.io/zues0077/lxserver:latest
 docker run -d \
   -p 9527:9527 \
   -v $(pwd)/data:/server/data \
+  -v $(pwd)/cache:/server/cache \
+  -v $(pwd)/music:/server/music \
   --name lx-sync-server \
   --restart unless-stopped \
   ghcr.io/zues0077/lxserver:1.5.3
 ```
 
-> **Mounting `/server/data` alone is enough.** It is the only volume the image declares and it holds
-> the config (`data/config.js`), logs (`data/logs`) and each user's cache/downloads
-> (`data/<user>/cache`, `data/<user>/music`). Separate `logs`, `cache` or `music` mounts are not needed.
+> **Mount `data`, `cache` and `music` together.**
+>
+> - `/server/data` (required): config (written to `data/config.js`), user data, logs (`data/logs`), backups.
+> - `/server/cache` (recommended): playback cache. The default cache location is `root`, so files are
+>   actually written to `/server/cache/<user>` inside the container.
+> - `/server/music` (recommended): download directory. After "download" or "move to download folder",
+>   files are moved here, i.e. `/server/music/<user>` inside the container.
+>
+> If you **do not** mount `cache` / `music`, those files land in the container's writable layer —
+> invisible from the host and lost whenever the container is recreated. Alternatively, switch
+> "Cache Location" from `root` to `data` in the panel; cache and downloads then go to
+> `/server/data/cache/<user>` and `/server/data/music/<user>`, and mounting `data` alone is enough —
+> at the cost of pulling that data into sync and growing the data volume considerably.
 
 **Docker Compose Example:**
 
@@ -250,6 +262,9 @@ services:
       - "9527:9527"
     volumes:
       - ./data:/server/data
+      # Required with the default `root` cache mode, otherwise cache/downloads stay in the container layer
+      - ./cache:/server/cache
+      - ./music:/server/music
     environment:
       - NODE_ENV=production
       # - ADMIN_PASSWORD=yourpassword
