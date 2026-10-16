@@ -6,7 +6,12 @@
  * 这两个路径**不在** data 卷里。若 docker-compose 只映射了 `/server/data`，文件会落到
  * 容器可写层：宿主机映射目录里看不到，一旦「下载」完成或容器重建，文件就永久消失。
  *
- * 这里在 HTTP 服务开始监听时检查这两个目录是否位于独立挂载卷上，未挂载就打印醒目告警
+ * 另有一个**不受 `serverCacheLocation` 影响**的目录：封面缓存
+ * （`fileCache.ts` 的 `getCoverCacheDir` 恒定用 `process.cwd()/cover_cache`）。
+ * 也就是说，即便面板切到 data 缓存模式、只挂 `data`，封面图依然写在容器可写层。
+ * 因此它**任何模式下都要检查**，不能跟着 cache/music 一起跳过。
+ *
+ * 这里在 HTTP 服务开始监听时检查这些目录是否位于独立挂载卷上，未挂载就打印醒目告警
  * 并给出可直接抄的 compose 片段。
  *
  * 判定方式：读 `/proc/self/mountinfo`，沿 `dir` 向上找最近的挂载点（**排除容器根 `/`**，
@@ -69,23 +74,29 @@ export function findPersistentVolume(dir: string, mounts: Set<string>): string |
 }
 
 /**
- * 检查「缓存 / 下载」目录是否在持久卷上，必要时打印告警。
+ * 检查「缓存 / 下载 / 封面缓存」目录是否在持久卷上，必要时打印告警。
  *
  * - 非 Linux：静默返回（无法判断，宁可不说，也不误报）
- * - 全局 `serverCacheLocation` 已是 `data`：缓存/下载都在 data 卷内，天然持久化，静默返回
- * - 其余情况：`process.cwd()/cache`、`process.cwd()/music` 未挂载则告警
+ * - 全局 `serverCacheLocation` 已是 `data`：`cache`/`music` 都在 data 卷内，天然持久化，跳过这两项；
+ *   但 `cover_cache` 恒定写在 cwd、不受该开关影响，**仍需检查**
+ * - 其余情况：`process.cwd()/{cache,music,cover_cache}` 未挂载则告警
  */
 export function checkPersistentVolumes(): void {
     const mounts = getMountPoints()
     if (!mounts) return
 
     const config = (global as any)?.lx?.config
-    if (config && config.serverCacheLocation === 'data') return
+    // 面板切到 data 模式后，缓存与下载都落进 data 卷，无需再单独检查；
+    // 而封面缓存固定在 cwd，与这个开关无关，必须始终检查。
+    const cacheInDataVol = !!config && config.serverCacheLocation === 'data'
 
     const cwd = process.cwd()
     const targets = [
-        { dir: path.join(cwd, 'cache'), label: '缓存', defaultValue: './cache', containerPath: '/server/cache' },
-        { dir: path.join(cwd, 'music'), label: '下载', defaultValue: './music', containerPath: '/server/music' },
+        ...(cacheInDataVol ? [] : [
+            { dir: path.join(cwd, 'cache'), label: '缓存', defaultValue: './cache', containerPath: '/server/cache' },
+            { dir: path.join(cwd, 'music'), label: '下载', defaultValue: './music', containerPath: '/server/music' },
+        ]),
+        { dir: path.join(cwd, 'cover_cache'), label: '封面缓存', defaultValue: './cover_cache', containerPath: '/server/cover_cache' },
     ]
 
     const missing = targets.filter(t => !findPersistentVolume(t.dir, mounts))
@@ -103,7 +114,8 @@ export function checkPersistentVolumes(): void {
     for (const m of missing) {
         lines.push(`        - ${m.defaultValue}:${m.containerPath}`)
     }
-    lines.push('    说明：若你已在面板把「缓存位置」改为 data 模式，可忽略此提示。')
+    lines.push('    说明：`cache`/`music` 的提示在面板把「缓存位置」切到 data 模式后可忽略；')
+    lines.push('          `cover_cache` 不受该开关影响（恒定写在容器 cwd），任何模式都需要单独挂载。')
 
     for (const line of lines) console.warn(line)
     try {

@@ -6,10 +6,14 @@
  * 和 public/js/config.js 的 `version`（前端展示、release.yml 读取它）。
  * 这个脚本让它们永远保持一致，避免只改一处导致的版本错乱。
  *
+ * 此外还会同步文档里「跟着版本号走」的示例（README 中英 + getting-started 中英）：
+ * 镜像 tag、标签对照表、`npm run version:set` 用法示例 —— 这些此前必须手工改，
+ * 漏改就会出现「文档写着旧版本、用户照着拉旧镜像」的漂移。changelog.md 属历史记录，不在此列。
+ *
  * 用法：
- *   npm run version:set -- 1.5.3
- *   node scripts/set-version.js 1.5.3
- *   node scripts/set-version.js v1.5.3     # 前缀 v 可有可无
+ *   npm run version:set -- 1.5.5
+ *   node scripts/set-version.js 1.5.5
+ *   node scripts/set-version.js v1.5.5     # 前缀 v 可有可无
  *   node scripts/set-version.js            # 只打印当前版本
  */
 const fs = require('fs');
@@ -27,7 +31,7 @@ const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
 
 if (!raw) {
   console.log(`当前版本: ${pkg.version}`);
-  console.log('用法: npm run version:set -- <版本号>   （例如 1.5.3）');
+  console.log('用法: npm run version:set -- <版本号>   （例如 1.5.5）');
   process.exit(0);
 }
 
@@ -61,6 +65,54 @@ for (const file of configPaths) {
   }
   fs.writeFileSync(file, next, 'utf-8');
   console.log(`✓ ${path.relative(root, file).padEnd(24)} v${oldVersion} → v${version}`);
+}
+
+// ---- 同步文档里跟着版本号走的示例（消除「文档写旧版本」漂移）----
+// 文档中版本号有三类形态，都随发版漂移，这里一次性替换掉：
+//   1) 镜像 tag：        ghcr.io/zues0077/lxserver:1.5.4 / ghcr.nju.edu.cn/...:1.5.4
+//   2) 标签对照表：      | `v1.5.4` / `1.5.4` | 当前版本 ... |
+//   3) 用法示例：        npm run version:set -- 1.5.4
+// 注意：changelog.md 属历史记录，**不**在这里同步。
+const docTargets = [
+  path.join(root, 'README.md'),
+  path.join(root, 'README_EN.md'),
+  path.join(root, 'docs', 'guide', 'getting-started.md'),
+  path.join(root, 'docs', 'en', 'guide', 'getting-started.md'),
+];
+
+const docRules = [
+  { name: '镜像 tag', re: /(ghcr\.(?:io|nju\.edu\.cn)\/zues0077\/lxserver:)\d+\.\d+\.\d+/g, to: `$1${version}` },
+  { name: '标签对照表', re: /`v\d+\.\d+\.\d+` \/ `\d+\.\d+\.\d+`/g, to: '`v' + version + '` / `' + version + '`' },
+  { name: '版本用法示例', re: /(npm run version:set -- )\d+\.\d+\.\d+/g, to: `$1${version}` },
+];
+
+let docChanged = 0;
+for (const file of docTargets) {
+  if (!fs.existsSync(file)) continue;
+  const src = fs.readFileSync(file, 'utf-8');
+  let next = src;
+  let hits = 0;
+  const detail = [];
+  for (const rule of docRules) {
+    const matched = next.match(rule.re);
+    if (matched) {
+      hits += matched.length;
+      detail.push(`${rule.name}×${matched.length}`);
+    }
+    next = next.replace(rule.re, rule.to);
+  }
+  if (next === src) {
+    console.log(`✓ ${path.relative(root, file).padEnd(32)} 无版本号需同步`);
+    continue;
+  }
+  fs.writeFileSync(file, next, 'utf-8');
+  docChanged += hits;
+  console.log(`✓ ${path.relative(root, file).padEnd(32)} 同步 ${hits} 处（${detail.join('、')}）→ v${version}`);
+}
+if (docChanged === 0) {
+  console.log('✓ 文档版本号示例           全部已是最新，无需修改');
+} else {
+  console.log(`✓ 文档版本号示例           共同步 ${docChanged} 处`);
 }
 
 // ---- 更新通知一致性检查 ----

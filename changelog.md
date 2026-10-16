@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.5.5 (2026-10-16)
+
+### 🐛 修复
+
+- **封面缓存（`cover_cache`）不再被漏挂（重要）**: `getCoverCacheDir` 恒定使用容器工作目录下的 `cover_cache`，**不受面板「缓存位置」开关影响** —— 也就是说，即使把缓存切成 `data` 模式、只挂 `data`，封面图依然会写进容器可写层（宿主看不到、重建即丢）。本版把 `./cover_cache:/server/cover_cache` 补进 `docker-compose.yml` 与中英文文档，并让启动自检覆盖它。
+- **`./logs` 挂载说明归位**: 镜像生效默认值为 `LOG_PATH=/server/data/logs`（`/server/logs` 是镜像里**被注释掉的备选**），所以单挂 `./logs:/server/logs` 是**空挂载** —— 这不是本版缺陷，上游行为完全相同。文档现在明确写出「设计如此 + 正确用法（需同时设 `LOG_PATH=/server/logs`）」，不再让用户以为挂上就有日志。
+- **Token 日志查询接口查不到内容**: 写入端写 `LOG_PATH/token.log`，读取端却硬编码 `process.cwd()/logs/token.log`，两者默认不同目录，导致「按 `tokenMasked` 查 Token 日志」永远为空。现读取端改为与写入端一致的 `global.lx.logPath`。
+- **API 文档笔误**: 管理员鉴权头 `x-admin-auth` 更正为 `x-frontend-auth`（源码一直是后者）；`POST /api/admin/restart` 更正为 `POST /api/restart`（源码从未注册 alias）。
+- **Web 播放器指南路径表述**: 全局公开源目录补全为 `data/users/source/_open`；`/cache`、`/music` 标注容器内实际路径为 `/server/cache`、`/server/music`（按字面往容器里放歌会放错位置）。
+
+### 🩺 启动自检
+
+- **挂载自检扩展到封面缓存**: 自检项由 `cache` / `music` 扩展为 `cache` / `music` / `cover_cache`。其中 `cover_cache` **在任何缓存模式下都会检查**（它不受「缓存位置」开关影响），这一点也写进了告警说明。
+
+### 🔒 安全
+
+- **用户列表不再默认下发明文密码**: `GET /api/users` 此前一次性返回所有用户的明文密码；现改为仅在请求头显式带 `x-reveal-secrets: 1` 时才返回。管理面板的「显示密码」按钮在点击时按需请求一次，功能不变，但明文不再默认出现在响应里。
+
+### 📖 文档
+
+- **部署说明补齐三处易踩坑**: `SUBSONIC_PORT` 需额外发布端口（`-p 4533:4533`）；镜像默认不含 `ffmpeg`（Subsonic 转码会自动优雅降级为 302 直链，不会报错）；`/api/restart` 依赖容器 `--restart` 策略，漏写会让「重启服务」变成彻底停止。
+- **`WEBDAV_EXCLUDE_CACHE` / `WEBDAV_EXCLUDE_MUSIC` 的生效条件**: 补充说明它们按数据目录内的相对路径判定，**仅在面板「缓存位置」为 `data` 模式时有效**（`root` 模式下缓存/下载不在数据目录内，开关等于空转）；英文文档同步补齐这两项及其余缺失的 WebDAV 配置项。
+- **英文文档补齐三篇**: 新增 `docs/en/guide/source-guard.md`、`source-probe.md`、`xiaoai.md`，英文侧边栏加入口（此前这三篇仅有中文）。
+
+### 🧰 维护
+
+- **版本号不再漂移**: `scripts/set-version.js` 现在会一并同步 README 中英与 getting-started 中英里的镜像 tag、标签对照表与用法示例（本次同步 18 处），避免「文档写着旧版本、用户照着拉旧镜像」。
+
 ## v1.5.4 (2026-10-16)
 
 ### 🐛 修复

@@ -183,18 +183,18 @@
 | 标签 | 说明 |
 | :--- | :--- |
 | `latest` | 最新稳定版，跟随 `main` 分支 |
-| `v1.5.3` / `1.5.3` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
+| `v1.5.5` / `1.5.5` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
 | `v*` | 每个已发布版本都会保留，可随时回滚到历史版本 |
 
 ```bash
 # 固定版本（推荐）
-docker pull ghcr.io/zues0077/lxserver:1.5.3
+docker pull ghcr.io/zues0077/lxserver:1.5.5
 
 # 或跟随最新
 docker pull ghcr.io/zues0077/lxserver:latest
 ```
 
-> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.4`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
+> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.5`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
 > - 如果要另外发布到 Docker Hub，可使用备用工作流 `.github/workflows/docker.yml`（需自行配置 `DOCKER_USERNAME` / `DOCKER_PASSWORD` 密钥并手动触发，默认不参与自动发布）。
 
 ## 🔒 访问控制与安全
@@ -249,7 +249,7 @@ Web 播放器针对移动端做了深度优化，手机浏览器访问也能接�
 镜像地址（GitHub Packages / GHCR）：
 
 - 跟随最新：`ghcr.io/zues0077/lxserver:latest`
-- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.3`
+- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.5`
 - 完整标签说明见上方 [Docker 部署](#-docker-部署)
 
 **Docker Run 示例：**
@@ -260,23 +260,34 @@ docker run -d \
   -v $(pwd)/data:/server/data \
   -v $(pwd)/cache:/server/cache \
   -v $(pwd)/music:/server/music \
+  -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.3
+  ghcr.io/zues0077/lxserver:1.5.5
 ```
 
-> **建议同时挂载 `data`、`cache`、`music` 三个目录。**
+> ⚠️ **`--restart` 不要省**：面板里的「重启服务」（`POST /api/restart`）在容器内是通过结束进程实现的，
+> 完全依赖容器的重启策略才能重新拉起来。漏写 `--restart`（或写成 `no`）时，点一次「重启服务」服务就彻底停了。
+> 推荐 `--restart unless-stopped` 或 `always`。
+
+> **建议同时挂载 `data`、`cache`、`music`、`cover_cache` 四个目录。**
 >
 > - `/server/data`（必须）：配置（会自动落到 `data/config.js`）、用户数据、日志（`data/logs`）、备份。
 > - `/server/cache`（建议）：播放缓存。默认缓存位置为 `root`，缓存实际写在容器内的
 >   `/server/cache/<用户名>`。
 > - `/server/music`（建议）：下载目录。点「下载」或「移入下载目录」后，文件会从缓存目录移到
 >   这里，即容器内的 `/server/music/<用户名>`。
+> - `/server/cover_cache`（建议）：歌曲封面缓存。**它恒定写在容器工作目录下，不受面板「缓存位置」开关影响**
+>   —— 即使把缓存切成 `data` 模式、只挂 `data`，封面图依然会落进容器可写层。所以要单独挂载它。
 >
 > 若**不**挂 `cache` / `music`，这两类文件会写进容器的可写层 —— 宿主目录里看不到，容器重建即丢失。
 > 另一种做法是在面板把「缓存位置」由 `root` 切换为 `data`，缓存与下载会改为落在
-> `/server/data/cache/<用户名>`、`/server/data/music/<用户名>`，此时只挂 `data` 即可；
-> 代价是这部分数据会纳入数据同步，数据卷体积会明显变大。
+> `/server/data/cache/<用户名>`、`/server/data/music/<用户名>`，此时这两个目录只挂 `data` 即可；
+> 代价是这部分数据会纳入数据同步，数据卷体积会明显变大。注意该开关**不影响 `cover_cache`**。
+>
+> **关于 `./logs`**：镜像默认 `LOG_PATH=/server/data/logs`，日志本来就写在 `data` 卷里，
+> 因此单独挂 `./logs:/server/logs` 是一个**空挂载**（上游默认行为也是如此）。
+> 想让日志单独落到宿主的 `./logs`，需要同时设置环境变量 `LOG_PATH=/server/logs`。
 
 **Docker Compose 示例：**
 
@@ -285,16 +296,19 @@ docker run -d \
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.3   # 或 :latest
+    image: ghcr.io/zues0077/lxserver:1.5.5   # 或 :latest
     container_name: lx-sync-server
-    restart: unless-stopped
+    restart: unless-stopped          # 不要省：面板「重启服务」靠它拉起进程
     ports:
       - "9527:9527"
+      # - "4533:4533"                # 仅当设置了 SUBSONIC_PORT（如 4533）时才需要
     volumes:
       - ./data:/server/data
       # 默认 root 缓存模式下必须一并挂载，否则缓存/下载会留在容器可写层
       - ./cache:/server/cache
       - ./music:/server/music
+      # 封面缓存恒定写在容器工作目录，不受「缓存位置」开关影响，需单独挂载
+      - ./cover_cache:/server/cover_cache
     environment:
       - NODE_ENV=production
       # - ADMIN_PASSWORD=yourpassword
@@ -302,6 +316,7 @@ services:
       # - WEBPLAYER_PASSWORD=yourpassword
       # - ADMIN_PATH=/admin
       # - PLAYER_PATH=/
+      # - LOG_PATH=/server/logs       # 仅当上面额外挂载了 ./logs:/server/logs 时才需要
 ```
 
 ### 方式三：直接运行 (Git Clone)
@@ -353,8 +368,13 @@ npm start
 - **服务器地址 (Server URL)**:
   - **默认共享主端口**: `http://<服务器IP>:9527/rest`（子路径由 `SUBSONIC_PATH` 决定，默认 `/rest`）
   - **独立监听端口模式**（若配置了 `SUBSONIC_PORT` > 0，例如 `4533`）: `http://<服务器IP>:4533/rest`
+    - ⚠️ **Docker 部署需要额外发布该端口**：仅设置 `SUBSONIC_PORT=4533` 环境变量是不够的，
+      还要在 `docker run` 里加 `-p 4533:4533`（或 compose 的 `ports` 里放开 `"4533:4533"`），否则容器外连不上。
 - **用户名 & 密码**: 在后台“用户管理”中配置的用户名及其同步密码。
 - **在线搜索**: 支持在 Subsonic 客户端中直接全网搜索与播放，可使用 `wy:`、`tx:`、`kw:`、`kg:`、`mg:` 指定平台，或使用 `online:` / `local:` 强制在线/本地搜索。
+- **关于服务端转码**：Subsonic 的 `transcode` 相关能力依赖 `ffmpeg`，而 **Docker 镜像默认只装了 `chromaprint`，不含 `ffmpeg`**。
+  镜像启动时会自动探测（`probeFfmpeg()`）：检测不到就关闭转码并**优雅降级为 302 直链**（不会报错、也不会导致播放失败），
+  只是客户端要求的码率/格式转换不会生效。需要服务端转码时，请自行在镜像中安装 `ffmpeg`，或改用自带 `ffmpeg` 的镜像变体。
 
 ---
 
@@ -370,7 +390,7 @@ npm start
 
 ## 🛠️ 配置说明
 
-系统配置文件已默认持久化在数据目录中的 `data/config.js`（Docker 部署只需挂载 `./data` 卷即可在容器更新、重启后永久保留配置，若根目录下存在旧 `config.js` 会自动平滑迁移）。环境变量优先级最高：
+系统配置文件已默认持久化在数据目录中的 `data/config.js`（Docker 部署下，挂载 `./data` 卷即可让**配置本身**在容器更新、重启后永久保留 —— 注意这里说的只是配置，缓存 / 下载 / 封面缓存还需要各自的挂载，见上文「建议同时挂载」说明；若根目录下存在旧 `config.js` 会自动平滑迁移）。环境变量优先级最高：
 
 | 环境变量                                     | 对应配置项                                   | 说明                                                                                               | 默认值               |
 | -------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------- |
@@ -421,7 +441,11 @@ npm start
 | `SINGER_SOURCE_PRIORITY`                   | `singer.sourcePriority`                    | 歌手信息获取来源优先级 (如 `tx,wy` 或 `wy,tx`)                                                 | `tx,wy`            |
 | `SUBSONIC_ENABLE`                          | `subsonic.enable`                          | 是否启用 Subsonic 协议支持                                                                         | `true`             |
 | `SUBSONIC_PATH`                            | `subsonic.path`                            | Subsonic 接口访问路径 (默认为 `/rest`)                                                           | `/rest`            |
-| `SUBSONIC_PORT`                            | `subsonic.port`                            | Subsonic 独立监听端口 (`0` 为关闭独立端口，与主服务共用端口)                                     | `0`                |
+| `SUBSONIC_PORT`                            | `subsonic.port`                            | Subsonic 独立监听端口 (`0` 为关闭独立端口，与主服务共用端口)。**Docker 部署需额外发布该端口**（如 `-p 4533:4533`） | `0`                |
+
+> 📌 **关于 `DATA_PATH` / `LOG_PATH` 的默认值差异**：表中写的 `./data`、`./logs` 是**直接 `npm start` 裸跑**时的默认值。
+> Docker 镜像已在 `Dockerfile` 里覆盖为 `DATA_PATH=/server/data`、`LOG_PATH=/server/data/logs`，
+> 因此容器内日志默认落在 `data/logs`（对应宿主 `./data/logs`），而不是单独挂的 `./logs` 目录。
 | `SUBSONIC_ENABLE_DEBUG`                    | `subsonic.enableDebug`                     | 是否开启 Subsonic 调试日志模式                                                                     | `false`            |
 | `SUBSONIC_ONLINE_SEARCH`                   | `subsonic.onlineSearch`                    | 是否开启 Subsonic 在线全网搜索                                                                     | `true`             |
 | `SUBSONIC_ONLINE_SEARCH_MODE`              | `subsonic.onlineSearchMode`                | Subsonic 在线搜索模式 (`fallback` / `merge` / `local_only`)                                  | `fallback`         |

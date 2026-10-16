@@ -38,12 +38,12 @@
 | 标签 | 说明 |
 | :--- | :--- |
 | `latest` | 最新稳定版，跟随 `main` 分支 |
-| `v1.5.3` / `1.5.3` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
+| `v1.5.5` / `1.5.5` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
 | `v*` | 每个已发布版本都会保留，可随时回滚到历史版本 |
 
 ```bash
 # 固定版本（推荐）
-docker pull ghcr.io/zues0077/lxserver:1.5.3
+docker pull ghcr.io/zues0077/lxserver:1.5.5
 
 # 或跟随最新
 docker pull ghcr.io/zues0077/lxserver:latest
@@ -57,17 +57,22 @@ docker run -d \
   -v $(pwd)/data:/server/data \
   -v $(pwd)/cache:/server/cache \
   -v $(pwd)/music:/server/music \
+  -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.3
+  ghcr.io/zues0077/lxserver:1.5.5
 ```
+
+> ⚠️ `--restart` 不要省略：面板的「重启服务」（`POST /api/restart`）在容器内是结束进程实现的，靠容器重启策略拉起；漏写则点一次重启服务就彻底停了。
 
 **容器挂载卷 (Volume Mappings) ：**
 
 - `-v $(pwd)/data:/server/data`：**必须挂载**。存放配置（`data/config.js`）、用户数据、日志（`data/logs`）与备份。
 - `-v $(pwd)/cache:/server/cache`：**建议挂载**。播放缓存。默认缓存位置为 `root`，缓存实际写在容器内的 `/server/cache/<用户名>`。
 - `-v $(pwd)/music:/server/music`：**建议挂载**。下载目录。点「下载」或「移入下载目录」后，文件会从缓存目录移到这里，即容器内的 `/server/music/<用户名>`。
-- 若**不**挂 `cache` / `music`，这两类文件会写进容器的可写层 —— 宿主目录里看不到，容器重建即丢失。另一种做法是在面板把「缓存位置」由 `root` 切换为 `data`，缓存与下载会改为落在 `/server/data/cache/<用户名>`、`/server/data/music/<用户名>`，此时只挂 `data` 即可；代价是这部分数据会纳入数据同步，数据卷体积会明显变大。
+- `-v $(pwd)/cover_cache:/server/cover_cache`：**建议挂载**。歌曲封面缓存。它**恒定写在容器工作目录下，不受面板「缓存位置」开关影响**（切到 `data` 模式也一样），因此无法跟着上面的开关一起省掉，需要单独挂载。
+- 若**不**挂 `cache` / `music`，这两类文件会写进容器的可写层 —— 宿主目录里看不到，容器重建即丢失。另一种做法是在面板把「缓存位置」由 `root` 切换为 `data`，缓存与下载会改为落在 `/server/data/cache/<用户名>`、`/server/data/music/<用户名>`，此时这两个目录只挂 `data` 即可；代价是这部分数据会纳入数据同步，数据卷体积会明显变大。注意该开关**不影响 `cover_cache`**。
+- **关于 `./logs`**：镜像默认 `LOG_PATH=/server/data/logs`，日志本来就写在 `data` 卷里，所以单独挂 `./logs:/server/logs` 是个**空挂载**（上游默认行为也是如此）。想让日志落到宿主的 `./logs`，需要同时设置环境变量 `LOG_PATH=/server/logs`。
 
 **声明式 Docker Compose ：**
 针对需标准化长久管理的生产实施，创建名为 `docker-compose.yml` 的定义配置：
@@ -75,21 +80,25 @@ docker run -d \
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.3   # 或 :latest
+    image: ghcr.io/zues0077/lxserver:1.5.5   # 或 :latest
     container_name: lx-sync-server
-    restart: unless-stopped
+    restart: unless-stopped      # 不要省：面板「重启服务」靠它把进程拉起来
     ports:
       - "9527:9527"
+      # - "4533:4533"            # 仅当设置了 SUBSONIC_PORT（如 4533）时才需要
     volumes:
       - ./data:/server/data
       # 默认 root 缓存模式下必须一并挂载，否则缓存/下载会留在容器可写层
       - ./cache:/server/cache
       - ./music:/server/music
+      # 封面缓存恒定写在容器工作目录，不受「缓存位置」开关影响，需单独挂载
+      - ./cover_cache:/server/cover_cache
     environment:
       - NODE_ENV=production
       # - ADMIN_PASSWORD=123456
       # - ENABLE_WEBPLAYER_AUTH=true
       # - WEBPLAYER_PASSWORD=yourpassword
+      # - LOG_PATH=/server/logs   # 仅当额外挂载了 ./logs:/server/logs 时才需要
 ```
 
 配置审查无误后，通过指令 `docker-compose up -d` 启动基础架构实例集。

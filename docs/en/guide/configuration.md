@@ -68,10 +68,16 @@ The underlying periodic polling asynchronous daemon of the service will only be 
 
 | Environment Variable Mapping Key (ENV) | System Default Value | Data Type | Scope and Applicable Scenarios |
 | :------------------- | :--------- | :------- | :------------------------------------------------------------------------------------------------------------- |
+| `WEBDAV_ENABLE` | `false` | Boolean | **Enable WebDAV sync and backup.** |
 | `WEBDAV_URL` | `''` | String | Various complete URIs with standard WebDAV protocol gateway interfaces (including HTTPS declaration), for example: `https://dav.jianguoyun.com/dav/Sync`. |
 | `WEBDAV_USERNAME` | `''` | String | Authorization identification name used for WebDAV service node handshake authentication. |
 | `WEBDAV_PASSWORD` | `''` | String | Remote WebDAV gateway access key (highly recommended to use an independent application-specific authorization password to reduce secondary leakage risks). |
+| `WEBDAV_SYNC_PATH` | `'/lx-sync'` | String | Remote path for WebDAV incremental sync. |
+| `WEBDAV_BACKUP_PATH` | `'/lx-sync-backups'` | String | Remote path for WebDAV full backups. |
 | `SYNC_INTERVAL` | `60` | Integer | Cold shrinking timed parameters (unit: minutes) that trigger full thermal backup and pull comparison synchronization flow periods. |
+| `BACKUP_INTERVAL` | `24` | Integer | Full backup interval (unit: hours). |
+| `WEBDAV_EXCLUDE_CACHE` | `false` | Boolean | **Exclude cache directory from sync** (`data/<user>/cache`). When enabled, per-user cache directories are excluded from incremental sync and full backups.<br>⚠️ **Only effective when "Cache Location" is set to `data` mode**: the switch matches the relative path `cache` inside the data directory, whereas the default `root` mode stores cache in `/server/cache` (outside the data directory), making the switch a no-op. |
+| `WEBDAV_EXCLUDE_MUSIC` | `false` | Boolean | **Exclude music download directory from sync** (`data/<user>/music`). When enabled, per-user download directories are excluded from incremental sync and full backups.<br>⚠️ Same as above: **only effective in `data` cache mode**; in `root` mode downloads live in `/server/music` and are unaffected by this switch. |
 
 > 🔖 **Stateful Resurrection and Initialization Mechanism**:
 > 1. **Cloud-First Restoration**: If this set of variables is detected at startup, the system will prioritize attempting to pull archives from the cloud.

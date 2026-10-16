@@ -1563,10 +1563,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
         if (req.method === 'GET') {
-          // 修改：返回包含密码及自定义目录配置的用户列表
+          // 安全收紧：默认**不**回传明文密码。
+          // 管理面板的「显示密码」按钮会在点击时额外带 `x-reveal-secrets: 1` 再请求一次，
+          // 明文于是只在管理员显式索要时才出现在响应里，避免默认把全部用户密码一次性下发
+          // （浏览器内存、扩展、日志、抓包等都会顺手拿到）。
+          const revealSecrets = req.headers['x-reveal-secrets'] === '1'
           const users = global.lx.config.users.map(u => ({
             name: u.name,
-            password: u.password,
+            password: revealSecrets ? u.password : '',
+            hasPassword: !!u.password,
             enableCustomMusicDir: u.enableCustomMusicDir ?? false,
             customMusicDir: u.customMusicDir || '',
             allowOperateCustomMusicDir: u.allowOperateCustomMusicDir ?? false,
@@ -1574,7 +1579,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             enableAutoDownload: u.enableAutoDownload ?? false,
           }))
           if (global.lx.config['user.enablePublicFavorites']) {
-            users.unshift({ name: '_open', password: '', enableCustomMusicDir: false, customMusicDir: '', allowOperateCustomMusicDir: false, allowWriteCustomMusicDir: false, enableAutoDownload: false })
+            users.unshift({ name: '_open', password: '', hasPassword: false, enableCustomMusicDir: false, customMusicDir: '', allowOperateCustomMusicDir: false, allowWriteCustomMusicDir: false, enableAutoDownload: false })
           }
           res.writeHead(200, {
             'Content-Type': 'application/json',
@@ -3455,8 +3460,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
 
         try {
-          // [路径修正] 直接指向根目录 logs/token.log (不依赖 global.lx.dataPath 下的 logs)
-          const logPath = path.join(process.cwd(), 'logs', 'token.log')
+          // 与写侧保持一致：token.log 由 utils/log4js.ts 的 createLogConfig 写到 `global.lx.logPath` 下
+          // （容器内即 `LOG_PATH`，默认 /server/data/logs）。
+          // 此前这里硬编码 `process.cwd()/logs/token.log`，与写侧不是同一目录，
+          // 导致「按 tokenMasked 查 Token 日志」这个接口默认永远查不到内容。
+          const logPath = path.join(global.lx.logPath, 'token.log')
           let logs: string[] = []
           if (fs.existsSync(logPath)) {
             const content = fs.readFileSync(logPath, 'utf8')

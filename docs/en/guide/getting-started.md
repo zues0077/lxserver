@@ -38,12 +38,12 @@ Images are published to **GitHub Packages (GHCR)**. **Every update also gets a v
 | Tag | Meaning |
 | :--- | :--- |
 | `latest` | Latest stable, tracking the `main` branch |
-| `v1.5.3` / `1.5.3` | Current version (matches `version` in `package.json`) — **pin to a concrete version in production** |
+| `v1.5.5` / `1.5.5` | Current version (matches `version` in `package.json`) — **pin to a concrete version in production** |
 | `v*` | Every published version is kept, so you can roll back at any time |
 
 ```bash
 # Pin a version (recommended)
-docker pull ghcr.io/zues0077/lxserver:1.5.3
+docker pull ghcr.io/zues0077/lxserver:1.5.5
 
 # Or follow the latest
 docker pull ghcr.io/zues0077/lxserver:latest
@@ -57,17 +57,22 @@ docker run -d \
   -v $(pwd)/data:/server/data \
   -v $(pwd)/cache:/server/cache \
   -v $(pwd)/music:/server/music \
+  -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.3
+  ghcr.io/zues0077/lxserver:1.5.5
 ```
+
+> ⚠️ Do not omit `--restart`: the panel's "Restart Service" (`POST /api/restart`) terminates the process inside the container and relies on the restart policy to bring it back. Without it, one click on "Restart Service" leaves the service down for good.
 
 **Container Volume Mappings:**
 
 - `-v $(pwd)/data:/server/data`: **Required.** Holds the config (`data/config.js`), user data, logs (`data/logs`) and backups.
 - `-v $(pwd)/cache:/server/cache`: **Recommended.** Playback cache. The default cache location is `root`, so cache files are written to `/server/cache/<user>` inside the container.
 - `-v $(pwd)/music:/server/music`: **Recommended.** Download directory. After "download" or "move to download folder", files are moved here, i.e. `/server/music/<user>` inside the container.
-- If you **do not** mount `cache` / `music`, those files land in the container's writable layer — invisible from the host and lost whenever the container is recreated. Alternatively, switch "Cache Location" from `root` to `data` in the panel; cache and downloads then go to `/server/data/cache/<user>` and `/server/data/music/<user>`, and mounting `data` alone is enough — at the cost of pulling that data into sync and growing the data volume considerably.
+- `-v $(pwd)/cover_cache:/server/cover_cache`: **Recommended.** Song cover cache. It is **always written under the container working directory and is NOT affected by the "Cache Location" setting** (switching to `data` mode changes nothing), so it cannot be skipped along with that switch — mount it separately.
+- If you **do not** mount `cache` / `music`, those files land in the container's writable layer — invisible from the host and lost whenever the container is recreated. Alternatively, switch "Cache Location" from `root` to `data` in the panel; cache and downloads then go to `/server/data/cache/<user>` and `/server/data/music/<user>`, and mounting `data` alone is enough for those two — at the cost of pulling that data into sync and growing the data volume considerably. Note the switch **does not affect `cover_cache`**.
+- **About `./logs`**: the image defaults to `LOG_PATH=/server/data/logs`, so logs already live inside the `data` volume; mounting `./logs:/server/logs` on its own is an **empty mount** (upstream's default behaviour is the same). To put logs in the host's `./logs`, you must also set `LOG_PATH=/server/logs`.
 
 **Declarative Docker Compose:**
 For standardized long-term management in production implementation, create a definition configuration named `docker-compose.yml`:
@@ -75,21 +80,25 @@ For standardized long-term management in production implementation, create a def
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.3   # or :latest
+    image: ghcr.io/zues0077/lxserver:1.5.5   # or :latest
     container_name: lx-sync-server
-    restart: unless-stopped
+    restart: unless-stopped      # don't omit: the panel's "Restart Service" needs it to bring the process back
     ports:
       - "9527:9527"
+      # - "4533:4533"            # only needed when SUBSONIC_PORT is set (e.g. 4533)
     volumes:
       - ./data:/server/data
       # Required with the default `root` cache mode, otherwise cache/downloads stay in the container layer
       - ./cache:/server/cache
       - ./music:/server/music
+      # Cover cache is always written to the container working dir and ignores the "Cache Location" setting
+      - ./cover_cache:/server/cover_cache
     environment:
       - NODE_ENV=production
       # - ADMIN_PASSWORD=123456
       # - ENABLE_WEBPLAYER_AUTH=true
       # - WEBPLAYER_PASSWORD=yourpassword
+      # - LOG_PATH=/server/logs   # only needed if you additionally mount ./logs:/server/logs
 ```
 
 After reviewing the configuration correctly, start the infrastructure instance set with the command `docker-compose up -d`.

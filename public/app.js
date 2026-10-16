@@ -1304,16 +1304,52 @@ class App {
     }
 
     // 切换密码显示/隐藏
-    togglePasswordVisibility(index) {
+    // 安全收紧：用户列表接口默认不再返回明文密码，首次点「显示」时会带
+    // `x-reveal-secrets: 1` 再向服务端请求一次，明文仅在管理员主动索要时取回。
+    async togglePasswordVisibility(index) {
         const user = this.users[index];
         if (!user) return;
 
         const el = document.getElementById(`pwd-text-${index}`);
-        if (el.textContent === '******') {
-            el.textContent = user.password;
-        } else {
+        if (!el) return;
+
+        // 当前已是明文 -> 收起
+        if (el.dataset.revealed === '1') {
             el.textContent = '******';
+            el.dataset.revealed = '0';
+            return;
         }
+
+        // 本地尚无明文：显式向服务端索要一次
+        if (!user.password) {
+            if (user.hasPassword === false) {
+                el.textContent = '（无密码）';
+                el.dataset.revealed = '1';
+                return;
+            }
+            try {
+                const users = await this.request('/api/users', {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Frontend-Auth': this.password,
+                        'x-reveal-secrets': '1'
+                    }
+                });
+                const fresh = Array.isArray(users) ? users.find(u => u.name === user.name) : null;
+                if (!fresh || !fresh.password) {
+                    showError('未能读取该用户密码');
+                    return;
+                }
+                user.password = fresh.password;
+                this.users[index] = user;
+            } catch (err) {
+                showError('读取密码失败: ' + err.message);
+                return;
+            }
+        }
+
+        el.textContent = user.password;
+        el.dataset.revealed = '1';
     }
 
     // 显示修改密码模态框

@@ -82,5 +82,27 @@
             "type": "link",
             "url": "https://github.com/zues0077/lxserver/releases/tag/v1.5.4"
         }
+    },
+    {
+        "comment": "=== 版本更新 v1.5.5 ===",
+        "id": "update_v1_5_5",
+        "status": "active",
+        "type": "version",
+        "logic": {
+            "target_version": "v1.5.5",
+            "operator": "<",
+            "interval_hours": 24
+        },
+        "ui": {
+            "title": "发现新版本 v1.5.5",
+            "date": "2026-10-16",
+            "message": "本次更新聚焦部署正确性与文档准确性：\n1. [修复] 封面缓存漏挂: cover_cache 恒定写在容器工作目录、不受「缓存位置」开关影响，此前按文档部署会让封面图写进容器可写层（宿主看不到、重建即丢）；现已补进 docker-compose 与中英文文档。\n2. [修复] Token 日志查询为空: 读取端硬编码目录与写入端不一致，导致「按 token 查日志」永远查不到内容，现已对齐。\n3. [安全] 用户列表不再默认下发密码明文: 仅在前端显式请求时返回，面板「显示密码」功能保持不变。\n4. [新增] 挂载自检覆盖封面缓存: 启动时一并检查 cover_cache 是否已挂载，且不受缓存模式影响。\n5. [修正] API 文档笔误: 鉴权头 x-admin-auth → x-frontend-auth；/api/admin/restart → /api/restart。\n6. [优化] 部署说明补齐: SUBSONIC_PORT 需额外发布端口、镜像默认不含 ffmpeg（转码自动降级为直链）、/api/restart 依赖 --restart 策略、单挂 ./logs 实为空挂载。\n7. [新增] 英文文档补齐: 音源自检护栏、平台可用性巡检、小爱音箱投播三篇此前仅有中文，现已提供英文版。",
+            "confirm_text": "查看日志",
+            "cancel_text": "稍后提醒"
+        },
+        "action": {
+            "type": "link",
+            "url": "https://github.com/zues0077/lxserver/releases/tag/v1.5.5"
+        }
     }
 ]

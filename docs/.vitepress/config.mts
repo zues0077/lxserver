@@ -130,7 +130,15 @@ export default defineConfig({
             text: 'Core Features',
             items: [
               { text: 'Sync Server Settings', link: '/en/guide/sync-server' },
-              { text: 'Web Player Guide', link: '/en/guide/web-player' }
+              { text: 'Web Player Guide', link: '/en/guide/web-player' },
+              { text: 'XiaoAi Speaker Casting', link: '/en/guide/xiaoai' }
+            ]
+          },
+          {
+            text: 'Source Governance',
+            items: [
+              { text: 'Source Guard', link: '/en/guide/source-guard' },
+              { text: 'Platform Availability Probe', link: '/en/guide/source-probe' }
             ]
           },
           {

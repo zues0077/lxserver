@@ -79,8 +79,8 @@ LX Music Sync Server 构建了统一的基础模型骨架（位于 `src/defaultC
 | `WEBDAV_BACKUP_PATH` | `'/lx-sync-backups'` | String | WebDAV 全量备份远端路径。 |
 | `SYNC_INTERVAL` | `60` | Integer | 触发全量热备、拉取比对同步推流周期的冷缩缓冲定时参数（单位：分钟）。 |
 | `BACKUP_INTERVAL` | `24` | Integer | 全量备份间隔（单位：小时）。 |
-| `WEBDAV_EXCLUDE_CACHE` | `false` | Boolean | **排除缓存目录同步**（`data/<用户>/cache`）。开启后各用户缓存目录不参与增量同步与全量备份。 |
-| `WEBDAV_EXCLUDE_MUSIC` | `false` | Boolean | **排除音乐下载目录同步**（`data/<用户>/music`）。开启后各用户下载歌曲目录不参与增量同步与全量备份。 |
+| `WEBDAV_EXCLUDE_CACHE` | `false` | Boolean | **排除缓存目录同步**（`data/<用户>/cache`）。开启后各用户缓存目录不参与增量同步与全量备份。<br>⚠️ **仅当面板「缓存位置」设为 `data` 模式时才真正有效**：该开关按数据目录内的相对路径 `cache` 判定，而默认 `root` 模式下缓存在 `/server/cache`（不在数据目录内），开关等于空转。 |
+| `WEBDAV_EXCLUDE_MUSIC` | `false` | Boolean | **排除音乐下载目录同步**（`data/<用户>/music`）。开启后各用户下载歌曲目录不参与增量同步与全量备份。<br>⚠️ 同上：**仅 `data` 缓存模式下有效**，`root` 模式下下载目录为 `/server/music`，不受此开关影响。 |
 
 > 🔖 **状态无感迁移与初始化机制 (Stateful Resurrection)**：
 > 1. **云端优先恢复**：若启动时探测到此组变量，系统会优先尝试从云端拉取存档。

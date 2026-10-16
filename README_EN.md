@@ -210,12 +210,12 @@ Images are published to **GitHub Packages (GHCR)**. **Every update also gets a v
 | Tag | Meaning |
 | :--- | :--- |
 | `latest` | Latest stable, tracking the `main` branch |
-| `v1.5.3` / `1.5.3` | Current version (matches `version` in `package.json`) — **pin to a concrete version in production** |
+| `v1.5.5` / `1.5.5` | Current version (matches `version` in `package.json`) — **pin to a concrete version in production** |
 | `v*` | Every published version is kept, so you can roll back at any time |
 
 ```bash
 # Pin a version (recommended)
-docker pull ghcr.io/zues0077/lxserver:1.5.3
+docker pull ghcr.io/zues0077/lxserver:1.5.5
 
 # Or follow the latest
 docker pull ghcr.io/zues0077/lxserver:latest
@@ -229,24 +229,38 @@ docker run -d \
   -v $(pwd)/data:/server/data \
   -v $(pwd)/cache:/server/cache \
   -v $(pwd)/music:/server/music \
+  -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.3
+  ghcr.io/zues0077/lxserver:1.5.5
 ```
 
-> **Mount `data`, `cache` and `music` together.**
+> ⚠️ **Do not omit `--restart`**: the panel's "Restart Service" (`POST /api/restart`) works by terminating the
+> process inside the container, so it relies entirely on the container restart policy to come back up.
+> Without `--restart` (or with `no`), clicking "Restart Service" once leaves the service down for good.
+> Use `--restart unless-stopped` or `always`.
+
+> **Mount `data`, `cache`, `music` and `cover_cache` together.**
 >
 > - `/server/data` (required): config (written to `data/config.js`), user data, logs (`data/logs`), backups.
 > - `/server/cache` (recommended): playback cache. The default cache location is `root`, so files are
 >   actually written to `/server/cache/<user>` inside the container.
 > - `/server/music` (recommended): download directory. After "download" or "move to download folder",
 >   files are moved here, i.e. `/server/music/<user>` inside the container.
+> - `/server/cover_cache` (recommended): song cover cache. **It is always written under the container's
+>   working directory and is NOT affected by the "Cache Location" setting** — even if you switch to
+>   `data` mode and mount `data` only, covers still land in the container's writable layer. Mount it separately.
 >
 > If you **do not** mount `cache` / `music`, those files land in the container's writable layer —
 > invisible from the host and lost whenever the container is recreated. Alternatively, switch
 > "Cache Location" from `root` to `data` in the panel; cache and downloads then go to
-> `/server/data/cache/<user>` and `/server/data/music/<user>`, and mounting `data` alone is enough —
-> at the cost of pulling that data into sync and growing the data volume considerably.
+> `/server/data/cache/<user>` and `/server/data/music/<user>`, and mounting `data` alone is enough for
+> those two — at the cost of pulling that data into sync and growing the data volume considerably.
+> Note this switch **does not affect `cover_cache`**.
+>
+> **About `./logs`**: the image defaults to `LOG_PATH=/server/data/logs`, so logs already live inside the
+> `data` volume. Mounting `./logs:/server/logs` on its own is therefore an **empty mount** (this is upstream's
+> default behaviour too). To put logs in the host's `./logs` directory you must also set `LOG_PATH=/server/logs`.
 
 **Docker Compose Example:**
 
@@ -255,16 +269,19 @@ Create a `docker-compose.yml` file:
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.3   # or :latest
+    image: ghcr.io/zues0077/lxserver:1.5.5   # or :latest
     container_name: lx-sync-server
-    restart: unless-stopped
+    restart: unless-stopped      # don't omit: the panel's "Restart Service" needs it to bring the process back
     ports:
       - "9527:9527"
+      # - "4533:4533"            # only needed when SUBSONIC_PORT is set (e.g. 4533)
     volumes:
       - ./data:/server/data
       # Required with the default `root` cache mode, otherwise cache/downloads stay in the container layer
       - ./cache:/server/cache
       - ./music:/server/music
+      # Cover cache is always written to the container working dir and ignores the "Cache Location" setting
+      - ./cover_cache:/server/cover_cache
     environment:
       - NODE_ENV=production
       # - ADMIN_PASSWORD=yourpassword
@@ -272,6 +289,7 @@ services:
       # - WEBPLAYER_PASSWORD=yourpassword
       # - ADMIN_PATH=/admin
       # - PLAYER_PATH=/
+      # - LOG_PATH=/server/logs   # only needed if you additionally mount ./logs:/server/logs
 ```
 
 ### Option 3: Manual Run (Git Clone)
@@ -318,8 +336,15 @@ Fully compatible with Subsonic API protocol:
 - **Server Address (Server URL)**:
   - **Default Shared Port**: `http://<server-ip>:9527/rest` (Subpath configured via `SUBSONIC_PATH`, default `/rest`).
   - **Standalone Port Mode** (if `SUBSONIC_PORT` > 0, e.g., `4533`): `http://<server-ip>:4533/rest`.
+    - ⚠️ **Docker deployments must also publish that port**: setting `SUBSONIC_PORT=4533` alone is not enough —
+      add `-p 4533:4533` to `docker run` (or expose `"4533:4533"` in the compose `ports` list), otherwise it is
+      unreachable from outside the container.
 - **Username & Password**: Sync username and password configured in the "User Management" dashboard.
 - **Global Online Search**: Search and stream tracks across music platforms directly within Subsonic clients. Prefix keywords with `wy:`, `tx:`, `kw:`, `kg:`, `mg:` to specify sources, or `online:` / `local:` to toggle online/local search.
+- **About server-side transcoding**: Subsonic `transcode` relies on `ffmpeg`, and the **Docker image ships `chromaprint` only — no `ffmpeg`**.
+  The server probes for it at startup (`probeFfmpeg()`): when missing it disables transcoding and **gracefully falls back to a 302 direct link**
+  (no errors, no playback failure) — only the client-requested bitrate/format conversion is skipped. If you need server-side transcoding,
+  install `ffmpeg` into the image yourself or use an image variant that bundles it.
 
 ---
 
@@ -335,7 +360,7 @@ Separated frontend and backend architecture based on Node.js:
 
 ## 🛠️ Configuration
 
-The configuration file is persisted by default in the data directory at `data/config.js` (Docker deployments only need to mount the `./data` volume to retain all settings across container updates and restarts; existing legacy `config.js` in root will be migrated automatically). Environment variables take precedence:
+The configuration file is persisted by default in the data directory at `data/config.js` (in Docker deployments, mounting the `./data` volume keeps **the configuration itself** across container updates and restarts — note this covers configuration only; cache / downloads / cover cache each need their own mounts, see "Mount ... together" above; existing legacy `config.js` in root will be migrated automatically). Environment variables take precedence:
 
 | Env Variable | Config Key | Description | Default |
 | --- | --- | --- | --- |
@@ -348,8 +373,8 @@ The configuration file is persisted by default in the data directory at `data/co
 | `ENABLE_DEBUG` | `debug.enabled` | Enable DEBUG mode (verbose debug and source sandbox logs, default false) | `false` |
 | `MAX_SNAPSHOT_NUM` | `maxSnapshotNum` | Max snapshots to keep | `10` |
 | `CONFIG_PATH` | - | Absolute path to external config file (defaults to `data/config.js`) | - |
-| `DATA_PATH` | - | Absolute path to data storage directory | `./data` |
-| `LOG_PATH` | - | Absolute path to log output directory | `./logs` |
+| `DATA_PATH` | - | Absolute path to data storage directory (**the Docker image overrides this to `/server/data`**) | `./data` |
+| `LOG_PATH` | - | Absolute path to log output directory (**the Docker image overrides this to `/server/data/logs`**, so logs land in `data/logs` rather than a separately mounted `./logs`) | `./logs` |
 | `PROXY_HEADER` | `proxy.header` | Proxy IP header (e.g., `x-real-ip`) | - |
 | `USER_ENABLE_ROOT` | `user.enableRoot` | Enable root path (use `ip:port`, password must be unique) | `false` |
 | `USER_ENABLE_PATH` | `user.enablePath` | Enable user path (use `ip:port/username`, passwords can repeat) | `true` |
@@ -386,7 +411,7 @@ The configuration file is persisted by default in the data directory at `data/co
 | `SINGER_SOURCE_PRIORITY` | `singer.sourcePriority` | Singer info retrieval priority (e.g., `tx,wy` or `wy,tx`) | `tx,wy` |
 | `SUBSONIC_ENABLE` | `subsonic.enable` | Enable Subsonic API support | `true` |
 | `SUBSONIC_PATH` | `subsonic.path` | Subsonic API access path (default `/rest`) | `/rest` |
-| `SUBSONIC_PORT` | `subsonic.port` | Standalone port for Subsonic (`0` means disabled, shares main port) | `0` |
+| `SUBSONIC_PORT` | `subsonic.port` | Standalone port for Subsonic (`0` means disabled, shares main port). **Docker deployments must also publish this port** (e.g. `-p 4533:4533`) | `0` |
 | `SUBSONIC_ENABLE_DEBUG` | `subsonic.enableDebug` | Enable Subsonic debug log mode | `false` |
 | `SUBSONIC_ONLINE_SEARCH` | `subsonic.onlineSearch` | Enable Subsonic online search | `true` |
 | `SUBSONIC_ONLINE_SEARCH_MODE` | `subsonic.onlineSearchMode` | Subsonic online search mode (`fallback` / `merge` / `local_only`) | `fallback` |

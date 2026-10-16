@@ -5,9 +5,15 @@ services:
     image: ghcr.io/zues0077/lxserver:latest
     build: .
     container_name: lx-sync-server
+    # 必须保留重启策略：面板的「重启服务」(/api/restart) 在容器内走 process.exit(0)，
+    # 完全依赖本策略把进程重新拉起来。用 `docker run` 部署时同理，
+    # 必须显式带上 --restart always 或 --restart unless-stopped，否则点一次重启服务就彻底停了。
     restart: always
     ports:
       - "9527:9527"
+      # Subsonic 独立监听端口：仅在设置了 SUBSONIC_PORT > 0 时才需要（例如 4533）。
+      # 注意：只设环境变量而不发布端口，容器外是连不上的，必须同时放开下面这行映射。
+      # - "4533:4533"
     volumes:
       # 数据持久化：配置、用户、日志、备份（必须）
       - ./data:/server/data
@@ -15,11 +21,21 @@ services:
       - ./cache:/server/cache
       # 音乐下载目录（"仅下载"与"移入下载目录"的文件最终落点）
       - ./music:/server/music
+      # 封面缓存目录：恒定写在容器工作目录，不受面板「缓存位置」开关影响
+      # （即使切成 data 模式也一样），不挂会留在容器可写层 —— 宿主看不到、重建即丢
+      - ./cover_cache:/server/cover_cache
+      # 可选：独立日志目录。
+      # 镜像默认 LOG_PATH=/server/data/logs，日志本来就在 data 卷里（data/logs），
+      # 所以这行默认是**空挂载**。想让日志单独落到宿主的 ./logs，需取消本行注释，
+      # 并同时在 environment 里设置 LOG_PATH=/server/logs。
+      # - ./logs:/server/logs
     environment:
       # 环境变量配置，优先级高于 config.js
       - NODE_ENV=production
       # 主事件循环卡死时由独立 worker 自动触发进程重启
       - EVENT_LOOP_WATCHDOG_TIMEOUT_MS=120000
+      # 可选：让上面的 ./logs 挂载真正生效（默认日志写在 /server/data/logs）
+      # - LOG_PATH=/server/logs
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9527/health',{signal:AbortSignal.timeout(10000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 60s
