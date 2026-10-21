@@ -942,14 +942,19 @@ if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
 // [自检护栏] 启动自定义源脚本自检。
 // 静态特征扫描在每次音源加载时生效；这里的运行期采样负责发现「加载成功但持续空转」的脚本，
 // 空闲 CPU 持续超标时逐个卸载候选音源做归因（若确认则保持卸载，未确认立即恢复）。
-// 另有关联入口：事件循环监控发现 >3s 卡顿时调用 attributeStall() 做同步归因
-// （定时器回调耗时即事件循环停顿时长，比 CPU 采样更不怕被阻塞错过）。
+// 另有关联入口（两条归因通道，命中其一即归因）：
+//   1. 事件循环监控察觉到 >阈值的卡顿 → attributeStall(估算的卡顿时长)
+//   2. 音源定时器回调自身耗时超阈值 → attributeStall(回调墙钟耗时，精确值)
+// 通道 2 的存在理由：延迟监控估出来的卡顿时长在低端设备上明显偏小（NAS 实测
+// 4000ms 阻塞只估出 2892ms），仅靠通道 1 会漏掉真凶。（详见 userApi 的注释）
 // 依赖注入而非直接 import，既避免循环依赖，也保证模块加载顺序不变。
 {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { startSourceGuard } = require('@/server/sourceGuard')
+  const { startSourceGuard, attributeStall } = require('@/server/sourceGuard')
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { getLoadedApiRefs, unloadSource, reloadSingleSource, getRecentSlowTimerCallbacks, getTrackedTimerDetails } = require('@/server/userApi')
+  const { getLoadedApiRefs, unloadSource, reloadSingleSource, getRecentSlowTimerCallbacks, getTrackedTimerDetails, setSlowCallbackAttributeHook } = require('@/server/userApi')
+  // 通道 2：慢回调直报。回调耗时是精确测量，不依赖会低估的事件循环估值。
+  setSlowCallbackAttributeHook(attributeStall)
   startSourceGuard({
     listLoaded: getLoadedApiRefs,
     unload: unloadSource,

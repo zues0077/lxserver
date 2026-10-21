@@ -135,6 +135,8 @@ interface GuardConfig {
     stallMinMs: number
     /** 卡顿归因：慢定时器回调的时间窗（毫秒），窗外的记录不作为证据 */
     stallSuspectWindowMs: number
+    /** 两条归因通道的去重窗口（毫秒） */
+    attributionDedupMs: number
     /** 卡顿归因：隔离模式下同一音源连续被归因几次才动手 */
     stallIsolateStreak: number
     /** 卡顿归因：是否真正隔离（默认 false = 告警模式先行） */
@@ -147,7 +149,9 @@ const envNum = (key: string, fallback: number): number => {
     const raw = process.env[key]
     if (raw === undefined || raw === '') return fallback
     const value = Number(raw)
-    return Number.isFinite(value) && value > 0 ? value : fallback
+    // 显式 0 必须生效（用于「设为 0 即关闭某机制」的开关），
+    // 只有非数字 / 负数才回落到默认值。
+    return Number.isFinite(value) && value >= 0 ? value : fallback
 }
 
 const envBool = (key: string, fallback: boolean): boolean => {
@@ -175,8 +179,12 @@ const cfg = (): GuardConfig => {
             probeMaxScripts: envNum('SOURCE_GUARD_PROBE_MAX_SCRIPTS', 6),
             // 卡顿联动归因：CPU 采样会被阻塞错过 5~7s 的爆发，事件循环延迟不会。
             // 默认只告警不隔离（warn 先行），连续归因同一源 N 次且显式开启开关才隔离。
-            stallMinMs: envNum('SOURCE_GUARD_STALL_MIN_MS', 3000),
+            // 归因触发阈值。默认 2000ms（实测依据：NAS 上 4000ms 的真实阻塞被
+            // 事件循环延迟监控低估成 2892ms，若设 3000 会漏掉；开发机同场景估值 3678ms）。
+            // 2s 级的事件循环停顿本身就已经能让音频下发明可感知地断流，值得归因。
+            stallMinMs: envNum('SOURCE_GUARD_STALL_MIN_MS', 2000),
             stallSuspectWindowMs: envNum('SOURCE_GUARD_STALL_SUSPECT_WINDOW_MS', 15000),
+            attributionDedupMs: envNum('SOURCE_GUARD_ATTRIBUTION_DEDUP_MS', 2000),
             stallIsolateStreak: envNum('SOURCE_GUARD_STALL_ISOLATE_STREAK', 3),
             stallIsolateEnabled: envBool('SOURCE_GUARD_STALL_ISOLATE_ENABLED', false),
         }
@@ -801,12 +809,28 @@ export function getStallAttributions(): Array<ReturnType<typeof summarizeAttribu
 /** 长定时器判定阈值：>=60s 的间隔才纳入佐证候选 */
 const LONG_TIMER_INTERVAL_MS = 60 * 1000
 
+/**
+ * 同一卡顿事件可能同时被「延迟监控」与「慢回调直报」两条通道命中，
+ * 去重窗口内只记一次——否则隔离模式的连续计数会被同一事件重复累加，提前动手。
+ * 自动化测试需要连续触发多个场景，可用 SOURCE_GUARD_ATTRIBUTION_DEDUP_MS=0 关闭。
+ */
+let lastAttributionAt = 0
+let lastAttributionRecord: StallAttribution | null = null
+
 export function attributeStall(stallMs: number): StallAttribution | null {
     const current = cfg()
     if (!current.enabled) return null
     if (stallMs < current.stallMinMs) return null
 
     const now = Date.now()
+
+    // 两条归因通道会在同一次阻塞上先后到达（先回调直报、后延迟监控察觉），
+    // 不去重的话隔离模式的连续计数会被同一事件重复累加，进而提前触发隔离。
+    if (lastAttributionRecord && now - lastAttributionAt < current.attributionDedupMs) {
+        return lastAttributionRecord
+    }
+    lastAttributionAt = now
+
     const suspects: StallSuspect[] = []
     const seen = new Set<string>()
 
@@ -852,6 +876,7 @@ export function attributeStall(stallMs: number): StallAttribution | null {
         suspects,
         action: 'none',
     }
+    lastAttributionRecord = attribution
 
     if (suspects.length === 0) {
         console.warn(`[自检护栏][归因] 主线程卡顿 ${stallMs}ms，未定位到音源定时器（可能来自宿主负载、GC 或同步任务）`)

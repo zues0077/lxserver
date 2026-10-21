@@ -180,6 +180,25 @@ export function getTrackedTimerCount() {
  */
 const SLOW_TIMER_CALLBACK_MS = 300
 
+/**
+ * 慢回调直接触发归因的阈值（毫秒）。
+ *
+ * 事件循环延迟监控（monitorEventLoopDelay）估出的卡顿时长会明显偏小：实测在 NAS 上
+ * 一段 4000ms 的同步阻塞只被估成 2892ms（-28%），恰好漏过归因阈值；同一份代码在
+ * 开发机上的估值却是 3678ms。估值依赖采样时机，弱 CPU 上偏差更大。
+ * 而这里记录的是回调自身的墙钟耗时（Date.now() 首尾夹逼），是精确值。
+ * 因此当某个音源的定时器回调本身已经占到这个量级时，直接以它作为卡顿量级触发归因，
+ * 不再依赖那个会低估的估算值。
+ */
+const SLOW_CALLBACK_ATTRIBUTE_MS = 2000
+
+/** 由 index.ts 注入的归因回调（sourceGuard.attributeStall），保持依赖注入风格避免循环依赖 */
+let slowCallbackAttributeHook: ((costMs: number) => void) | null = null
+
+export function setSlowCallbackAttributeHook(fn: ((costMs: number) => void) | null): void {
+    slowCallbackAttributeHook = fn
+}
+
 export interface TrackedTimerInfo {
     owner: string
     id: string
@@ -244,6 +263,12 @@ const reportSlowTimerCallback = (ref: { owner: string; id: string; name: string 
         at: Date.now(),
     })
     if (recentSlowTimerCallbacks.length > MAX_SLOW_TIMER_RECORDS) recentSlowTimerCallbacks.shift()
+
+    // 回调自身耗时已达卡顿量级 → 立即归因。
+    // 这是精确测量，无需等待（也不受）事件循环延迟监控那套会低估的估算值。
+    if (costMs >= SLOW_CALLBACK_ATTRIBUTE_MS) {
+        try { slowCallbackAttributeHook?.(costMs) } catch { /* 归因失败不得影响业务 */ }
+    }
 }
 
 /** 返回已成功加载的 API 源数量，用于状态展示与健康检查。 */
