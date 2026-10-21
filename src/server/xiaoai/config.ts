@@ -28,6 +28,14 @@ export interface XiaoAiConfig {
   streamPath: string
   /** 播放时点亮灯环 */
   keepLight: boolean
+  /**
+   * 触屏音箱显示封面与歌词（会向小米曲库搜索 audioID 并塞进 player_play_music）。
+   * 默认关闭：带上曲库 audioID 后，音箱会改播小米云端的对应资源，
+   * VIP 歌往往只有 30 秒试听片段，表现为「播错歌 / 断断续续」，所以默认走自己的直链。
+   */
+  touchscreenLyrics: boolean
+  /** 投送前先把整首缓存到本地（默认关闭：音箱直接按远端地址拉流） */
+  cacheBeforePlay: boolean
   /** 强制走 player_play_url 的型号（覆盖内置白名单） */
   disabledModels: string[]
   /** 选中的设备（支持多选同时播放） */
@@ -45,6 +53,8 @@ const DEFAULT_CONFIG: XiaoAiConfig = {
   serverBaseUrl: '',
   streamPath: '/api/music/xiaoai/stream',
   keepLight: true,
+  cacheBeforePlay: false,
+  touchscreenLyrics: false,
   disabledModels: [],
   selectedDeviceIds: [],
   devices: [],
@@ -82,6 +92,8 @@ export const loadConfig = (): XiaoAiConfig => {
       ...DEFAULT_CONFIG,
       ...raw,
       keepLight: raw.keepLight !== false,
+      touchscreenLyrics: raw.touchscreenLyrics === true,
+      cacheBeforePlay: raw.cacheBeforePlay === true,
       disabledModels: Array.isArray(raw.disabledModels)
         ? raw.disabledModels.map((item: unknown) => String(item).trim().toUpperCase()).filter(Boolean)
         : [],

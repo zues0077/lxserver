@@ -15,5 +15,7 @@ export interface ScheduledTask {
   nextRunTime?: number
   isRunning: boolean
   lastResult?: TaskExecutionResult
+  /** 服务端启动后多久跑第一次（默认 3 秒）；重任务可以调大，避免和启动期抢资源 */
+  startupDelayMs?: number
   run: () => Promise<TaskExecutionResult>
 }

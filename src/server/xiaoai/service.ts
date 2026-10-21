@@ -1,5 +1,7 @@
+import os from 'node:os'
 import { MinaAuth, type LoginResult, type QRPollResult, type TokenInfo } from './auth'
-import { MinaClient, type MinaDevice } from './client'
+import { MinaClient, PLAY_STATUS_PAUSED, type MinaDevice } from './client'
+import { DEFAULT_MUSIC_AUDIO_ID, needUseMusicApi } from './constants'
 import { httpRequest } from './http'
 import {
   loadConfig,
@@ -17,6 +19,8 @@ export interface DeviceActionResult {
   name: string
   ok: boolean
   error?: string
+  /** 暂停操作的最终结果：paused 正常暂停 / stopped 降级为停止（无法原位续播） */
+  state?: 'paused' | 'stopped' | 'failed'
 }
 
 /** 对外暴露的配置（含设备与登录状态，不含任何凭据） */
@@ -26,12 +30,75 @@ export interface XiaoAiPublicConfig {
   loginMethod: string
   account: string
   serverBaseUrl: string
+  /** 服务端探测到的局域网地址建议值（形如 http://192.168.1.10:9527），供界面一键填入 */
+  suggestedBaseUrl: string
   streamPath: string
   keepLight: boolean
+  /** 触屏音箱显示封面与歌词（默认关闭，开启后可能改播小米云端试听） */
+  touchscreenLyrics: boolean
+  /** 投送前先缓存整首音频 */
+  cacheBeforePlay: boolean
   disabledModels: string[]
   selectedDeviceIds: string[]
   devices: XiaoAiDevice[]
   lastSyncAt: number | null
+}
+
+/** audioID 缓存有效期与容量上限 */
+const AUDIO_ID_CACHE_TTL_MS = 30 * 60 * 1000
+const AUDIO_ID_CACHE_MAX = 300
+
+/** 是否私有网段 IPv4（10/8、172.16-31、192.168/16） */
+const isPrivateIPv4 = (ip: string) => {
+  const parts = String(ip || '').split('.').map(item => Number(item))
+  if (parts.length !== 4 || parts.some(item => !Number.isInteger(item))) return false
+  const [a, b] = parts
+  if (a === 10) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  return a === 192 && b === 168
+}
+
+/**
+ * 探测本机可被音箱访问的局域网地址。
+ *
+ * 音箱只会照 URL 拉流，填 127.0.0.1 时它会请求自己，所以界面需要一个真实可路由的地址。
+ * 参考 songloft-player 的 LanAddress：跳过回环、链路本地与容器/虚拟网卡，取第一个私有网段地址。
+ */
+const suggestLanBaseUrl = (): string => {
+  try {
+    const port = String(process.env.PORT || 9527)
+    const interfaces = os.networkInterfaces()
+    for (const [name, list] of Object.entries(interfaces)) {
+      // 跳过容器与虚拟网卡，避免给出 docker0/br-xxx 之类的地址
+      if (/^(docker|br-|veth|virbr|vmnet|tailscale|zt)/i.test(name)) continue
+      for (const item of list || []) {
+        if (item.internal) continue
+        if (item.family !== 'IPv4' && (item.family as unknown) !== 4) continue
+        if (!isPrivateIPv4(item.address)) continue
+        return `http://${item.address}:${port}`
+      }
+    }
+  } catch {
+    /* 枚举失败时不给建议值，前端按原逻辑走 */
+  }
+  return ''
+}
+
+/** 浏览器访问本服务时的地址，判断是否值得直接拿来当建议值 */
+const USELESS_HOST = /^(https?:\/\/)?(localhost|127\.|0\.0\.0\.0|\[?::1\]?)/i
+
+/**
+ * 优先用浏览器请求的来源地址作为建议值。
+ *
+ * 容器部署时网卡地址是内网假地址（fnOS 容器网络常见 10.201.x.x），
+ * 端口也是容器内端口（如 9527），音箱根本连不上；
+ * 而请求来源天然就是用户在浏览器里打开这份页面的地址（如 http://192.168.1.10:9527），
+ * 音箱和浏览器处在同一个局域网，这个地址才是可达的。
+ */
+const suggestBaseUrl = (origin?: string): string => {
+  const value = String(origin || '').trim().replace(/\/+$/, '')
+  if (value && !USELESS_HOST.test(value)) return value
+  return suggestLanBaseUrl()
 }
 
 class XiaoAiService {
@@ -55,7 +122,7 @@ class XiaoAiService {
     return this.auth.isTokenValid() ? 'valid' : 'expired'
   }
 
-  getPublicConfig(): XiaoAiPublicConfig {
+  getPublicConfig(origin?: string): XiaoAiPublicConfig {
     this.ensureInit()
     const config = loadConfig()
     const token = this.auth.getToken()
@@ -65,8 +132,11 @@ class XiaoAiService {
       loginMethod: token?.loginMethod || '',
       account: token?.account ? maskAccount(token.account) : config.account ? maskAccount(config.account) : '',
       serverBaseUrl: config.serverBaseUrl,
+      suggestedBaseUrl: suggestBaseUrl(origin),
       streamPath: config.streamPath || '/api/music/xiaoai/stream',
       keepLight: config.keepLight !== false,
+      cacheBeforePlay: config.cacheBeforePlay !== false,
+      touchscreenLyrics: config.touchscreenLyrics === true,
       disabledModels: config.disabledModels,
       selectedDeviceIds: config.selectedDeviceIds,
       devices: config.devices,
@@ -74,17 +144,19 @@ class XiaoAiService {
     }
   }
 
-  updateConfig(patch: Record<string, unknown>): XiaoAiPublicConfig {
+  updateConfig(patch: Record<string, unknown>, origin?: string): XiaoAiPublicConfig {
     const next: Partial<XiaoAiConfig> = {}
     if (patch.serverBaseUrl !== undefined) next.serverBaseUrl = String(patch.serverBaseUrl || '').trim()
     if (patch.streamPath !== undefined) next.streamPath = String(patch.streamPath || '').trim() || '/api/music/xiaoai/stream'
     if (patch.keepLight !== undefined) next.keepLight = !!patch.keepLight
+    if (patch.touchscreenLyrics !== undefined) next.touchscreenLyrics = !!patch.touchscreenLyrics
+    if (patch.cacheBeforePlay !== undefined) next.cacheBeforePlay = !!patch.cacheBeforePlay
     if (patch.disabledModels !== undefined) next.disabledModels = Array.isArray(patch.disabledModels) ? patch.disabledModels.map(String) : []
     if (patch.selectedDeviceIds !== undefined) {
       next.selectedDeviceIds = Array.isArray(patch.selectedDeviceIds) ? patch.selectedDeviceIds.map(String) : []
     }
     saveConfig(next)
-    return this.getPublicConfig()
+    return this.getPublicConfig(origin)
   }
 
   // ===== 登录 =====
@@ -223,19 +295,94 @@ class XiaoAiService {
   /**
    * 投播：把同一个音频直链同时推给多台音箱。
    * streamUrl 必须是对音箱可达的地址（通常是本服务的签名中转地址）。
+   *
+   * 触屏机型走 player_play_music 时，会先按「歌名 + 歌手」去小米曲库搜真实 audioID，
+   * 这样音箱屏幕上能显示对应封面与歌词（搜不到则回退默认封面）。
    */
   async play(params: { streamUrl: string; deviceIds?: string[]; song?: { name?: string; singer?: string } }) {
     const streamUrl = String(params.streamUrl || '').trim()
     if (!streamUrl) throw new Error('缺少可投送的播放地址')
     const config = loadConfig()
-    const results = await this.fanOut(params.deviceIds, 'play', (client, deviceId, hardware) =>
-      client.playUrl(deviceId, streamUrl, hardware, { keepLight: config.keepLight !== false, disabledModels: config.disabledModels })
-    )
+    const songName = String(params.song?.name || '').trim()
+    const singer = String(params.song?.singer || '').trim()
+    const results = await this.fanOut(params.deviceIds, 'play', async (client, deviceId, hardware) => {
+      let audioId: string | undefined
+      if (config.touchscreenLyrics === true && songName && needUseMusicApi(hardware, config.disabledModels)) {
+        audioId = await this.resolveAudioId(client, songName, singer)
+      }
+      return client.playUrl(deviceId, streamUrl, hardware, {
+        keepLight: config.keepLight !== false,
+        disabledModels: config.disabledModels,
+        audioId,
+      })
+    })
+    const label = songName ? `${songName}${singer ? ` - ${singer}` : ''}` : '未命名曲目'
+    for (const item of results) {
+      if (item.ok) {
+        console.log(`[XiaoAi] 已下发播放 ${label} → ${item.name || item.deviceId}`)
+      } else {
+        console.warn(`[XiaoAi] 播放下发失败 ${label} → ${item.name || item.deviceId}: ${item.error || '设备未受理'}`)
+      }
+    }
+    // 投送后做一次「播的到底是不是这首歌」的自检：
+    // 带上曲库 audioID 时音箱可能转去播小米云端资源（VIP 歌只有 30 秒试听），
+    // 表现就是播错歌 / 断断续续，这里把它写进日志，免得用户只看到「能播但不对劲」。
+    const firstOk = results.find(item => item.ok)
+    if (firstOk) {
+      setTimeout(() => {
+        void this.getStatus(firstOk.deviceId)
+          .then(status => this.reportPlaybackMismatch(status, songName))
+          .catch(() => {})
+      }, 3000)
+    }
     return { results, success: results.some(item => item.ok), song: params.song || null }
   }
 
+  /** 播放内容自检：试听片段 / 播错歌 都记一条可读告警 */
+  private reportPlaybackMismatch(status: any, expectedTitle: string) {
+    const raw = (status?.raw || {}) as any
+    const detail = raw?.extra_track_list?.[0] || raw?.play_song_detail?.extra_track_list?.[0]
+    if (!detail) return
+    const title = String(detail.title || '')
+    if (detail.isSongPreview) {
+      console.warn(
+        `[XiaoAi] 音箱正在播小米曲库的试听片段：${title || '未知'}（audio_id=${detail.audio_id || '?'}）。` +
+          '若听到断断续续或播错歌，请在设置里关闭「触屏显示封面歌词」',
+      )
+      return
+    }
+    if (expectedTitle && title && !title.includes(expectedTitle) && !expectedTitle.includes(title)) {
+      console.warn(`[XiaoAi] 音箱当前曲目（${title}）与投送的（${expectedTitle}）不一致`)
+    }
+  }
+
+  /**
+   * 暂停：逐台下发并回读校验，必要时降级为 stop。
+   * 返回的 results[].state 让前端能区分「真暂停」与「降级停止（无法原位续播）」。
+   */
   async pause(deviceIds?: string[]) {
-    const results = await this.fanOut(deviceIds, 'pause', (client, deviceId) => client.playerPause(deviceId))
+    const config = loadConfig()
+    const targets = await this.resolveTargets(deviceIds)
+    const client = await this.getClient()
+    const results: DeviceActionResult[] = await Promise.all(
+      targets.map(async target => {
+        try {
+          const state = await client.playerPauseVerified(target.deviceID, target.hardware, {
+            disabledModels: config.disabledModels,
+          })
+          return { deviceId: target.deviceID, name: target.name, ok: state !== 'failed', state }
+        } catch (error: any) {
+          console.warn(`[XiaoAi] pause 失败 (${target.name}):`, error?.message || error)
+          return {
+            deviceId: target.deviceID,
+            name: target.name,
+            ok: false,
+            state: 'failed' as const,
+            error: error?.message || String(error),
+          }
+        }
+      })
+    )
     return { results, success: results.some(item => item.ok) }
   }
 
@@ -266,39 +413,72 @@ class XiaoAiService {
     return { volume: value, results, success: results.some(item => item.ok) }
   }
 
-  /** 单设备播放状态（用于界面回显） */
+  /** 单设备播放状态（用于界面回显与自动续播判定） */
   async getStatus(deviceId: string) {
     const config = loadConfig()
     const target = deviceId || config.selectedDeviceIds[0] || config.devices[0]?.deviceID || ''
     if (!target) throw new Error('没有可查询的设备')
     const client = await this.getClient()
     const raw = await client.getPlayerStatus(target)
-    let info: Record<string, unknown> = {}
-    const rawInfo = (raw?.data as any)?.info
-    if (typeof rawInfo === 'string') {
-      try {
-        info = JSON.parse(rawInfo)
-      } catch {
-        info = {}
-      }
-    }
-    const position = Number(info.position)
-    const duration = Number(info.duration)
-    const hasPosition = Number.isFinite(position) && position > 0
-    const hasDuration = Number.isFinite(duration) && duration > 0
+    const info = client.parseStatusInfo(raw)
+
+    // 设备上报的 position/duration 单位随固件而异（多数是秒，部分上报毫秒）。
+    // 常用音频时长不会是「小于 10000 的毫秒数」，所以小于 10000 一律按秒处理。
+    const scale = info.duration > 0 && info.duration < 10000 ? 1000 : 1
+    const durationMs = info.duration > 0 ? Math.round(info.duration * scale) : 0
+    const positionMs = info.position > 0 ? Math.round(info.position * scale) : 0
+
     return {
       deviceId: target,
-      playing: Number(info.status) === 1,
-      volume: typeof info.volume === 'number' ? info.volume : -1,
-      title: String(info.title || info.audioName || ''),
-      durationMs: hasDuration ? duration : 0,
-      positionMs: hasPosition ? position : 0,
-      // 设备上报的位置/总长单位随固件而异（秒或毫秒），因此额外给出无量纲的播放进度比例。
-      // 自动续播的前端只看这个比例，就不必关心单位差异。
-      hasProgress: hasPosition && hasDuration,
-      progressRatio: hasPosition && hasDuration ? Math.min(1, position / duration) : -1,
-      raw: info,
+      playing: info.status === 1,
+      paused: info.status === PLAY_STATUS_PAUSED,
+      status: info.status,
+      volume: info.volume,
+      title: info.title,
+      durationMs,
+      positionMs,
+      // 无量纲播放进度：自动续播只看这个比例，就不必关心单位差异
+      hasProgress: durationMs > 0 && positionMs > 0,
+      // 是否在播小米曲库的试听片段（只有 30 秒，会让播放听起来断断续续）
+      preview: (() => {
+        const raw2 = (info.raw || {}) as any
+        const detail = raw2?.extra_track_list?.[0] || raw2?.play_song_detail?.extra_track_list?.[0]
+        return !!detail?.isSongPreview
+      })(),
+      progressRatio: durationMs > 0 && positionMs > 0 ? Math.min(1, positionMs / durationMs) : -1,
+      raw: info.raw,
     }
+  }
+
+  // ===== 内部：曲库 audioID 缓存 =====
+
+  /** audioID 搜索结果缓存：同一首歌在多设备/多次投送间复用，避免重复请求小米曲库 */
+  private audioIdCache = new Map<string, { id: string; at: number }>()
+
+  private async resolveAudioId(client: MinaClient, name: string, singer: string): Promise<string> {
+    const key = `${name}|${singer}`.toLowerCase()
+    const cached = this.audioIdCache.get(key)
+    if (cached && Date.now() - cached.at < AUDIO_ID_CACHE_TTL_MS) return cached.id
+
+    let audioId = DEFAULT_MUSIC_AUDIO_ID
+    try {
+      audioId = await client.searchAudioId(name, singer)
+      if (audioId && audioId !== DEFAULT_MUSIC_AUDIO_ID) {
+        console.log(`[XiaoAi] 曲库命中：${name}${singer ? ` - ${singer}` : ''} → audioID=${audioId}`)
+      }
+    } catch (error: any) {
+      console.warn('[XiaoAi] 曲库搜索失败，回退默认封面:', error?.message || error)
+    }
+
+    // 只缓存有效结果，并限制条目数避免长期运行内存增长
+    if (audioId) {
+      if (this.audioIdCache.size >= AUDIO_ID_CACHE_MAX) {
+        const oldest = this.audioIdCache.keys().next().value
+        if (oldest) this.audioIdCache.delete(oldest)
+      }
+      this.audioIdCache.set(key, { id: audioId, at: Date.now() })
+    }
+    return audioId
   }
 
   // ===== 内部：客户端与自动续期 =====

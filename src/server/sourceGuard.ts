@@ -67,6 +67,14 @@ export interface GuardDeps {
     listLoaded: () => SourceRef[]
     unload: (owner: string, id: string) => void
     reload: (owner: string, id: string) => Promise<unknown>
+    /**
+     * 服务当前是否「忙到不能被打扰」（例如正在往音箱下发音频）。
+     *
+     * 复检要卸载/重载自定义源脚本，重载会在主线程同步 eval 整个脚本（实测 2~3 秒），
+     * 期间事件循环完全卡住——正在下发的音频会断流，音箱缓冲被抽干，
+     * 听感就是「每隔几十秒突然静音一两秒」。所以有音频在放时必须让路。
+     */
+    isBusy?: () => boolean
 }
 
 export interface GuardStatus {
@@ -527,6 +535,11 @@ const tick = (): void => {
         highStreak = 0
         return
     }
+    // 正在往音箱下发音频：这时绝对不能卸载/重载音源（会卡住事件循环、断掉音频流）
+    if (guardDeps?.isBusy?.()) {
+        highStreak = 0
+        return
+    }
 
     const avg = windowAvg()
     if (avg < current.thresholdPercent) {
@@ -571,6 +584,13 @@ const candidateWeight = (ref: SourceRef): number => {
  */
 const runProbe = async (deps: GuardDeps, baseline: number): Promise<void> => {
     const current = cfg()
+    // 复检会卸载/重载自定义源脚本，重载要在主线程同步 eval 整个脚本（实测 2~3 秒）。
+    // 正在往音箱下发音频时绝不能做：事件循环一卡，正在下发的音频就断流。
+    if (deps.isBusy?.()) {
+        console.log('[自检护栏] 正在播放音频，跳过本轮复检（避免重载音源打断播放）')
+        highStreak = 0
+        return
+    }
     probing = true
     // 复检期间暂停常规采样，避免两套测量互相污染
     if (sampler) {

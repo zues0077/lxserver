@@ -7,6 +7,7 @@ import {
     reviewSourceScript,
 } from './sourceGuard'
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
+import { syncLog } from '../utils/log4js'
 
 import needle from 'needle'
 import * as crypto from 'crypto'
@@ -504,13 +505,12 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
             !!apiInfo.allowUnsafeVM && !!global.lx.config['system.allowUnsafeVM'],
             (alert) => {
                 const apiKey = `${fullApiInfo.owner}_${fullApiInfo.id}`
-                const sig = `${alert.log}||${alert.updateUrl || ''}`
+                // 去重只看提示内容本身：同一音源脚本常在初始化/重试中连发多次相同提示，
+                // 而 updateUrl 每次可能带不同参数，按整串比较会漏判、造成日志刷屏。
+                const sig = String(alert.log || '')
                 const now = Date.now()
                 const last = sniffDedupeMap.get(apiKey)
-                // 同一音源在窗口期内重复上报同一条更新提示时直接忽略：
-                // 音源脚本常会在初始化/重试中连续发起多次请求，导致同一条提示被反复记录。
-                if (last && last.sig === sig && now - last.at < SNIFF_DEDUPE_WINDOW_MS) return
-                sniffDedupeMap.set(apiKey, { sig, at: now })
+                const repeated = !!last && last.sig === sig && now - last.at < SNIFF_DEDUPE_WINDOW_MS
 
                 const currentStatus = apiStatus.get(apiKey) || { status: 'success' }
                 currentStatus.updateAlert = {
@@ -519,7 +519,10 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                     updateUrl: alert.updateUrl
                 }
                 apiStatus.set(apiKey, currentStatus)
-                console.log(`[自定义源] [更新嗅探] 嗅探到源 ${fullApiInfo.name} 的更新提示: ${alert.log}`)
+                if (!repeated) {
+                    sniffDedupeMap.set(apiKey, { sig, at: now })
+                    console.log(`[自定义源] [更新嗅探] 嗅探到源 ${fullApiInfo.name} 的更新提示: ${alert.log}`)
+                }
             },
             pendingAborts
         ),
@@ -1132,6 +1135,12 @@ async function loadOneSource(
 
     try {
         const script = fs.readFileSync(scriptPath, 'utf-8')
+        // 记录脚本内容指纹：文件监控只在内容真的变了时才重载（见 watcher 里的判断）。
+        // 音源脚本经常自己往目录里写文件（自愈保存、缓存落盘等），
+        // 如果只看「文件变了」就重载，就会形成
+        // 「重载(2~3 秒同步 eval) → 脚本再写文件 → 再重载」的自激循环，
+        // 期间整个事件循环被卡住，正在下发的音频会断流。
+        loadedScriptHashes.set(`${owner}/${source.id}`, crypto.createHash('sha1').update(script).digest('hex'))
         const metadata = extractMetadata(script)
 
         // [自检护栏] 加载前体检：命中 A 级特征（反调试自旋 / 空死循环 / 沙箱逃逸）时按策略隔离。
@@ -1391,6 +1400,93 @@ async function runCoalescedReload(key: string, task: () => Promise<void>): Promi
 let fsWatcher: fs.FSWatcher | null = null
 const lastReloadMap = new Map<string, number>() // 记录每个用户的最后加载时间
 
+/**
+ * 每个已加载音源脚本的内容指纹（sha1）。
+ *
+ * 用来判断「文件事件触发的变化」是不是内容真的变了：
+ * 音源脚本运行时经常自己往源目录里写文件（自愈保存、缓存落盘），
+ * 只看文件事件就重载会形成自激循环，而每次重载都要在主线程同步 eval
+ * 整个脚本（2~3 秒），期间事件循环被卡住 → 正在下发的音频断流 → 听感断断续续。
+ */
+const loadedScriptHashes = new Map<string, string>()
+
+/** 当前是否正在往音箱下发音频（正在放音时不能做重载这种重活） */
+const isAudioStreaming = (): boolean => {
+    try {
+        // 延迟 require，避免与 xiaoai 模块产生循环依赖
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { hasActiveStream } = require('./xiaoai/stream')
+        return hasActiveStream()
+    } catch {
+        return false
+    }
+}
+
+/**
+ * 真正执行一次「文件变了 → 重载音源」的处理。
+ *
+ * 两道保护：
+ *  1) **放音期间不做**：重载要在主线程同步 eval 整个音源脚本（2~3 秒），
+ *     事件循环一卡，正在下发的音频就断流（听感是突然静音一两秒）。
+ *     放音时先压着，隔几秒再试。
+ *  2) **内容没变就不做**：音源脚本运行时经常自己往源目录里写文件（自愈保存、缓存落盘），
+ *     只看「文件事件」就重载会形成「重载 → 脚本再写 → 再重载」的自激循环，
+ *     每轮都要卡住主线程 2~3 秒。用内容指纹比对即可一劳永逸地掐断。
+ */
+function applySourceChange(
+    username: string,
+    baseName: string,
+    eventType: string,
+    filename: string,
+    sourceRoot: string,
+    attempt = 0,
+) {
+    // 放音期间：暂缓，稍后重试（最多等 2 分钟）
+    if (isAudioStreaming()) {
+        if (attempt < 24) {
+            console.log(`[自定义源] [文件监控] 正在播放音频，暂缓重载 ${username}/${baseName}`)
+            syncLog.info(`[自定义源] [文件监控] 正在播放音频，暂缓重载 ${username}/${baseName}`)
+            const timer = setTimeout(() => {
+                applySourceChange(username, baseName, eventType, filename, sourceRoot, attempt + 1)
+            }, 5000)
+            timer.unref?.()
+        }
+        return
+    }
+
+    // 单个音源脚本变化：只重载该音源，避免「改一个文件重载全部音源」的放大
+    if (baseName.endsWith('.js')) {
+        const scriptPath = path.join(sourceRoot, username === 'open' ? '_open' : username, baseName)
+        let changed = true
+        try {
+            const now = crypto
+                .createHash('sha1')
+                .update(fs.readFileSync(scriptPath, 'utf-8'))
+                .digest('hex')
+            changed = now !== loadedScriptHashes.get(`${username}/${baseName}`)
+        } catch {
+            changed = true
+        }
+        if (!changed) {
+            console.log(`[自定义源] [文件监控] 音源脚本内容未变化，跳过重载 ${username}/${baseName}`)
+            return
+        }
+        console.log(`[自定义源] [文件监控] 检测到音源脚本变动 (${eventType}): ${filename} -> 增量重载 ${username}/${baseName}`)
+        syncLog.info(`[自定义源] [文件监控] 检测到音源脚本变动 (${eventType}): ${username}/${baseName} -> 增量重载`)
+        reloadSingleSource(username, baseName).catch(err => {
+            console.error(`[自定义源] [文件监控] 增量重载失败:`, err)
+        })
+        return
+    }
+
+    // 源清单 (sources.json) 变化：增删/启停集合可能已变，仍需全量重载
+    console.log(`[自定义源] [文件监控] 检测到源清单变动 (${eventType}): ${filename} -> 全量重载 ${username}`)
+    syncLog.info(`[自定义源] [文件监控] 检测到源清单变动 (${eventType}): ${username} -> 全量重载`)
+    initUserApis(username).catch(err => {
+        console.error(`[自定义源] [文件监控] 重新加载失败:`, err)
+    })
+}
+
 // 启动文件监控
 function startWatcher(sourceRoot: string) {
     if (fsWatcher) return
@@ -1433,21 +1529,7 @@ function startWatcher(sourceRoot: string) {
                 }
 
                 const baseName = parts[parts.length - 1]
-
-                // 单个音源脚本变化：只重载该音源，避免「改一个文件重载全部音源」的放大
-                if (baseName.endsWith('.js')) {
-                    console.log(`[自定义源] [文件监控] 检测到音源脚本变动 (${eventType}): ${filename} -> 增量重载 ${username}/${baseName}`)
-                    reloadSingleSource(username, baseName).catch(err => {
-                        console.error(`[自定义源] [文件监控] 增量重载失败:`, err)
-                    })
-                    return
-                }
-
-                // 源清单 (sources.json) 变化：增删/启停集合可能已变，仍需全量重载
-                console.log(`[自定义源] [文件监控] 检测到源清单变动 (${eventType}): ${filename} -> 全量重载 ${username}`)
-                initUserApis(username).catch(err => {
-                    console.error(`[自定义源] [文件监控] 重新加载失败:`, err)
-                })
+                applySourceChange(username, baseName, eventType, filename as string, sourceRoot)
             }, 2000)) // 2秒防抖，等待文件写入完成
         })
 

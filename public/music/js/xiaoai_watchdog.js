@@ -37,14 +37,73 @@
         idleGiveupMs: 4 * 60 * 1000,
         /** 连续查询失败上限（约 failLimit × 轮询间隔），超过即放弃 */
         failLimit: 6,
+        /**
+         * 已知曲目时长时，按墙钟提前这么久切歌（覆盖设备不报进度的机型）。
+         *
+         * 这个值要覆盖「决定切歌 → 新歌真正出声」的全部延迟：
+         *   投送接口耗时（命中预解析时 ~0.6s，现解析时 2~4s）
+         * + 小米云下发 + 音箱建立连接、读够起播缓冲（~1~2s）
+         * 实测总延迟 2.5~6 秒，取 2 秒时每次都会晚一步——音箱已经把上一首从头拉回来播了。
+         * 留太长会截掉上一首结尾，所以不能盲目加大，而是用服务端下发的 startDelayMs
+         * （实测「投送→音箱来拉流」的延迟）自适应，见 effectiveLeadMs。
+         */
+        wallClockLeadMs: 4000,
+        /** 自适应提前量的上限：投送特别慢时也不至于把上一首切掉太多 */
+        wallClockLeadMaxMs: 10000,
+        /** 墙钟预判的最短曲目时长，太短的音频不参与（避免误判） */
+        wallClockMinDurationMs: 45000,
+        /**
+         * 从「投送成功」到「音箱真正出声」的预估延迟。
+         *
+         * 墙钟的「第 0 秒」如果取第一次采样到 playing 的时刻，会整体偏晚 0~一个轮询周期，
+         * 结果就是每次都晚切一两秒（音箱已经把上一首重头拉出来了）。实测局域网投送
+         * 到音箱开始拉流约 0.6 秒，再到出声约 1 秒，所以用「投送时刻 + 这个延迟」当锚点。
+         */
+        startLatencyMs: 1000,
+        /** 实际起播比预估晚太多（缓冲慢、设备唤醒）时不再用预估锚点，退回首次采样时刻 */
+        startLatencyToleranceMs: 5000,
+        /** 相邻两次播放心跳的正常间隔上限，超过说明中间被暂停过，需顺延计时基准 */
+        heartbeatGapMs: 8000,
+        /** 设备上报位置比墙钟落后超过该值，视为缓冲/上报错位，用位置重锚 */
+        positionDriftToleranceMs: 20000,
+        /**
+         * 收到「流被重拉」信号后，至少播这么久才认可为播完（防止开头重复请求误判）。
+         *
+         * 这个守卫原本是 5 秒，用来防「刚投送就被重拉」的误判。
+         * 但现在服务端只在「整首已完整送达」之后才置这个信号（streamRounds.complete），
+         * 误判风险已经消除；而 5 秒的等待意味着音箱会把上一首**再播 5 秒**——
+         * 正好是用户抱怨的「切歌时回放上一首的一部分」。
+         * 所以压到 1 秒：留一点余量给轮询间隔即可。
+         */
+        streamReplayGuardMs: 1000,
+    };
+
+    /**
+     * 本次实际使用的提前量。
+     *
+     * 服务端会把「投送完成 → 音箱真的来拉这一路流」的实测延迟（startDelayMs）随状态下发，
+     * 再加上设备起播缓冲（startLatencyMs），就是必须提前的量。
+     * 没拿到实测值时退回默认值——第一首永远只能猜，从第二首开始就越来越准。
+     */
+    const effectiveLeadMs = function (sample, opts) {
+        const measured = Number(sample && sample.startDelayMs);
+        if (!Number.isFinite(measured) || measured <= 0) return opts.wallClockLeadMs;
+        const wanted = measured + Number(opts.startLatencyMs) * 2;
+        return Math.min(Number(opts.wallClockLeadMaxMs) || 10000, Math.max(opts.wallClockLeadMs, wanted));
     };
 
     /** 新建一次投送对应的守望状态 */
     const createState = function (now) {
         return {
             phase: 'starting', // starting: 等待设备开始播放；playing: 已确认在播
-            startedAt: Number(now) || Date.now(),
+            // 注意不能用 `Number(now) || Date.now()`：测试与回放里 now 可能是 0，
+            // 会被当成 falsy 换成真实时间戳，锚点就全乱了
+            startedAt: Number.isFinite(Number(now)) ? Number(now) : Date.now(),
             lastPlayingAt: 0,
+            /** 本次播放的「第 0 秒」对应的墙钟时间，暂停后会自动顺延 */
+            playingSince: 0,
+            /** 最近一次拿到的曲目总时长（毫秒，设备或歌曲元数据提供） */
+            durationMs: 0,
             idleSince: null,
             failCount: 0,
         };
@@ -64,7 +123,8 @@
     const evaluate = function (prev, sample, options) {
         const opts = Object.assign({}, DEFAULTS, options || {});
         const state = Object.assign({}, prev || createState(Date.now()));
-        const now = Number(sample && sample.at) || Date.now();
+        // 同上：at 可能合法地为 0（测试/回放基准），不能让它被 falsy 判定换成真实时间
+        const now = Number.isFinite(Number(sample && sample.at)) ? Number(sample.at) : Date.now();
         const done = function (action, reason) {
             return { state: state, action: action, reason: reason };
         };
@@ -79,13 +139,58 @@
 
         const ratio = Number(sample.progressRatio);
         const hasRatio = Number.isFinite(ratio) && ratio >= 0;
+        const durationMs = Number(sample.durationMs) > 0 ? Number(sample.durationMs) : 0;
+        const positionMs = Number(sample.positionMs) > 0 ? Number(sample.positionMs) : 0;
+        if (durationMs > 0) state.durationMs = durationMs;
 
         // 2. 正在播放：记录心跳，接近结尾就提前切
         if (sample.playing) {
+            // 从未播放过 / 中间被暂停过：把「第 0 秒」的基准向后顺延，避免暂停时长被算进已播
+            if (!state.playingSince) {
+                const assumed = Number(state.startedAt) + Number(opts.startLatencyMs);
+                // 起播比预估慢很多时（冷启动、网络慢）就不能再用预估锚点，否则会提前切歌
+                state.playingSince = now - assumed <= opts.startLatencyToleranceMs ? assumed : now;
+            } else if (state.lastPlayingAt && now - state.lastPlayingAt > opts.heartbeatGapMs) {
+                state.playingSince += now - state.lastPlayingAt;
+            }
+
+            // 设备上报位置明显落后于墙钟（缓冲、或暂停后状态没更新）：以设备位置为准重锚。
+            // 但有两种情况绝不能重锚，否则自动切歌会被无限推迟：
+            //  1) 已经接近结尾——某些音箱循环拉同一 URL 时会回报小的 position；
+            //  2) 设备位置回到开头——那是音箱播完重拉（songloft-plugin-miot 的 canCalibrateAutoNextTimer 同理）。
+            const elapsed = now - state.playingSince;
+            const lead = effectiveLeadMs(sample, opts);
+            const nearEnd =
+                state.durationMs > 0 && elapsed >= state.durationMs - lead - opts.positionDriftToleranceMs;
+            const rewoundToStart = positionMs > 0 && positionMs < 3000 && elapsed > 15000;
+            if (positionMs > 0 && !nearEnd && !rewoundToStart && positionMs + opts.positionDriftToleranceMs < elapsed) {
+                state.playingSince = now - positionMs;
+            }
+
             state.phase = 'playing';
             state.lastPlayingAt = now;
             state.idleSince = null;
+
+            // 最可靠的「播完」信号：音箱把我们这一路流拉完一遍后，会自己重拉同一个 URL。
+            // 服务端在「新一轮请求建立连接」的那一刻就置位（不用等这轮传完，快几十秒），
+            // 没这个信号就只能靠猜时长，晚了就会听到上一首重头播。
+            // 加个最短播放守卫，避免投送后立刻的重复请求把一首歌误判成已播完。
+            if (sample.streamReplay === true && now - state.startedAt >= opts.streamReplayGuardMs) {
+                return done('advance', 'stream-replayed');
+            }
+            // 兜底：老版本服务端只有遍数没有 replay 标记
+            if (Number(sample.streamFull) >= 2 && now - state.startedAt >= opts.streamReplayGuardMs) {
+                return done('advance', 'stream-replayed');
+            }
+
             if (hasRatio && ratio >= opts.prerollRatio) return done('advance', 'near-end');
+
+            // 有可信时长就按墙钟预判：设备不上报进度时也能准点切歌，不必等 6 秒确认
+            if (state.durationMs >= opts.wallClockMinDurationMs) {
+                if (now - state.playingSince >= state.durationMs - lead) {
+                    return done('advance', 'wall-clock');
+                }
+            }
             return done('none', 'playing');
         }
 
@@ -121,5 +226,5 @@
         return done('none', 'paused-externally');
     };
 
-    return { DEFAULTS: DEFAULTS, createState: createState, evaluate: evaluate };
+    return { DEFAULTS: DEFAULTS, createState: createState, evaluate: evaluate, effectiveLeadMs: effectiveLeadMs };
 });

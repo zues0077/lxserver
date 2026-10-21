@@ -1117,6 +1117,8 @@ export function createSourceProbeTask(): ScheduledTask {
     intervalMs: conf.intervalMinutes * 60 * 1000,
     enabled: conf.enabled,
     isRunning: false,
+    // 一轮巡检要探测上百个平台（实测 90~120 秒），启动即跑会明显拖慢首屏与投送
+    startupDelayMs: 120000,
     run: async (): Promise<TaskExecutionResult> => {
       const result = await runSourceProbe()
       return {

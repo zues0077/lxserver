@@ -10,7 +10,7 @@
  *  - client.ts      MiniA 接口客户端（设备列表、ubus、播放控制）
  *  - config.ts      配置与登录态持久化
  *  - streamToken.ts 播放直链签名
- *  - stream.ts      音频流转发（本地文件 / 远端中转）
+ *  - stream.ts      音频流转发（本地文件 / 远端中转）+ 投送前音频探测
  *  - playCache.ts   投送地址短时缓存（自动续播的预解析用）
  *  - service.ts     面向业务的高阶服务（多设备 fan-out）
  */
@@ -18,6 +18,15 @@
 export { xiaoAiService } from './service'
 export type { XiaoAiPublicConfig, DeviceActionResult } from './service'
 export { buildStreamUrl, createStreamToken, parseStreamToken } from './streamToken'
-export { serveXiaoAiStream } from './stream'
+export {
+  serveXiaoAiStream,
+  probeAudioSource,
+  getStreamRounds,
+  detectAudioFormat,
+  paceWaitMs,
+  retireStreams,
+  hasActiveStream,
+} from './stream'
+export { detectAudioDurationMs } from './audioMeta'
 export { loadConfig as loadXiaoAiConfig } from './config'
-export { buildTrackKey, getCachedTrackUrl, setCachedTrackUrl, clearTrackCache } from './playCache'
+export { buildTrackKey, getCachedTrack, getCachedTrackUrl, setCachedTrackUrl, clearTrackCache } from './playCache'

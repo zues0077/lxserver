@@ -10,6 +10,8 @@
 
 interface CachedTrack {
   url: string
+  /** 投送前解析到的真实音频时长（毫秒，0 表示没解析出来）；自动续播靠它算切歌时机 */
+  durationMs: number
   at: number
 }
 
@@ -29,20 +31,22 @@ export const buildTrackKey = (song: Record<string, any> | null | undefined, qual
   return `${source}|${id || name}|${quality}`
 }
 
-export const getCachedTrackUrl = (key: string): string => {
-  if (!key) return ''
+export const getCachedTrack = (key: string): { url: string; durationMs: number } => {
+  if (!key) return { url: '', durationMs: 0 }
   const item = cache.get(key)
-  if (!item) return ''
+  if (!item) return { url: '', durationMs: 0 }
   if (Date.now() - item.at > CACHE_TTL) {
     cache.delete(key)
-    return ''
+    return { url: '', durationMs: 0 }
   }
   // 命中即续期，避免长歌单播放到后段时前面的预解析被提前淘汰
   item.at = Date.now()
-  return item.url
+  return { url: item.url, durationMs: item.durationMs || 0 }
 }
 
-export const setCachedTrackUrl = (key: string, url: string): void => {
+export const getCachedTrackUrl = (key: string): string => getCachedTrack(key).url
+
+export const setCachedTrackUrl = (key: string, url: string, durationMs = 0): void => {
   if (!key || !url) return
   if (!cache.has(key) && cache.size >= MAX_ENTRIES) {
     // 超出上限时淘汰最久未使用的一条，防止长时间运行后内存无界增长
@@ -56,7 +60,7 @@ export const setCachedTrackUrl = (key: string, url: string): void => {
     }
     if (oldestKey) cache.delete(oldestKey)
   }
-  cache.set(key, { url, at: Date.now() })
+  cache.set(key, { url, durationMs: Number(durationMs) || 0, at: Date.now() })
 }
 
 export const clearTrackCache = (): void => {

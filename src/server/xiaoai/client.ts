@@ -30,11 +30,39 @@ interface UbusResponse {
   data?: unknown
 }
 
+/** 曲库搜索返回的单曲（audioID 为大整数字符串） */
+interface MusicSearchSong {
+  audioID?: string
+  songID?: string
+  name?: string
+  artist?: { name?: string }
+}
+
+/** 播放状态结构化结果 */
+export interface PlayStatusInfo {
+  /** 1 = 播放中，2 = 暂停，0 = 停止，-1 = 未知 */
+  status: number
+  volume: number
+  /** 原始单位（部分固件是秒，部分是毫秒），由上层归一 */
+  position: number
+  duration: number
+  title: string
+  raw: Record<string, unknown>
+}
+
+/** player_get_play_status 的 status 值 */
+export const PLAY_STATUS_PLAYING = 1
+export const PLAY_STATUS_PAUSED = 2
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
 export interface PlayOptions {
   /** 播放时点亮灯环（audio_type=MUSIC），触屏机型还会显示封面歌词 */
   keepLight?: boolean
   /** 强制禁用 player_play_music，改走 player_play_url */
   disabledModels?: string[]
+  /** 触屏机型使用的曲库 audioID（用于显示封面与歌词），为空则用默认封面 */
+  audioId?: string
 }
 
 /**
@@ -95,7 +123,7 @@ export class MinaClient {
     const keepLight = !!options.keepLight
     const useMusicApi = needUseMusicApi(hardware, options.disabledModels)
     if (useMusicApi) {
-      return this.playMusicUrl(deviceId, url, hardware, keepLight)
+      return this.playMusicUrl(deviceId, url, hardware, keepLight, options.audioId)
     }
     const result = await this.ubus(deviceId, 'player_play_url', 'mediaplayer', {
       url,
@@ -166,8 +194,114 @@ export class MinaClient {
     return this.playerOperation(deviceId, 'pause')
   }
 
+  /**
+   * 暂停并回读校验，必要时升级为 stop。
+   *
+   * 部分小爱型号（尤其是走 player_play_music 的触屏机型）会「受理」pause 但音频继续播，
+   * 表现为网页暂停按钮无效。这里 pause 后连续回读设备状态，仍在上报播放就降级为 stop。
+   * 参考 songloft-plugin-miot 的 playerPauseVerified 与 miair-next 的 pause=stop 策略。
+   *
+   * @returns 'paused' 暂停已生效 | 'stopped' 已升级为停止（媒体上下文丢失，无法原位续播）
+   *          | 'failed' 指令下发失败
+   */
+  async playerPauseVerified(deviceId: string, hardware = '', options: PlayOptions = {}): Promise<'paused' | 'stopped' | 'failed'> {
+    // 触屏机型走 music api 时，pause 的状态机经常不更新，直接用 stop 表达暂停语义
+    if (needUseMusicApi(hardware, options.disabledModels)) {
+      return (await this.playerStop(deviceId)) ? 'stopped' : 'failed'
+    }
+
+    const pauseOK = await this.playerPause(deviceId)
+    for (let i = 0; i < 2; i++) {
+      await delay(700)
+      const status = await this.readPlayStatus(deviceId)
+      // -1 表示读不到状态（部分固件不支持），此时保守认为暂停已生效，避免误 stop 丢进度
+      if (status !== PLAY_STATUS_PLAYING) return 'paused'
+    }
+
+    console.warn(`[XiaoAi] 设备 ${deviceId} 暂停未生效（仍在上报播放），升级为 stop`)
+    if (await this.playerOperation(deviceId, 'stop')) return 'stopped'
+    return pauseOK ? 'paused' : 'failed'
+  }
+
+  /** 停止播放：部分型号单独 stop 不生效，先 pause 再 stop */
   async playerStop(deviceId: string): Promise<boolean> {
+    await this.playerPause(deviceId).catch(() => false)
     return this.playerOperation(deviceId, 'stop')
+  }
+
+  /**
+   * 搜小米曲库，命中真实 audioID（触屏音箱据此拉取封面与歌词）。
+   * 精确命中要求歌名完全相等 + 歌手双向包含；未命中时按相关度取首条。
+   * 参考 songloft-plugin-miot 的 searchAudioId 与 miair-next 的 search_audio_id。
+   */
+  async searchAudioId(title: string, artist = '', options: { fuzzyFallback?: boolean; fallbackAudioId?: string } = {}): Promise<string> {
+    const fallback = options.fallbackAudioId || DEFAULT_MUSIC_AUDIO_ID
+    const songTitle = String(title || '').trim()
+    if (!songTitle) return fallback
+    const songArtist = String(artist || '').trim()
+    const query = songArtist ? `${songTitle}-${songArtist}` : songTitle
+    const body = encodeForm({
+      query,
+      queryType: '1',
+      offset: '0',
+      count: '6',
+      timestamp: String(Date.now()),
+      requestId: generateRequestId(),
+    })
+
+    const result = await this.request<{ code?: number; data?: { songList?: MusicSearchSong[] } }>(
+      'POST',
+      `${MINA_API_BASE_URL}/music/search`,
+      body,
+      false,
+      // audioID / songID 是超出 JS 安全整数范围的大整数，必须先把纯数字转成字符串再解析
+      text => text.replace(/"(audioID|songID)"\s*:\s*(-?\d+)/g, '"$1":"$2"')
+    )
+    const songList = result?.data?.songList
+    if (!Array.isArray(songList) || !songList.length) return fallback
+
+    const firstArtist = songArtist.split(/[;；,，&、/·—]/)[0].trim().toLowerCase()
+    const titleLower = songTitle.toLowerCase()
+    for (const song of songList) {
+      const name = String(song?.name || '').toLowerCase()
+      if (name !== titleLower) continue
+      const songArtistName = String(song?.artist?.name || '').toLowerCase()
+      if (firstArtist && songArtistName && !songArtistName.includes(firstArtist) && !firstArtist.includes(songArtistName)) continue
+      const audioId = String(song?.audioID || '')
+      if (audioId) return audioId
+    }
+
+    // 默认不做模糊兜底：搜不到宁可返回默认 audioID 播我们的直链，
+    // 也不要拿第一条不相干的结果——那会让音箱去播小米云端的另一首歌（往往还是试听片段）。
+    if (options.fuzzyFallback === true) {
+      const audioId = String(songList[0]?.audioID || '')
+      if (audioId) return audioId
+    }
+    return fallback
+  }
+
+  /** 把 player_get_play_status 的 info 解析成结构化对象（兼容 string / object 两种返回） */
+  parseStatusInfo(raw: { code: number; data?: any } | null): PlayStatusInfo {
+    const info = (raw?.data as any)?.info
+    let parsed: Record<string, unknown> = {}
+    if (info && typeof info === 'object') {
+      parsed = info as Record<string, unknown>
+    } else if (typeof info === 'string') {
+      try {
+        parsed = JSON.parse(info)
+      } catch {
+        parsed = {}
+      }
+    }
+    const status = Number(parsed.status)
+    return {
+      status: Number.isFinite(status) ? status : -1,
+      volume: typeof parsed.volume === 'number' ? parsed.volume : -1,
+      position: Number(parsed.position) || 0,
+      duration: Number(parsed.duration) || 0,
+      title: String(parsed.title || parsed.audioName || parsed.media_name || ''),
+      raw: parsed,
+    }
   }
 
   /** 设置音量 0-100 */
@@ -182,30 +316,16 @@ export class MinaClient {
     return this.ubus(deviceId, 'player_get_play_status', 'mediaplayer', { media: 'app_ios' })
   }
 
-  /** 读取播放状态码（1 = 播放中） */
+  /** 读取播放状态码（1 = 播放中，2 = 暂停，0 = 停止，-1 = 未知） */
   async readPlayStatus(deviceId: string): Promise<number> {
     const raw = await this.getPlayerStatus(deviceId)
-    const info = (raw?.data as any)?.info
-    if (typeof info !== 'string') return -1
-    try {
-      const parsed = JSON.parse(info)
-      return typeof parsed?.status === 'number' ? parsed.status : -1
-    } catch {
-      return -1
-    }
+    return this.parseStatusInfo(raw).status
   }
 
   /** 读取音量（-1 表示读取失败） */
   async getVolume(deviceId: string): Promise<number> {
     const raw = await this.getPlayerStatus(deviceId)
-    const info = (raw?.data as any)?.info
-    if (typeof info !== 'string') return -1
-    try {
-      const parsed = JSON.parse(info)
-      return typeof parsed?.volume === 'number' ? parsed.volume : -1
-    } catch {
-      return -1
-    }
+    return this.parseStatusInfo(raw).volume
   }
 
   // ===== 内部实现 =====
@@ -250,7 +370,13 @@ export class MinaClient {
   }
 
   /** 统一请求入口：带 Cookie，401 时刷新登录态并重试一次 */
-  private async request<T>(method: 'GET' | 'POST', url: string, body?: string, retried = false): Promise<T | null> {
+  private async request<T>(
+    method: 'GET' | 'POST',
+    url: string,
+    body?: string,
+    retried = false,
+    transformResponseText?: (text: string) => string
+  ): Promise<T | null> {
     const headers: Record<string, string> = {
       'User-Agent': this.userAgent,
       Cookie: [
@@ -270,11 +396,12 @@ export class MinaClient {
 
     if (res.status === 401 && !retried && this.onTokenExpired) {
       const refreshed = await this.onTokenExpired()
-      if (refreshed) return this.request<T>(method, url, body, true)
+      if (refreshed) return this.request<T>(method, url, body, true, transformResponseText)
       return null
     }
 
     if (res.status >= 400) return null
-    return parseJson<T>(res.text)
+    const text = transformResponseText ? transformResponseText(res.text) : res.text
+    return parseJson<T>(text)
   }
 }

@@ -14,8 +14,27 @@
     const AUTO_NEXT_KEY = 'lx_xiaoai_auto_next';
     /** 轮询音箱状态的间隔（毫秒） */
     const WATCH_INTERVAL = 3000;
+    /** 进入歌曲最后这一段（毫秒）改为加密轮询，把「判定该切」到「真的切」的延迟压到一秒内 */
+    const TAIL_WATCH_WINDOW_MS = 25000;
+    /**
+     * 尾部加密轮询的间隔。
+     *
+     * 不宜再往小调：每次查询都要经小米云往返，问得太密设备反而容易卡一下
+     * （听感就是「突然静音一两秒」）。现在的切歌提前量已经能覆盖一个轮询周期。
+     */
+    const TAIL_WATCH_INTERVAL_MS = 1500;
     /** 进度超过该比例时提前预解析下一首，减少切歌等待 */
     const PREFETCH_RATIO = 0.6;
+    /** 距离本首结束还有这么多毫秒时也提前预解析（设备不报进度时靠它，否则预取永远不触发） */
+    const PREFETCH_LEAD_MS = 45000;
+    /** 相邻两次自动切歌的最小间隔，避免投送异步期间被重复判定连切好几首 */
+    const ADVANCE_COOLDOWN_MS = 2500;
+
+    /** 防抖间隔；自动化测试可用 window.__XIAOAI_ADVANCE_COOLDOWN__ 覆盖成 0 */
+    const advanceCooldownMs = () => {
+        const override = Number(window.__XIAOAI_ADVANCE_COOLDOWN__);
+        return Number.isFinite(override) && override >= 0 ? override : ADVANCE_COOLDOWN_MS;
+    };
 
     const state = {
         config: null,
@@ -25,7 +44,11 @@
         qrPolling: false,
         loginTab: 'qrcode',
         remotePaused: false,
+        /** 暂停被降级为 stop（该机型不支持暂停），恢复时需重新投送 */
+        remoteStopped: false,
         lastVolume: 50,
+        /** 下一次投送的来源标记（自动续播时由 advanceToNext 设置），仅用于日志排查 */
+        nextCaller: '',
     };
 
     /** 自动续播守望：投送成功后开始查询音箱状态，用于「自动下一首」 */
@@ -36,11 +59,15 @@
         state: null,
         hint: '',
         timer: null,
+        /** 尾部加密轮询用的单次定时器 */
+        tailTimer: null,
         worker: null,
         workerBroken: false,
         polling: false,
         prefetchedKey: '',
         lastAdvanceAt: 0,
+        /** 服务端解析出的本首真实时长（毫秒）；比歌曲元数据 interval 可靠，优先用它 */
+        audioDurationMs: 0,
     };
 
     const $ = id => document.getElementById(id);
@@ -121,9 +148,26 @@
                 : '当前：本机浏览器';
         }
         if (btn) {
-            btn.textContent = active ? '切回本机播放' : '投送到小爱';
-            btn.classList.toggle('bg-emerald-500', active);
+            // t-bg-main / t-border-main / t-text-main 都带 !important，直接叠加 Tailwind 实心色会被压掉，
+            // 结果就是「白字浅底」几乎看不见按钮。强调态先把主题类摘掉再上实心样式。
+            const label = $('xiaoai-target-btn-text');
+            const icon = $('xiaoai-target-btn-icon');
+            if (label) label.textContent = active ? '切回本机播放' : '投送到小爱';
+            else btn.textContent = active ? '切回本机播放' : '投送到小爱';
+            if (icon) {
+                icon.className = active
+                    ? 'fa-solid fa-circle-stop'
+                    : 'fa-solid fa-tower-broadcast';
+            }
+            btn.classList.toggle('t-bg-main', !active);
+            btn.classList.toggle('t-border-main', !active);
+            btn.classList.toggle('t-text-main', !active);
+            btn.classList.toggle('hover:t-bg-track', !active);
+            btn.classList.toggle('bg-amber-500', active);
+            btn.classList.toggle('hover:bg-amber-600', active);
+            btn.classList.toggle('border-amber-500', active);
             btn.classList.toggle('text-white', active);
+            btn.classList.toggle('shadow-md', active);
         }
     };
 
@@ -184,9 +228,37 @@
         if (baseInput && document.activeElement !== baseInput) baseInput.value = cfg.serverBaseUrl || '';
         const autoNextToggle = $('xiaoai-auto-next-toggle');
         if (autoNextToggle) autoNextToggle.checked = !!state.autoNext;
+        // 触屏歌词开关（老配置没有该字段时按开启处理，与服务端默认一致）
+        const lyricsToggle = $('xiaoai-lyrics-toggle');
+        if (lyricsToggle) lyricsToggle.checked = cfg.touchscreenLyrics === true;
+        const cacheToggle = $('xiaoai-cache-toggle');
+        if (cacheToggle) cacheToggle.checked = cfg.cacheBeforePlay === true;
+        renderSuggestedBase();
         renderTarget();
         renderLoginState();
         renderDevices();
+    };
+
+    /** 服务端探测到的局域网地址（仅用于「用检测到的地址」按钮） */
+    let suggestedBase = '';
+
+    /** 服务端探测到的局域网地址：仅在用户没填地址时提供一键填入 */
+    const renderSuggestedBase = () => {
+        const btn = $('xiaoai-use-lan-btn');
+        if (!btn) return;
+        const suggested = String(state.config?.suggestedBaseUrl || '');
+        const configured = String(state.config?.serverBaseUrl || '').trim();
+        suggestedBase = suggested;
+        btn.classList.toggle('hidden', !suggested || !!configured);
+        btn.title = suggested ? `填入 ${suggested}` : '';
+    };
+
+    const useSuggestedBase = () => {
+        const suggested = suggestedBase || String(state.config?.suggestedBaseUrl || '').trim();
+        const input = $('xiaoai-server-base-input');
+        if (!suggested || !input) return;
+        input.value = suggested;
+        void saveConfig({ serverBaseUrl: suggested });
     };
 
     // ===== 登录 =====
@@ -484,6 +556,10 @@
             clearInterval(watch.timer);
             watch.timer = null;
         }
+        if (watch.tailTimer) {
+            clearTimeout(watch.tailTimer);
+            watch.tailTimer = null;
+        }
         if (watch.worker) {
             try {
                 watch.worker.postMessage({ type: 'stop' });
@@ -493,8 +569,8 @@
         }
     };
 
-    /** 投送成功后开始守望（song 仅用于日志与界面提示） */
-    const startWatch = song => {
+    /** 投送成功后开始守望（song 用于日志与界面提示，audioDurationMs 是服务端解析出的真实时长） */
+    const startWatch = (song, audioDurationMs) => {
         stopWatch();
         if (!state.autoNext || !shouldRoute()) return;
         const deviceId = selectedDevices()[0];
@@ -505,6 +581,7 @@
         watch.active = true;
         watch.deviceId = deviceId;
         watch.song = song || null;
+        watch.audioDurationMs = Number(audioDurationMs) > 0 ? Number(audioDurationMs) : 0;
         watch.state = watchdog.createState(Date.now());
         watch.prefetchedKey = '';
         watch.polling = false;
@@ -531,18 +608,52 @@
     };
 
     const advanceToNext = reason => {
+        // 投送是异步的：上一首的判定刚落地、新一首还没接上时，轮询很容易再判定一次，
+        // 结果就是连切好几首。这里做个短间隔防抖。
+        if (Date.now() - watch.lastAdvanceAt < advanceCooldownMs()) {
+            console.info('[小爱] 自动续播请求过于频繁，已忽略');
+            return;
+        }
         const previousIndex = typeof currentIndex !== 'undefined' ? currentIndex : -1;
         stopWatch();
         watch.lastAdvanceAt = Date.now();
-        console.info(`[小爱] 自动续播（${reason}）`);
+        console.info(`[小爱] 自动续播（${reason}）当前索引=${previousIndex}`);
         if (typeof window.playNext !== 'function') {
             setWatchHint('当前播放器不支持自动切歌');
             return;
         }
+        // 标记这次投送来自自动续播，随 /play 上报给服务端日志，便于排查「切歌切错」
+        state.nextCaller = `auto-next(${reason})`;
+
+        // 单曲循环下 playNext 只会重播当前这首，自动续播就永远推不动。
+        // 用户显式打开了「播放完自动下一首」，这里按列表顺序强制推进一首。
+        let singleMode = false;
+        try {
+            singleMode = typeof playMode === 'string' && playMode === 'single';
+        } catch (e) {
+            singleMode = false;
+        }
+        if (singleMode && typeof currentPlaylist !== 'undefined' && currentPlaylist.length > 0) {
+            const nextIndex = ((typeof currentIndex === 'number' ? currentIndex : -1) + 1) % currentPlaylist.length;
+            const nextSong = currentPlaylist[nextIndex];
+            if (nextSong && typeof window.playSong === 'function') {
+                console.info(`[小爱] 单曲循环模式下按列表推进到第 ${nextIndex} 首`);
+                setWatchHint('正在切换下一首…');
+                try {
+                    void window.playSong(nextSong, nextIndex);
+                    return;
+                } catch (e) {
+                    console.error('[小爱] 强制切歌失败:', e.message);
+                    state.nextCaller = '';
+                }
+            }
+        }
+
         try {
             window.playNext();
             setWatchHint('正在切换下一首…');
         } catch (e) {
+            state.nextCaller = '';
             console.error('[小爱] 自动切歌失败:', e.message);
             setWatchHint(`自动切歌失败：${e.message}`);
             return;
@@ -559,10 +670,16 @@
         }
     };
 
-    /** 进度过半后提前把下一首解析好，切歌时直接命中缓存 */
+    /** 进度过半 / 距结束不足 PREFETCH_LEAD_MS 时，提前把下一首解析好，切歌时直接命中缓存 */
     const maybePrefetch = sample => {
         if (!sample.ok || !sample.playing) return;
-        if (!Number.isFinite(sample.progressRatio) || sample.progressRatio < PREFETCH_RATIO) return;
+        const duration = Number(sample.durationMs) > 0 ? Number(sample.durationMs) : 0;
+        const elapsed = Number(sample.elapsedMs) > 0 ? Number(sample.elapsedMs) : 0;
+        const byRatio = Number.isFinite(sample.progressRatio) && sample.progressRatio >= PREFETCH_RATIO;
+        // 走 player_play_music 的机型根本不报进度（progressRatio 恒为 -1），
+        // 只按比例判定的话预解析永远不会执行，切歌时就只能现解析音源，凭空多出 1~3 秒空档
+        const byWallClock = duration > 0 && elapsed > 0 && duration - elapsed <= PREFETCH_LEAD_MS;
+        if (!byRatio && !byWallClock) return;
         if (typeof window.getNextIndex !== 'function' || typeof currentPlaylist === 'undefined') return;
         const nextIndex = window.getNextIndex();
         if (nextIndex === -1 || !currentPlaylist[nextIndex]) return;
@@ -574,6 +691,29 @@
         request('/prefetch', { songInfo: nextSong, quality: nextSong.quality || undefined }).catch(() => {
             /* 预解析失败不影响主流程，切歌时会再解析一次 */
         });
+    };
+
+    /**
+     * 临近结尾时把采样加密到 TAIL_WATCH_INTERVAL_MS。
+     *
+     * 常态 3 秒一采样够用（省云端请求），但最后 20 秒里 3 秒的采样间隔本身就等于
+     * 3 秒的切歌延迟：等我们发现「该切了」，音箱早把上一首从头拉回来播了几秒。
+     * 这一段只在最后窗口生效，请求量增加有限。
+     */
+    const scheduleTailTick = sample => {
+        if (watch.tailTimer) {
+            clearTimeout(watch.tailTimer);
+            watch.tailTimer = null;
+        }
+        if (!watch.active || !sample || !sample.ok || !sample.playing) return;
+        const duration = Number(sample.durationMs) > 0 ? Number(sample.durationMs) : 0;
+        const elapsed = Number(sample.elapsedMs) > 0 ? Number(sample.elapsedMs) : 0;
+        if (!duration || !elapsed) return;
+        if (duration - elapsed > TAIL_WATCH_WINDOW_MS) return;
+        watch.tailTimer = setTimeout(() => {
+            watch.tailTimer = null;
+            void tick();
+        }, TAIL_WATCH_INTERVAL_MS);
     };
 
     const applyWatchSample = sample => {
@@ -616,10 +756,36 @@
         } else {
             setWatchHint('自动续播监听中…');
         }
+        scheduleTailTick(sample);
+    };
+
+    /** "03:45" → 225000 毫秒（老固件不报时长时用歌曲元数据兜底墙钟预判） */
+    const parseIntervalMs = value => {
+        const matched = /^(\d+):([0-5]?\d)$/.exec(String(value || '').trim());
+        return matched ? (Number(matched[1]) * 60 + Number(matched[2])) * 1000 : 0;
+    };
+
+    /** 本首已播时长（毫秒）：有 playingSince 用它，否则退回「投送至今」 */
+    const watchElapsedMs = () => {
+        const state = watch.state;
+        if (!state) return 0;
+        if (state.playingSince) return Math.max(0, Date.now() - state.playingSince);
+        const startedAt = Number(state.startedAt);
+        return Number.isFinite(startedAt) && startedAt > 0 ? Math.max(0, Date.now() - startedAt) : 0;
     };
 
     const tick = async () => {
-        if (!watch.active || watch.polling) return;
+        if (!watch.active) return;
+        if (watch.polling) {
+            // 上一次查询还没回来（云端偶发慢），尾部窗口内补一次，别退回 3 秒节奏
+            if (!watch.tailTimer) {
+                watch.tailTimer = setTimeout(() => {
+                    watch.tailTimer = null;
+                    void tick();
+                }, 300);
+            }
+            return;
+        }
         if (!shouldRoute()) {
             stopWatch();
             return;
@@ -628,12 +794,30 @@
         let sample;
         try {
             const data = await request(`/status?deviceId=${encodeURIComponent(watch.deviceId)}`);
+            const deviceDuration = Number(data.durationMs) > 0 ? Number(data.durationMs) : 0;
+            // 走 player_play_music 的机型，上报的时长取的是云端曲目元数据，未必是我们推的这首；
+            // 歌曲元数据里的 interval 才是这次真正在放的音频长度，所以优先用它。
+            const metaDuration = parseIntervalMs(watch.song && watch.song.interval);
             sample = {
                 ok: data.success === true,
                 at: Date.now(),
                 playing: data.playing === true,
+                paused: data.paused === true,
                 hasProgress: data.hasProgress === true,
                 progressRatio: typeof data.progressRatio === 'number' ? data.progressRatio : -1,
+                // 时长优先级：服务端解析的真实文件时长 > 歌曲 interval 元数据 > 设备上报
+                // （设备上报的是云端曲目元数据，interval 也常常和实际文件对不上）
+                durationMs: watch.audioDurationMs || metaDuration || deviceDuration,
+                // 距本次播放起点过了多久，供 watchdog 做墙钟预判、供预取按剩余时间触发。
+                // 第一次采样时 playingSince 还没建立，用投送时刻兜底，否则短歌会来不及预取。
+                elapsedMs: watchElapsedMs(),
+                positionMs: typeof data.positionMs === 'number' ? data.positionMs : 0,
+                // 服务端统计：本次投送这一路流被完整拉了几遍（音箱播完会自己重拉）
+                streamFull: Number(data.streamFull) || 0,
+                // 音箱已经完整拉过一遍、又开始新一轮 → 这一首确实播完了
+                streamReplay: data.streamReplay === true,
+                // 实测「投送完成 → 音箱来拉流」的延迟，watchdog 用它把切歌提前量调准
+                startDelayMs: Number(data.startDelayMs) || 0,
                 userPaused: !!state.remotePaused,
             };
         } catch (e) {
@@ -657,12 +841,30 @@
 
     // ===== 播放路由 =====
 
-    const pushSong = async (song, quality) => {
+    /** 取播放器的队列索引与播放模式（可能为空，取不到就传 undefined） */
+    const queueContext = meta => {
+        const rawIndex = meta && Number.isFinite(meta.index)
+            ? meta.index
+            : (typeof currentIndex === 'number' ? currentIndex : undefined);
+        let mode;
+        try {
+            mode = typeof playMode === 'string' ? playMode : undefined;
+        } catch (e) {
+            mode = undefined;
+        }
+        return { queueIndex: rawIndex, playMode: mode };
+    };
+
+    const pushSong = async (song, quality, meta) => {
         const devices = selectedDevices();
+        const context = queueContext(meta);
         const data = await request('/play', {
             songInfo: song,
             quality: quality || undefined,
             deviceIds: devices,
+            queueIndex: context.queueIndex,
+            playMode: context.playMode,
+            caller: (meta && meta.caller) || 'manual',
         });
         if (!data.success) throw new Error(data.message || '投送失败');
         return data;
@@ -703,7 +905,17 @@
      * 播放器把播放交给小爱时调用。
      * 先用 noPlay 模式跑一遍原 playSong，让标题/封面/队列索引保持一致，再推送到音箱。
      */
-    const playSongViaXiaoAi = async (song, index, quality, origPlaySong) => {
+    const playSongViaXiaoAi = async (song, index, quality, origPlaySong, explicitCaller) => {
+        // 自动续播由 advanceToNext 提前打好标记，这里取走后清空，避免影响下一次手动点播
+        const caller = explicitCaller || state.nextCaller || 'manual';
+        state.nextCaller = '';
+        console.info(`[小爱] 投送准备：${song && song.name}｜索引=${index}｜来源=${caller}`);
+        // 投送到音箱时停掉浏览器本地播放，避免两边同时出声
+        try {
+            if (typeof audio !== 'undefined' && audio && !audio.paused) audio.pause();
+        } catch (e) {
+            /* 播放器未暴露 audio 时忽略 */
+        }
         if (typeof origPlaySong === 'function') {
             try {
                 await origPlaySong(song, index, quality, true);
@@ -712,12 +924,16 @@
             }
         }
         try {
-            await pushSong(song, quality);
+            // 服务端可能要先校验音源、必要时把整首缓存下来，先给个提示免得看起来像卡住
+            if (typeof setPlayerStatus === 'function') setPlayerStatus(`正在准备音频：${song.name || ''}`, false);
+            const pushed = await pushSong(song, quality, { index, caller });
             markRemotePaused(false);
+            state.remoteStopped = false;
             updatePlayButtonSafe(true);
-            if (typeof setPlayerStatus === 'function') setPlayerStatus(`正在小爱音箱播放：${song.name || ''}`, false);
-            // 投送成功后开始守望，用于自动下一首
-            startWatch(song);
+            const via = pushed && pushed.via ? `（${pushed.via}）` : '';
+            if (typeof setPlayerStatus === 'function') setPlayerStatus(`正在小爱音箱播放：${song.name || ''}${via}`, false);
+            // 投送成功后开始守望，用于自动下一首（带上服务端解析出的真实时长）
+            startWatch(song, pushed && pushed.audioDurationMs);
         } catch (e) {
             console.error('[小爱] 投送失败:', e.message);
             stopWatch();
@@ -732,17 +948,42 @@
     const toggleRemotePlay = async () => {
         try {
             if (state.remotePaused) {
+                if (state.remoteStopped) {
+                    // 该机型暂停被降级为 stop，媒体上下文已丢失，只能重新投送
+                    const song = watch.song
+                        || (typeof window.getCurrentSong === 'function' && window.getCurrentSong())
+                        || (typeof currentPlaylist !== 'undefined' && currentIndex >= 0 ? currentPlaylist[currentIndex] : null);
+                    if (!song) {
+                        setMessage('没有可恢复的歌曲，请重新选择播放', true);
+                        return;
+                    }
+                    await playSongViaXiaoAi(
+                        song,
+                        typeof currentIndex === 'number' ? currentIndex : -1,
+                        song.quality || null,
+                        typeof playSong === 'function' ? playSong : undefined,
+                    );
+                    state.remoteStopped = false;
+                    return;
+                }
                 await request('/resume', {});
                 markRemotePaused(false);
                 updatePlayButtonSafe(true);
                 // 恢复播放后重新开始守望（暂停期间不轮询，省掉无谓的云端请求）
                 startWatch(watch.song);
             } else {
-                await request('/pause', {});
+                const data = await request('/pause', {});
+                const states = Array.isArray(data && data.results) ? data.results.map(item => item.state) : [];
+                // 触屏/部分固件不支持 pause，服务端已降级为 stop，提示用户恢复时会重新投送
+                state.remoteStopped = states.length > 0 && states.every(item => item === 'stopped');
                 markRemotePaused(true);
                 updatePlayButtonSafe(false);
                 stopWatch();
-                setWatchHint('已暂停，点播放恢复后继续自动续播');
+                setWatchHint(
+                    state.remoteStopped
+                        ? '该机型不支持暂停，已停止播放（点播放会重新投送这首）'
+                        : '已暂停，点播放恢复后继续自动续播'
+                );
             }
         } catch (e) {
             console.error('[小爱] 播放控制失败:', e.message);
@@ -774,6 +1015,8 @@
         init,
         saveConfig: () => saveConfig({
             serverBaseUrl: ($('xiaoai-server-base-input')?.value || '').trim(),
+            touchscreenLyrics: $('xiaoai-lyrics-toggle') ? !!$('xiaoai-lyrics-toggle').checked : false,
+            cacheBeforePlay: $('xiaoai-cache-toggle') ? !!$('xiaoai-cache-toggle').checked : false,
         }),
         switchLoginTab,
         startQr,
@@ -790,7 +1033,16 @@
         toggleAutoNext,
         reload: loadConfig,
         // 供调试/自动化测试查看守望状态
-        watchState: () => ({ active: watch.active, hint: watch.hint, deviceId: watch.deviceId }),
+        watchState: () => ({
+            active: watch.active,
+            hint: watch.hint,
+            deviceId: watch.deviceId,
+            // 服务端实测的投送→拉流延迟（排查「切歌晚了一步」时看这个）
+            startDelayMs: (watch.state && watch.state.startDelayMs) || 0,
+            // 服务端解析出的真实时长与当前采用的时长（排查「切早/切晚」时看这两个值）
+            audioDurationMs: watch.audioDurationMs,
+            durationMs: (watch.state && watch.state.durationMs) || 0,
+        }),
     };
 
     // 对外暴露成全局函数，供 index.html 的内联事件调用
@@ -805,6 +1057,7 @@
     window.xiaoAiFetchDevices = fetchDevices;
     window.xiaoAiApplyVolume = applyVolume;
     window.xiaoAiStop = stop;
+    window.xiaoAiUseSuggestedBase = useSuggestedBase;
     window.xiaoAiToggleTarget = toggleTarget;
     window.xiaoAiToggleAutoNext = toggleAutoNext;
 

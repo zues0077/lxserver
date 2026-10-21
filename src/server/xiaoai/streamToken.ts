@@ -16,6 +16,12 @@ export interface StreamTokenPayload {
   url?: string
   /** 下载文件名 */
   filename?: string
+  /** 投送前探测到的真实 Content-Type（上游给 octet-stream 时用它纠正） */
+  contentType?: string
+  /** 本次投送的流标识：服务端据此统计「音箱把这一路流拉了几遍」 */
+  sid?: string
+  /** 本首真实时长（毫秒）：中转按它算码率，把数据平滑地喂给音箱而不是一阵一阵地灌 */
+  durationMs?: number
   /** 过期时间戳（毫秒） */
   exp: number
 }
@@ -29,15 +35,22 @@ export const createStreamToken = (target: {
   path?: string
   url?: string
   filename?: string
+  contentType?: string
+  durationMs?: number
   ttlMs?: number
 }): string => {
   const ttl = Math.max(MIN_TTL_MS, Number(target.ttlMs) || DEFAULT_TTL_MS)
   const payload: StreamTokenPayload = {
     exp: Date.now() + ttl,
+    // 每路流一个短标识：音箱播完会重拉同一个 URL，服务端靠它统计「拉了几遍」，
+    // 比猜歌曲时长可靠得多（走 player_play_music 的机型根本不报进度）
+    sid: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
   }
   if (target.path) payload.path = String(target.path)
   if (target.url) payload.url = String(target.url)
   if (target.filename) payload.filename = String(target.filename)
+  if (target.contentType) payload.contentType = String(target.contentType)
+  if (Number(target.durationMs) > 0) payload.durationMs = Number(target.durationMs)
 
   const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
   return `${encoded}.${sign(encoded)}`
@@ -63,12 +76,37 @@ export const parseStreamToken = (token: string): StreamTokenPayload => {
   return payload
 }
 
+/** Content-Type → URL 后缀（音箱靠后缀判断解码方式，必须和真实内容一致） */
+const EXT_BY_MIME: Record<string, string> = {
+  'audio/mpeg': '.mp3',
+  'audio/mp3': '.mp3',
+  'audio/mp4': '.m4a',
+  'audio/x-m4a': '.m4a',
+  'audio/aac': '.aac',
+  'audio/flac': '.flac',
+  'audio/x-flac': '.flac',
+  'audio/ogg': '.ogg',
+  'audio/wav': '.wav',
+  'audio/x-wav': '.wav',
+  'audio/x-ape': '.ape',
+}
+
 /** 拼接给音箱播放的完整地址（优先使用配置里的对外地址，否则用请求来源） */
-export const buildStreamUrl = (baseUrl: string, streamPath: string, target: { path?: string; url?: string; filename?: string }) => {
+export const buildStreamUrl = (
+  baseUrl: string,
+  streamPath: string,
+  target: { path?: string; url?: string; filename?: string; contentType?: string; durationMs?: number },
+) => {
   const base = String(baseUrl || '').trim().replace(/\/+$/, '')
   const rawPath = String(streamPath || '/api/music/xiaoai/stream').trim()
-  const pathname = rawPath.startsWith('/') ? rawPath : `/${rawPath}`
+  let pathname = rawPath.startsWith('/') ? rawPath : `/${rawPath}`
   if (!base) throw new Error('无法确定服务对外地址，请在设置里填写「服务地址」')
+  // 地址没有扩展名时按真实格式补一个：小爱音箱会依据后缀决定解码器，
+  // 给它一个「.mp3 后缀 + m4a 内容」或者干脆没后缀的地址，很容易被判成无法播放
+  if (!/\.[a-z0-9]{2,5}$/i.test(pathname)) {
+    const mime = String(target.contentType || '').split(';')[0].trim().toLowerCase()
+    pathname += EXT_BY_MIME[mime] || '.mp3'
+  }
   const token = createStreamToken(target)
   return `${base}${pathname}?token=${encodeURIComponent(token)}`
 }

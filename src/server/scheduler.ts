@@ -215,13 +215,14 @@ export const startScheduler = () => {
     if (task.enabled && task.intervalMs > 0) {
       scheduleNextRun(task)
 
-      // 服务端刚开机/刚启动时立即执行一次（延迟3秒等待网络/musicSdk初始化）
+      // 服务端刚开机/刚启动时执行一次（默认延迟 3 秒等待网络/musicSdk 初始化）。
+      // 音源巡检这类要跑上百个平台的重任务自带更大延迟，否则会和启动期抢 CPU 与出口带宽。
       setTimeout(() => {
         if (isSchedulerRunning && task.enabled) {
           syncLog.info(`[任务调度] 服务端启动，触发任务首次执行: ${task.name}`)
           void executeTask(task.id)
         }
-      }, 3000)
+      }, task.startupDelayMs ?? 3000)
     }
   }
 }

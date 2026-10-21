@@ -16,7 +16,6 @@ export class DislikeManage {
     const listData = await this.getDislikeRules()
     const md5 = toMD5(JSON.stringify(listData))
     const snapshotInfo = await this.snapshotDataManage.getSnapshotInfo()
-    console.log(md5, snapshotInfo.latest)
     if (snapshotInfo.latest == md5) return md5
     if (snapshotInfo.list.includes(md5)) {
       snapshotInfo.list.splice(snapshotInfo.list.indexOf(md5), 1)

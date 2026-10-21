@@ -16,6 +16,7 @@ if (typeof (global as any).navigator === 'undefined') {
 }
 
 import { initLogger } from '@/utils/log4js'
+import { syncLog } from '@/utils/log4js'
 import defaultConfig from './defaultConfig'
 import { ENV_PARAMS, File } from './constants'
 import { checkAndCreateDirSync } from './utils'
@@ -804,6 +805,30 @@ if (hasUserCustomDirModified) {
 
 initLogger()
 
+/**
+ * 事件循环卡顿自检。
+ *
+ * 定时器被推迟多久，就说明主线程被占了多久。服务里任何「同步重活」
+ * （比如在主线程 eval 一个几 MB 的音源脚本）都会在这里被记下来，
+ * 并且写进 app.log——否则容器外的 console 看不到，只能靠现象猜。
+ */
+{
+  let expected = Date.now() + 2000
+  const tick = () => {
+    const lag = Date.now() - expected
+    if (lag > 500) {
+      const msg = `[事件循环] 主线程卡顿 ${lag}ms（期间所有 HTTP 请求与音频下发都会停顿）`
+      console.error(msg)
+      syncLog.error(msg)
+    }
+    expected = Date.now() + 2000
+    const timer = setTimeout(tick, 2000)
+    timer.unref?.()
+  }
+  const timer = setTimeout(tick, 2000)
+  timer.unref?.()
+}
+
 
 /**
  * Normalize a port into a number, string, or false.
@@ -943,6 +968,20 @@ if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
     listLoaded: getLoadedApiRefs,
     unload: unloadSource,
     reload: reloadSingleSource,
+    // 正在往音箱下发音频时，护栏必须让路：
+    // 复检要卸载/重载自定义源脚本，重载会在主线程同步 eval 整个（混淆过的）脚本，
+    // 实测 2~3 秒——事件循环一卡，正在下发的音频就断流，音箱缓冲被抽干，
+    // 听感就是「每隔几十秒断断续续 / 突然静音一两秒」。
+    // 延迟 require，避免启动阶段提前加载小爱模块。
+    isBusy: () => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { hasActiveStream } = require('@/server/xiaoai/stream')
+        return hasActiveStream()
+      } catch {
+        return false
+      }
+    },
   })
 }
 

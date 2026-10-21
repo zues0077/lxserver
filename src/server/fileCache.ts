@@ -1943,8 +1943,19 @@ export const saveLyricCache = (songInfo: any, lyricsObj: any, username?: string,
             return false
         }
 
-        fs.writeFileSync(finalPath, formattedLrc, { encoding: 'utf-8' })
-        console.log(`[文件缓存] 歌词已成功保存至: ${finalPath}`)
+        // 同一首歌在投送/缓存/重试中会被反复调用，内容没变就不要重复写盘与刷日志
+        let lyricChanged = true
+        try {
+            if (fs.existsSync(finalPath)) {
+                lyricChanged = fs.readFileSync(finalPath, 'utf-8') !== formattedLrc
+            }
+        } catch {
+            lyricChanged = true
+        }
+        if (lyricChanged) {
+            fs.writeFileSync(finalPath, formattedLrc, { encoding: 'utf-8' })
+            console.log(`[文件缓存] 歌词已成功保存至: ${finalPath}`)
+        }
 
         // Update index — use normalizeSongId to ensure the ID has source prefix, matching index keys
         const foldersToUpdate: Array<'cache' | 'music'> = isOnlyDownload ? ['music', 'cache'] : ['cache', 'music']

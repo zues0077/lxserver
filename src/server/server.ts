@@ -45,10 +45,16 @@ import {
   buildStreamUrl,
   parseStreamToken,
   serveXiaoAiStream,
+  probeAudioSource,
+  getStreamRounds,
+  detectAudioFormat,
+  detectAudioDurationMs,
   loadXiaoAiConfig,
   buildTrackKey,
+  getCachedTrack,
   getCachedTrackUrl,
   setCachedTrackUrl,
+  retireStreams,
 } from './xiaoai'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
@@ -276,6 +282,20 @@ const getRequestOrigin = (req: IncomingMessage): string => {
   return host ? `${proto}://${host}` : ''
 }
 
+/**
+ * 投播时使用的对外地址。
+ *
+ * 配置里的「服务地址」优先，但把 127.0.0.1/localhost 当地址是常见误填——
+ * 音箱会照着这个地址请求它自己，表现为能收到指令却拉不到音频，
+ * 所以这类值直接忽略，退回浏览器访问本服务时的来源地址。
+ */
+const LOOPBACK_BASE_URL = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[?::1\])/i
+const resolvePlayBaseUrl = (req: IncomingMessage, configured: string): string => {
+  const value = String(configured || '').trim().replace(/\/+$/, '')
+  if (value && !LOOPBACK_BASE_URL.test(value)) return value
+  return getRequestOrigin(req)
+}
+
 /** 小爱投播接口的身份校验：返回 null 表示校验不通过，调用方应回 401 */
 const resolveXiaoAiUser = (req: IncomingMessage): string | null => {
   const clientUsername = req.headers['x-user-name'] as string | undefined
@@ -287,56 +307,381 @@ const resolveXiaoAiUser = (req: IncomingMessage): string | null => {
   return verified
 }
 
+/** 音源可用性探测结果的短时缓存，避免自动续播/重复投送时反复回源 */
+const audioProbeCache = new Map<
+  string,
+  { ok: boolean; detail: string; contentType: string; durationMs: number; at: number }
+>()
+const AUDIO_PROBE_TTL_MS = 5 * 60 * 1000
+/** 最近一次投送使用的流标识（/status 用它回报「这一路被拉了几遍」） */
+let lastXiaoAiStreamSid = ''
+/** 最近一次投送完成的时刻：和「音箱真的来拉流」的时刻一减，就是投送到起播的真实延迟 */
+let lastXiaoAiPushAt = 0
+/** 本次这一路流「第一次被音箱请求」的时刻 */
+let lastXiaoAiStreamAt = 0
+
+const probeAudioCached = async (url: string) => {
+  const hit = audioProbeCache.get(url)
+  if (hit && Date.now() - hit.at < AUDIO_PROBE_TTL_MS) return hit
+  const result = await probeAudioSource(url)
+  const entry = {
+    ok: result.ok,
+    detail: result.ok ? `ok/${result.format || result.contentType}` : result.detail,
+    contentType: result.ok ? result.contentType : '',
+    // 真实音频时长：投送给音箱后，前端靠它判断「还剩几秒」，不再依赖不可靠的元数据
+    durationMs: result.ok ? result.durationMs || 0 : 0,
+    at: Date.now(),
+  }
+  if (audioProbeCache.size > 300) audioProbeCache.clear()
+  audioProbeCache.set(url, entry)
+  return entry
+}
+
 /**
- * 解析出可投送给小爱音箱的音频地址。三种来源：
- *  1. 前端直接给的可播放地址
- *  2. 站内相对地址（例如服务端缓存的音频文件）
- *  3. 交给音源现解析
- * 解析结果会写入短时缓存，供自动续播提前预解析时复用。
+ * 带预算的探测：超时就当「没探到」，不阻塞投送。
+ *
+ * 直链投送原本是零等待的，不能因为一个慢音源把投送卡住几秒——
+ * 用户点下播放却没反应，比切歌时机差两秒难受得多。
+ */
+const DIRECT_PROBE_BUDGET_MS = 2500
+
+const probeWithBudget = async (url: string) => {
+  const probe = probeAudioCached(url).catch(() => null)
+  const timeout = new Promise<null>(resolve => setTimeout(() => resolve(null), DIRECT_PROBE_BUDGET_MS))
+  return Promise.race([probe, timeout])
+}
+
+/** 本地缓存文件：读前 8KB 解析真实时长（自动续播切歌时机用） */
+const probeLocalFileDuration = (filePath: string): number => {
+  let fd: number | undefined
+  try {
+    fd = fs.openSync(filePath, 'r')
+    const buffer = Buffer.alloc(8192)
+    const read = fs.readSync(fd, buffer, 0, buffer.length, 0)
+    const head = buffer.subarray(0, read)
+    const format = detectAudioFormat(head)
+    if (!format) return 0
+    return detectAudioDurationMs(head, format, fs.statSync(filePath).size)
+  } catch {
+    return 0
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        /* 忽略 */
+      }
+    }
+  }
+}
+
+interface ResolvedPlayableAudio {
+  url: string
+  sourceName: string
+  quality: string
+  /** 探测到的真实 Content-Type（上游常给 octet-stream，投送时要纠正） */
+  contentType: string
+  /** 探测到的真实音频时长（毫秒），0 表示算不出 */
+  durationMs: number
+  failures: string[]
+}
+
+/**
+ * 解析出「确认真的能出音频」的播放地址。
+ *
+ * 音源脚本只要拼出一个字符串就算成功，它不会验证对方是否还活着
+ * （典型现象：同一平台的 30 多个源共用同一个上游，上游一挂，逐个试都拿到 404）。
+ * 所以这里每拿到一个地址都先探 64 字节：不是音频就把它记进 exclude 换下一个源，
+ * 直到某个源真的能出音频，或所有源都试完。
+ */
+const resolvePlayableAudio = async (
+  songInfo: any,
+  requestedQuality: string,
+  username: string,
+): Promise<ResolvedPlayableAudio> => {
+  const failures: string[] = []
+  const tried = new Set<string>()
+  // 逐源重试要有个上限：某个平台真整体挂掉时，30 多个源全试一遍会让用户干等，
+  // 这里给 20 秒总预算 + 最多 8 次探测，超了就带着已有失败原因返回。
+  const deadline = Date.now() + 20000
+  let probes = 0
+  const qualities = [requestedQuality, ...getDownloadQualityCandidates(requestedQuality)]
+    .filter((q, i, arr) => !!q && arr.indexOf(q) === i)
+    .slice(0, 2)
+
+  /** 对同一个候选，逐源尝试：探测失败就把该源加入 exclude 再问下一个 */
+  const attempt = async (candidate: any, quality: string) => {
+    const source = String(candidate?.source || '')
+    if (!source || !isSourceSupported(source, username)) return null
+    const id = String(candidate.songmid || candidate.id || candidate.hash || candidate.name || '')
+    const key = `${source}|${id}|${quality}`
+    if (tried.has(key)) return null
+    tried.add(key)
+
+    const exclude: string[] = []
+    for (let round = 0; round < 5; round++) {
+      if (Date.now() >= deadline || probes >= 8) return null
+      let result: any
+      try {
+        result = await callUserApiGetMusicUrl(source, candidate, quality, username, undefined, true, exclude)
+      } catch (error: any) {
+        failures.push(`${source}: ${error?.message || error}`)
+        return null
+      }
+      const url = String(result?.url || '').trim()
+      if (!url) {
+        failures.push(`${result?.sourceName || source}: 未返回播放地址`)
+        return null
+      }
+      const label = String(result?.sourceName || source)
+      probes++
+      const probe = await probeAudioCached(url)
+      if (probe.ok) {
+        return {
+          url,
+          sourceName: label,
+          quality: String(result?.type || quality),
+          contentType: probe.contentType || '',
+          durationMs: probe.durationMs || 0,
+        }
+      }
+      failures.push(`${label}: 地址不可播（${probe.detail}）`)
+
+      // 把这个坏源排除掉再来一轮；拿不到标识或已经没有更多源就收手
+      const marker = String(result?.sourceId || result?.sourceName || '').trim()
+      if (!marker || exclude.includes(marker)) return null
+      exclude.push(marker)
+      if (result?.hasMoreSources === false) return null
+    }
+    return null
+  }
+
+  for (const quality of qualities) {
+    const direct = await attempt(songInfo, quality)
+    if (direct) return { ...direct, failures }
+
+    // 同平台源全挂时，换到别的平台/别的曲库 ID 再试
+    let matches: any[] = []
+    try {
+      matches = await findServerSourceMatches(songInfo, username)
+    } catch {
+      matches = []
+    }
+    for (const match of matches.slice(0, 3)) {
+      const hit = await attempt(match, quality)
+      if (hit) return { ...hit, failures }
+    }
+  }
+
+  return { url: '', sourceName: '', quality: requestedQuality, contentType: '', durationMs: 0, failures }
+}
+
+/**
+ * 等本地缓存出现（含等待播放器自己那一路下载完成）。
+ * 超时返回 null，由调用方决定是否回落到远端中转。
+ */
+const waitForCachedFile = async (
+  songInfo: Record<string, any>,
+  quality: string,
+  username: string,
+  timeoutMs: number,
+) => {
+  const songKey = `${fileCache.normalizeSongId(songInfo)}_${quality}`
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  for (;;) {
+    const cached = fileCache.checkCache({ ...songInfo, quality }, username)
+    if (cached?.exists && cached.path) return cached
+    const progress = fileCache.cacheProgress.get(songKey)
+    if (!progress || progress.status === 'error') return null
+    if (Date.now() >= deadline) return null
+    await new Promise(resolve => setTimeout(resolve, 400))
+  }
+}
+
+interface XiaoAiTrackTarget {
+  /** 本地文件绝对路径（命中缓存时使用，音箱直接读本机文件） */
+  path?: string
+  /** 远端音频地址（服务端中转） */
+  url?: string
+  filename: string
+  cached: boolean
+  /** 真实音频 Content-Type，用于纠正上游的 octet-stream 与 URL 后缀 */
+  contentType?: string
+  /** 解析来源，写进日志与接口返回，方便排查 */
+  via: string
+  /** 真实音频时长（毫秒）；前端自动续播用它算切歌时机，0 表示没解析出来 */
+  durationMs?: number
+}
+
+/** 扩展名 → Content-Type（本地缓存文件按真实格式命名过，可以直接推） */
+const AUDIO_MIME_BY_EXT: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.flac': 'audio/flac',
+  '.m4a': 'audio/mp4',
+  '.mp4': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.wav': 'audio/wav',
+  '.ape': 'audio/x-ape',
+}
+
+/**
+ * 投送前确定音频来源，优先级：
+ *   本地缓存 → 客户端直链 → 预解析地址（需探测） → 现解析（换源 + 探测）
+ * 开了「先缓存再投送」且缓存未命中时，会先把整首下载到本地再投送。
  */
 const resolveXiaoAiTrack = async (
   req: IncomingMessage,
   songInfo: Record<string, any>,
   quality: string,
   verifiedUsername: string,
-  directStreamUrl = ''
-): Promise<{ url: string; filename: string; cached: boolean }> => {
+  directStreamUrl = '',
+): Promise<XiaoAiTrackTarget> => {
   const songName = String(songInfo.name || songInfo.title || 'track')
   const singer = String(songInfo.singer || '')
   const filename = `${singer ? `${singer} - ` : ''}${songName}.mp3`.replace(/[\\/:*?"<>|]/g, '_')
+
+  // 1. 本地缓存命中：音源死活都不影响，首字节几乎为零
+  try {
+    const cached = fileCache.checkCache({ ...songInfo, quality }, verifiedUsername)
+    if (cached?.exists && cached.path) {
+      console.log(`[XiaoAi] 命中本地缓存，直接投送：${filename}`)
+      return {
+        path: cached.path,
+        filename,
+        cached: true,
+        contentType: AUDIO_MIME_BY_EXT[path.extname(cached.path).toLowerCase()],
+        via: '本地缓存',
+        durationMs: probeLocalFileDuration(cached.path),
+      }
+    }
+  } catch {
+    /* 缓存索引异常时继续走远端解析 */
+  }
 
   const directUrl = String(directStreamUrl || '').trim()
   const rawSongUrl = String(songInfo.url || songInfo.streamUrl || songInfo.meta?.url || '').trim()
   const httpUrl = /^https?:\/\//i.test(directUrl) ? directUrl : /^https?:\/\//i.test(rawSongUrl) ? rawSongUrl : ''
 
-  // 1. 已经是绝对可播放地址，直接用
-  if (httpUrl) return { url: httpUrl, filename, cached: false }
+  // 2. 已经是绝对可播放地址，直接用
+  if (httpUrl) {
+    // 直链不经音源解析，但「真实时长」还是要测一下：自动续播全靠它决定什么时候切歌。
+    // 给一个很短的预算（不达标就当没有），投送本身不能被探测拖慢。
+    const probe = await probeWithBudget(httpUrl)
+    return {
+      url: httpUrl,
+      filename,
+      cached: false,
+      contentType: probe?.contentType || '',
+      via: '客户端直链',
+      durationMs: probe?.durationMs || 0,
+    }
+  }
 
-  // 2. 站内相对地址：补全成绝对地址，并把播放器 token 带进查询串
+  // 3. 站内相对地址：补全成绝对地址，并把播放器 token 带进查询串
   if (rawSongUrl) {
     const userToken = String(req.headers['x-user-token'] || '')
     const absolute = `${getRequestOrigin(req)}${rawSongUrl.startsWith('/') ? '' : '/'}${rawSongUrl}`
     const withToken = userToken && !absolute.includes('token=')
       ? `${absolute}${absolute.includes('?') ? '&' : '?'}token=${encodeURIComponent(userToken)}`
       : absolute
-    return { url: withToken, filename, cached: false }
+    const probe = await probeWithBudget(withToken)
+    return {
+      url: withToken,
+      filename,
+      cached: false,
+      contentType: probe?.contentType || '',
+      via: '站内地址',
+      durationMs: probe?.durationMs || 0,
+    }
   }
 
-  // 3. 命中预解析缓存：自动续播切歌时走这条路径，省掉音源解析耗时
+  // 4. 预解析缓存：自动续播切歌时走这条，省掉音源解析耗时；但地址可能已失效，要探测
   const cacheKey = buildTrackKey(songInfo, quality)
-  const cachedUrl = getCachedTrackUrl(cacheKey)
-  if (cachedUrl) return { url: cachedUrl, filename, cached: true }
-
-  // 4. 交给音源现解析
-  if (songInfo.source) {
-    const resolved = await callUserApiGetMusicUrl(songInfo.source, songInfo, quality, verifiedUsername)
-    const resolvedUrl = String(resolved?.url || '').trim()
-    if (!resolvedUrl) throw new Error('音源未返回可用播放地址')
-    setCachedTrackUrl(cacheKey, resolvedUrl)
-    return { url: resolvedUrl, filename, cached: false }
+  const cachedTrack = getCachedTrack(cacheKey)
+  if (cachedTrack.url) {
+    const probe = await probeAudioCached(cachedTrack.url)
+    if (probe.ok) {
+      return {
+        url: cachedTrack.url,
+        filename,
+        cached: true,
+        contentType: probe.contentType,
+        via: '预解析地址',
+        durationMs: probe.durationMs || cachedTrack.durationMs,
+      }
+    }
+    console.warn(`[XiaoAi] 预解析地址已失效，重新解析：${filename}（${probe.detail}）`)
   }
 
-  throw new Error('缺少可投送的歌曲信息（需要 source 或可播放地址）')
+  if (!songInfo.source) throw new Error('缺少可投送的歌曲信息（需要 source 或可播放地址）')
+
+  const existingDownload = !!fileCache.cacheProgress.get(
+    `${fileCache.normalizeSongId(songInfo)}_${quality}`,
+  )
+
+  // 5. 现解析：原源 → 换源 → 音质降级，每个候选都做音频探测
+  const resolved = await resolvePlayableAudio(songInfo, quality, verifiedUsername)
+  if (!resolved.url) {
+    const detail = resolved.failures.slice(0, 3).join('；') || '没有可用音源'
+    console.warn(`[XiaoAi] 音源全部不可播：${filename} → ${detail}`)
+    throw new Error(`没有可用音源（已自动换源）：${detail}`)
+  }
+  console.log(`[XiaoAi] 音源可用：${filename} ← ${resolved.sourceName} (${resolved.quality})`)
+
+  // 6. 先缓存再投送：整首落盘后推本地文件，彻底避开音箱拉流超时与中途断流
+  //    默认关闭（cacheBeforePlay=false），即音箱直接按远端地址拉流；需要时可在页面打开。
+  const config = loadXiaoAiConfig()
+  if (config.cacheBeforePlay) {
+    const effectiveQuality = resolved.quality || quality
+    // 播放器自己在播这首歌时也会触发缓存下载；两边同时下会抢同一个 .tmp 文件，
+    // 所以先等它下完，只有确实没人下才自己发起。
+    const cached = await waitForCachedFile(songInfo, effectiveQuality, verifiedUsername, existingDownload ? 30000 : 0)
+    if (cached) {
+      console.log(`[XiaoAi] 先缓存后投送：${filename}`)
+      setCachedTrackUrl(cacheKey, resolved.url, resolved.durationMs)
+      return {
+        path: cached.path,
+        filename,
+        cached: true,
+        contentType: AUDIO_MIME_BY_EXT[path.extname(cached.path).toLowerCase()],
+        via: `先缓存后投送（${resolved.sourceName}）`,
+        durationMs: probeLocalFileDuration(cached.path) || resolved.durationMs,
+      }
+    }
+    try {
+      await Promise.race([
+        fileCache.downloadAndCache(songInfo, resolved.url, effectiveQuality, verifiedUsername),
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error('缓存超时 60s')), 60000)),
+      ])
+    } catch (error: any) {
+      console.warn(`[XiaoAi] 预缓存失败，回落到远端中转：${error?.message || error}`)
+    }
+    const afterDownload = await waitForCachedFile(songInfo, effectiveQuality, verifiedUsername, 15000)
+    if (afterDownload) {
+      console.log(`[XiaoAi] 先缓存后投送：${filename}`)
+      setCachedTrackUrl(cacheKey, resolved.url, resolved.durationMs)
+      return {
+        path: afterDownload.path,
+        filename,
+        cached: true,
+        contentType: AUDIO_MIME_BY_EXT[path.extname(afterDownload.path).toLowerCase()],
+        via: `先缓存后投送（${resolved.sourceName}）`,
+        durationMs: probeLocalFileDuration(afterDownload.path) || resolved.durationMs,
+      }
+    }
+    console.warn(`[XiaoAi] 预缓存未命中，回落到远端中转：${filename}`)
+  }
+
+  setCachedTrackUrl(cacheKey, resolved.url, resolved.durationMs)
+  return {
+    url: resolved.url,
+    filename,
+    cached: false,
+    contentType: resolved.contentType,
+    via: `音源 ${resolved.sourceName}`,
+    durationMs: resolved.durationMs,
+  }
 }
 
 /** 小爱相关接口的鉴权：管理员口令，或已通过认证的播放器会话 */
@@ -6444,9 +6789,17 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
       // ===== 小爱同学（米家云）投播 API =====
       // 播放流地址：音箱本身没有登录态，只能靠 URL 里的签名 token 授权，因此这里不做会话鉴权
-      if (pathname === '/api/music/xiaoai/stream' && req.method === 'GET') {
+      // 路径可能带音频后缀（/stream.mp3、/stream.m4a …）：音箱靠后缀判断解码方式，
+      // 所以投送地址会按真实格式补后缀，这里两种写法都要认
+      if ((pathname === '/api/music/xiaoai/stream' || /^\/api\/music\/xiaoai\/stream\.[a-z0-9]{2,5}$/i.test(pathname)) && req.method === 'GET') {
         try {
           const streamPayload = parseStreamToken(urlObj.searchParams.get('token') || '')
+          // 音箱第一次来要这一路流的时间点：减去投送时刻就是「投送→开始拉流」的真实延迟。
+          // 自动切歌的提前量必须覆盖它（还要加上设备起播缓冲），否则新歌总是慢半步，
+          // 用户就会听到上一首被重头播了几秒。
+          if (streamPayload.sid && streamPayload.sid === lastXiaoAiStreamSid && !lastXiaoAiStreamAt) {
+            lastXiaoAiStreamAt = Date.now()
+          }
           void serveXiaoAiStream(req, res, streamPayload)
         } catch (error: any) {
           res.writeHead(403, { 'Content-Type': 'application/json' })
@@ -6481,13 +6834,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
         // --- 配置读写 ---
         if (pathname === '/api/music/xiaoai/config' && req.method === 'GET') {
-          sendJson({ success: true, config: xiaoAiService.getPublicConfig() })
+          // 带上请求来源，建议地址才能是「音箱可达的局域网地址+真实端口」
+          sendJson({ success: true, config: xiaoAiService.getPublicConfig(getRequestOrigin(req)) })
           return
         }
         if (pathname === '/api/music/xiaoai/config' && req.method === 'POST') {
           void readJsonBody().then(payload => {
             try {
-              sendJson({ success: true, config: xiaoAiService.updateConfig(payload) })
+              sendJson({ success: true, config: xiaoAiService.updateConfig(payload, getRequestOrigin(req)) })
             } catch (error: any) {
               failed(error, '保存小爱配置失败')
             }
@@ -6631,22 +6985,54 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const quality = String(payload.quality || songInfo.quality || '320k')
               const deviceIds = Array.isArray(payload.deviceIds) ? payload.deviceIds.map(String) : undefined
               const config = loadXiaoAiConfig()
-              const baseUrl = String(config.serverBaseUrl || '').trim() || getRequestOrigin(req)
+              const baseUrl = resolvePlayBaseUrl(req, config.serverBaseUrl)
               const streamPath = config.streamPath || '/api/music/xiaoai/stream'
               const songName = String(songInfo.name || songInfo.title || 'track')
-              const singer = String(songInfo.singer || '')
+              const singer = String(songInfo.singer || songInfo.artist || '')
 
               const target = await resolveXiaoAiTrack(req, songInfo, quality, verifiedUsername, payload.streamUrl)
               const streamUrl = buildStreamUrl(baseUrl, streamPath, target)
+              // 队列线索写进 app.log（console 只进 stdout，容器外看不到）：
+              // 自动续播出问题时，能直接从日志判断是「前端算错索引」还是「服务端投送了别的歌」
+              const queueIndex = Number.isFinite(Number(payload.queueIndex)) ? Number(payload.queueIndex) : null
+              const playMode = typeof payload.playMode === 'string' ? payload.playMode : ''
+              const caller = typeof payload.caller === 'string' ? payload.caller : 'manual'
+              const seconds = target.durationMs ? Math.round(target.durationMs / 1000) : 0
+              const trace = `索引=${queueIndex === null ? '?' : queueIndex} 模式=${playMode || '?'} 调用=${caller}${seconds ? ` 时长=${seconds}s` : ''}`
+              console.log(`[XiaoAi] 投送 ${songName}${singer ? ' - ' + singer : ''}（${target.via}｜${trace}）`)
+              syncLog.info(`[XiaoAi] 投送 ${songName}${singer ? ' - ' + singer : ''}（${target.via}｜${trace}）`)
+              // 投送新歌前，把上一首正在传输的连接作废旧连接：音箱播完一首会拿旧 URL
+              // 重拉（songloft #437），否则它会真的把上一首从头再放，听起来就是「切歌前先响上一首」
+              try {
+                const killed = retireStreams()
+                if (killed > 0) syncLog.info(`[XiaoAi] 切歌：已掐断上一首的 ${killed} 路旧流`)
+              } catch {
+                /* 无旧流可断时忽略 */
+              }
               const result = await xiaoAiService.play({
                 streamUrl,
                 deviceIds,
                 song: { name: songName, singer },
               })
+              // 记住本次投送的流标识：/status 会把「这一路被拉了几遍」带下去，
+              // 前端据此判断音箱是否已经把这首放完（它播完会自己重拉同一个 URL）
+              try {
+                const tokenStr = decodeURIComponent(streamUrl.split('token=')[1] || '')
+                lastXiaoAiStreamSid = parseStreamToken(tokenStr).sid || ''
+              } catch {
+                lastXiaoAiStreamSid = ''
+              }
+              if (result.success) {
+                lastXiaoAiPushAt = Date.now()
+                lastXiaoAiStreamAt = 0
+              }
               sendJson({
                 success: result.success,
                 streamUrl,
                 cached: target.cached,
+                via: target.via,
+                // 真实音频时长：前端自动续播用它算「还剩几秒」，避免用不可靠的 interval 元数据
+                audioDurationMs: target.durationMs || 0,
                 device: result.results,
                 message: result.success ? '' : '所有设备投送失败，请检查设备在线状态与登录态',
               })
@@ -6669,7 +7055,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const songInfo = normalizeSongInfo(payload.songInfo || payload.song || {}) || {}
               const quality = String(payload.quality || songInfo.quality || '320k')
               const target = await resolveXiaoAiTrack(req, songInfo, quality, verifiedUsername)
-              sendJson({ success: true, ready: !!target.url, cached: target.cached })
+              sendJson({
+                success: true,
+                ready: !!(target.url || target.path),
+                cached: target.cached,
+                via: target.via,
+                audioDurationMs: target.durationMs || 0,
+              })
             } catch (error: any) {
               sendJson({ success: false, message: error?.message || '预解析失败' })
             }
@@ -6742,7 +7134,22 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           const deviceId = String(urlObj.searchParams.get('deviceId') || '')
           void xiaoAiService
             .getStatus(deviceId)
-            .then(result => sendJson({ success: true, ...result }))
+            .then(result => {
+              // streamFull：本次投送这一路流被完整拉了几遍。
+              // 音箱播完会自己重拉同一个 URL，所以 >=2 就等于「已经放完一遍」，
+              // 走 player_play_music 的机型不报进度，这个信号比猜时长可靠。
+              const rounds = getStreamRounds(lastXiaoAiStreamSid)
+              sendJson({
+                success: true,
+                ...result,
+                streamFull: rounds.full,
+                streamBytes: rounds.bytes,
+                // 音箱已经完整拉过一遍、现在又开始新一轮 → 这首确实播完了（最准的完成信号）
+                streamReplay: rounds.replay === true,
+                // 实测「投送完成 → 音箱来拉流」的延迟：前端据此把切歌提前量调到真正够用
+                startDelayMs: lastXiaoAiStreamAt && lastXiaoAiPushAt ? lastXiaoAiStreamAt - lastXiaoAiPushAt : 0,
+              })
+            })
             .catch((error: any) => failed(error, '查询小爱状态失败'))
           return
         }

@@ -3833,9 +3833,43 @@
                                         <input type="text" id="xiaoai-server-base-input"
                                             class="w-full t-bg-main border t-border-main rounded-lg px-3 py-2 text-sm t-text-main"
                                             placeholder="http://192.168.1.10:9527" onchange="xiaoAiSaveConfig()">
-                                        <p class="text-xs t-text-muted">
-                                            留空则按当前页面地址自动推断。填错会导致音箱能收到指令但拉不到音频。
-                                        </p>
+                                        <div class="flex items-start gap-2">
+                                            <p class="text-xs t-text-muted flex-1">
+                                                留空则按当前页面地址自动推断。填错会导致音箱能收到指令但拉不到音频。
+                                            </p>
+                                            <button id="xiaoai-use-lan-btn" onclick="xiaoAiUseSuggestedBase()"
+                                                class="hidden flex-shrink-0 px-2 py-1 text-xs rounded-lg border border-emerald-500 text-emerald-600 hover:bg-emerald-50 transition-colors">
+                                                用检测到的地址
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <!-- 触屏显示 -->
+                                    <div
+                                        class="t-bg-panel rounded-xl border t-border-main p-4 flex items-center justify-between">
+                                        <div>
+                                            <h4 class="text-sm font-bold t-text-main">触屏显示封面歌词</h4>
+                                            <p class="text-xs t-text-muted mt-1">
+                                                会按歌名到小米曲库匹配 audioID。注意：带上曲库 ID 后音箱会改播小米云端资源，VIP 歌常只有 30 秒试听（表现为播错歌、断断续续），所以默认关闭
+                                            </p>
+                                        </div>
+                                        <input type="checkbox" id="xiaoai-lyrics-toggle"
+                                            class="w-4 h-4 accent-emerald-500 cursor-pointer"
+                                            onchange="xiaoAiSaveConfig()">
+                                    </div>
+
+                                    <!-- 先缓存再投送 -->
+                                    <div
+                                        class="t-bg-panel rounded-xl border t-border-main p-4 flex items-center justify-between">
+                                        <div>
+                                            <h4 class="text-sm font-bold t-text-main">先缓存再投送</h4>
+                                            <p class="text-xs t-text-muted mt-1">
+                                                投送前先把整首下载到本地再推给音箱（默认关闭，音箱直接按地址拉流）。音源不稳、经常「播放遇到问题」时建议打开
+                                            </p>
+                                        </div>
+                                        <input type="checkbox" id="xiaoai-cache-toggle"
+                                            class="w-4 h-4 accent-emerald-500 cursor-pointer"
+                                            onchange="xiaoAiSaveConfig()">
                                     </div>
 
                                     <!-- 播放目标 -->
@@ -3845,9 +3879,13 @@
                                             <h4 class="text-sm font-bold t-text-main">播放目标</h4>
                                             <p class="text-xs t-text-muted mt-1" id="xiaoai-target-hint">当前：本机浏览器</p>
                                         </div>
+                                        <!-- 主题类 t-bg-main / t-border-main 带 !important，会把实心色压掉，
+                                             所以按钮的强调态由 JS 摘掉主题类后叠加 Tailwind 实心样式 -->
                                         <button id="xiaoai-target-btn" onclick="xiaoAiToggleTarget()"
-                                            class="px-3 py-1.5 text-xs md:text-sm t-bg-main border t-border-main rounded-lg hover:t-bg-track transition-colors">
-                                            投送到小爱
+                                            title="在「本机浏览器」和「小爱音箱」之间切换播放目标"
+                                            class="px-4 py-2 text-xs md:text-sm font-semibold rounded-lg border t-bg-main t-border-main t-text-main hover:t-bg-track transition-all whitespace-nowrap flex items-center gap-2">
+                                            <i id="xiaoai-target-btn-icon" class="fa-solid fa-tower-broadcast"></i>
+                                            <span id="xiaoai-target-btn-text">投送到小爱</span>
                                         </button>
                                     </div>
 
