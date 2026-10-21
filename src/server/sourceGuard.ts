@@ -20,6 +20,7 @@
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
+import { syncLog } from '../utils/log4js'
 
 // ============================ 类型 ============================
 
@@ -68,6 +69,29 @@ export interface GuardDeps {
     unload: (owner: string, id: string) => void
     reload: (owner: string, id: string) => Promise<unknown>
     /**
+     * 最近的慢定时器回调记录（卡顿归因第一信号）。
+     * 音源定时器回调同步执行，耗时即事件循环停顿时长，与卡顿规模直接对应。
+     */
+    getRecentSlowTimers?: () => Array<{
+        owner: string
+        id: string
+        name: string
+        kind: string
+        intervalMs: number
+        costMs: number
+        at: number
+    }>
+    /** 当前登记的沙箱定时器明细（卡顿归因佐证：长间隔定时器往往是周期性尖峰来源） */
+    getTrackedTimers?: () => Array<{
+        owner: string
+        id: string
+        name: string
+        kind: string
+        intervalMs: number
+        registeredAt: number
+        ageMs?: number
+    }>
+    /**
      * 服务当前是否「忙到不能被打扰」（例如正在往音箱下发音频）。
      *
      * 复检要卸载/重载自定义源脚本，重载会在主线程同步 eval 整个脚本（实测 2~3 秒），
@@ -84,6 +108,11 @@ export interface GuardStatus {
     flagged: Array<{ id: string; name: string; level: GuardLevel; reasons: string[] }>
     isolated: Array<{ id: string; name: string; reason: string; level: GuardLevel; at: string; source: IsolateSource }>
     lastProbe: { at: string; candidates: number; confirmed: string[] } | null
+    /** 单次采样尖峰计数：5~6 秒级的卡顿会被 15s 窗口均值稀释，这里单独捕捉 */
+    cpuSpikes: { count: number; lastAt: string | null }
+    /** 卡顿联动归因记录（最近 10 条）：事件循环监控发现 >3s 卡顿时自动归因到音源 */
+    stallAttributions: Array<{ at: string; stallMs: number; suspects: string[]; action: string }>
+    lastStallAttribution: { at: string; stallMs: number; suspects: string[]; action: string } | null
 }
 
 export interface GuardDecision {
@@ -102,6 +131,14 @@ interface GuardConfig {
     probeEnabled: boolean
     probeWindowMs: number
     probeMaxScripts: number
+    /** 卡顿归因：超过该值的卡顿才触发归因（毫秒） */
+    stallMinMs: number
+    /** 卡顿归因：慢定时器回调的时间窗（毫秒），窗外的记录不作为证据 */
+    stallSuspectWindowMs: number
+    /** 卡顿归因：隔离模式下同一音源连续被归因几次才动手 */
+    stallIsolateStreak: number
+    /** 卡顿归因：是否真正隔离（默认 false = 告警模式先行） */
+    stallIsolateEnabled: boolean
 }
 
 // ============================ 配置 ============================
@@ -136,6 +173,12 @@ const cfg = (): GuardConfig => {
             probeEnabled: envBool('SOURCE_GUARD_PROBE_ENABLED', true),
             probeWindowMs: envNum('SOURCE_GUARD_PROBE_WINDOW_MS', 3000),
             probeMaxScripts: envNum('SOURCE_GUARD_PROBE_MAX_SCRIPTS', 6),
+            // 卡顿联动归因：CPU 采样会被阻塞错过 5~7s 的爆发，事件循环延迟不会。
+            // 默认只告警不隔离（warn 先行），连续归因同一源 N 次且显式开启开关才隔离。
+            stallMinMs: envNum('SOURCE_GUARD_STALL_MIN_MS', 3000),
+            stallSuspectWindowMs: envNum('SOURCE_GUARD_STALL_SUSPECT_WINDOW_MS', 15000),
+            stallIsolateStreak: envNum('SOURCE_GUARD_STALL_ISOLATE_STREAK', 3),
+            stallIsolateEnabled: envBool('SOURCE_GUARD_STALL_ISOLATE_ENABLED', false),
         }
     }
     return configCache
@@ -371,6 +414,18 @@ const flagged = new Map<string, GuardFlag>()
 
 let idleCpuPercent = 0
 let lastProbe: { at: string; candidates: number; confirmed: string[] } | null = null
+/** 单次采样尖峰：窗口均值会稀释几秒级的卡顿，单独计数便于与 [GC]/慢定时器日志互相印证 */
+let cpuSpikeCount = 0
+let lastCpuSpikeAt: string | null = null
+/**
+ * 单次采样达到该百分比即记一次尖峰。
+ *
+ * 取 50% 而非 70%：卡顿期间采样定时器被推迟，恢复后首个样本理论值很高，
+ * 但非纯 CPU 阻塞（混有 I/O 等待、GC）时会落到 50~70% 区间——
+ * 阈值定 70% 会把这类爆发整批漏掉（246 的豆包定制循环即如此）。
+ * 该计数只用于日志归因，不触发任何隔离，误报成本低。
+ */
+const SPIKE_SAMPLE_PERCENT = 50
 /** 复检冷却截止时间：避免在告警模式（不隔离，异常持续存在）下反复复检、反复重载音源 */
 let probeCooldownUntil = 0
 const PROBE_COOLDOWN_MS = 10 * 60 * 1000
@@ -462,6 +517,9 @@ export function getSourceGuardStatus(): GuardStatus {
             source: item.source,
         })),
         lastProbe,
+        cpuSpikes: { count: cpuSpikeCount, lastAt: lastCpuSpikeAt },
+        stallAttributions: getStallAttributions(),
+        lastStallAttribution: stallAttributionLog.length > 0 ? summarizeAttribution(stallAttributionLog[stallAttributionLog.length - 1]) : null,
     }
 }
 
@@ -518,6 +576,19 @@ const tick = (): void => {
 
     const value = sampleOnce()
     idleCpuPercent = value
+
+    // 短尖峰单独记录：5~6 秒的卡顿摊进 15s 窗口均值会被稀释到阈值以下，
+    // 单次采样却能到 70%+。这里抓「单次就很高」的情况，归因看同刻的
+    // [GC] 大额暂停与 [自定义源-*] 定时器耗时日志，三者时间重合即锁定真凶。
+    if (value >= SPIKE_SAMPLE_PERCENT && !probing && Date.now() >= busyUntil) {
+        cpuSpikeCount++
+        lastCpuSpikeAt = new Date().toISOString()
+        const msg = `[自检护栏] CPU 尖峰：单次采样 ${value.toFixed(0)}%（该时刻事件循环应处于卡顿状态）。` +
+            '短尖峰会被窗口均值稀释故单独记录，归因请对照同刻的 [GC] 与 [自定义源-*] 定时器耗时日志'
+        console.warn(msg)
+        syncLog.warn(msg)
+    }
+
     const capacity = Math.max(2, Math.round(current.windowMs / current.sampleIntervalMs))
     samples.push(value)
     while (samples.length > capacity) samples.shift()
@@ -667,6 +738,179 @@ const runProbe = async (deps: GuardDeps, baseline: number): Promise<void> => {
         lastCpuAt = Date.now()
         scheduleSampler()
     }
+}
+
+// ============================ 卡顿联动归因 ============================
+
+/**
+ * 事件循环监控发现 >3s 卡顿时调用，直接把嫌疑锁定到音源。
+ *
+ * 为什么不做纯 CPU 归因：卡顿是同步阻塞，阻塞期间采样定时器本身也被推迟，
+ * 5~7 秒的爆发经常一次都采不到；而「哪个音源的定时器回调刚跑完、耗时多少」
+ * 是同步事实，与卡顿时长严格对应。本案（豆包定制 600s 自排探测循环）正是
+ * 窗口均值 + 连续窗口 + 采样错过三重原因下完全隐形的典型。
+ *
+ * 信号优先级：
+ *   1. 慢定时器回调（硬证据）：回调同步执行，耗时 ≈ 事件循环停顿时长；
+ *      要求 costMs >= 卡顿时长的一半，且发生在卡顿前 N 秒内。
+ *   2. 活动长定时器（佐证）：>=60s 间隔的定时器是周期性尖峰的常见来源，
+ *      在没有硬证据命中时作为候选列出。
+ *
+ * 默认 warn 模式：只记录与告警，不动任何音源（避免误伤正常源）。
+ * SOURCE_GUARD_STALL_ISOLATE_ENABLED=true 后，同一源连续被归因
+ * STALL_ISOLATE_STREAK 次才隔离；播放音频时一律推迟。
+ */
+
+export interface StallSuspect {
+    owner: string
+    id: string
+    name: string
+    evidence: string
+}
+
+export interface StallAttribution {
+    at: string
+    stallMs: number
+    suspects: StallSuspect[]
+    action: 'none' | 'warn' | 'isolated' | 'deferred'
+}
+
+const stallAttributionLog: StallAttribution[] = []
+const MAX_STALL_ATTRIBUTION_LOG = 10
+/**
+ * 隔离模式下的连续归因计数：同一源连续 N 次被归因才隔离。
+ * 与 warn 模式的观察计数相互独立——warn 跑一段时间后再切 isolate，
+ * 隔离模式应重新开始自己的观察期，而不是继承旧计数立即动手。
+ */
+const stallStreak = new Map<string, number>()
+/** warn 模式的观察计数（只写日志，不触发任何动作） */
+const warnStreak = new Map<string, number>()
+
+/** 归因记录只保留 suspects 的简要描述，避免 /health  payload 过大 */
+const summarizeAttribution = (a: StallAttribution) => ({
+    at: a.at,
+    stallMs: a.stallMs,
+    suspects: a.suspects.map(s => `${s.name}（${s.evidence}）`),
+    action: a.action,
+})
+
+export function getStallAttributions(): Array<ReturnType<typeof summarizeAttribution>> {
+    return stallAttributionLog.map(summarizeAttribution)
+}
+
+/** 长定时器判定阈值：>=60s 的间隔才纳入佐证候选 */
+const LONG_TIMER_INTERVAL_MS = 60 * 1000
+
+export function attributeStall(stallMs: number): StallAttribution | null {
+    const current = cfg()
+    if (!current.enabled) return null
+    if (stallMs < current.stallMinMs) return null
+
+    const now = Date.now()
+    const suspects: StallSuspect[] = []
+    const seen = new Set<string>()
+
+    // ---- 信号一：慢定时器回调（硬证据）----
+    const slowTimers = guardDeps?.getRecentSlowTimers?.() || []
+    for (const rec of slowTimers) {
+        if (now - rec.at > current.stallSuspectWindowMs) continue
+        // 回调耗时对不上卡顿规模（小于卡顿时长一半）→ 不是这次卡顿的主因
+        if (rec.costMs < stallMs * 0.5) continue
+        const key = `${rec.owner}_${rec.id}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        const ago = Math.max(0, Math.round((now - rec.at) / 1000))
+        const interval = rec.intervalMs > 0 ? `${Math.round(rec.intervalMs / 1000)}s` : '未知'
+        suspects.push({
+            owner: rec.owner,
+            id: rec.id,
+            name: rec.name,
+            evidence: `定时器回调耗时 ${rec.costMs}ms（间隔 ${interval}，${ago}s 前完成）`,
+        })
+    }
+
+    // ---- 信号二：活动长定时器（佐证，仅在没有硬证据时列出）----
+    if (suspects.length === 0) {
+        const tracked = guardDeps?.getTrackedTimers?.() || []
+        for (const t of tracked) {
+            if (t.intervalMs < LONG_TIMER_INTERVAL_MS) continue
+            const key = `${t.owner}_${t.id}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            suspects.push({
+                owner: t.owner,
+                id: t.id,
+                name: t.name,
+                evidence: `活动长定时器 ${Math.round(t.intervalMs / 1000)}s（已存活 ${Math.round((t.ageMs || 0) / 1000)}s）`,
+            })
+        }
+    }
+
+    const attribution: StallAttribution = {
+        at: new Date(now).toISOString(),
+        stallMs,
+        suspects,
+        action: 'none',
+    }
+
+    if (suspects.length === 0) {
+        console.warn(`[自检护栏][归因] 主线程卡顿 ${stallMs}ms，未定位到音源定时器（可能来自宿主负载、GC 或同步任务）`)
+        pushAttribution(attribution)
+        return attribution
+    }
+
+    const names = suspects.map(s => `${s.name}（${s.evidence}）`).join('; ')
+    console.warn(`[自检护栏][归因] 主线程卡顿 ${stallMs}ms → 疑似音源: ${names}`)
+
+    if (!current.stallIsolateEnabled) {
+        // 告警模式：只标记，不动音源。观察计数仅用于日志，与隔离模式的计数独立。
+        attribution.action = 'warn'
+        const primary = suspects[0]
+        const key = `${primary.owner}_${primary.id}`
+        const streak = (warnStreak.get(key) || 0) + 1
+        warnStreak.set(key, streak)
+        console.warn(`[自检护栏][归因] ⚠ 告警模式（未隔离）：${primary.name} 第 ${streak} 次被归因，建议在音源管理中手动禁用或联系作者`)
+        pushAttribution(attribution)
+        return attribution
+    }
+
+    // 隔离模式：播放中一律推迟（卸载/重载会断音频流）
+    if (guardDeps?.isBusy?.()) {
+        attribution.action = 'deferred'
+        console.warn('[自检护栏][归因] 正在播放音频，推迟隔离处置（下次卡顿再评估）')
+        pushAttribution(attribution)
+        return attribution
+    }
+
+    const primary = suspects[0]
+    const key = `${primary.owner}_${primary.id}`
+    const streak = (stallStreak.get(key) || 0) + 1
+    stallStreak.set(key, streak)
+
+    if (streak < current.stallIsolateStreak) {
+        attribution.action = 'warn'
+        console.warn(`[自检护栏][归因] ⚠ 隔离模式观察期：${primary.name} 第 ${streak}/${current.stallIsolateStreak} 次被归因，达上限才隔离`)
+        pushAttribution(attribution)
+        return attribution
+    }
+
+    // 连续多次归因同一源 → 隔离（脚本内容更新后自动解除，与静态隔离同机制）
+    const script = readSourceScript(primary)
+    const reason = `stall:${stallMs}ms`
+    const record = recordIsolation(primary, script ? fingerprintOf(script) : '', 'A', reason, 'probe')
+    activeIsolations.set(key, record)
+    guardDeps?.unload(primary.owner, primary.id)
+    stallStreak.delete(key)
+    warnStreak.delete(key)
+    attribution.action = 'isolated'
+    console.warn(`[自检护栏][归因] ✓ 连续 ${streak} 次归因同一音源，已隔离: ${primary.name} (${primary.id})，脚本更新后自动解除`)
+    pushAttribution(attribution)
+    return attribution
+}
+
+const pushAttribution = (a: StallAttribution): void => {
+    stallAttributionLog.push(a)
+    while (stallAttributionLog.length > MAX_STALL_ATTRIBUTION_LOG) stallAttributionLog.shift()
 }
 
 // ============================ 生命周期 ============================

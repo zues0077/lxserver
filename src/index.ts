@@ -15,8 +15,11 @@ if (typeof (global as any).navigator === 'undefined') {
   (global as any).navigator = { userAgent: 'node.js' }
 }
 
+// 必须排在所有 import 之前：桥接 console.* 与登记长定时器，先于其它模块的副作用
+import '@/utils/stdoutBridge'
+
 import { initLogger } from '@/utils/log4js'
-import { syncLog } from '@/utils/log4js'
+import { startEventLoopMonitor } from '@/utils/eventLoopMonitor'
 import defaultConfig from './defaultConfig'
 import { ENV_PARAMS, File } from './constants'
 import { checkAndCreateDirSync } from './utils'
@@ -805,29 +808,10 @@ if (hasUserCustomDirModified) {
 
 initLogger()
 
-/**
- * 事件循环卡顿自检。
- *
- * 定时器被推迟多久，就说明主线程被占了多久。服务里任何「同步重活」
- * （比如在主线程 eval 一个几 MB 的音源脚本）都会在这里被记下来，
- * 并且写进 app.log——否则容器外的 console 看不到，只能靠现象猜。
- */
-{
-  let expected = Date.now() + 2000
-  const tick = () => {
-    const lag = Date.now() - expected
-    if (lag > 500) {
-      const msg = `[事件循环] 主线程卡顿 ${lag}ms（期间所有 HTTP 请求与音频下发都会停顿）`
-      console.error(msg)
-      syncLog.error(msg)
-    }
-    expected = Date.now() + 2000
-    const timer = setTimeout(tick, 2000)
-    timer.unref?.()
-  }
-  const timer = setTimeout(tick, 2000)
-  timer.unref?.()
-}
+// 事件循环卡顿自检 + GC/堆内存归因。
+// 定时器被推迟多久，就说明主线程被占了多久；报卡顿的同时带上堆内存、
+// V8 堆统计与 GC 暂停明细，否则只能看到「卡了 Xms」而不知道是谁占的。
+startEventLoopMonitor()
 
 
 /**
@@ -958,16 +942,21 @@ if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
 // [自检护栏] 启动自定义源脚本自检。
 // 静态特征扫描在每次音源加载时生效；这里的运行期采样负责发现「加载成功但持续空转」的脚本，
 // 空闲 CPU 持续超标时逐个卸载候选音源做归因（若确认则保持卸载，未确认立即恢复）。
+// 另有关联入口：事件循环监控发现 >3s 卡顿时调用 attributeStall() 做同步归因
+// （定时器回调耗时即事件循环停顿时长，比 CPU 采样更不怕被阻塞错过）。
 // 依赖注入而非直接 import，既避免循环依赖，也保证模块加载顺序不变。
 {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { startSourceGuard } = require('@/server/sourceGuard')
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { getLoadedApiRefs, unloadSource, reloadSingleSource } = require('@/server/userApi')
+  const { getLoadedApiRefs, unloadSource, reloadSingleSource, getRecentSlowTimerCallbacks, getTrackedTimerDetails } = require('@/server/userApi')
   startSourceGuard({
     listLoaded: getLoadedApiRefs,
     unload: unloadSource,
     reload: reloadSingleSource,
+    // 卡顿联动归因的数据面：慢定时器回调（硬证据）+ 定时器登记明细（佐证）
+    getRecentSlowTimers: getRecentSlowTimerCallbacks,
+    getTrackedTimers: getTrackedTimerDetails,
     // 正在往音箱下发音频时，护栏必须让路：
     // 复检要卸载/重载自定义源脚本，重载会在主线程同步 eval 整个（混淆过的）脚本，
     // 实测 2~3 秒——事件循环一卡，正在下发的音频就断流，音箱缓冲被抽干，

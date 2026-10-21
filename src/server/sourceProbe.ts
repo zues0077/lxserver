@@ -50,6 +50,13 @@ export interface PlatformProbeState {
   lastError: string
   /** 该平台的关闭是否由本模块自动执行（true 才会被自动恢复） */
   autoDisabled: boolean
+  /**
+   * 「平台侧疑似异常」停探截止时间。
+   * 该平台在过半音源上同时失败（测试曲目不可播/平台限流）时，再探一遍结果也一样，
+   * 却要实打实烧掉几分钟 CPU 与出口带宽——停探半个周期，下一轮自动重新探测，
+   * 平台恢复最多晚一个周期发现。
+   */
+  suspectSkipUntil?: number
 }
 
 export interface SourceProbeState {
@@ -122,6 +129,8 @@ export interface ProbeRunResult {
    * 因此本轮只记录、不处置，交由使用者判断。
    */
   suspectPlatforms: Array<{ platform: string; checked: number; failed: number; ok: number }>
+  /** 本轮因「上轮平台侧疑似异常」而停探的平台（去重） */
+  suspectSkippedPlatforms: string[]
   message: string
 }
 
@@ -175,6 +184,8 @@ interface ProbeConfig {
   testSongs: Record<string, Partial<ProbeTestSong>>
   /** 平台失败率超过该比例即视为「平台侧系统性异常」，本轮暂缓自动处置 */
   systemicFailureRatio: number
+  /** 平台侧疑似异常的平台停探半个周期（省掉注定失败的重复探测，配置可关） */
+  suspectBackoff: boolean
 }
 
 /**
@@ -205,7 +216,9 @@ const configOf = (): ProbeConfig => {
     intervalMinutes: positiveNumber(c['customSource.probe.intervalMinutes'], 180),
     failThreshold: Math.max(1, Math.round(positiveNumber(c['customSource.probe.failThreshold'], 2))),
     timeoutMs: positiveNumber(c['customSource.probe.timeoutMs'], 15000),
-    concurrency: Math.max(1, Math.min(8, Math.round(positiveNumber(c['customSource.probe.concurrency'], 2)))),
+    // 并发默认 6：实测 40 音源 × 152 平台在并发 2 下要跑 356 秒，
+    // 窗口越长越容易和用户播放撞车（抢出口带宽与 CPU）。单平台多为网络等待，提并发 safe。
+    concurrency: Math.max(1, Math.min(8, Math.round(positiveNumber(c['customSource.probe.concurrency'], 6)))),
     verifyLink: c['customSource.probe.verifyLink'] !== false,
     autoDisablePlatform: c['customSource.probe.autoDisablePlatform'] !== false,
     autoRemoveSource: c['customSource.probe.autoRemoveSource'] !== false,
@@ -213,6 +226,7 @@ const configOf = (): ProbeConfig => {
     probeOnNewSource: c['customSource.probe.probeOnNewSource'] !== false,
     testSongs: rawTestSongs && typeof rawTestSongs === 'object' && !Array.isArray(rawTestSongs) ? rawTestSongs : {},
     systemicFailureRatio: ratioNumber(c['customSource.probe.systemicFailureRatio'], DEFAULT_SYSTEMIC_RATIO),
+    suspectBackoff: c['customSource.probe.suspectBackoff'] !== false,
   }
 }
 
@@ -827,7 +841,7 @@ export async function runSourceProbe(
   const empty: ProbeRunResult = {
     startedAt, durationMs: 0, sourcesChecked: 0, platformsChecked: 0,
     platformsOk: 0, platformsDown: 0, platformsSkipped: 0,
-    newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [],
+    newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [], suspectSkippedPlatforms: [],
     message: '未执行',
   }
 
@@ -859,7 +873,7 @@ export async function runSourceProbe(
     const result: ProbeRunResult = {
       startedAt, durationMs: 0, sourcesChecked: targets.length, platformsChecked: 0,
       platformsOk: 0, platformsDown: 0, platformsSkipped: 0,
-      newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [],
+      newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [], suspectSkippedPlatforms: [],
       message: '',
     }
 
@@ -888,6 +902,19 @@ export async function runSourceProbe(
         if (manuallyDisabled) {
           platformState.status = 'skipped'
           result.platformsSkipped++
+          continue
+        }
+
+        // 上轮被判定为「平台侧系统性异常」的平台：停探半个周期。
+        // 这类平台在过半音源上同时失败（测试曲目不可播/平台限流），再探一遍结论一样，
+        // 却要实打实烧掉几分钟 CPU 与出口带宽；停探半个周期后下一轮自动重新探测，
+        // 平台恢复最多晚一个周期发现。配置 customSource.probe.suspectBackoff=false 可关闭。
+        if (conf.suspectBackoff && platformState.suspectSkipUntil && platformState.suspectSkipUntil > Date.now()) {
+          platformState.status = 'skipped'
+          platformState.lastCheckAt = Date.now()
+          platformState.lastError = '平台侧疑似异常（上轮过半音源同时失败），本轮停探'
+          result.platformsSkipped++
+          if (!result.suspectSkippedPlatforms.includes(platform)) result.suspectSkippedPlatforms.push(platform)
           continue
         }
 
@@ -979,6 +1006,20 @@ export async function runSourceProbe(
         `本轮暂缓自动处置：${result.suspectPlatforms.map(s => `${s.platform}(失败${s.failed}/探测${s.checked}，可用${s.ok})`).join('、')}`)
     }
 
+    // 记录停探截止时间（半个周期）：这些平台下一轮不再重复探测，省下的时间留给真正需要探的平台
+    if (conf.suspectBackoff && suspectPlatforms.size) {
+      const skipUntil = startedAt + Math.floor((conf.intervalMinutes * 60 * 1000) / 2)
+      for (const target of targets) {
+        const sourceState = statusFor(target.owner).sources[target.id]
+        if (!sourceState) continue
+        for (const platform of target.platforms) {
+          if (!suspectPlatforms.has(platform)) continue
+          const ps = sourceState.platforms[platform]
+          if (ps) ps.suspectSkipUntil = skipUntil
+        }
+      }
+    }
+
     // ---- 落定每个平台的结论并执行自动关闭 ----
     for (const target of targets) {
       const sourceState = statusFor(target.owner).sources[target.id]
@@ -1048,7 +1089,8 @@ export async function runSourceProbe(
       (result.newlyDisabled.length ? `；新关闭 ${result.newlyDisabled.length} 个平台` : '') +
       (result.restored.length ? `；恢复 ${result.restored.length} 个平台` : '') +
       (result.removed.length ? `；移除 ${result.removed.length} 个音源` : '') +
-      (result.suspectPlatforms.length ? `；${result.suspectPlatforms.length} 个平台疑似平台侧异常已暂缓处置` : '')
+      (result.suspectPlatforms.length ? `；${result.suspectPlatforms.length} 个平台疑似平台侧异常已暂缓处置` : '') +
+      (result.suspectSkippedPlatforms.length ? `；${result.suspectSkippedPlatforms.length} 个平台上轮疑似异常本轮停探` : '')
 
     lastRun = result
     console.log(`[音源巡检] 本轮完成（${result.durationMs}ms）：${result.message}`)

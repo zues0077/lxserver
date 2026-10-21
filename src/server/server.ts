@@ -24,9 +24,11 @@ import formidable from 'formidable'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
-import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount } from './userApi'
+import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails } from './userApi'
 import { getSourceGuardStatus } from './sourceGuard'
 import { getSourceProbeStatus } from './sourceProbe'
+import { getEventLoopStats } from '@/utils/eventLoopMonitor'
+import { getActiveLongTimers } from '@/utils/stdoutBridge'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
 import { checkPersistentVolumes } from './volumeCheck'
@@ -1568,9 +1570,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         customSourceCount: getLoadedApisCount(),
         lastReloadDurationMs: getLastReloadDurationMs(),
         trackedSourceResources: getTrackedTimerCount(),
+        // 存活中的音源沙箱定时器明细：长间隔定时器（如 10 分钟）往往是周期性 CPU 尖峰的来源
+        trackedTimers: getTrackedTimerDetails(),
         activeResources: getActiveResourceSummary(),
+        // 全进程登记到的长定时器（>=5min，含注册栈）：周期性卡顿的头号嫌疑
+        activeLongTimers: getActiveLongTimers(),
         sourceGuard: getSourceGuardStatus(),
-        sourceProbe: getSourceProbeStatus(probeDetail)
+        sourceProbe: getSourceProbeStatus(probeDetail),
+        // 事件循环/内存/GC 诊断：卡顿归因三要素（配合 app.log 里的 [GC] 与慢定时器日志）
+        diagnostics: getEventLoopStats()
       }))
       return
     }

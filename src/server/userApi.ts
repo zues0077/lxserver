@@ -171,6 +171,81 @@ export function getTrackedTimerCount() {
     return total
 }
 
+/**
+ * 音源沙箱定时器回调的执行时长超过该值即记录（毫秒）。
+ *
+ * 音源脚本用宿主 setInterval 注册的回调跑在主线程上：一次几秒的重计算
+ * 就会让事件循环停转同样长的时间（所有 HTTP 请求与音频下发集体停顿）。
+ * 这类卡顿与 [GC] 大额暂停在时间上互相印证，即可锁定「是哪个音源的定时器」。
+ */
+const SLOW_TIMER_CALLBACK_MS = 300
+
+export interface TrackedTimerInfo {
+    owner: string
+    id: string
+    name: string
+    kind: 'timeout' | 'interval'
+    /** 注册时声明的间隔（毫秒）；未知为 -1 */
+    intervalMs: number
+    registeredAt: number
+    /** 查询时计算得出的已存活时长（毫秒） */
+    ageMs?: number
+}
+
+/** 全部存活中的沙箱定时器明细（按 timer id 索引），供 /health 排查「谁注册了长间隔定时器」。 */
+const trackedTimerRegistry = new Map<any, TrackedTimerInfo>()
+
+/** 当前存活的沙箱定时器明细：长间隔定时器（如 10 分钟）往往是周期性 CPU 尖峰的来源。 */
+export function getTrackedTimerDetails(): TrackedTimerInfo[] {
+    const now = Date.now()
+    return Array.from(trackedTimerRegistry.values()).map(item => ({ ...item, ageMs: now - item.registeredAt }))
+}
+
+/**
+ * 最近一批「慢定时器回调」记录（按时间正序，最多保留 30 条）。
+ *
+ * 这是卡顿联动归因的第一信号：音源的定时器回调是同步执行的，
+ * 它跑多久事件循环就停多久——回调耗时与主线程卡顿时长直接对应。
+ */
+export interface SlowTimerRecord {
+    owner: string
+    id: string
+    name: string
+    kind: string
+    /** 注册时声明的间隔（毫秒）；未知为 -1 */
+    intervalMs: number
+    /** 回调实际耗时（毫秒） */
+    costMs: number
+    /** 回调完成的时刻（Date.now()） */
+    at: number
+}
+
+const recentSlowTimerCallbacks: SlowTimerRecord[] = []
+const MAX_SLOW_TIMER_RECORDS = 30
+
+/** 最近的慢定时器回调明细，供自检护栏在卡顿发生时做归因。 */
+export function getRecentSlowTimerCallbacks(): SlowTimerRecord[] {
+    return recentSlowTimerCallbacks.slice()
+}
+
+const reportSlowTimerCallback = (ref: { owner: string; id: string; name: string }, kind: string, intervalMs: number | undefined, costMs: number): void => {
+    if (costMs < SLOW_TIMER_CALLBACK_MS) return
+    const msg = `[自定义源-${ref.name}] ${kind}回调耗时 ${costMs}ms（间隔 ${intervalMs ?? '未知'}ms）——` +
+        '此期间事件循环被占满，所有 HTTP 请求与音频下发都会停顿'
+    console.warn(msg)
+    syncLog.warn(msg)
+    recentSlowTimerCallbacks.push({
+        owner: ref.owner,
+        id: ref.id,
+        name: ref.name,
+        kind,
+        intervalMs: typeof intervalMs === 'number' ? intervalMs : -1,
+        costMs,
+        at: Date.now(),
+    })
+    if (recentSlowTimerCallbacks.length > MAX_SLOW_TIMER_RECORDS) recentSlowTimerCallbacks.shift()
+}
+
 /** 返回已成功加载的 API 源数量，用于状态展示与健康检查。 */
 export function getLoadedApisCount() {
     return loadedApis.size
@@ -395,29 +470,51 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
     let disposed = false
     const sandboxTimers = new Set<any>()
     const pendingAborts = new Set<() => void>()
+    /** 登记/注销定时器明细：/health 要能回答「哪个音源注册了长间隔定时器」 */
+    const registerTimer = (id: any, kind: 'timeout' | 'interval', ms: number | undefined) => {
+        sandboxTimers.add(id)
+        trackedTimerRegistry.set(id, {
+            owner: fullApiInfo.owner,
+            id: fullApiInfo.id,
+            name: fullApiInfo.name,
+            kind,
+            intervalMs: typeof ms === 'number' ? ms : -1,
+            registeredAt: Date.now(),
+        })
+    }
+    const unregisterTimer = (id: any) => {
+        sandboxTimers.delete(id)
+        trackedTimerRegistry.delete(id)
+    }
     const trackedSetTimeout = (fn: Function, ms?: number, ...args: any[]) => {
         const id = setTimeout(() => {
-            sandboxTimers.delete(id)
+            unregisterTimer(id)
             if (disposed) return
+            const startedAt = Date.now()
             try { fn(...args) } catch (e: any) {
                 console.warn(`[自定义源-${fullApiInfo.name}] 定时器回调异常: ${e?.message || e}`)
+            } finally {
+                reportSlowTimerCallback(fullApiInfo, '定时器', ms, Date.now() - startedAt)
             }
         }, ms)
-        sandboxTimers.add(id)
+        registerTimer(id, 'timeout', ms)
         return id
     }
     const trackedSetInterval = (fn: Function, ms?: number, ...args: any[]) => {
         const id = setInterval(() => {
             if (disposed) return
+            const startedAt = Date.now()
             try { fn(...args) } catch (e: any) {
                 console.warn(`[自定义源-${fullApiInfo.name}] 定时器回调异常: ${e?.message || e}`)
+            } finally {
+                reportSlowTimerCallback(fullApiInfo, '间隔定时器', ms, Date.now() - startedAt)
             }
         }, ms)
-        sandboxTimers.add(id)
+        registerTimer(id, 'interval', ms)
         return id
     }
     const trackedClearTimer = (id: any) => {
-        sandboxTimers.delete(id)
+        unregisterTimer(id)
         clearTimeout(id)
         clearInterval(id)
     }
@@ -428,6 +525,7 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
         for (const id of sandboxTimers) {
             clearTimeout(id)
             clearInterval(id)
+            trackedTimerRegistry.delete(id)
         }
         sandboxTimers.clear()
         const abortCount = pendingAborts.size
@@ -1118,7 +1216,11 @@ async function loadOneSource(
 ): Promise<{ needsSave: boolean }> {
     const apiKey = `${owner}_${source.id}`
 
-    if (!source.enabled && owner !== 'open') {
+    // 禁用的音源一律不再加载执行（含公开源）：
+    // 此前仅 owner 非 open 时才跳过，导致面板禁用公开源只挡住路由、
+    // 脚本照常执行——自带定时器/探测循环的音源（如 600s 健康探测）会继续烧 CPU。
+    // 热切换（custom-source/toggle → reloadSingleSource）也因此对公开源失效。
+    if (!source.enabled) {
         console.log(`[自定义源] [${owner}] 跳过已禁用: ${source.name}`)
         apiStatus.delete(apiKey)
         // 增量场景下必须显式移除旧实例，否则禁用后仍会残留在 loadedApis 中被调用
@@ -1161,6 +1263,11 @@ async function loadOneSource(
             }
         }
         if (guardDecision.isolate) {
+            // 持久隔离记录命中时 flag 可能为 null（上次运行隔离的），这里必须留痕，
+            // 否则音源「莫名消失」在日志里没有任何解释。
+            if (!guardDecision.flag) {
+                console.warn(`[自检护栏] ⓘ 命中既有隔离记录，跳过加载: ${metadata.name || source.name} (${source.id}) 原因=${guardDecision.reason}`)
+            }
             apiStatus.set(apiKey, { status: 'failed', error: `已被自检护栏隔离（${guardDecision.reason}）` })
             unloadLoadedApi(apiKey)
             stats.isolatedCount = (stats.isolatedCount || 0) + 1
@@ -1244,7 +1351,13 @@ async function loadSourcesFromDir(dirPath: string, owner: string, stats: { loade
         }
         // =========================================================================
 
-        for (const source of sources) {
+        for (const [index, source] of sources.entries()) {
+            // 逐个音源之间让出事件循环（setImmediate 是真让步，await 产生的微任务让步不算）：
+            // vm 编译/执行音源脚本是同步重活，几十个源会糊成一整块 2~3 秒的卡顿，
+            // 期间 HTTP 请求与音频下发全部停顿。分片后每次只堵单个脚本的时长（几十毫秒）。
+            if (index > 0) {
+                await new Promise<void>(resolve => { setImmediate(resolve) })
+            }
             const res = await loadOneSource(dirPath, owner, source, stats)
             if (res.needsSave) needsSave = true
         }
