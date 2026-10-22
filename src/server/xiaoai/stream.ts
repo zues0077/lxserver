@@ -63,6 +63,19 @@ export const getStreamRounds = (sid?: string) =>
  * 直接 410 打发掉。音箱拿不到数据就只能去切新地址，不会再重放旧歌。
  */
 const retiredStreams = new Set<string>()
+
+/**
+ * 「放完这一遍就停」的流。
+ *
+ * 场景：用户在投送中途点「切回本机播放」。播放器不再投送下一首，于是音箱播完
+ * 拿同一个 URL 重拉时，既等不到新歌（`retireStreams` 不触发），又会把整首再放一遍——
+ * 实测会一直循环下去（217.6s 传输 + 4s 等待，无限重复）。
+ *
+ * 所以切回本机时把当前这一路标成 drainOnly：正在传的这次不受影响（这首照常完整播完），
+ * 播完来重拉时直接 410，音箱就停住了。
+ */
+const drainOnlyStreams = new Set<string>()
+
 /** 正在传输的连接：投送新歌时一并收尾，避免旧连接继续往音箱送旧歌数据 */
 const liveStreams = new Map<string, Set<ServerResponse>>()
 
@@ -119,6 +132,29 @@ export const retireStreams = (keepSid?: string): number => {
 
 /** 这一路流是不是已经被换掉了（音箱在重拉旧歌） */
 export const isRetiredStream = (sid?: string) => (sid ? retiredStreams.has(sid) : false)
+
+/**
+ * 把某一路流标成「放完即止」（切回本机播放时调用）。
+ *
+ * 与 retire 的区别：retire 是**立刻**断掉（切歌时用），drain 是让手上这首播完再停。
+ * 返回 false 表示没有可标的 sid（还没投送过）。
+ */
+export const markDrainOnly = (sid?: string): boolean => {
+  if (!sid) return false
+  drainOnlyStreams.add(sid)
+  if (drainOnlyStreams.size > 500) {
+    const drop = drainOnlyStreams.size - 400
+    let index = 0
+    for (const item of drainOnlyStreams) {
+      if (index++ >= drop) break
+      drainOnlyStreams.delete(item)
+    }
+  }
+  return true
+}
+
+/** 这一路流是不是处于「放完即止」状态 */
+export const isDrainOnly = (sid?: string) => (sid ? drainOnlyStreams.has(sid) : false)
 
 /**
  * 当前是否还有音频正在往音箱下发。
@@ -1178,6 +1214,17 @@ export const serveXiaoAiStream = async (req: IncomingMessage, res: ServerRespons
   // 「整首放完后又来拉」= 音箱觉得歌放完了 → 这是切歌信号，
   // 必须**立刻**置位（前端轮询 /status 有 1.5s 间隔，晚一点就多播一段）。
   if (noteReplayRequest(payload.sid)) {
+    // 切回本机播放后（drainOnly）：这首已经完整放完，用户也不要小爱继续播了。
+    // 不能走下面的 hold 逻辑——那是在等前端投下一首，而这时前端已经不管小爱了，
+    // 等不到就会把整首从头再发一遍，实测会无限循环（见 drainOnlyStreams 注释）。
+    if (isDrainOnly(payload.sid)) {
+      syncLog.info('[XiaoAi] 已切回本机播放，这首放完即止：拒绝重拉，音箱停止播放')
+      if (!res.headersSent) {
+        res.writeHead(410, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ success: false, message: 'stream drained' }))
+      }
+      return
+    }
     const holdMs = replayHoldMs()
     syncLog.info(`[XiaoAi] 音箱重拉已放完的流，先按住 ${holdMs}ms 等前端切歌（避免回放上一首）`)
     await new Promise((resolve) => setTimeout(resolve, holdMs))

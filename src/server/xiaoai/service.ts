@@ -46,6 +46,8 @@ export interface XiaoAiPublicConfig {
   songTransitionOffset: number
   /** 转码时的尾部淡出秒数 */
   fadeOutSec: number
+  /** 上一次设置的音量（0-100），界面回填用；真值以设备上报为准 */
+  volume: number
   /** ffmpeg 是否可用（不可用时 mp3 统一自动降级，界面据此提示） */
   ffmpegAvailable: boolean
   disabledModels: string[]
@@ -166,6 +168,7 @@ class XiaoAiService {
       unifyMp3: config.unifyMp3 !== false,
       songTransitionOffset: config.songTransitionOffset || 0,
       fadeOutSec: config.fadeOutSec ?? 1.5,
+      volume: Number.isFinite(Number(config.volume)) ? Number(config.volume) : 50,
       ffmpegAvailable: this.ffmpegReady,
       touchscreenLyrics: config.touchscreenLyrics === true,
       disabledModels: config.disabledModels,
@@ -185,6 +188,7 @@ class XiaoAiService {
     if (patch.unifyMp3 !== undefined) next.unifyMp3 = !!patch.unifyMp3
     if (patch.songTransitionOffset !== undefined) next.songTransitionOffset = Number(patch.songTransitionOffset) || 0
     if (patch.fadeOutSec !== undefined) next.fadeOutSec = Number(patch.fadeOutSec) || 0
+    if (patch.volume !== undefined) next.volume = Number(patch.volume)
     if (patch.disabledModels !== undefined) next.disabledModels = Array.isArray(patch.disabledModels) ? patch.disabledModels.map(String) : []
     if (patch.selectedDeviceIds !== undefined) {
       next.selectedDeviceIds = Array.isArray(patch.selectedDeviceIds) ? patch.selectedDeviceIds.map(String) : []

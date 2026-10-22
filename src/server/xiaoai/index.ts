@@ -25,6 +25,8 @@ export {
   detectAudioFormat,
   paceWaitMs,
   retireStreams,
+  markDrainOnly,
+  isDrainOnly,
   hasActiveStream,
 } from './stream'
 export { detectAudioDurationMs } from './audioMeta'

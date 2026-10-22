@@ -60,6 +60,7 @@ import {
   getCachedTrackUrl,
   setCachedTrackUrl,
   retireStreams,
+  markDrainOnly,
   sleepTimer,
   mp3CachePath,
   isMp3File,
@@ -7229,6 +7230,25 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               sendJson({ ...(await xiaoAiService.stop(payload.deviceIds)) })
             } catch (error: any) {
               failed(error, '停止失败')
+            }
+          })
+          return
+        }
+        // --- 切回本机播放：让音箱把手上这首放完就停 ---
+        // 与 /stop 的区别：/stop 是立刻掐掉这首；这里只标记「放完即止」，
+        // 当前这次传输照常走完，音箱播完重拉时回 410 停住（否则会一直重复同一首）
+        if (pathname === '/api/music/xiaoai/detach' && req.method === 'POST') {
+          void readJsonBody().then(payload => {
+            try {
+              const sid = String(payload.sid || lastXiaoAiStreamSid || '')
+              const ok = markDrainOnly(sid)
+              if (ok) {
+                console.log(`[XiaoAi] 已切回本机播放：当前流标为放完即止（sid=${sid.slice(0, 8)}）`)
+                syncLog.info(`[XiaoAi] 已切回本机播放：当前流标为放完即止（sid=${sid.slice(0, 8)}）`)
+              }
+              sendJson({ success: ok, sid })
+            } catch (error: any) {
+              failed(error, '切换本机播放失败')
             }
           })
           return

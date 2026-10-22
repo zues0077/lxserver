@@ -248,6 +248,16 @@
         }
         const fadeInput = $('xiaoai-fadeout-input');
         if (fadeInput && document.activeElement !== fadeInput) fadeInput.value = Number(cfg.fadeOutSec ?? 1.5);
+        // 音量回填：HTML 里写死的 50 只是占位，真实值来自上次保存的配置
+        const volumeRange = $('xiaoai-volume-range');
+        if (volumeRange && document.activeElement !== volumeRange) {
+            const savedVolume = Number(cfg.volume);
+            volumeRange.value = String(Number.isFinite(savedVolume) ? savedVolume : state.lastVolume);
+        }
+        const volumeValueEl = $('xiaoai-volume-value');
+        if (volumeValueEl) {
+            volumeValueEl.textContent = String(volumeRange ? volumeRange.value : state.lastVolume);
+        }
         const offsetInput = $('xiaoai-transition-offset-input');
         if (offsetInput && document.activeElement !== offsetInput) offsetInput.value = Number(cfg.songTransitionOffset || 0);
         renderSleepTimer();
@@ -481,9 +491,43 @@
         const volume = Number(range?.value || 0);
         try {
             const data = await request('/volume', { volume });
-            setMessage(data.results?.some(r => r.ok) ? `音量已设为 ${volume}` : '音量设置失败', !data.results?.some(r => r.ok));
+            const ok = data.results?.some(r => r.ok);
+            if (ok) {
+                state.lastVolume = volume;
+                // 记住上次设置：音箱本身不提供「读上次设了多少」，重开页面只能靠服务端配置回填
+                void saveConfig({ volume });
+            }
+            setMessage(ok ? `音量已设为 ${volume}` : '音量设置失败', !ok);
         } catch (e) {
             setMessage(e.message, true);
+        }
+    };
+
+    /**
+     * 用设备真实音量校正滑块。
+     *
+     * 音箱没有「查询我上次设置值」的接口，/status 里的 volume 才是权威值：
+     * 用户可能用语音或遥控器改过音量，界面必须跟设备对齐，否则就是假状态。
+     * 查询失败时保留持久化值，不报错打扰。
+     */
+    const syncVolumeFromDevice = async () => {
+        if (!state.config?.configured) return;
+        try {
+            const data = await request('/status');
+            const volume = Number(data?.volume);
+            if (!data?.success || !Number.isFinite(volume) || volume < 0) return;
+            const rounded = Math.round(volume);
+            const range = $('xiaoai-volume-range');
+            const valueEl = $('xiaoai-volume-value');
+            if (range && document.activeElement !== range) range.value = String(rounded);
+            if (valueEl) valueEl.textContent = String(range ? range.value : rounded);
+            state.lastVolume = rounded;
+            if (Number(state.config.volume) !== rounded) {
+                state.config.volume = rounded;
+                void saveConfig({ volume: rounded });
+            }
+        } catch (e) {
+            console.warn('[小爱] 校正音量失败:', e.message);
         }
     };
 
@@ -967,9 +1011,14 @@
             state.target = 'local';
             localStorage.setItem(TARGET_KEY, 'local');
             stopWatch();
-            setWatchHint('已切回本机播放，自动续播停止');
+            setWatchHint('已切回本机播放：音箱把正在播的这首放完就停');
             render();
             setMessage('已切回本机播放');
+            // 告诉服务端「放完即止」：否则音箱播完会一直重拉同一个地址，
+            // 而那首已经放完 → 单曲无限循环（实测每 3 分 38 秒重发一遍整首）
+            void request('/detach', {}).catch(e => {
+                console.warn('[小爱] 通知服务端切换本机失败:', e.message);
+            });
             return;
         }
         if (!state.config?.configured) return setMessage('请先登录小米账号', true);
@@ -1098,9 +1147,13 @@
         // 定时关机：读取服务端状态并开始本地倒计时刷新（页面关掉服务端也照常到点停）
         void loadSleepTimer();
         startSleepTick();
-        // 打开设置页时刷新一次登录态（服务端可能已自动续期）
+        // 打开设置页时刷新一次登录态（服务端可能已自动续期），并用设备真实音量校正滑块
         const settingsEntry = document.querySelector('[data-view="settings"], a[onclick*="view-settings"]');
-        if (settingsEntry) settingsEntry.addEventListener('click', () => { void loadConfig(); });
+        if (settingsEntry) {
+            settingsEntry.addEventListener('click', () => {
+                void loadConfig().then(() => syncVolumeFromDevice());
+            });
+        }
     };
 
     window.XiaoAi = {
