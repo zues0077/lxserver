@@ -239,7 +239,7 @@ const HARD_FAILURE_PATTERN = new RegExp([
 ].join('|'), 'i')
 
 /** 失败信息是否属于音源自身的硬故障（而非测试曲目不可播这类软失败） */
-const isHardFailure = (message: unknown): boolean => {
+export const isHardFailure = (message: unknown): boolean => {
   if (typeof message !== 'string' || !message) return false
   return HARD_FAILURE_PATTERN.test(message)
 }
@@ -896,6 +896,78 @@ function wakePendingNewSources(): void {
  * @param options.firstProbe 新增音源的首次探测：每个平台只试 1 首候选曲目（快），
  *        多曲目重试留给后续周期巡检做确认 —— 批量导入时不至于把单轮拖长数倍
  */
+/**
+ * 巡检进行中的内存状态。手动取链的记账必须走同一份：
+ * 否则它先 writeStatus 落盘，巡检轮末又整体 writeStatus 覆盖回去，证据会被悄悄抹掉。
+ */
+let liveStatusByOwner: Map<string, ProbeStatusFile> | null = null
+
+/** 用户点播放时的取链失败证据 */
+export interface ManualFailureReport {
+  owner: string
+  sourceId: string
+  sourceName: string
+  platform: string
+  error: string
+  /** 同一首歌、同一平台是否有别的音源成功返回链接 —— 这是最强的对照组 */
+  hasControlGroup: boolean
+}
+
+/**
+ * 把「手动取链」遇到的硬故障记进巡检账本。
+ *
+ * 为什么不直接关平台：手动请求是**单首歌、单次失败**，而没有版权/已下架/这首歌在该源没资源
+ * 这类软失败占比极高，凭一首冷门歌就关平台会一次性误伤一批。
+ * 所以这里只记「与歌曲无关」的硬故障（域名解析失败、连接重置、超时、5xx、接口已废弃、证书过期），
+ * 且只有在**同一首歌、同一平台有别的音源成功**时才可能立即处置 ——
+ * 歌能播是确定的，那么它失败只能是它自己的后端挂了。
+ * 没有对照组时只累加计数，处置仍留给有测试曲目与阈值保护的巡检。
+ */
+export function reportManualFailure(ev: ManualFailureReport): { counted: boolean; disabled: boolean; failCount: number } {
+  const none = { counted: false, disabled: false, failCount: 0 }
+  const conf = configOf()
+  if (!conf.enabled) return none
+
+  const live = liveStatusByOwner
+  let status: ProbeStatusFile
+  if (live) {
+    let s = live.get(ev.owner)
+    if (!s) { s = readStatus(ev.owner); live.set(ev.owner, s) }
+    status = s
+  } else {
+    status = readStatus(ev.owner)
+  }
+
+  const sourceState = status.sources[ev.sourceId]
+  // 巡检尚未登记过这个源（例如刚上传还没跑首轮）→ 不凭单次播放就建档
+  if (!sourceState) return none
+  const ps = sourceState.platforms[ev.platform]
+  if (!ps || ps.autoDisabled) return none
+
+  ps.failCount += 1
+  ps.lastCheckAt = Date.now()
+  ps.lastError = ev.error
+
+  let disabled = false
+  if (ev.hasControlGroup && conf.autoDisablePlatform && ps.failCount >= conf.failThreshold) {
+    ps.status = 'down'
+    ps.autoDisabled = true
+    if (setPlatformDisabled(ev.owner, ev.sourceId, ev.platform, true)) disabled = true
+    audit(ev.owner, 'disable-platform', {
+      sourceId: ev.sourceId, sourceName: ev.sourceName, platform: ev.platform,
+      failCount: ps.failCount, error: ev.error, via: 'manual-play',
+    })
+    const msg = `⚠ 已关闭平台解析: ${ev.sourceName} / ${ev.platform}` +
+      `（同一首歌下其他音源可播，本源硬故障 ${ps.failCount} 次：${ev.error}）`
+    console.warn(`[手动取链] ${msg}`)
+    syncLog.warn(`[手动取链] ${msg}`)
+  }
+
+  // 巡检进行中时由它轮末统一落盘；否则自己写回
+  if (!live) writeStatus(ev.owner, status)
+  return { counted: true, disabled, failCount: ps.failCount }
+}
+
 export async function runSourceProbe(
   options: { owner?: string; only?: Array<{ owner: string; id: string }>; firstProbe?: boolean } = {},
 ): Promise<ProbeRunResult> {
@@ -948,6 +1020,9 @@ export async function runSourceProbe(
       if (!s) { s = readStatus(owner); statusByOwner.set(owner, s) }
       return s
     }
+    // 巡检进行中：让「手动取链失败记账」走同一份内存状态，
+    // 否则它写完文件、巡检轮末又整体 writeStatus 覆盖回去，证据会被抹掉
+    liveStatusByOwner = statusByOwner
 
     interface Job { target: ProbeTarget; platform: string; songs: ProbeTestSong[] }
     const jobs: Job[] = []
@@ -1247,6 +1322,7 @@ export async function runSourceProbe(
     return failed
   } finally {
     running = false
+    liveStatusByOwner = null
     endHostActivity('sourceProbe')
     clearInterval(busyTicker)
     // 退出静默，并把抑制掉的源错误日志汇总成少量几行（巡检期失败属预期内噪音）

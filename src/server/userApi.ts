@@ -7,6 +7,7 @@ import {
     reviewSourceScript,
 } from './sourceGuard'
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
+import { isHardFailure, reportManualFailure } from './sourceProbe'
 import { syncLog } from '../utils/log4js'
 import {
     acquireRequestSlot,
@@ -1007,6 +1008,81 @@ const DEFAULT_CALL_TIMEOUT_MS = 20000
 /** 链接可用性校验的请求超时（毫秒）。只在拿不到结论时才会拖时间，给小一点避免拖慢整次取链 */
 const VERIFY_TIMEOUT_MS = 3000
 
+// ==================== 播放取链的「运行时沉底」账本 ====================
+// 只存在于内存：进程重启即清零，任何一次成功立刻清除。它不写 states.json，
+// 因此绝不会让音源或平台「消失」，只影响下次取链时谁先被尝试。
+/** 沉底的观察窗口（毫秒）：多久之前的失败还算数 */
+const PLAY_SINK_WINDOW_MS = 15 * 60 * 1000
+/** 窗口内失败几次才沉底 */
+const PLAY_SINK_MIN_FAILS = 2
+interface PlaySinkRecord { fails: number; lastFailAt: number }
+const playFailSink = new Map<string, PlaySinkRecord>()
+
+const playSinkKey = (owner: string, id: string, platform: string): string => `${owner || ''}:${id || ''}:${platform || ''}`
+
+/** 按「近期是否反复失败」把候选分成两拨：先试 fresh，再试 sunk。纯函数，便于单测 */
+export const partitionByPlaySink = (
+    candidates: any[],
+    platform: string,
+    now: number = Date.now(),
+): { fresh: any[]; sunk: any[] } => {
+    const isSunk = (api: any): boolean => {
+        const rec = playFailSink.get(playSinkKey(api?.info?.owner, api?.info?.id, platform))
+        return !!rec && rec.fails >= PLAY_SINK_MIN_FAILS && now - rec.lastFailAt < PLAY_SINK_WINDOW_MS
+    }
+    return {
+        fresh: candidates.filter(api => !isSunk(api)),
+        sunk: candidates.filter(isSunk),
+    }
+}
+
+const playSinkEnabled = (): boolean => {
+    const v = (global.lx && global.lx.config) ? (global.lx.config as any)['customSource.playSink.enabled'] : undefined
+    return v !== false
+}
+
+/** 记一次取链失败（原因不限）——只用于排序，不参与定罪 */
+export const notePlayFailure = (api: any, platform: string): void => {
+    if (!api?.info) return
+    const key = playSinkKey(api.info.owner, api.info.id, platform)
+    const rec = playFailSink.get(key) || { fails: 0, lastFailAt: 0 }
+    rec.fails += 1
+    rec.lastFailAt = Date.now()
+    playFailSink.set(key, rec)
+}
+
+/** 取链成功——立刻撤销沉底，并把它清出账本 */
+export const clearPlayFailure = (api: any, platform: string): void => {
+    if (!api?.info) return
+    playFailSink.delete(playSinkKey(api.info.owner, api.info.id, platform))
+}
+
+/**
+ * 把本轮取链里「硬故障」的失败交给巡检账本。
+ *
+ * hasControlGroup=true 表示同一首歌、同一平台有别的音源成功返回了链接——
+ * 既然歌确定能播，那么这些源失败只能是它们自己的后端挂了，可以让巡检按阈值处置。
+ * 没有对照组时只累加计数，不处置。
+ */
+const reportPlayHardFailures = (failures: Array<{ api: any; message: string }>, platform: string, hasControlGroup: boolean): void => {
+    if (!failures.length) return
+    for (const f of failures) {
+        if (!isHardFailure(f.message)) continue
+        try {
+            reportManualFailure({
+                owner: f.api?.info?.owner || 'open',
+                sourceId: f.api?.info?.id || '',
+                sourceName: f.api?.info?.name || '未知音源',
+                platform,
+                error: f.message.slice(0, 300),
+                hasControlGroup,
+            })
+        } catch (e) {
+            // 记账失败绝不能影响播放
+        }
+    }
+}
+
 /**
  * 状态码是否代表「这个链接确定取不到」。
  *
@@ -1302,6 +1378,20 @@ export async function callUserApiGetMusicUrl(
     }
     // =========================================
 
+    // === 运行时沉底：近期反复失败的音源排到队尾 ===
+    // 不写 states.json、不禁用、不删源——只改变尝试顺序。
+    // 目的是让「已知是坏的源」不再挡在前面白白吃掉几秒，而不是把它从池子里拿掉：
+    // 手动取链是单首歌单次失败，无版权/已下架这类软失败占比很高，凭一次失败禁用会误伤一批。
+    // 沉底只认「同一平台近期连续失败」，且该源任意一次成功即立刻恢复原位。
+    if (candidates.length > 1 && playSinkEnabled()) {
+        const { fresh, sunk } = partitionByPlaySink(candidates, source)
+        if (sunk.length && fresh.length) {
+            candidates = [...fresh, ...sunk]
+            console.log(`[自定义源] ${sunk.length} 个近期失败的音源已排到队尾（不禁用、成功即恢复）：` +
+                sunk.map((a: any) => a.info?.name).join('、'))
+        }
+    }
+
     // === 排除已在当前请求中上报失败/失效的自定义源 ===
     if (Array.isArray(excludeApiSources) && excludeApiSources.length > 0) {
         const excludeSet = new Set(excludeApiSources.map(s => String(s).trim().toLowerCase()))
@@ -1336,6 +1426,8 @@ export async function callUserApiGetMusicUrl(
     const attempts: any[] = []
     // 单个音源取链的超时上限：脚本内部可能串行试十几个后端，默认给 20s。
     const callTimeoutMs = configNumber('customSource.callTimeoutMs', DEFAULT_CALL_TIMEOUT_MS)
+    // 本轮取链里失败的音源（用于轮末把硬故障证据交给巡检）
+    const roundFailures: Array<{ api: any; message: string }> = []
 
     if (supportedCount === 1) {
         const api = candidates[0]
@@ -1361,6 +1453,9 @@ export async function callUserApiGetMusicUrl(
                 if (unplayable) throw new Error(unplayable)
 
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
+                clearPlayFailure(api, source)
+                // 单源场景没有对照组（没人证明这首歌能播），只记账不处置
+                reportPlayHardFailures(roundFailures, source, false)
                 const att = { name: api.info.name, status: 'success', message: `第 ${i + 1} 次尝试成功` }
                 attempts.push(att)
                 if (onProgress) await onProgress(att)
@@ -1368,6 +1463,8 @@ export async function callUserApiGetMusicUrl(
             } catch (error: any) {
                 console.error(`[自定义源] ${api.info.name} 失败 (第 ${i + 1}/${maxRetries} 次):`, `音源日志：${error.message}`)
                 lastError = error
+                notePlayFailure(api, source)
+                roundFailures.push({ api, message: String(error?.message || error) })
                 const att = { name: api.info.name, status: 'fail', message: `第 ${i + 1} 次尝试失败,音源日志：${error.message}` }
                 attempts.push(att)
                 if (onProgress) await onProgress(att)
@@ -1400,6 +1497,9 @@ export async function callUserApiGetMusicUrl(
                 if (unplayable) throw new Error(unplayable)
 
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
+                clearPlayFailure(api, source)
+                // 本源成功 = 这首歌在这个平台确定可播 → 本轮硬故障失败的源有了对照组
+                reportPlayHardFailures(roundFailures, source, true)
                 const att = { name: api.info.name, status: 'success' }
                 attempts.push(att)
                 if (onProgress) await onProgress(att)
@@ -1414,6 +1514,8 @@ export async function callUserApiGetMusicUrl(
             } catch (error: any) {
                 console.error(`[自定义源] ${api.info.name} 失败:`, `音源日志：${error.message}`)
                 lastError = error
+                notePlayFailure(api, source)
+                roundFailures.push({ api, message: String(error?.message || error) })
                 const att = { name: api.info.name, status: 'fail', message: `音源日志：${error.message}` }
                 attempts.push(att)
                 if (onProgress) await onProgress(att)
@@ -1421,6 +1523,9 @@ export async function callUserApiGetMusicUrl(
             }
         }
     }
+
+    // 全部失败：没有任何音源证明这首歌能播，只把硬故障记进账本，不做任何处置
+    reportPlayHardFailures(roundFailures, source, false)
 
     const detailMsg = supportedCount === 1
         ? `自定义源 [${candidates[0].info.name}] 解析失败`

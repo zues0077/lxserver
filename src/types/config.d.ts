@@ -602,5 +602,11 @@ declare namespace LX {
      * 用于挡掉「URL 格式正常但实际请求是 404」的假成功 —— 假成功会让轮询停在坏源上。
      */
     'customSource.verifyPlayable'?: boolean
+    /**
+     * 取链失败过的音源是否排到队尾 (默认 true)。
+     *
+     * 只影响尝试顺序: 不写 states.json、不禁用平台、不删音源, 任意一次成功即恢复原位。
+     */
+    'customSource.playSink.enabled'?: boolean
   }
 }

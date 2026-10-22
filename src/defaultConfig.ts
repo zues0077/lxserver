@@ -148,6 +148,10 @@ const config: LX.Config = {
   // 与巡检无关：这里控制的是用户实际播放时，逐个音源要链接的行为。
   'customSource.callTimeoutMs': 20000, // 单个音源取链的超时上限（脚本内部可能串行试十几个后端）
   'customSource.verifyPlayable': true, // 拿到链接后再探一次，挡掉「URL 正常但实际 404」的假成功
+  // 取链失败过的音源，下次排到队尾（不禁用、不删源、成功即恢复）：
+  // 单首歌的单次失败里「无版权/已下架」这类软失败占比很高，凭一次失败禁用会误伤一批，
+  // 所以只改尝试顺序，把定罪留给有测试曲目与阈值保护的巡检。
+  'customSource.playSink.enabled': true,
 }
 
 export default config
