@@ -107,9 +107,8 @@ module.exports = {
   // 单个平台单次探测超时（毫秒）
   'customSource.probe.timeoutMs': 15000,
 
-  // 探测并发数（音源多、平台数量大时调高：实测 36 个源 / 136 个平台在并发 2 下
-  // 单轮约 3.6 分钟，调高可明显缩短；上限 8）
-  'customSource.probe.concurrency': 2,
+  // 探测并发数（默认 6。实测 37 个源 / 97 个平台：并发 2 约 356s，并发 6 约 44s；上限 8）
+  'customSource.probe.concurrency': 6,
 
   // 是否对返回链接做可达性校验
   'customSource.probe.verifyLink': true,

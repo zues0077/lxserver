@@ -130,7 +130,9 @@ const config: LX.Config = {
   'customSource.probe.intervalMinutes': 180, // 复检间隔（分钟）
   'customSource.probe.failThreshold': 2, // 连续失败多少次判定不可用
   'customSource.probe.timeoutMs': 15000, // 单平台单次探测超时（毫秒）
-  'customSource.probe.concurrency': 2, // 探测并发数
+  // 必须与 sourceProbe.ts 里 positiveNumber(..., 6) 的兜底值保持一致：
+  // config.js 一旦显式落值就会覆盖运行时默认，两边不同步会让「默认 6」形同虚设。
+  'customSource.probe.concurrency': 6, // 探测并发数（实测 37 源 / 97 平台：2 并发约 356s，6 并发约 44s）
   'customSource.probe.verifyLink': true, // 是否对返回链接做可达性校验
   'customSource.probe.autoDisablePlatform': true, // 不可用是否自动关闭该平台
   'customSource.probe.autoRemoveSource': true, // 全平台不可用是否自动移除音源

@@ -156,6 +156,8 @@ export interface ProbeStatusSnapshot {
   running: boolean
   intervalMinutes: number
   failThreshold: number
+  /** 当前生效的探测并发路数（config.js 的 customSource.probe.concurrency） */
+  concurrency: number
   autoDisablePlatform: boolean
   autoRemoveSource: boolean
   removeMode: 'trash' | 'delete'
@@ -1239,6 +1241,7 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
     running,
     intervalMinutes: conf.intervalMinutes,
     failThreshold: conf.failThreshold,
+    concurrency: conf.concurrency,
     autoDisablePlatform: conf.autoDisablePlatform,
     autoRemoveSource: conf.autoRemoveSource,
     removeMode: conf.removeMode,

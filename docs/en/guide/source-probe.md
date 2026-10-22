@@ -99,9 +99,8 @@ module.exports = {
   // Timeout for a single platform probe (milliseconds)
   'customSource.probe.timeoutMs': 15000,
 
-  // Probe concurrency (raise it with many sources/platforms: measured 36 sources / 136 platforms
-  // takes about 3.6 minutes per round at concurrency 2; raising it shortens this noticeably; max 8)
-  'customSource.probe.concurrency': 2,
+  // Probe concurrency (default 6. Measured 37 sources / 97 platforms: ~356s at 2, ~44s at 6; max 8)
+  'customSource.probe.concurrency': 6,
 
   // Whether to verify the reachability of the returned link
   'customSource.probe.verifyLink': true,
