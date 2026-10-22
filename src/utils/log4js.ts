@@ -3,7 +3,14 @@ import log4js from 'log4js'
 
 // 统一本地时区的时间戳布局：与 src/utils/time.ts 的 localTime() 格式一致，
 // 避免日志里出现「UTC + 本地」双层时间（容器默认时区常为 UTC，而代码里又混用本地时刻）。
-const FILE_LAYOUT = { type: 'pattern', pattern: '%d{yyyy-MM-dd HH:mm:ss.SSS} [%p] %c - %m' }
+/**
+ * 文件日志布局：本地时区 `yyyy-MM-dd hh:mm:ss.SSS`。
+ *
+ * 注意必须用 `hh` 而不是 `HH`：log4js 的日期格式化走 date-format 库，
+ * 它只认 `hh`（含义仍是 24 小时制）。写成 `HH` 不会被替换，
+ * 日志里会原样出现字面量「HH:mm:ss」，时间完全不可读（v1.5.15 踩过这个坑）。
+ */
+const FILE_LAYOUT = { type: 'pattern', pattern: '%d{yyyy-MM-dd hh:mm:ss.SSS} [%p] %c - %m' }
 
 const createLogConfig = (logPath: string) => {
   return {
