@@ -5,6 +5,8 @@ import { probeNewSource } from './sourceProbe'
 import type { IncomingMessage, ServerResponse } from 'http'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
+import { verifyUser } from './userAuth'
+import { getFlagFor } from './sourceGuard'
 
 // 读取请求体
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -501,6 +503,13 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
         const stateObj = userStates[source.id] || (userStates[decodeURIComponent(source.id)]) || (userStates[encodeURIComponent(source.id)]) || {}
         source.disabledSources = Array.isArray(stateObj.disabledSources) ? stateObj.disabledSources : []
 
+        // 自检护栏的可疑特征标记：静态扫描只说明「可疑」，不足以据此禁用，
+        // 所以这里只把结论交给前端展示，处置权留给用户。
+        try {
+            const flag = getFlagFor(source.owner, source.id)
+            if (flag) source.guard = flag
+        } catch (e) { }
+
         return source
     })
 
@@ -569,6 +578,8 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
                 res.end(JSON.stringify({ success: false, error: '公共源状态切换已受限，仅管理员可操作。' }))
                 return
             }
+        } else if (rejectCrossUserWrite(req, res, targetOwner)) {
+            return
         }
 
         let sourcesDir = getSourceDir(targetOwner)
@@ -731,6 +742,8 @@ export async function handleReorder(req: IncomingMessage, res: ServerResponse) {
                 res.end(JSON.stringify({ success: false, error: '公共源排序已受限，仅管理员可操作。' }))
                 return
             }
+        } else if (rejectCrossUserWrite(req, res, targetOwner)) {
+            return
         }
 
         let sourcesDir = getSourceDir(targetOwner)
@@ -816,6 +829,8 @@ export async function handleDelete(req: IncomingMessage, res: ServerResponse) {
                 res.end(JSON.stringify({ success: false, error: '公共源删除已受限，仅管理员可操作。' }))
                 return
             }
+        } else if (rejectCrossUserWrite(req, res, targetOwner)) {
+            return
         }
 
         let sourcesDir = getSourceDir(targetOwner)
@@ -884,6 +899,71 @@ export async function handleDelete(req: IncomingMessage, res: ServerResponse) {
     }
 }
 
+/** 已注册用户名（与 sourceProbe 的 registeredUsers 同源） */
+const registeredUsers = (): string[] => {
+    const users = (global.lx && global.lx.config && global.lx.config.users) || []
+    return users.map((u: any) => u && u.name).filter((n: any): n is string => !!n)
+}
+
+/**
+ * 改一个音源的 disabledSources 需要落盘到哪些空间。
+ *
+ * 列表接口只按「请求者自己的空间」读 states.json，所以公开源只写 _open 的话，
+ * 管理员登录状态下反而看不到自己的改动 —— 这正是「平台开关对公开源不生效」的
+ * 另一半原因。这里与巡检（sourceProbe.stateSpacesFor）保持一致：
+ * 公开源覆盖「公开空间 + 每个已注册用户空间」。
+ */
+const stateSpacesFor = (owner: string): string[] =>
+    owner === 'open' ? ['open', ...registeredUsers()] : [owner]
+
+/** 越权防护：已认证用户只允许改动自己名下的空间（管理员密码可豁免） */
+const rejectCrossUserWrite = (req: IncomingMessage, res: ServerResponse, targetOwner: string): boolean => {
+    if (targetOwner === 'open') return false
+    const me = verifyUser(req)
+    // 未认证请求不做收紧：由各 handler 的 open 分支与公开访问限制把关，
+    // 避免在开放部署下把原本可用的场景一刀切掉
+    if (!me) return false
+    if (me === targetOwner) return false
+    if (req.headers['x-frontend-auth'] === global.lx.config['admin.password']) return false
+    res.writeHead(403, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ success: false, error: `权限不足：不允许修改用户 ${targetOwner} 的自定义源。` }))
+    return true
+}
+
+const writeDisabledSources = (spaces: string[], targetId: string, disabled: string[]): string => {
+    let matchedKey = targetId
+    for (const space of spaces) {
+        const dir = getSourceDir(space)
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+        const statesPath = path.join(dir, 'states.json')
+        let states: Record<string, any> = {}
+        if (fs.existsSync(statesPath)) {
+            try { states = JSON.parse(fs.readFileSync(statesPath, 'utf-8')) } catch (e) { }
+        }
+
+        // 兼容原名、解码后或编码后的 key
+        let key = targetId
+        if (!states[key]) {
+            try {
+                const decoded = decodeURIComponent(targetId)
+                if (states[decoded]) key = decoded
+            } catch (e) { }
+        }
+        if (!states[key]) {
+            try {
+                const encoded = encodeURIComponent(targetId)
+                if (states[encoded]) key = encoded
+            } catch (e) { }
+        }
+        if (!states[key]) states[key] = {}
+
+        states[key].disabledSources = disabled
+        fs.writeFileSync(statesPath, JSON.stringify(states, null, 2), 'utf-8')
+        if (space === spaces[0]) matchedKey = key
+    }
+    return matchedKey
+}
+
 // 更新音源的平台配置 (关闭/开启部分平台)
 export async function handleUpdatePlatforms(req: IncomingMessage, res: ServerResponse) {
     try {
@@ -905,48 +985,18 @@ export async function handleUpdatePlatforms(req: IncomingMessage, res: ServerRes
                 res.end(JSON.stringify({ success: false, error: '权限不足：修改全局公开源平台配置需要管理员身份。' }))
                 return
             }
+        } else if (rejectCrossUserWrite(req, res, targetOwner)) {
+            return
         }
 
-        const sourcesDir = getSourceDir(targetOwner)
-        if (!fs.existsSync(sourcesDir)) {
-            fs.mkdirSync(sourcesDir, { recursive: true })
-        }
-
-        const userStatesPath = path.join(sourcesDir, 'states.json')
-        let states: Record<string, any> = {}
-        if (fs.existsSync(userStatesPath)) {
-            try {
-                states = JSON.parse(fs.readFileSync(userStatesPath, 'utf-8'))
-            } catch (e) { }
-        }
-
-        // 兼容原名、解码后或编码后的 key
-        let matchedKey = targetId
-        if (!states[matchedKey]) {
-            try {
-                const decoded = decodeURIComponent(targetId)
-                if (states[decoded]) matchedKey = decoded
-            } catch (e) { }
-        }
-        if (!states[matchedKey]) {
-            try {
-                const encoded = encodeURIComponent(targetId)
-                if (states[encoded]) matchedKey = encoded
-            } catch (e) { }
-        }
-
-        if (!states[matchedKey]) {
-            states[matchedKey] = {}
-        }
-
-        states[matchedKey].disabledSources = Array.isArray(disabledSources) ? disabledSources : []
-        fs.writeFileSync(userStatesPath, JSON.stringify(states, null, 2), 'utf-8')
+        const disabled = Array.isArray(disabledSources) ? disabledSources : []
+        const matchedKey = writeDisabledSources(stateSpacesFor(targetOwner), targetId, disabled)
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({
             success: true,
             id: matchedKey,
-            disabledSources: states[matchedKey].disabledSources
+            disabledSources: disabled
         }))
     } catch (error: any) {
         res.writeHead(500, { 'Content-Type': 'application/json' })

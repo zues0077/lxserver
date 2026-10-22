@@ -27,7 +27,7 @@ import { getActiveHostActivities, registerStallHit } from './sourceActivity'
 
 export type GuardLevel = 'A' | 'B'
 export type GuardMode = 'warn' | 'isolate'
-export type IsolateSource = 'static' | 'probe'
+export type IsolateSource = 'static' | 'probe' | 'manual'
 
 export interface ScanFinding {
     level: GuardLevel
@@ -124,6 +124,8 @@ export interface GuardStatus {
     mode: GuardMode
     idleCpuPercent: number
     flagged: Array<{ id: string; name: string; level: GuardLevel; reasons: string[] }>
+    /** 用户手动确认安全的音源（owner:id） */
+    trusted: string[]
     isolated: Array<{ id: string; name: string; reason: string; level: GuardLevel; at: string; source: IsolateSource }>
     lastProbe: { at: string; candidates: number; confirmed: string[] } | null
     /** 单次采样尖峰计数：5~6 秒级的卡顿会被 15s 窗口均值稀释，这里单独捕捉 */
@@ -340,6 +342,12 @@ export const fingerprintOf = (script: string): string =>
 interface GuardStore {
     version: number
     isolated: IsolateRecord[]
+    /**
+     * 用户手动标记为「我确认安全」的音源（key = owner:id）。
+     * 静态特征只是可疑迹象不是证据 —— 46 个真实音源里 10 个带 while(!![]) 且完全正常，
+     * 所以处置权必须留给人：这里记的就是用户已经看过并接受的那些。
+     */
+    trusted: string[]
 }
 
 const storeFilePath = (): string =>
@@ -351,9 +359,13 @@ const loadStore = (): GuardStore => {
     if (storeCache) return storeCache
     try {
         const parsed = JSON.parse(fs.readFileSync(storeFilePath(), 'utf-8'))
-        storeCache = { version: 1, isolated: Array.isArray(parsed?.isolated) ? parsed.isolated : [] }
+        storeCache = {
+            version: 1,
+            isolated: Array.isArray(parsed?.isolated) ? parsed.isolated : [],
+            trusted: Array.isArray(parsed?.trusted) ? parsed.trusted.filter((k: unknown) => typeof k === 'string') : [],
+        }
     } catch (e) {
-        storeCache = { version: 1, isolated: [] }
+        storeCache = { version: 1, isolated: [], trusted: [] }
     }
     return storeCache
 }
@@ -431,6 +443,77 @@ export function clearIsolation(owner: string, id: string): boolean {
     return false
 }
 
+// ============================ 手动信任（白名单） ============================
+
+/**
+ * 用户已确认安全的音源。
+ *
+ * B 级特征（超长行、while(true) 等）绝大多数是混淆/压缩的副产物而非恶意证据，
+ * 自动禁用会误杀正常音源；但完全不提示又等于没做。折中做法是「提示 + 交给人处置」，
+ * 用户确认后写进这里，之后不再重复打扰。
+ */
+const isTrusted = (owner: string, id: string): boolean =>
+    loadStore().trusted.includes(recordKey(owner, id))
+
+/** 用户确认该音源安全：清标记、清隔离，之后不再提示 */
+export function trustSource(owner: string, id: string): boolean {
+    const store = loadStore()
+    const key = recordKey(owner, id)
+    if (!store.trusted.includes(key)) store.trusted.push(key)
+    // 信任优先于历史隔离：一并撤掉，否则「我信了但仍被隔离」会让人以为没生效
+    store.isolated = store.isolated.filter(item => recordKey(item.owner, item.id) !== key)
+    saveStore()
+    flagged.delete(key)
+    activeIsolations.delete(key)
+    return true
+}
+
+/** 撤销信任，恢复正常体检 */
+export function untrustSource(owner: string, id: string): boolean {
+    const store = loadStore()
+    const key = recordKey(owner, id)
+    const before = store.trusted.length
+    store.trusted = store.trusted.filter(k => k !== key)
+    if (store.trusted.length !== before) {
+        saveStore()
+        return true
+    }
+    return false
+}
+
+/** 供音源列表接口注入：该音源当前的可疑标记（无标记返回 null） */
+export function getFlagFor(owner: string, id: string): { level: GuardLevel; reasons: string[] } | null {
+    const flag = flagged.get(recordKey(owner, id))
+    if (!flag) return null
+    return { level: flag.level, reasons: flag.reasons }
+}
+
+/** 面板上手动隔离：用户看过特征后认定这个源有问题 */
+export function isolateManually(owner: string, id: string, name: string): boolean {
+    const key = recordKey(owner, id)
+    const flag = flagged.get(key)
+    const store = loadStore()
+    // 手动隔离与信任互斥
+    store.trusted = store.trusted.filter(k => k !== key)
+    // fingerprint 留空表示「不由脚本内容变化自动解除」，只能手动解除
+    const record = recordIsolation(
+        { owner, id, name: name || flag?.name || id },
+        '',
+        'A',
+        flag?.reasons.join('+') || 'manual',
+        'manual'
+    )
+    saveStore()
+    activeIsolations.set(key, record)
+    flagged.delete(key)
+    try {
+        guardDeps?.unload(owner, id)
+    } catch (e: any) {
+        console.warn(`[自检护栏] 手动隔离后卸载失败 ${name || id}:`, e?.message || e)
+    }
+    return true
+}
+
 // ============================ 运行时状态 ============================
 
 /** 本次加载实际被隔离的脚本（用于 /health 展示当前生效的隔离） */
@@ -467,6 +550,14 @@ export function reviewSourceScript(ref: SourceRef, script: string): GuardDecisio
     const scan = scanScript(script)
     const reasons = scan.findings.map(item => item.code)
     const key = recordKey(ref.owner, ref.id)
+
+    // 0. 用户已手动确认安全：既不标记也不隔离。
+    //    放在最前面，这样「信任」也能撤销历史隔离，不会出现「我信了但还是被隔离」。
+    if (isTrusted(ref.owner, ref.id)) {
+        flagged.delete(key)
+        activeIsolations.delete(key)
+        return { isolate: false, reason: '', flag: null, scan }
+    }
 
     // 1. 历史隔离记录（脚本未变化）优先
     const existing = shouldSkipSource(ref.owner, ref.id, fingerprint)
@@ -534,6 +625,7 @@ export function getSourceGuardStatus(): GuardStatus {
             level: item.level,
             reasons: item.reasons,
         })),
+        trusted: [...loadStore().trusted],
         isolated: Array.from(activeIsolations.values()).map(item => ({
             id: item.id,
             name: item.name,

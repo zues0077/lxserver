@@ -1364,6 +1364,64 @@
                                         <span class="toggle-track"><span class="toggle-thumb"></span></span>
                                     </label>
                                 </div>
+                                <div class="config-divider"></div>
+                                <div class="config-toggle-row">
+                                    <div class="config-toggle-info">
+                                        <span class="config-toggle-label">启用音源平台可用性巡检</span>
+                                        <span class="config-toggle-desc">定时探测每个音源声明的平台是否还能解析出可用链接，失效的自动关闭解析</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" name="customSource.probe.enabled" />
+                                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                    </label>
+                                </div>
+                                <div class="config-field-row">
+                                    <div class="config-field">
+                                        <label class="config-label">巡检间隔（分钟）</label>
+                                        <input type="number" name="customSource.probe.intervalMinutes" class="form-input config-input"
+                                            value="180" min="5" />
+                                        <small class="config-hint">最小 5。保存后立即重新排程，无需重启</small>
+                                    </div>
+                                    <div class="config-field">
+                                        <label class="config-label">探测并发数</label>
+                                        <input type="number" name="customSource.probe.concurrency" class="form-input config-input"
+                                            value="6" min="1" max="8" />
+                                        <small class="config-hint">范围 1–8。实测 40 源 / 151 平台：并发 6 约 130 秒，并发 2 约 390 秒</small>
+                                    </div>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label">判定失效所需连续失败次数</label>
+                                    <input type="number" name="customSource.probe.failThreshold" class="form-input config-input"
+                                        value="2" min="1" />
+                                    <small class="config-hint">调高可减少误判，但失效平台会更晚被关闭</small>
+                                </div>
+                                <div class="config-toggle-row">
+                                    <div class="config-toggle-info">
+                                        <span class="config-toggle-label">失效平台自动关闭解析</span>
+                                        <span class="config-toggle-desc">关闭后在音源的「编辑平台」里可以看到并手动重新开启</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" name="customSource.probe.autoDisablePlatform" />
+                                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                    </label>
+                                </div>
+                                <div class="config-toggle-row">
+                                    <div class="config-toggle-info">
+                                        <span class="config-toggle-label">全部平台失效时自动移除音源</span>
+                                        <span class="config-toggle-desc">仅在确认该音源已彻底不可用时才建议开启</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" name="customSource.probe.autoRemoveSource" />
+                                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                    </label>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label">移除方式</label>
+                                    <select name="customSource.probe.removeMode" class="form-input config-input">
+                                        <option value="trash">移入回收站（可恢复）</option>
+                                        <option value="delete">直接删除</option>
+                                    </select>
+                                </div>
                             </div>
                         </div>
 

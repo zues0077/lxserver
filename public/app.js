@@ -2713,6 +2713,29 @@ class App {
                 form.elements['snapshot.backupPath'].value = config['snapshot.backupPath'] || '';
             }
 
+            // 音源平台可用性巡检
+            if (form.elements['customSource.probe.enabled']) {
+                form.elements['customSource.probe.enabled'].checked = config['customSource.probe.enabled'] !== false;
+            }
+            if (form.elements['customSource.probe.intervalMinutes']) {
+                form.elements['customSource.probe.intervalMinutes'].value = config['customSource.probe.intervalMinutes'] || 180;
+            }
+            if (form.elements['customSource.probe.concurrency']) {
+                form.elements['customSource.probe.concurrency'].value = config['customSource.probe.concurrency'] || 6;
+            }
+            if (form.elements['customSource.probe.failThreshold']) {
+                form.elements['customSource.probe.failThreshold'].value = config['customSource.probe.failThreshold'] || 2;
+            }
+            if (form.elements['customSource.probe.autoDisablePlatform']) {
+                form.elements['customSource.probe.autoDisablePlatform'].checked = config['customSource.probe.autoDisablePlatform'] !== false;
+            }
+            if (form.elements['customSource.probe.autoRemoveSource']) {
+                form.elements['customSource.probe.autoRemoveSource'].checked = config['customSource.probe.autoRemoveSource'] !== false;
+            }
+            if (form.elements['customSource.probe.removeMode']) {
+                form.elements['customSource.probe.removeMode'].value = config['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash';
+            }
+
             // URL路径配置
             if (form.elements['admin.path']) {
                 form.elements['admin.path'].value = config['admin.path'] ?? '';
@@ -3302,6 +3325,13 @@ class App {
             'configBackup.retentionDays': parseInt(formData.get('configBackup.retentionDays')) || 7,
             'configBackup.dir': (formData.get('configBackup.dir') || '').trim(),
             'snapshot.backupPath': (formData.get('snapshot.backupPath') || '').trim(),
+            'customSource.probe.enabled': formData.get('customSource.probe.enabled') === 'on',
+            'customSource.probe.intervalMinutes': parseInt(formData.get('customSource.probe.intervalMinutes')) || 180,
+            'customSource.probe.concurrency': parseInt(formData.get('customSource.probe.concurrency')) || 6,
+            'customSource.probe.failThreshold': parseInt(formData.get('customSource.probe.failThreshold')) || 2,
+            'customSource.probe.autoDisablePlatform': formData.get('customSource.probe.autoDisablePlatform') === 'on',
+            'customSource.probe.autoRemoveSource': formData.get('customSource.probe.autoRemoveSource') === 'on',
+            'customSource.probe.removeMode': formData.get('customSource.probe.removeMode') || 'trash',
             'admin.path': adminPath,
             'player.path': playerPath,
             'subsonic.enable': formData.get('subsonic.enable') === 'on',

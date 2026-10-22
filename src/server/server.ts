@@ -25,11 +25,12 @@ import formidable from 'formidable'
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
 import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot } from './userApi'
-import { getSourceGuardStatus } from './sourceGuard'
+import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation } from './sourceGuard'
 import { getSourceProbeStatus } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
 import { getActiveHostActivities } from './sourceActivity'
+import { setUserAuthVerifier } from './userAuth'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
 import { checkPersistentVolumes } from './volumeCheck'
@@ -872,6 +873,10 @@ export const verifyUserAuth = (req: IncomingMessage): string | null => {
 
   return null
 }
+
+// 把校验能力交给需要它的模块（customSourceHandlers 等），
+// 避免它们反向 import 本文件形成循环依赖
+setUserAuthVerifier(verifyUserAuth)
 
 const getCacheRequestUsername = (req: IncomingMessage): string | null => {
   const requested = (req.headers['x-user-name'] as string) || ''
@@ -7836,6 +7841,46 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return customSourceHandlers.handleUpdatePlatforms(req, res)
       }
 
+      // ===== 自检护栏：可疑音源的手动处置 =====
+      // 静态特征只是「可疑」不是「恶意」，自动禁用会误杀混淆过的正常音源，
+      // 所以这里只提供处置接口，由用户在面板上决定信任还是隔离。
+      if (pathname.startsWith('/api/source-guard/') && req.method === 'POST') {
+        const action = pathname.slice('/api/source-guard/'.length).split('?')[0]
+        void (async () => {
+          try {
+            if (req.headers['x-frontend-auth'] !== global.lx.config['admin.password']) {
+              res.writeHead(403, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, error: '权限不足：处置自定义源需要管理员身份。' }))
+              return
+            }
+            const { owner, id, name } = JSON.parse(await readBody(req))
+            if (!id) throw new Error('缺少音源ID')
+            const targetOwner = (owner && owner !== 'default' && owner !== 'open') ? owner : 'open'
+
+            let payload: Record<string, unknown> = { success: true }
+            if (action === 'trust') {
+              trustSource(targetOwner, id)
+            } else if (action === 'untrust') {
+              payload = { success: untrustSource(targetOwner, id) }
+            } else if (action === 'isolate') {
+              payload = { success: isolateManually(targetOwner, id, name || id) }
+            } else if (action === 'release') {
+              payload = { success: clearIsolation(targetOwner, id) }
+            } else {
+              res.writeHead(404, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, error: `未知操作: ${action}` }))
+              return
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ...payload, id, owner: targetOwner }))
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })()
+        return
+      }
+
       // elFinder 文件管理器连接器
       if (pathname === '/api/elfinder/connector') {
         // [修改] 优先从 Header 获取，如果没有则尝试从 URL 参数获取 (用于支持下载和预览)
@@ -8083,6 +8128,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'singer.sourcePriority': (global.lx.config['singer.sourcePriority'] || ['tx', 'wy']).join(','),
             'artist.maxFetchPages': global.lx.config['artist.maxFetchPages'] ?? 20,
             'system.allowUnsafeVM': global.lx.config['system.allowUnsafeVM'] || false,
+            // 音源平台可用性巡检：此前只能手改 config.js，改完还要重启才生效
+            'customSource.probe.enabled': global.lx.config['customSource.probe.enabled'] !== false,
+            'customSource.probe.intervalMinutes': Number(global.lx.config['customSource.probe.intervalMinutes']) || 180,
+            'customSource.probe.failThreshold': Number(global.lx.config['customSource.probe.failThreshold']) || 2,
+            'customSource.probe.concurrency': Math.min(8, Math.max(1, Number(global.lx.config['customSource.probe.concurrency']) || 6)),
+            'customSource.probe.autoDisablePlatform': global.lx.config['customSource.probe.autoDisablePlatform'] !== false,
+            'customSource.probe.autoRemoveSource': global.lx.config['customSource.probe.autoRemoveSource'] !== false,
+            'customSource.probe.removeMode': global.lx.config['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash',
             'configBackup.enable': global.lx.config['configBackup.enable'] ?? true,
             'configBackup.retentionDays': global.lx.config['configBackup.retentionDays'] ?? 7,
             'configBackup.dir': global.lx.config['configBackup.dir'] ?? '',
@@ -8123,6 +8176,41 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (newConfig['user.cacheSizeLimit'] !== undefined) global.lx.config['user.cacheSizeLimit'] = parseInt(newConfig['user.cacheSizeLimit']) || 2000
               if (newConfig['cache.maxAgeDays'] !== undefined) global.lx.config['cache.maxAgeDays'] = Math.max(0, parseInt(newConfig['cache.maxAgeDays']) || 0)
               if (newConfig['system.allowUnsafeVM'] !== undefined) global.lx.config['system.allowUnsafeVM'] = newConfig['system.allowUnsafeVM']
+
+              // 音源平台可用性巡检
+              if (newConfig['customSource.probe.enabled'] !== undefined) {
+                global.lx.config['customSource.probe.enabled'] = !!newConfig['customSource.probe.enabled']
+              }
+              if (newConfig['customSource.probe.intervalMinutes'] !== undefined) {
+                global.lx.config['customSource.probe.intervalMinutes'] = Math.max(5, parseInt(newConfig['customSource.probe.intervalMinutes']) || 180)
+              }
+              if (newConfig['customSource.probe.failThreshold'] !== undefined) {
+                global.lx.config['customSource.probe.failThreshold'] = Math.max(1, parseInt(newConfig['customSource.probe.failThreshold']) || 2)
+              }
+              if (newConfig['customSource.probe.concurrency'] !== undefined) {
+                global.lx.config['customSource.probe.concurrency'] = Math.min(8, Math.max(1, parseInt(newConfig['customSource.probe.concurrency']) || 6))
+              }
+              if (newConfig['customSource.probe.autoDisablePlatform'] !== undefined) {
+                global.lx.config['customSource.probe.autoDisablePlatform'] = !!newConfig['customSource.probe.autoDisablePlatform']
+              }
+              if (newConfig['customSource.probe.autoRemoveSource'] !== undefined) {
+                global.lx.config['customSource.probe.autoRemoveSource'] = !!newConfig['customSource.probe.autoRemoveSource']
+              }
+              if (newConfig['customSource.probe.removeMode'] !== undefined) {
+                global.lx.config['customSource.probe.removeMode'] = newConfig['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash'
+              }
+
+              // 巡检开关与间隔改动后立即重排任务。
+              // 不能指望配置文件热重载：那边的 hash 判定会把「本次保存自己触发的
+              // fs.watch 事件」当成无实质变化跳过，改完要等重启才生效。
+              if (Object.keys(newConfig).some(k => k.startsWith('customSource.probe.'))) {
+                try {
+                  scheduler.updateTaskConfig('custom_source_health_probe', {
+                    enabled: global.lx.config['customSource.probe.enabled'] !== false,
+                    intervalMs: (Number(global.lx.config['customSource.probe.intervalMinutes']) || 180) * 60 * 1000,
+                  })
+                } catch { /* 调度器尚未启动时忽略 */ }
+              }
 
               let warning = ''
 

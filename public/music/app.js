@@ -13775,7 +13775,7 @@ async function handleFileUpload(input) {
             headers: headers,
             body: JSON.stringify({
                 script: content,
-                username: currentListData?.username || 'default'
+                username: getUploadTargetOwner()
             })
         });
 
@@ -13862,7 +13862,7 @@ async function handleUrlImport() {
     try {
         showInfo('正在获取并验证远程脚本...');
 
-        const username = currentListData?.username || 'default';
+        const username = getUploadTargetOwner();
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
         const adminPass = localStorage.getItem('lx_admin_password');
         if (adminPass) headers['x-frontend-auth'] = adminPass;
@@ -13951,7 +13951,7 @@ async function uploadCustomSource(filename, content, type, allowUnsafeVM = false
             filename,
             content,
             type,
-            username: currentListData?.username || 'default', // 使用当前登录用户
+            username: getUploadTargetOwner(), // 一律进公开空间，而非当前歌单的拥有者
             allowUnsafeVM
         })
     });
@@ -13988,9 +13988,40 @@ async function loadCustomSources() {
 
 // ========== 自定义源管理逻辑 ==========
 
+// 「我是谁」——用于列表读取这类语义。
+// 不能拿 currentListData.username 顶替：currentListData 是「当前歌单列表」的数据，
+// 它的 username 是歌单的拥有者。浏览他人或公开歌单时，它会变成别人，
+// 于是请求会被静默指向别人的目录。
+function getCurrentUsername() {
+    const me = localStorage.getItem('lx_sync_user') || '';
+    return (me && me !== '_open') ? me : 'default';
+}
+
+// 新增音源（上传 / 导入 / 校验）落到哪个空间。
+// 本部署按「只有公开源」运行：所有音源统一进公开空间，不按登录用户分流。
+// 否则以 admin 登录时上传会落到 admin/ 变成私有源，
+// 又回到「两份 states.json、登录前后看到不一样」的老问题。
+function getUploadTargetOwner() {
+    return 'default'; // 'default' → 服务端的公开源空间（_open）
+}
+
+// 「这个音源属于谁」——用于编辑/删除/开关/平台配置这类语义。
+// 服务端按 username 定位目录：'default' 落到公开源（open），其它落到同名用户。
+// 所以这里必须传音源自己的 owner，而不是当前歌单的拥有者。
+// 此前用 currentListData?.username 的后果：浏览公开/他人歌单时去关一个公开源的平台，
+// 改动会写进别人的 states.json，公开源毫无变化，服务端却返回 200「已更新」——静默失败。
+function resolveSourceOwner(sourceId) {
+    const list = window._currentCustomSourcesList || [];
+    const hit = list.find(s => s.id === sourceId);
+    const owner = hit && hit.owner;
+    if (owner) return owner === 'open' ? 'default' : owner;
+    // 缓存缺失时退回「我」，而不是当前歌单的拥有者（后者与本音源无关）
+    return getCurrentUsername();
+}
+
 async function fetchCustomSources() {
     try {
-        const username = currentListData?.username || 'default';
+        const username = getCurrentUsername();
         const headers = getUserAuthHeaders();
         const adminPass = localStorage.getItem('lx_admin_password');
         if (adminPass) headers['x-frontend-auth'] = adminPass;
@@ -14015,7 +14046,7 @@ async function fetchCustomSources() {
 
 
 function updateSourceScopeUI() {
-    const username = currentListData?.username || 'default';
+    const username = getUploadTargetOwner();
     const isPublic = username === 'default';
     const showPublic = settings.enablePublicSources !== false; // Default true
 
@@ -14199,6 +14230,22 @@ async function renderCustomSources() {
             const vmTag = source.allowUnsafeVM ?
                 `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold bg-red-50 text-red-500 border border-red-100 dark:bg-red-500/20 dark:text-red-400 dark:border-red-500/30 whitespace-nowrap">VM</span>` : '';
 
+            // 自检护栏的可疑特征角标：只提示不代劳，点开由用户决定信任还是隔离
+            const guardTag = source.guard ? (() => {
+                const isA = source.guard.level === 'A';
+                const reasons = (source.guard.reasons || []).join('、');
+                return `<span data-guard-id="${escapeHtmlText(encodeURIComponent(source.id))}"
+                        data-guard-owner="${escapeHtmlText(source.owner || 'open')}"
+                        data-guard-name="${escapeHtmlText(source.name)}"
+                        data-guard-level="${escapeHtmlText(source.guard.level)}"
+                        data-guard-reasons="${escapeHtmlText(reasons)}"
+                        onclick="showSourceGuardMenu(this)"
+                        class="cursor-pointer px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold whitespace-nowrap border ${isA
+                            ? 'bg-red-50 text-red-600 border-red-200 dark:bg-red-500/20 dark:text-red-400 dark:border-red-500/30'
+                            : 'bg-amber-50 text-amber-600 border-amber-200 dark:bg-amber-500/20 dark:text-amber-400 dark:border-amber-500/30'}"
+                        title="自检护栏：命中可疑特征 ${escapeHtmlText(reasons)}（点击处置）"><i class="fas fa-shield-alt mr-0.5"></i>${isA ? '高危' : '可疑'}</span>`;
+            })() : '';
+
             // 权限判断：管理员有所有权限；登录用户对公开源只有查看使用（Toggle）权限，无法刷新或删除
             const isPublic = source.owner === 'open';
             const canManageSource = isAdmin || (!isPublic && isUser);
@@ -14225,6 +14272,7 @@ async function renderCustomSources() {
                          ${createMarqueeHtml(source.name, "font-bold t-text-main text-xs md:text-sm")}
                         ${ownerTag}
                         ${vmTag}
+                        ${guardTag}
                     </div>
                     ${errorMsg}
                     <div class="flex flex-wrap items-center text-[10px] t-text-muted gap-x-2.5 md:gap-x-3 gap-y-1 mt-1 md:mt-1.5">
@@ -14312,25 +14360,35 @@ async function renderCustomSources() {
                     }
 
                     try {
-                        const username = currentListData?.username || 'default';
                         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
                         const adminPass = localStorage.getItem('lx_admin_password');
                         if (adminPass) headers['x-frontend-auth'] = adminPass;
 
-                        const response = await fetch('/api/custom-source/reorder', {
-                            method: 'POST',
-                            headers: headers,
-                            body: JSON.stringify({ username, sourceIds: finalOrderIds })
+                        // 列表里公开源与个人源混排，而服务端按 username 定位 order.json
+                        // （'default' 落到公开源）。用单一 username 提交会把公开源的顺序
+                        // 写进个人目录，公开源排序不生效。按归属分组分别提交。
+                        const groups = new Map();
+                        finalOrderIds.forEach(id => {
+                            const owner = resolveSourceOwner(id);
+                            if (!groups.has(owner)) groups.set(owner, []);
+                            groups.get(owner).push(id);
                         });
 
-                        if (response.status === 403) {
-                            showError('权限限制：保存排序需要管理员身份。');
-                            const authorized = await handleAdminAuth('保存排序需要管理员身份');
-                            if (authorized) renderCustomSources();
-                            else renderCustomSources();
-                            return;
+                        for (const [owner, ids] of groups) {
+                            const response = await fetch('/api/custom-source/reorder', {
+                                method: 'POST',
+                                headers: headers,
+                                body: JSON.stringify({ username: owner, sourceIds: ids })
+                            });
+
+                            if (response.status === 403) {
+                                showError('权限限制：保存排序需要管理员身份。');
+                                await handleAdminAuth('保存排序需要管理员身份');
+                                renderCustomSources();
+                                return;
+                            }
+                            if (!response.ok) throw new Error('Reorder failed');
                         }
-                        if (!response.ok) throw new Error('Reorder failed');
                         // 成功：DOM 已是正确顺序，无需重新拉取
                         showInfo('排序已保存');
                     } catch (error) {
@@ -14351,7 +14409,7 @@ async function renderCustomSources() {
 // 重新加载源 (强制重新启用)
 async function reloadSource(sourceId) {
     try {
-        const username = currentListData?.username || 'default';
+        const username = resolveSourceOwner(sourceId);
         const adminPass = localStorage.getItem('lx_admin_password');
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
         if (adminPass) headers['x-frontend-auth'] = adminPass;
@@ -14379,7 +14437,7 @@ async function reloadSource(sourceId) {
 // 切换状态
 async function toggleSource(sourceId, currentEnabled, allowUnsafeVM = false) {
     try {
-        const username = currentListData?.username || 'default';
+        const username = resolveSourceOwner(sourceId);
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
         const adminPass = localStorage.getItem('lx_admin_password');
         if (adminPass) headers['x-frontend-auth'] = adminPass;
@@ -14426,12 +14484,100 @@ async function toggleSource(sourceId, currentEnabled, allowUnsafeVM = false) {
     }
 }
 
+// ===== 自检护栏：可疑音源的手动处置 =====
+
+// 静态特征只是「可疑迹象」而非「恶意证据」——46 个真实音源里 10 个带 while(!![]) 且完全正常，
+// 所以这里不自动禁用，只把结论摆出来让用户自己决定。
+function showGuardDialog(name, level, reasons) {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = "fixed inset-0 z-[200] flex items-center justify-center p-4 animate-fade-in";
+        modal.innerHTML = `
+            <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
+            <div class="t-bg-panel rounded-2xl shadow-2xl w-full max-w-md overflow-hidden transform transition-all animate-slide-up relative z-10 border t-border-main">
+                <div class="px-5 py-4 border-b border-amber-100/50 flex justify-between items-center bg-amber-50/50">
+                    <h3 class="text-sm font-bold t-text-main">可疑音源处置</h3>
+                    <button id="guard-close-x" class="t-text-muted hover:text-amber-500 transition-colors"><i class="fas fa-times text-lg"></i></button>
+                </div>
+                <div class="p-6">
+                    <div class="flex items-start gap-4">
+                        <div class="w-10 h-10 rounded-full ${level === 'A' ? 'bg-red-50 text-red-500' : 'bg-amber-50 text-amber-500'} flex items-center justify-center shrink-0">
+                            <i class="fas fa-shield-alt text-lg"></i>
+                        </div>
+                        <div class="flex-1">
+                            <p class="text-sm t-text-main font-bold mb-1">${escapeHtmlText(name)}</p>
+                            <p class="text-xs t-text-muted leading-relaxed">命中特征：<span class="font-mono">${escapeHtmlText(reasons || '未知')}</span>（${level === 'A' ? '高危级' : '可疑级'}）</p>
+                            <p class="text-xs t-text-muted leading-relaxed mt-2">${level === 'A'
+                                ? '这类特征基本只在真正危险的脚本里出现，建议直接隔离。'
+                                : '这类特征绝大多数是代码混淆、压缩的副产物，不代表恶意。若该音源一直用着正常，选「信任并忽略」即可。'}</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="p-4 t-bg-main/50 border-t t-border-main/50 flex flex-col gap-2">
+                    <button id="guard-trust" class="w-full py-2.5 text-sm font-bold text-white bg-emerald-500 hover:opacity-90 rounded-xl shadow-lg transition-all active:scale-95">信任并忽略</button>
+                    <button id="guard-isolate" class="w-full py-2.5 text-sm font-bold text-white bg-red-500 hover:bg-red-600 rounded-xl shadow-lg transition-all active:scale-95">隔离该音源</button>
+                    <button id="guard-cancel" class="w-full py-2.5 text-sm font-bold t-text-muted hover:t-text-main hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-all">取消</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+
+        const close = (result) => {
+            const content = modal.querySelector('.max-w-md');
+            if (content) content.classList.add('scale-95', 'opacity-0');
+            modal.classList.add('opacity-0');
+            setTimeout(() => { modal.remove(); resolve(result); }, 200);
+        };
+        modal.querySelector('#guard-trust').onclick = () => close('trust');
+        modal.querySelector('#guard-isolate').onclick = () => close('isolate');
+        modal.querySelector('#guard-cancel').onclick = () => close(null);
+        modal.querySelector('#guard-close-x').onclick = () => close(null);
+        modal.querySelector('div:first-child').onclick = () => close(null);
+    });
+}
+
+async function postGuardAction(action, owner, id, name) {
+    const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
+    const adminPass = localStorage.getItem('lx_admin_password');
+    if (adminPass) headers['x-frontend-auth'] = adminPass;
+    try {
+        const res = await fetch(`/api/source-guard/${action}`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ owner, id, name })
+        });
+        if (res.status === 403) {
+            const authorized = await handleAdminAuth('处置自定义源需要管理员身份');
+            if (authorized) return await postGuardAction(action, owner, id, name);
+            return;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        showSuccess(action === 'trust' ? '已标记为可信，不再提示' : '已隔离该音源');
+        await renderCustomSources();
+    } catch (error) {
+        console.error('[Guard] 处置失败:', error);
+        showError(`处置失败: ${error.message}`);
+    }
+}
+
+async function showSourceGuardMenu(el) {
+    const id = decodeURIComponent(el.dataset.guardId || '');
+    const owner = el.dataset.guardOwner || 'open';
+    const name = el.dataset.guardName || id;
+    const level = el.dataset.guardLevel || 'B';
+    const reasons = el.dataset.guardReasons || '';
+    if (!id) return;
+    const choice = await showGuardDialog(name, level, reasons);
+    if (!choice) return;
+    await postGuardAction(choice, owner, id, name);
+}
+
 // 删除源
 async function deleteSource(sourceId) {
     if (!(await showSelect('删除自定义源', '确定要删除这个自定义源吗？', { danger: true }))) return;
 
     try {
-        const username = currentListData?.username || 'default';
+        const username = resolveSourceOwner(sourceId);
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
         const adminPass = localStorage.getItem('lx_admin_password');
         if (adminPass) headers['x-frontend-auth'] = adminPass;
@@ -14552,7 +14698,6 @@ async function batchSourceEnable(scope, enable) {
     const label = enable ? '启用' : '禁用';
     if (!(await showSelect(`批量${label}`, `确定要${label} ${selected.length} 个源吗？`, {}))) return;
 
-    const username = currentListData?.username || 'default';
     const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
     const adminPass = localStorage.getItem('lx_admin_password');
     if (adminPass) headers['x-frontend-auth'] = adminPass;
@@ -14563,7 +14708,8 @@ async function batchSourceEnable(scope, enable) {
             const response = await fetch('/api/custom-source/toggle', {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ username, sourceId, enabled: enable })
+                // 批量选择可能同时含公开源与个人源，逐个按真实归属提交
+                body: JSON.stringify({ username: resolveSourceOwner(sourceId), sourceId, enabled: enable })
             });
             if (response.ok) successCount++;
         } catch(e) { console.error('[BatchSource] toggle error', sourceId, e); }
@@ -14577,7 +14723,6 @@ async function batchSourceDelete(scope) {
     if (!selected.length) { showInfo('请先选择要删除的源'); return; }
     if (!(await showSelect('批量删除', `确定要删除 ${selected.length} 个源吗？此操作不可撤销。`, { danger: true }))) return;
 
-    const username = currentListData?.username || 'default';
     const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
     const adminPass = localStorage.getItem('lx_admin_password');
     if (adminPass) headers['x-frontend-auth'] = adminPass;
@@ -14596,7 +14741,8 @@ async function batchSourceDelete(scope) {
             const response = await fetch('/api/custom-source/delete', {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ username, sourceId })
+                // 批量选择可能同时含公开源与个人源，逐个按真实归属提交
+                body: JSON.stringify({ username: resolveSourceOwner(sourceId), sourceId })
             });
             if (response.ok) {
                 successCount++;
@@ -14818,7 +14964,10 @@ async function saveEditSourcePlatforms() {
         // 收集被关闭的平台
         const disabledSources = checkboxes.filter(cb => !cb.checked).map(cb => cb.value);
 
-        const username = currentListData?.username || 'default';
+        // 平台开关必须写到音源自己的归属目录下。
+        // 用当前歌单的拥有者会把改动写进不相干的用户目录：
+        // 公开源毫无变化，服务端却返回 200「已更新平台配置」。
+        const username = resolveSourceOwner(source.id);
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
         const adminPass = localStorage.getItem('lx_admin_password');
         if (adminPass) headers['x-frontend-auth'] = adminPass;
