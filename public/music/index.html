@@ -3850,7 +3850,9 @@
                                         <div>
                                             <h4 class="text-sm font-bold t-text-main">触屏显示封面歌词</h4>
                                             <p class="text-xs t-text-muted mt-1">
-                                                会按歌名到小米曲库匹配 audioID。注意：带上曲库 ID 后音箱会改播小米云端资源，VIP 歌常只有 30 秒试听（表现为播错歌、断断续续），所以默认关闭
+                                                会按歌名到小米曲库匹配 audioID，让触屏音箱显示封面与歌词（已与「灯环」开关解耦，关灯环不再丢歌词）。
+                                                失败时自动逐级回退：搜到的 ID → 默认封面 → 普通播放 → 直链，保证至少有声音。
+                                                注意：带上曲库 ID 后部分机型可能改播小米云端资源，VIP 歌常只有 30 秒试听（表现为播错歌、断断续续），遇到请关闭本项
                                             </p>
                                         </div>
                                         <input type="checkbox" id="xiaoai-lyrics-toggle"
@@ -3869,6 +3871,20 @@
                                         </div>
                                         <input type="checkbox" id="xiaoai-cache-toggle"
                                             class="w-4 h-4 accent-emerald-500 cursor-pointer"
+                                            onchange="xiaoAiSaveConfig()">
+                                    </div>
+
+                                    <!-- 统一 mp3 -->
+                                    <div
+                                        class="t-bg-panel rounded-xl border t-border-main p-4 flex items-start justify-between gap-3">
+                                        <div>
+                                            <h4 class="text-sm font-bold t-text-main">推送格式统一转为 mp3</h4>
+                                            <p class="text-xs t-text-muted mt-1" id="xiaoai-mp3-hint">
+                                                已是 mp3 的源不会重复转码；转码产物存入「歌曲缓存/xiaoai」，受权限与缓存限制约束。
+                                            </p>
+                                        </div>
+                                        <input type="checkbox" id="xiaoai-mp3-toggle"
+                                            class="w-4 h-4 mt-1 flex-shrink-0 accent-emerald-500 cursor-pointer"
                                             onchange="xiaoAiSaveConfig()">
                                     </div>
 
@@ -4028,6 +4044,66 @@
                                                 随机 / 单曲循环 / 顺序播放等模式与播放器保持一致；页面关闭后不再续播。
                                             </p>
                                             <p id="xiaoai-watch-status" class="text-xs t-text-muted">自动续播待命（播放时生效）</p>
+
+                                            <!-- 切歌过渡 -->
+                                            <div class="pt-2 grid grid-cols-2 gap-3">
+                                                <label class="block">
+                                                    <span class="text-xs t-text-muted">切歌提前量（秒）</span>
+                                                    <input type="number" id="xiaoai-transition-offset-input" min="-30"
+                                                        max="30" step="0.5" value="0"
+                                                        class="mt-1 w-full t-bg-main border t-border-main rounded-lg px-2 py-1 text-sm t-text-main"
+                                                        onchange="xiaoAiSaveConfig()">
+                                                </label>
+                                                <label class="block">
+                                                    <span class="text-xs t-text-muted">尾部淡出（秒）</span>
+                                                    <input type="number" id="xiaoai-fadeout-input" min="0" max="6"
+                                                        step="0.5" value="1.5"
+                                                        class="mt-1 w-full t-bg-main border t-border-main rounded-lg px-2 py-1 text-sm t-text-main"
+                                                        onchange="xiaoAiSaveConfig()">
+                                                </label>
+                                            </div>
+                                            <p class="text-xs t-text-muted">
+                                                正数更早切（减少空档），负数更晚切（少截上一首结尾）；0 为自动。
+                                                淡出只对「需要转码的曲目」生效，已是 mp3 的源不重编码以保证音质。
+                                            </p>
+                                        </div>
+
+                                        <!-- 定时关机 -->
+                                        <div class="pt-3 border-t t-border-main space-y-2">
+                                            <h5 class="text-sm font-bold t-text-main flex items-center">
+                                                <i class="fas fa-moon mr-2 text-emerald-500"></i> 定时关机
+                                            </h5>
+                                            <div class="flex flex-wrap items-end gap-2">
+                                                <label class="block">
+                                                    <span class="text-xs t-text-muted">按分钟</span>
+                                                    <input type="number" id="xiaoai-sleep-minutes" min="1" max="1440"
+                                                        step="1" value="30"
+                                                        class="mt-1 w-24 t-bg-main border t-border-main rounded-lg px-2 py-1 text-sm t-text-main">
+                                                </label>
+                                                <button onclick="xiaoAiSleepTimer('minutes')"
+                                                    class="px-3 py-1.5 text-xs rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors">
+                                                    开始倒计时
+                                                </button>
+                                                <label class="block ml-2">
+                                                    <span class="text-xs t-text-muted">按曲数</span>
+                                                    <input type="number" id="xiaoai-sleep-songs" min="1" max="999"
+                                                        step="1" value="10"
+                                                        class="mt-1 w-24 t-bg-main border t-border-main rounded-lg px-2 py-1 text-sm t-text-main">
+                                                </label>
+                                                <button onclick="xiaoAiSleepTimer('songs')"
+                                                    class="px-3 py-1.5 text-xs rounded-lg border t-border-main t-text-main hover:t-bg-track transition-colors">
+                                                    播完这些停
+                                                </button>
+                                                <button onclick="xiaoAiSleepTimer('off')"
+                                                    class="px-3 py-1.5 text-xs rounded-lg border t-border-main t-text-main hover:t-bg-track transition-colors">
+                                                    关闭定时
+                                                </button>
+                                            </div>
+                                            <p id="xiaoai-sleep-hint" class="text-xs t-text-muted">未启用定时关机</p>
+                                            <p class="text-xs t-text-muted">
+                                                到点只「停止播放」，不会给音箱断电（多数小爱型号没有可用的关机指令）。
+                                                计时在服务端进行，关掉页面同样有效。
+                                            </p>
                                         </div>
                                     </div>
                                 </div>

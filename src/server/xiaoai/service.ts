@@ -2,6 +2,7 @@ import os from 'node:os'
 import { MinaAuth, type LoginResult, type QRPollResult, type TokenInfo } from './auth'
 import { MinaClient, PLAY_STATUS_PAUSED, type MinaDevice } from './client'
 import { DEFAULT_MUSIC_AUDIO_ID, needUseMusicApi } from './constants'
+import { isFfmpegAvailable } from './transcode'
 import { httpRequest } from './http'
 import {
   loadConfig,
@@ -38,6 +39,14 @@ export interface XiaoAiPublicConfig {
   touchscreenLyrics: boolean
   /** 投送前先缓存整首音频 */
   cacheBeforePlay: boolean
+  /** 推送格式统一转 mp3 */
+  unifyMp3: boolean
+  /** 切歌提前量偏移（秒，-30..30） */
+  songTransitionOffset: number
+  /** 转码时的尾部淡出秒数 */
+  fadeOutSec: number
+  /** ffmpeg 是否可用（不可用时 mp3 统一自动降级，界面据此提示） */
+  ffmpegAvailable: boolean
   disabledModels: string[]
   selectedDeviceIds: string[]
   devices: XiaoAiDevice[]
@@ -105,6 +114,8 @@ class XiaoAiService {
   private auth = new MinaAuth()
   private client: MinaClient | null = null
   private inited = false
+  /** ffmpeg 可用性（异步探测结果；未探测完时按可用处理，避免界面闪一下"不可用"） */
+  private ffmpegReady = true
 
   /** 首次使用时从磁盘恢复登录态 */
   private ensureInit() {
@@ -112,6 +123,9 @@ class XiaoAiService {
     this.inited = true
     const token = loadToken()
     if (token) this.auth.restoreToken(token)
+    void isFfmpegAvailable().then(ok => {
+      this.ffmpegReady = ok
+    })
   }
 
   /** 当前登录态 */
@@ -135,7 +149,13 @@ class XiaoAiService {
       suggestedBaseUrl: suggestBaseUrl(origin),
       streamPath: config.streamPath || '/api/music/xiaoai/stream',
       keepLight: config.keepLight !== false,
-      cacheBeforePlay: config.cacheBeforePlay !== false,
+      // 修历史不一致：loadConfig 的默认是 false，这里原本写成 `!== false`，
+      // 导致界面显示「已开启」而实际走的是直投，用户以为开了却没生效
+      cacheBeforePlay: config.cacheBeforePlay === true,
+      unifyMp3: config.unifyMp3 !== false,
+      songTransitionOffset: config.songTransitionOffset || 0,
+      fadeOutSec: config.fadeOutSec ?? 1.5,
+      ffmpegAvailable: this.ffmpegReady,
       touchscreenLyrics: config.touchscreenLyrics === true,
       disabledModels: config.disabledModels,
       selectedDeviceIds: config.selectedDeviceIds,
@@ -151,6 +171,9 @@ class XiaoAiService {
     if (patch.keepLight !== undefined) next.keepLight = !!patch.keepLight
     if (patch.touchscreenLyrics !== undefined) next.touchscreenLyrics = !!patch.touchscreenLyrics
     if (patch.cacheBeforePlay !== undefined) next.cacheBeforePlay = !!patch.cacheBeforePlay
+    if (patch.unifyMp3 !== undefined) next.unifyMp3 = !!patch.unifyMp3
+    if (patch.songTransitionOffset !== undefined) next.songTransitionOffset = Number(patch.songTransitionOffset) || 0
+    if (patch.fadeOutSec !== undefined) next.fadeOutSec = Number(patch.fadeOutSec) || 0
     if (patch.disabledModels !== undefined) next.disabledModels = Array.isArray(patch.disabledModels) ? patch.disabledModels.map(String) : []
     if (patch.selectedDeviceIds !== undefined) {
       next.selectedDeviceIds = Array.isArray(patch.selectedDeviceIds) ? patch.selectedDeviceIds.map(String) : []
@@ -306,15 +329,27 @@ class XiaoAiService {
     const songName = String(params.song?.name || '').trim()
     const singer = String(params.song?.singer || '').trim()
     const results = await this.fanOut(params.deviceIds, 'play', async (client, deviceId, hardware) => {
+      const musicApiModel = needUseMusicApi(hardware, config.disabledModels)
+      // 歌词模式只在「走 player_play_music 的触屏机型 + 有歌名」时开启；
+      // 开启后 client 会强制 audio_type='MUSIC'，与灯环开关彻底解耦
+      const lyricsWanted = config.touchscreenLyrics === true && musicApiModel && !!songName
       let audioId: string | undefined
-      if (config.touchscreenLyrics === true && songName && needUseMusicApi(hardware, config.disabledModels)) {
-        audioId = await this.resolveAudioId(client, songName, singer)
+      if (lyricsWanted) {
+        const resolved = await this.resolveAudioId(client, songName, singer)
+        // 没搜到真实 audioID 时不要把它当"搜到了"传下去，让 client 走「默认封面」分支
+        audioId = resolved && resolved !== DEFAULT_MUSIC_AUDIO_ID ? resolved : undefined
       }
-      return client.playUrl(deviceId, streamUrl, hardware, {
+      const outcome = await client.playUrlDetailed(deviceId, streamUrl, hardware, {
         keepLight: config.keepLight !== false,
         disabledModels: config.disabledModels,
         audioId,
+        lyricsMode: lyricsWanted,
       })
+      if (outcome.ok) {
+        const idPart = outcome.audioId ? `（audioID=${outcome.audioId}）` : ''
+        console.log(`[XiaoAi] 下发方式 ${outcome.via}${idPart} → ${deviceId}`)
+      }
+      return outcome.ok
     })
     const label = songName ? `${songName}${singer ? ` - ${singer}` : ''}` : '未命名曲目'
     for (const item of results) {

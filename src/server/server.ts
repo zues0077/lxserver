@@ -60,6 +60,11 @@ import {
   getCachedTrackUrl,
   setCachedTrackUrl,
   retireStreams,
+  sleepTimer,
+  mp3CachePath,
+  isMp3File,
+  transcodeFileToMp3,
+  isFfmpegAvailable,
 } from './xiaoai'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
@@ -516,6 +521,12 @@ interface XiaoAiTrackTarget {
   via: string
   /** 真实音频时长（毫秒）；前端自动续播用它算切歌时机，0 表示没解析出来 */
   durationMs?: number
+  /** 要求中转统一转 mp3（源不是 mp3 时设置） */
+  format?: 'mp3'
+  /** 转码时的尾部淡出秒数 */
+  fadeOutSec?: number
+  /** 转码产物的预期落盘路径（中转 tee 到这里，第二次拉流直接命中） */
+  mp3Path?: string
 }
 
 /** 扩展名 → Content-Type（本地缓存文件按真实格式命名过，可以直接推） */
@@ -535,7 +546,7 @@ const AUDIO_MIME_BY_EXT: Record<string, string> = {
  *   本地缓存 → 客户端直链 → 预解析地址（需探测） → 现解析（换源 + 探测）
  * 开了「先缓存再投送」且缓存未命中时，会先把整首下载到本地再投送。
  */
-const resolveXiaoAiTrack = async (
+const resolveXiaoAiTrackRaw = async (
   req: IncomingMessage,
   songInfo: Record<string, any>,
   quality: string,
@@ -688,6 +699,82 @@ const resolveXiaoAiTrack = async (
     durationMs: resolved.durationMs,
   }
 }
+
+/**
+ * 统一 mp3：在原始解析结果上再套一层格式归一。
+ *
+ *  - 源是本地文件且不是 mp3 → 转码落到 `cache/<用户>/xiaoai/<key>.mp3`（进缓存体系、受限额管）
+ *  - 源是远端地址 → 给流 token 打上 format=mp3，中转时边转边发并把产物 tee 到磁盘
+ *  - 已是 mp3 或 ffmpeg 不可用 → 原样返回（只降级格式，不影响能播）
+ *
+ * 尾部淡出只在「真的需要转码」时生效：对已是 mp3 的源强制重编码会二次损失音质，
+ * 这里宁可不淡出。
+ */
+const applyMp3Unification = async (
+  target: XiaoAiTrackTarget,
+  songInfo: Record<string, any>,
+  quality: string,
+  username: string,
+): Promise<XiaoAiTrackTarget> => {
+  const config = loadXiaoAiConfig()
+  if (config.unifyMp3 === false) return target
+  const fadeOutSec = Number(config.fadeOutSec) || 0
+
+  if (target.path) {
+    if (isMp3File(target.path)) return target
+    const dest = mp3CachePath(username, songInfo, quality)
+    const result = await transcodeFileToMp3(target.path, dest, {
+      fadeOutSec,
+      durationMs: Number(target.durationMs) || 0,
+    })
+    if (!result.ok || !result.path) {
+      console.warn(
+        `[XiaoAi] 统一 mp3 失败，按原格式投送：${target.filename}（${result.error || '未知原因'}）`,
+      )
+      return target
+    }
+    return {
+      ...target,
+      path: result.path,
+      contentType: 'audio/mpeg',
+      via: `${target.via}｜转 mp3`,
+      durationMs: target.durationMs || probeLocalFileDuration(result.path),
+    }
+  }
+
+  if (target.url) {
+    if (!(await isFfmpegAvailable())) return target
+    return {
+      ...target,
+      format: 'mp3',
+      fadeOutSec,
+      mp3Path: mp3CachePath(username, songInfo, quality),
+    }
+  }
+  return target
+}
+
+/**
+ * 投送前确定音频来源（对外入口），在原始解析结果上再叠加 mp3 统一。
+ */
+const resolveXiaoAiTrack = async (
+  req: IncomingMessage,
+  songInfo: Record<string, any>,
+  quality: string,
+  verifiedUsername: string,
+  directStreamUrl = '',
+): Promise<XiaoAiTrackTarget> => {
+  const target = await resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, directStreamUrl)
+  try {
+    return await applyMp3Unification(target, songInfo, quality, verifiedUsername)
+  } catch (error: any) {
+    console.warn(`[XiaoAi] mp3 统一异常，按原格式投送：${error?.message || error}`)
+    return target
+  }
+}
+
+// 定时关机到点时统一停掉当前选中的全部设备（只做停止播放，不承诺断电）
+sleepTimer.setStopHandler(() => xiaoAiService.stop())
 
 /** 小爱相关接口的鉴权：管理员口令，或已通过认证的播放器会话 */
 const isXiaoAiRequestAuthorized = (req: IncomingMessage): boolean => {
@@ -7045,6 +7132,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (result.success) {
                 lastXiaoAiPushAt = Date.now()
                 lastXiaoAiStreamAt = 0
+                // 定时关机（按曲数模式）：每成功投送一首扣一次
+                try {
+                  const consumed = sleepTimer.consumeSong()
+                  if (consumed.fired) syncLog.info('[XiaoAi] 定时关机已触发（按曲数）')
+                } catch {
+                  /* 定时器异常不能影响投送结果 */
+                }
               }
               sendJson({
                 success: result.success,
@@ -7146,6 +7240,30 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               sendJson({ ...(await xiaoAiService.setVolume(payload.volume, payload.deviceIds)) })
             } catch (error: any) {
               failed(error, '设置音量失败')
+            }
+          })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/sleep-timer' && req.method === 'GET') {
+          sendJson({ success: true, sleepTimer: sleepTimer.status() })
+          return
+        }
+        if (pathname === '/api/music/xiaoai/sleep-timer' && req.method === 'POST') {
+          void readJsonBody().then(payload => {
+            try {
+              const mode = String(payload.mode || 'off').toLowerCase()
+              if (mode === 'off' || mode === 'cancel') {
+                sendJson({ success: true, sleepTimer: sleepTimer.cancel('用户关闭') })
+                return
+              }
+              const status = sleepTimer.start({
+                mode,
+                minutes: Number(payload.minutes) || 0,
+                songs: Number(payload.songs) || 0,
+              })
+              sendJson({ success: true, sleepTimer: status })
+            } catch (error: any) {
+              failed(error, '设置定时关机失败')
             }
           })
           return

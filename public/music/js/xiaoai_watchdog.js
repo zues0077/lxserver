@@ -64,6 +64,17 @@
         startLatencyToleranceMs: 5000,
         /** 相邻两次播放心跳的正常间隔上限，超过说明中间被暂停过，需顺延计时基准 */
         heartbeatGapMs: 8000,
+        /**
+         * 切歌提前量偏移（毫秒，正数更早切、负数更晚切）。
+         * 由用户在设置里调，直接叠加在自适应提前量上：
+         *  - 觉得「切早了、上一首结尾被截掉」→ 调成负数
+         *  - 觉得「切晚了、两首之间有空档/上一首回放」→ 调成正数
+         */
+        transitionOffsetMs: 0,
+        /** 偏移量的合法范围（±30 秒），超出就夹取，避免把切歌时机调飞 */
+        transitionOffsetMaxMs: 30000,
+        /** 提前量的下限：再小就没有意义了（音箱起播本身就要几百毫秒） */
+        leadMinMs: 500,
         /** 设备上报位置比墙钟落后超过该值，视为缓冲/上报错位，用位置重锚 */
         positionDriftToleranceMs: 20000,
         /**
@@ -84,12 +95,22 @@
      * 服务端会把「投送完成 → 音箱真的来拉这一路流」的实测延迟（startDelayMs）随状态下发，
      * 再加上设备起播缓冲（startLatencyMs），就是必须提前的量。
      * 没拿到实测值时退回默认值——第一首永远只能猜，从第二首开始就越来越准。
+     *
+     * 用户可再叠加一个偏移（transitionOffsetMs）：在自己的设备/网络上调到最顺，
+     * 不必改代码。结果夹在 [leadMinMs, wallClockLeadMaxMs + 30s] 之间，调不飞。
      */
     const effectiveLeadMs = function (sample, opts) {
         const measured = Number(sample && sample.startDelayMs);
-        if (!Number.isFinite(measured) || measured <= 0) return opts.wallClockLeadMs;
-        const wanted = measured + Number(opts.startLatencyMs) * 2;
-        return Math.min(Number(opts.wallClockLeadMaxMs) || 10000, Math.max(opts.wallClockLeadMs, wanted));
+        let base = opts.wallClockLeadMs;
+        if (Number.isFinite(measured) && measured > 0) {
+            const wanted = measured + Number(opts.startLatencyMs) * 2;
+            base = Math.min(Number(opts.wallClockLeadMaxMs) || 10000, Math.max(opts.wallClockLeadMs, wanted));
+        }
+        const offsetRaw = Number(opts.transitionOffsetMs);
+        const offsetMax = Number(opts.transitionOffsetMaxMs) || 30000;
+        const offset = Number.isFinite(offsetRaw) ? Math.max(-offsetMax, Math.min(offsetMax, offsetRaw)) : 0;
+        const minLead = Number(opts.leadMinMs) || 500;
+        return Math.max(minLead, base + offset);
     };
 
     /** 新建一次投送对应的守望状态 */

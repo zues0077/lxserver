@@ -2979,15 +2979,53 @@ export const serveCacheFile = (req: http.IncomingMessage, res: http.ServerRespon
     stream.pipe(res)
 }
 
+/**
+ * 递归收集目录下的音频文件（浅层目录直接用 readdir 就够，这里只给子目录用）。
+ * depth 限制 2 层：缓存目录结构固定（<user>/xiaoai/*.mp3），不需要无界递归。
+ */
+const collectAudioFiles = (
+    dir: string,
+    out: Array<{ path: string; size: number; mtime: number }>,
+    depth = 2,
+) => {
+    if (depth <= 0) return
+    let entries: fs.Dirent[]
+    try {
+        entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+        return
+    }
+    for (const entry of entries) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+            collectAudioFiles(full, out, depth - 1)
+            continue
+        }
+        try {
+            const stats = fs.statSync(full)
+            out.push({ path: full, size: stats.size, mtime: stats.mtime.getTime() })
+        } catch {
+            /* 单个文件不可读时跳过 */
+        }
+    }
+}
+
 export const getCacheStats = (username?: string) => {
     const roots = ['cache', 'music']
-    const result: any = { cache: { totalSize: 0, fileCount: 0 }, music: { totalSize: 0, fileCount: 0 }, totalSize: 0, fileCount: 0 }
+    const result: any = {
+        cache: { totalSize: 0, fileCount: 0 },
+        music: { totalSize: 0, fileCount: 0 },
+        // 小爱投播的 mp3 转码产物单独统计（物理上在 cache/<用户>/xiaoai/，计入 cache 总量）
+        xiaoai: { totalSize: 0, fileCount: 0 },
+        totalSize: 0,
+        fileCount: 0,
+    }
     const normalizedUsername = (username && username !== '_open' && username !== 'default') ? username : '_open'
+    const extensions = ['.mp3', '.flac', '.m4a', '.ogg', '.wav', '.lrc']
     for (const folder of roots) {
         const dir = getCacheDir(normalizedUsername, folder === 'music')
         if (!fs.existsSync(dir)) continue
         const files = fs.readdirSync(dir)
-        const extensions = ['.mp3', '.flac', '.m4a', '.ogg', '.wav', '.lrc']
         for (const file of files) {
             const ext = path.extname(file).toLowerCase()
             if (extensions.includes(ext)) {
@@ -2998,6 +3036,22 @@ export const getCacheStats = (username?: string) => {
                     if (ext !== '.lrc') { result[folder].fileCount++; result.fileCount++ }
                 } catch (e) { }
             }
+        }
+    }
+
+    // 小爱 mp3 子目录：递归统计，否则「权限与缓存限制」管不到它
+    const xiaoaiDir = path.join(getCacheDir(normalizedUsername), 'xiaoai')
+    if (fs.existsSync(xiaoaiDir)) {
+        const collected: Array<{ path: string; size: number; mtime: number }> = []
+        collectAudioFiles(xiaoaiDir, collected)
+        for (const item of collected) {
+            if (path.extname(item.path).toLowerCase() === '.lrc') continue
+            result.xiaoai.totalSize += item.size
+            result.xiaoai.fileCount += 1
+            result.cache.totalSize += item.size
+            result.cache.fileCount += 1
+            result.totalSize += item.size
+            result.fileCount += 1
         }
     }
     return result
@@ -3014,8 +3068,21 @@ export const clearAllCache = (username?: string) => {
         const files = fs.readdirSync(dir)
         for (const file of files) {
             try {
-                const stats = fs.statSync(path.join(dir, file))
-                fs.unlinkSync(path.join(dir, file))
+                const fullPath = path.join(dir, file)
+                const stats = fs.statSync(fullPath)
+                if (stats.isDirectory()) {
+                    // 子目录（小爱 mp3 转码产物）整体清掉，保留空目录本身
+                    const nested: Array<{ path: string; size: number; mtime: number }> = []
+                    collectAudioFiles(fullPath, nested)
+                    for (const item of nested) {
+                        try {
+                            fs.unlinkSync(item.path)
+                            deletedCount++; freedSize += item.size
+                        } catch (e) { }
+                    }
+                    continue
+                }
+                fs.unlinkSync(fullPath)
                 deletedCount++; freedSize += stats.size
             } catch (e) { }
         }
@@ -3175,6 +3242,11 @@ export const checkAndCleanupCache = async (username?: string) => {
             try {
                 const filePath = path.join(dir, file)
                 const stats = fs.statSync(filePath)
+                // 子目录（如小爱的 xiaoai/）也要收进来，否则限额清理永远动不到它们
+                if (stats.isDirectory()) {
+                    collectAudioFiles(filePath, allFiles)
+                    continue
+                }
                 allFiles.push({ path: filePath, size: stats.size, mtime: stats.mtime.getTime() })
             } catch (e) { }
         }

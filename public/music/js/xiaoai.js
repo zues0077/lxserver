@@ -233,6 +233,24 @@
         if (lyricsToggle) lyricsToggle.checked = cfg.touchscreenLyrics === true;
         const cacheToggle = $('xiaoai-cache-toggle');
         if (cacheToggle) cacheToggle.checked = cfg.cacheBeforePlay === true;
+        // 统一 mp3（默认开；服务端没装 ffmpeg 时自动降级，这里把状态说清楚）
+        const mp3Toggle = $('xiaoai-mp3-toggle');
+        if (mp3Toggle) mp3Toggle.checked = cfg.unifyMp3 !== false;
+        const mp3Hint = $('xiaoai-mp3-hint');
+        if (mp3Hint) {
+            if (cfg.ffmpegAvailable === false) {
+                mp3Hint.textContent = '服务端未检测到 ffmpeg，转码会自动跳过（按原格式投送）。';
+                mp3Hint.className = 'text-xs text-amber-600 mt-1';
+            } else {
+                mp3Hint.textContent = '已是 mp3 的源不会重复转码；转码产物存入「歌曲缓存/xiaoai」，受权限与缓存限制约束。';
+                mp3Hint.className = 'text-xs t-text-muted mt-1';
+            }
+        }
+        const fadeInput = $('xiaoai-fadeout-input');
+        if (fadeInput && document.activeElement !== fadeInput) fadeInput.value = Number(cfg.fadeOutSec ?? 1.5);
+        const offsetInput = $('xiaoai-transition-offset-input');
+        if (offsetInput && document.activeElement !== offsetInput) offsetInput.value = Number(cfg.songTransitionOffset || 0);
+        renderSleepTimer();
         renderSuggestedBase();
         renderTarget();
         renderLoginState();
@@ -488,6 +506,76 @@
         }
     };
 
+    // ===== 定时关机 =====
+    //
+    // 服务端负责真正到点停止（页面关掉也有效）；这里只做设置与倒计时展示。
+    // 语义是「停止播放」，不是断电——绝大多数小爱型号没有可用的关机指令。
+
+    const sleepState = { status: null, timer: null };
+
+    const renderSleepTimer = () => {
+        const hint = $('xiaoai-sleep-hint');
+        if (!hint) return;
+        const s = sleepState.status;
+        if (!s || !s.active) {
+            hint.textContent = '未启用定时关机';
+            hint.className = 'text-xs t-text-muted';
+            return;
+        }
+        if (s.mode === 'minutes') {
+            const ms = Math.max(0, Number(s.remainingMs) || 0);
+            const total = Math.ceil(ms / 1000);
+            const mm = String(Math.floor(total / 60)).padStart(2, '0');
+            const ss = String(total % 60).padStart(2, '0');
+            hint.textContent = `将在 ${mm}:${ss} 后停止播放`;
+        } else {
+            hint.textContent = `再播 ${Math.max(0, Number(s.songsLeft) || 0)} 首后停止播放`;
+        }
+        hint.className = 'text-xs text-emerald-600';
+    };
+
+    const loadSleepTimer = async () => {
+        try {
+            const data = await request('/sleep-timer');
+            if (data.success) sleepState.status = data.sleepTimer;
+        } catch (e) {
+            /* 读取失败不影响主流程 */
+        }
+        renderSleepTimer();
+    };
+
+    /** 本地每秒刷新倒计时；到 0 时回服务端确认（以服务端为准） */
+    const startSleepTick = () => {
+        if (sleepState.timer) return;
+        sleepState.timer = setInterval(() => {
+            const s = sleepState.status;
+            if (!s || !s.active) return renderSleepTimer();
+            if (s.mode === 'minutes') {
+                s.remainingMs = Math.max(0, (Number(s.endsAt) || 0) - Date.now());
+                if (s.remainingMs <= 0) {
+                    void loadSleepTimer();
+                    return;
+                }
+            }
+            renderSleepTimer();
+        }, 1000);
+    };
+
+    const applySleepTimer = async mode => {
+        try {
+            const body = { mode };
+            if (mode === 'minutes') body.minutes = Number($('xiaoai-sleep-minutes')?.value || 0);
+            if (mode === 'songs') body.songs = Number($('xiaoai-sleep-songs')?.value || 0);
+            const data = await request('/sleep-timer', body);
+            if (!data.success) throw new Error(data.message || '设置失败');
+            sleepState.status = data.sleepTimer;
+            renderSleepTimer();
+            setMessage(mode === 'off' ? '已关闭定时关机' : '定时关机已设置，到点会停止小爱播放');
+        } catch (e) {
+            setMessage(`定时关机设置失败：${e.message}`, true);
+        }
+    };
+
     // ===== 自动续播守望 =====
     //
     // 音箱播完不会通知播放器，因此投送成功后由这里持续查询音箱状态：
@@ -721,7 +809,11 @@
         const watchdog = window.XiaoAiWatchdog;
         if (!watchdog) return;
 
-        const decision = watchdog.evaluate(watch.state, sample, {});
+        // 切歌提前量偏移由用户在设置里调（秒 → 毫秒），叠加在服务端实测的自适应提前量上
+        const offsetSec = Number(state.config && state.config.songTransitionOffset);
+        const decision = watchdog.evaluate(watch.state, sample, {
+            transitionOffsetMs: Number.isFinite(offsetSec) ? offsetSec * 1000 : 0,
+        });
         watch.state = decision.state;
 
         // 设备确实在响时，纠正可能已经过期的暂停标记
@@ -1003,6 +1095,9 @@
         const autoNextToggle = $('xiaoai-auto-next-toggle');
         if (autoNextToggle) autoNextToggle.checked = !!state.autoNext;
         setWatchHint(state.autoNext ? '自动续播待命（播放时生效）' : '自动续播已关闭');
+        // 定时关机：读取服务端状态并开始本地倒计时刷新（页面关掉服务端也照常到点停）
+        void loadSleepTimer();
+        startSleepTick();
         // 打开设置页时刷新一次登录态（服务端可能已自动续期）
         const settingsEntry = document.querySelector('[data-view="settings"], a[onclick*="view-settings"]');
         if (settingsEntry) settingsEntry.addEventListener('click', () => { void loadConfig(); });
@@ -1017,6 +1112,9 @@
             serverBaseUrl: ($('xiaoai-server-base-input')?.value || '').trim(),
             touchscreenLyrics: $('xiaoai-lyrics-toggle') ? !!$('xiaoai-lyrics-toggle').checked : false,
             cacheBeforePlay: $('xiaoai-cache-toggle') ? !!$('xiaoai-cache-toggle').checked : false,
+            unifyMp3: $('xiaoai-mp3-toggle') ? !!$('xiaoai-mp3-toggle').checked : true,
+            songTransitionOffset: Number($('xiaoai-transition-offset-input')?.value || 0),
+            fadeOutSec: Number($('xiaoai-fadeout-input')?.value || 0),
         }),
         switchLoginTab,
         startQr,
@@ -1060,6 +1158,8 @@
     window.xiaoAiUseSuggestedBase = useSuggestedBase;
     window.xiaoAiToggleTarget = toggleTarget;
     window.xiaoAiToggleAutoNext = toggleAutoNext;
+    window.xiaoAiSleepTimer = applySleepTimer;
+    window.xiaoAiReloadSleepTimer = loadSleepTimer;
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);

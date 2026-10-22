@@ -22,6 +22,16 @@ export interface StreamTokenPayload {
   sid?: string
   /** 本首真实时长（毫秒）：中转按它算码率，把数据平滑地喂给音箱而不是一阵一阵地灌 */
   durationMs?: number
+  /** 要求中转统一转成 mp3（直投远端源时用；源已是 mp3 则不重复转码） */
+  format?: 'mp3'
+  /** 转 mp3 时的尾部淡出秒数（0/缺省 = 不淡出） */
+  fadeOutSec?: number
+  /**
+   * 转码产物的落盘路径。
+   * 音箱播完一首常会拿同一个 URL 重新拉流：第一次边转边发并落盘，
+   * 第二次直接命中本地文件（支持 Range），既快又稳。
+   */
+  mp3Path?: string
   /** 过期时间戳（毫秒） */
   exp: number
 }
@@ -37,6 +47,9 @@ export const createStreamToken = (target: {
   filename?: string
   contentType?: string
   durationMs?: number
+  format?: 'mp3'
+  fadeOutSec?: number
+  mp3Path?: string
   ttlMs?: number
 }): string => {
   const ttl = Math.max(MIN_TTL_MS, Number(target.ttlMs) || DEFAULT_TTL_MS)
@@ -51,6 +64,11 @@ export const createStreamToken = (target: {
   if (target.filename) payload.filename = String(target.filename)
   if (target.contentType) payload.contentType = String(target.contentType)
   if (Number(target.durationMs) > 0) payload.durationMs = Number(target.durationMs)
+  if (target.format === 'mp3') {
+    payload.format = 'mp3'
+    if (Number(target.fadeOutSec) > 0) payload.fadeOutSec = Number(target.fadeOutSec)
+    if (target.mp3Path) payload.mp3Path = String(target.mp3Path)
+  }
 
   const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
   return `${encoded}.${sign(encoded)}`
@@ -95,7 +113,16 @@ const EXT_BY_MIME: Record<string, string> = {
 export const buildStreamUrl = (
   baseUrl: string,
   streamPath: string,
-  target: { path?: string; url?: string; filename?: string; contentType?: string; durationMs?: number },
+  target: {
+    path?: string
+    url?: string
+    filename?: string
+    contentType?: string
+    durationMs?: number
+    format?: 'mp3'
+    fadeOutSec?: number
+    mp3Path?: string
+  },
 ) => {
   const base = String(baseUrl || '').trim().replace(/\/+$/, '')
   const rawPath = String(streamPath || '/api/music/xiaoai/stream').trim()
@@ -104,8 +131,13 @@ export const buildStreamUrl = (
   // 地址没有扩展名时按真实格式补一个：小爱音箱会依据后缀决定解码器，
   // 给它一个「.mp3 后缀 + m4a 内容」或者干脆没后缀的地址，很容易被判成无法播放
   if (!/\.[a-z0-9]{2,5}$/i.test(pathname)) {
-    const mime = String(target.contentType || '').split(';')[0].trim().toLowerCase()
-    pathname += EXT_BY_MIME[mime] || '.mp3'
+    if (target.format === 'mp3') {
+      // 统一转 mp3：后缀必须和实际内容一致（中转出来的一定是 mp3）
+      pathname += '.mp3'
+    } else {
+      const mime = String(target.contentType || '').split(';')[0].trim().toLowerCase()
+      pathname += EXT_BY_MIME[mime] || '.mp3'
+    }
   }
   const token = createStreamToken(target)
   return `${base}${pathname}?token=${encodeURIComponent(token)}`

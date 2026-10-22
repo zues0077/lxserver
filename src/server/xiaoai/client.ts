@@ -57,11 +57,28 @@ export const PLAY_STATUS_PAUSED = 2
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 export interface PlayOptions {
-  /** 播放时点亮灯环（audio_type=MUSIC），触屏机型还会显示封面歌词 */
+  /** 播放时点亮灯环（audio_type=MUSIC） */
   keepLight?: boolean
   /** 强制禁用 player_play_music，改走 player_play_url */
   disabledModels?: string[]
   /** 触屏机型使用的曲库 audioID（用于显示封面与歌词），为空则用默认封面 */
+  audioId?: string
+  /**
+   * 触屏歌词模式：强制 audio_type='MUSIC'。
+   *
+   * 历史 bug：audio_type 曾直接绑在 keepLight 上（`keepLight ? 'MUSIC' : ''`），
+   * 用户一关「灯环」，audio_type 就变成空串，触屏上的封面与歌词随之消失。
+   * 歌词与灯环本是两件事，这里彻底解耦。参考 songloft-plugin-miot 的 playByMusicURL(true, ...)。
+   */
+  lyricsMode?: boolean
+}
+
+/** 播放结果的细节（便于上层做回退与日志） */
+export interface PlayOutcome {
+  ok: boolean
+  /** 实际生效的播放方式，写日志/自检用 */
+  via: 'player_play_music(歌词)' | 'player_play_music(默认封面)' | 'player_play_music' | 'player_play_url'
+  /** 实际使用的曲库 audioID（走 player_play_url 时为空） */
   audioId?: string
 }
 
@@ -118,27 +135,82 @@ export class MinaClient {
   /**
    * 播放一个音频直链。
    * 部分型号（见 DEFAULT_MUSIC_API_MODELS）必须走 player_play_music，否则会出现灯亮无声。
+   *
+   * 触屏歌词模式下按「搜到的 audioID → 默认 audioID → 普通 Music API → player_play_url」
+   * 四级回退（参考 songloft-plugin-miot 的 playByUrl），保证封面歌词失败时至少有声音。
    */
   async playUrl(deviceId: string, url: string, hardware = '', options: PlayOptions = {}): Promise<boolean> {
-    const keepLight = !!options.keepLight
-    const useMusicApi = needUseMusicApi(hardware, options.disabledModels)
-    if (useMusicApi) {
-      return this.playMusicUrl(deviceId, url, hardware, keepLight, options.audioId)
-    }
-    const result = await this.ubus(deviceId, 'player_play_url', 'mediaplayer', {
-      url,
-      type: keepLight ? 1 : 2,
-      media: 'app_ios',
-    })
-    return this.isDeviceOk(result)
+    return (await this.playUrlDetailed(deviceId, url, hardware, options)).ok
   }
 
-  /** 走 player_play_music 播放直链（触屏机型可显示歌曲信息） */
-  async playMusicUrl(deviceId: string, audioUrl: string, _hardware = '', keepLight = false, audioId?: string): Promise<boolean> {
-    const finalAudioId = audioId || DEFAULT_MUSIC_AUDIO_ID
+  async playUrlDetailed(deviceId: string, url: string, hardware = '', options: PlayOptions = {}): Promise<PlayOutcome> {
+    const keepLight = !!options.keepLight
+    const useMusicApi = needUseMusicApi(hardware, options.disabledModels)
+    const lyricsMode = options.lyricsMode === true
+
+    const playUrl = async (): Promise<PlayOutcome> => {
+      const result = await this.ubus(deviceId, 'player_play_url', 'mediaplayer', {
+        url,
+        type: keepLight ? 1 : 2,
+        media: 'app_ios',
+      })
+      return { ok: this.isDeviceOk(result), via: 'player_play_url' }
+    }
+
+    if (!useMusicApi) return playUrl()
+
+    const fallbackAudioId = options.audioId || DEFAULT_MUSIC_AUDIO_ID
+
+    if (lyricsMode) {
+      // 1. 搜到的真实 audioID（能对上歌词与封面）
+      const searched = options.audioId || ''
+      if (searched) {
+        const ok = await this.playMusicUrl(deviceId, url, hardware, {
+          keepLight,
+          audioId: searched,
+          audioType: 'MUSIC',
+        })
+        if (ok) return { ok: true, via: 'player_play_music(歌词)', audioId: searched }
+        console.warn(`[XiaoAi] 曲库 audioID=${searched} 播放失败，回退默认封面`)
+      }
+      // 2. 默认 audioID（仍在歌词模式，屏幕至少要有个封面位）
+      const defaultOk = await this.playMusicUrl(deviceId, url, hardware, {
+        keepLight,
+        audioId: fallbackAudioId,
+        audioType: 'MUSIC',
+      })
+      if (defaultOk) return { ok: true, via: 'player_play_music(默认封面)', audioId: fallbackAudioId }
+
+      // 3. 退回普通 Music API（audio_type 跟随灯环设置）
+      const normalOk = await this.playMusicUrl(deviceId, url, hardware, { keepLight, audioId: fallbackAudioId })
+      if (normalOk) return { ok: true, via: 'player_play_music', audioId: fallbackAudioId }
+
+      // 4. 最后退回 player_play_url：宁可没有封面歌词，也要能出声
+      console.warn(`[XiaoAi] 设备 ${deviceId} 多次 player_play_music 失败，回退 player_play_url`)
+      return playUrl()
+    }
+
+    const ok = await this.playMusicUrl(deviceId, url, hardware, { keepLight, audioId: options.audioId })
+    return { ok, via: 'player_play_music', audioId: options.audioId || DEFAULT_MUSIC_AUDIO_ID }
+  }
+
+  /**
+   * 走 player_play_music 播放直链（触屏机型可显示歌曲信息）。
+   *
+   * audioType 与 keepLight 解耦：传 'MUSIC' 就一定有封面歌词位（触屏歌词模式），
+   * 不传时才回落到「灯环开着就带 MUSIC」的旧行为。
+   */
+  async playMusicUrl(
+    deviceId: string,
+    audioUrl: string,
+    _hardware = '',
+    options: { keepLight?: boolean; audioId?: string; audioType?: 'MUSIC' | '' } = {},
+  ): Promise<boolean> {
+    const finalAudioId = options.audioId || DEFAULT_MUSIC_AUDIO_ID
+    const audioType = options.audioType !== undefined ? options.audioType : options.keepLight ? 'MUSIC' : ''
     const music = {
       payload: {
-        audio_type: keepLight ? 'MUSIC' : '',
+        audio_type: audioType,
         audio_items: [
           {
             item_id: {

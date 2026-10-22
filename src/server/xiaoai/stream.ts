@@ -8,6 +8,7 @@ import { getProxyAgent } from '../../modules/utils/proxy.js'
 import { syncLog } from '../../utils/log4js'
 import { audioDurationNeedsTail, detectAudioDurationMs, type AudioFormat } from './audioMeta'
 import type { StreamTokenPayload } from './streamToken'
+import { createMp3Transcoder, isFfmpegAvailable, isMp3File, transcodeFileToMp3 } from './transcode'
 
 export type { AudioFormat }
 
@@ -306,6 +307,147 @@ const serveLocalFile = (
   }
 
   void send()
+}
+
+/**
+ * 统一 mp3 中转：不管源是本地缓存还是远端地址，最终都以 mp3 发给音箱。
+ *
+ * 三种情况：
+ *  1. 转码产物已存在 → 直接当本地文件发（支持 Range，最稳）
+ *  2. 源是本地文件   → 先转码落盘，再按本地文件发（能拿到完整时长做尾部淡出）
+ *  3. 源是远端地址   → 边转边发（首字节几乎无等待），同时 tee 到磁盘供下次复用
+ *
+ * ffmpeg 不可用时一律退回原格式直发：宁可没有 mp3，也不能让播放挂掉。
+ */
+const serveTranscodedMp3 = async (
+  req: IncomingMessage,
+  res: ServerResponse,
+  payload: StreamTokenPayload,
+) => {
+  const durationMs = Number(payload.durationMs) || 0
+  const fadeOutSec = Number(payload.fadeOutSec) || 0
+  const filename = payload.filename || 'track.mp3'
+
+  // 1. 已有转码产物
+  if (payload.mp3Path && fs.existsSync(payload.mp3Path) && isMp3File(payload.mp3Path)) {
+    syncLog.info(`[XiaoAi] mp3 缓存命中，本地直发：${filename}`)
+    serveLocalFile(req, res, payload.mp3Path, filename, payload.sid, durationMs)
+    return
+  }
+
+  // 2. 源是本地文件
+  if (payload.path) {
+    if (isMp3File(payload.path)) {
+      serveLocalFile(req, res, payload.path, filename, payload.sid, durationMs)
+      return
+    }
+    const dest = payload.mp3Path || `${payload.path}.mp3`
+    const result = await transcodeFileToMp3(payload.path, dest, { fadeOutSec, durationMs })
+    if (result.ok && result.path) {
+      serveLocalFile(req, res, result.path, filename, payload.sid, durationMs)
+      return
+    }
+    console.warn(`[XiaoAi] 转码失败，按原格式直投：${filename}（${result.error || '未知原因'}）`)
+    serveLocalFile(req, res, payload.path, filename, payload.sid, durationMs)
+    return
+  }
+
+  const url = String(payload.url || '')
+  if (!url) {
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ success: false, message: 'token 缺少播放目标' }))
+    return
+  }
+
+  // 3. 远端地址：没有 ffmpeg 就原样中转
+  if (!(await isFfmpegAvailable())) {
+    await serveRemoteUrl(req, res, url, filename, payload.contentType, payload.sid, durationMs)
+    return
+  }
+
+  beginStreamRound(payload.sid, 0, req.headers.range as string | undefined)
+  res.writeHead(200, {
+    'Content-Type': 'audio/mpeg',
+    'Cache-Control': 'no-store',
+    // 转码是「边转边发」，总量未知，因此不支持断点续传
+    'Accept-Ranges': 'none',
+    'X-Accel-Buffering': 'no',
+  })
+
+  // tee：转码数据同时落盘，音箱播完重拉同一 URL 时就能命中本地文件
+  let fileStream: fs.WriteStream | null = null
+  let partPath = ''
+  if (payload.mp3Path) {
+    try {
+      fs.mkdirSync(path.dirname(payload.mp3Path), { recursive: true })
+      partPath = `${payload.mp3Path}.part`
+      fileStream = fs.createWriteStream(partPath)
+    } catch (error: any) {
+      console.warn(`[XiaoAi] 转码产物落盘不可用：${error?.message || error}`)
+      fileStream = null
+    }
+  }
+
+  const startedAt = Date.now()
+  let sent = 0
+  const transcoder = createMp3Transcoder(url, { fadeOutSec, durationMs })
+
+  // 注意：不能用 req 的 close 事件——IncomingMessage 的 close 在请求体读完就会触发，
+  // 不是「客户端断开」，用它会在转码刚开始时就把 ffmpeg 杀掉。
+  res.on('close', () => {
+    if (!res.writableEnded) transcoder.kill()
+  })
+
+  transcoder.stream.on('data', (chunk: Buffer) => {
+    sent += chunk.length
+    if (fileStream) {
+      // 磁盘背压不阻塞音箱：写不进去就丢掉这一段，宁可少一次缓存命中也不能卡播放
+      try {
+        fileStream.write(chunk)
+      } catch {
+        /* 忽略 */
+      }
+    }
+    if (!res.write(chunk)) transcoder.stream.pause()
+  })
+  res.on('drain', () => transcoder.stream.resume())
+
+  const finish = async () => {
+    const outcome = await transcoder.done
+    try {
+      if (fileStream) {
+        await new Promise<void>(resolve => fileStream!.end(resolve))
+      }
+    } catch {
+      /* 忽略 */
+    }
+    // 只有完整转完才把 .part 转正，中途失败的下次会重新转
+    if (outcome.ok && partPath && payload.mp3Path) {
+      try {
+        fs.renameSync(partPath, payload.mp3Path)
+      } catch (error: any) {
+        console.warn(`[XiaoAi] 转码产物改名失败：${error?.message || error}`)
+      }
+    } else if (partPath) {
+      try {
+        if (fs.existsSync(partPath)) fs.unlinkSync(partPath)
+      } catch {
+        /* 忽略 */
+      }
+    }
+    if (!res.writableEnded) res.end()
+    recordStreamRound(payload.sid, sent, sent, true)
+    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1)
+    if (outcome.ok) {
+      syncLog.info(
+        `[XiaoAi] mp3 流式转码完成 ${filename}：已发 ${sent}B ｜耗时 ${elapsed}s` +
+          `${outcome.bytes !== sent ? `（ffmpeg 产出 ${outcome.bytes}B）` : ''}`,
+      )
+    } else {
+      syncLog.warn(`[XiaoAi] mp3 流式转码中断 ${filename}：已发 ${sent}B ｜${outcome.error || '未知原因'}`)
+    }
+  }
+  void finish()
 }
 
 /** 远端音频中转 */
@@ -1034,6 +1176,12 @@ export const serveXiaoAiStream = async (req: IncomingMessage, res: ServerRespons
       }
       return
     }
+  }
+
+  // 统一 mp3：本地缓存、远端直投都收口到同一条转码通道
+  if (payload.format === 'mp3') {
+    await serveTranscodedMp3(req, res, payload)
+    return
   }
 
   if (payload.path) {

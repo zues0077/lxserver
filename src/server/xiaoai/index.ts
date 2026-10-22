@@ -30,3 +30,7 @@ export {
 export { detectAudioDurationMs } from './audioMeta'
 export { loadConfig as loadXiaoAiConfig } from './config'
 export { buildTrackKey, getCachedTrack, getCachedTrackUrl, setCachedTrackUrl, clearTrackCache } from './playCache'
+export { sleepTimer } from './sleepTimer'
+export type { SleepTimerStatus, SleepTimerMode } from './sleepTimer'
+export { mp3CacheDir, mp3CacheKey, mp3CachePath, removeMp3Cache } from './mp3Cache'
+export { isFfmpegAvailable, isMp3File, transcodeFileToMp3 } from './transcode'

@@ -38,6 +38,18 @@ export interface XiaoAiConfig {
   cacheBeforePlay: boolean
   /** 强制走 player_play_url 的型号（覆盖内置白名单） */
   disabledModels: string[]
+  /**
+   * 推送格式统一转 mp3（默认开启）。
+   * 音箱对 mp3 的兼容性最好；已是 mp3 的源不会重复转码，直接复用。
+   */
+  unifyMp3: boolean
+  /**
+   * 切歌提前量偏移（秒，-30..30）。
+   * 0 = 用服务端实测延迟自适应；负数更晚切（少截结尾），正数更早切（减少空档）。
+   */
+  songTransitionOffset: number
+  /** 转码时的尾部淡出秒数（0 = 不淡出，默认 1.5s，让切歌不突兀） */
+  fadeOutSec: number
   /** 选中的设备（支持多选同时播放） */
   selectedDeviceIds: string[]
   /** 上一次拉取到的设备列表 */
@@ -56,10 +68,20 @@ const DEFAULT_CONFIG: XiaoAiConfig = {
   cacheBeforePlay: false,
   touchscreenLyrics: false,
   disabledModels: [],
+  unifyMp3: true,
+  songTransitionOffset: 0,
+  fadeOutSec: 1.5,
   selectedDeviceIds: [],
   devices: [],
   account: '',
   lastSyncAt: null,
+}
+
+/** 数值配置的兜底与夹取：配置文件被手改坏时不至于让逻辑跑飞 */
+const clampNumber = (value: unknown, min: number, max: number, fallback: number): number => {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return fallback
+  return Math.min(max, Math.max(min, num))
 }
 
 const dataPath = () => {
@@ -94,6 +116,9 @@ export const loadConfig = (): XiaoAiConfig => {
       keepLight: raw.keepLight !== false,
       touchscreenLyrics: raw.touchscreenLyrics === true,
       cacheBeforePlay: raw.cacheBeforePlay === true,
+      unifyMp3: raw.unifyMp3 !== false,
+      songTransitionOffset: clampNumber(raw.songTransitionOffset, -30, 30, 0),
+      fadeOutSec: clampNumber(raw.fadeOutSec, 0, 6, 1.5),
       disabledModels: Array.isArray(raw.disabledModels)
         ? raw.disabledModels.map((item: unknown) => String(item).trim().toUpperCase()).filter(Boolean)
         : [],
@@ -112,6 +137,13 @@ export const saveConfig = (patch: Partial<XiaoAiConfig>): XiaoAiConfig => {
   const next: XiaoAiConfig = {
     ...prev,
     ...patch,
+    unifyMp3: patch.unifyMp3 !== undefined ? patch.unifyMp3 !== false : prev.unifyMp3,
+    songTransitionOffset:
+      patch.songTransitionOffset !== undefined
+        ? clampNumber(patch.songTransitionOffset, -30, 30, prev.songTransitionOffset)
+        : prev.songTransitionOffset,
+    fadeOutSec:
+      patch.fadeOutSec !== undefined ? clampNumber(patch.fadeOutSec, 0, 6, prev.fadeOutSec) : prev.fadeOutSec,
     disabledModels: patch.disabledModels
       ? patch.disabledModels.map(item => String(item).trim().toUpperCase()).filter(Boolean)
       : prev.disabledModels,
