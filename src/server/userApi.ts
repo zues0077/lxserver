@@ -407,7 +407,15 @@ async function createLxRequest(
     isUnsafe: boolean = false,
     onSniffUpdate?: (alert: { name?: string, log?: string, updateUrl?: string }) => void,
     pendingAborts?: Set<() => void>,
-    meta?: { owner: string; id: string; name: string }
+    meta?: { owner: string; id: string; name: string },
+    /**
+     * 音源实例是否已释放。
+     *
+     * 请求在并发闸门里排队时，音源可能正好被卸载（禁用/重载/隔离）。原实现是同步发起
+     * needle 请求，不存在这个窗口；加了闸门后必须先确认实例还活着再发——否则回调会
+     * 写进已经释放的 VM2 沙箱，轻则抛 contextified 错误，重则直接 SIGSEGV 崩进程。
+     */
+    isDisposed?: () => boolean
 ) {
     // 活动账本埋点：脚本视角的「发起请求」与「响应回来」都要记下来。
     // 卡顿归因靠的就是这两个时间锚点——一批响应同时回来时，每个回调都要在
@@ -457,8 +465,10 @@ async function createLxRequest(
         }
         if (tracked) noteRequest(owner, id, name)
 
-            const launch = () => {
-                if (cancelled) { releaseSlotOnce(); return }
+        const launch = () => {
+            // 排队期间实例可能已被卸载（禁用/重载/隔离），此时发起请求会让回调
+            // 写进已释放的 VM2 沙箱——实测会直接 SIGSEGV 崩掉整个进程
+            if (cancelled || isDisposed?.()) { releaseSlotOnce(); return }
                 const request = needle.request(method, url, data, requestOptions, (err: any, resp: any, body: any) => {
                     // 响应回来的时刻是卡顿归因的关键锚点，必须抢在任何同步处理之前记下
                     if (tracked) noteCallback(owner, id, name)
@@ -725,7 +735,8 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                 }
             },
             pendingAborts,
-            { owner: fullApiInfo.owner, id: fullApiInfo.id, name: fullApiInfo.name }
+            { owner: fullApiInfo.owner, id: fullApiInfo.id, name: fullApiInfo.name },
+            () => disposed
         ),
         send: (eventName: string, data: any) => {
             if (disposed) return
