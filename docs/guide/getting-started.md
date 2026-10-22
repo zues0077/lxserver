@@ -38,12 +38,12 @@
 | 标签 | 说明 |
 | :--- | :--- |
 | `latest` | 最新稳定版，跟随 `main` 分支 |
-| `v1.5.8` / `1.5.8` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
+| `v1.5.9` / `1.5.9` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
 | `v*` | 每个已发布版本都会保留，可随时回滚到历史版本 |
 
 ```bash
 # 固定版本（推荐）
-docker pull ghcr.io/zues0077/lxserver:1.5.8
+docker pull ghcr.io/zues0077/lxserver:1.5.9
 
 # 或跟随最新
 docker pull ghcr.io/zues0077/lxserver:latest
@@ -60,7 +60,7 @@ docker run -d \
   -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.8
+  ghcr.io/zues0077/lxserver:1.5.9
 ```
 
 > ⚠️ `--restart` 不要省略：面板的「重启服务」（`POST /api/restart`）在容器内是结束进程实现的，靠容器重启策略拉起；漏写则点一次重启服务就彻底停了。
@@ -80,7 +80,7 @@ docker run -d \
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.8   # 或 :latest
+    image: ghcr.io/zues0077/lxserver:1.5.9   # 或 :latest
     container_name: lx-sync-server
     restart: unless-stopped      # 不要省：面板「重启服务」靠它把进程拉起来
     ports:

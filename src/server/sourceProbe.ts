@@ -201,6 +201,17 @@ interface ProbeConfig {
 const DEFAULT_SYSTEMIC_RATIO = 0.5
 /** 单个平台每轮最多尝试几首测试曲目（第一首失败后换歌重试，降低单曲失灵的误判） */
 const MAX_SONG_ATTEMPTS = 3
+/**
+ * 平台处于「停探」期时，每轮仍要探测的哨兵音源数。
+ * 用意在 suspectBackoff 分支里详述：没有哨兵的话，全部平台同时 suspect 会让整轮巡检 100% 空转。
+ */
+const SUSPECT_SAMPLE_SIZE = 3
+/**
+ * 判定「平台侧系统性异常」所需的最小样本量。
+ * 停探轮次只有 SUSPECT_SAMPLE_SIZE 个哨兵，若允许小样本定罪，哨兵全挂就会让嫌疑无限续期
+ * —— 停探期永不到期，巡检再也回不到全量。低于该样本量只报告、不续期。
+ */
+const SUSPECT_MIN_SAMPLE = 5
 
 const positiveNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
@@ -892,6 +903,8 @@ export async function runSourceProbe(
 
     interface Job { target: ProbeTarget; platform: string; songs: ProbeTestSong[] }
     const jobs: Job[] = []
+    // 「停探」期间每个平台仍保留的哨兵探测数（见下方 suspectBackoff 分支）
+    const suspectSamples = new Map<string, number>()
 
     for (const target of targets) {
       const status = statusFor(target.owner)
@@ -916,12 +929,22 @@ export async function runSourceProbe(
         // 却要实打实烧掉几分钟 CPU 与出口带宽；停探半个周期后下一轮自动重新探测，
         // 平台恢复最多晚一个周期发现。配置 customSource.probe.suspectBackoff=false 可关闭。
         if (conf.suspectBackoff && platformState.suspectSkipUntil && platformState.suspectSkipUntil > Date.now()) {
-          platformState.status = 'skipped'
-          platformState.lastCheckAt = Date.now()
-          platformState.lastError = '平台侧疑似异常（上轮过半音源同时失败），本轮停探'
-          result.platformsSkipped++
-          if (!result.suspectSkippedPlatforms.includes(platform)) result.suspectSkippedPlatforms.push(platform)
-          continue
+          // 每个平台仍保留 SUSPECT_SAMPLE_SIZE 个哨兵探测。
+          // 不加这一刀会出大事：平台种类一共就 wy/tx/kw/kg/mg 这么几个，一旦它们同时被判 suspect，
+          // 「按平台停探」就等价于「整轮停探」——实测出现过 40 源 / 166 平台一轮只探 0 个、
+          // 全程 76ms 空转，巡检等于被自己关掉，而且平台恢复了也发现不了。
+          // 有哨兵就既能观测平台是否恢复，成本又只有几个请求。
+          const sampled = suspectSamples.get(platform) ?? 0
+          if (sampled < SUSPECT_SAMPLE_SIZE) {
+            suspectSamples.set(platform, sampled + 1)
+          } else {
+            platformState.status = 'skipped'
+            platformState.lastCheckAt = Date.now()
+            platformState.lastError = '平台侧疑似异常（上轮过半音源同时失败），本轮停探'
+            result.platformsSkipped++
+            if (!result.suspectSkippedPlatforms.includes(platform)) result.suspectSkippedPlatforms.push(platform)
+            continue
+          }
         }
 
         const songs = await pickTestSongs(platform, deps)
@@ -1005,10 +1028,14 @@ export async function runSourceProbe(
       platformStats.set(job.platform, stat)
     }
     const suspectPlatforms = new Set<string>()
+    // 只有样本量够的平台才续期「停探」。定罪本身仍按原样（含小样本），
+    // 这样小音源库依旧受保护，但停探期不会因为哨兵全挂而无限续期。
+    const backoffPlatforms = new Set<string>()
     for (const [platform, stat] of platformStats) {
       if (stat.checked > 0 && stat.failed / stat.checked >= conf.systemicFailureRatio) {
         suspectPlatforms.add(platform)
         result.suspectPlatforms.push({ platform, checked: stat.checked, failed: stat.failed, ok: stat.ok })
+        if (stat.checked >= SUSPECT_MIN_SAMPLE) backoffPlatforms.add(platform)
       }
     }
     if (suspectPlatforms.size) {
@@ -1018,13 +1045,13 @@ export async function runSourceProbe(
     }
 
     // 记录停探截止时间（半个周期）：这些平台下一轮不再重复探测，省下的时间留给真正需要探的平台
-    if (conf.suspectBackoff && suspectPlatforms.size) {
+    if (conf.suspectBackoff && backoffPlatforms.size) {
       const skipUntil = startedAt + Math.floor((conf.intervalMinutes * 60 * 1000) / 2)
       for (const target of targets) {
         const sourceState = statusFor(target.owner).sources[target.id]
         if (!sourceState) continue
         for (const platform of target.platforms) {
-          if (!suspectPlatforms.has(platform)) continue
+          if (!backoffPlatforms.has(platform)) continue
           const ps = sourceState.platforms[platform]
           if (ps) ps.suspectSkipUntil = skipUntil
         }
@@ -1101,7 +1128,8 @@ export async function runSourceProbe(
       (result.restored.length ? `；恢复 ${result.restored.length} 个平台` : '') +
       (result.removed.length ? `；移除 ${result.removed.length} 个音源` : '') +
       (result.suspectPlatforms.length ? `；${result.suspectPlatforms.length} 个平台疑似平台侧异常已暂缓处置` : '') +
-      (result.suspectSkippedPlatforms.length ? `；${result.suspectSkippedPlatforms.length} 个平台上轮疑似异常本轮停探` : '')
+      (result.suspectSkippedPlatforms.length
+        ? `；${result.suspectSkippedPlatforms.length} 个平台上轮疑似异常本轮停探（每平台保留 ${SUSPECT_SAMPLE_SIZE} 个哨兵）` : '')
 
     lastRun = result
     console.log(`[音源巡检] 本轮完成（${result.durationMs}ms）：${result.message}`)
