@@ -66,6 +66,22 @@ export interface EventLoopStats {
   }
 }
 
+/**
+ * 卡顿采样周期（毫秒）。
+ *
+ * 这里有个容易踩的坑：测的是「定时器被推迟了多久」，而不是「阻塞了多久」。
+ * 如果阻塞的起点恰好在两次采样中间，那么阻塞的前半段根本不会被算进延迟——
+ *   采样周期 2000ms，阻塞 3500ms，最坏只报 1500ms（实测 1732ms / 2612ms），
+ *   直接掉到归因阈值以下，真凶就这么漏掉了。
+ * 周期越短，这部分「相位损失」的上界越小，因此取 250ms（可用环境变量调）。
+ * 注意：不要用 histogram.max 直接当卡顿时长——它是**累计**最大值，
+ * 一旦出现过 3.5 秒的卡顿，之后同等规模的卡顿就再也不会刷新它。
+ */
+const SAMPLE_INTERVAL_MS = (() => {
+  const raw = Number(process.env.EVENT_LOOP_SAMPLE_INTERVAL_MS)
+  return Number.isFinite(raw) && raw >= 50 ? raw : 250
+})()
+
 /** 卡顿超过该值才记录（毫秒） */
 const STALL_LOG_THRESHOLD_MS = 500
 /** GC 暂停超过该值单独记一行（毫秒） */
@@ -165,15 +181,18 @@ export function startEventLoopMonitor(): void {
     console.warn('[事件循环] 延迟直方图启动失败（不影响卡顿监控）:', e?.message || e)
   }
 
-  let expected = Date.now() + 2000
+  // 用「实际间隔 - 采样周期」衡量卡顿：定时器被推迟多久，主线程就被占了多久。
+  // 采样周期越短，相位损失越小，卡顿时长越接近真实值（见 SAMPLE_INTERVAL_MS 的注释）。
+  let lastTickAt = Date.now()
   const tick = () => {
-    const lag = Date.now() - expected
+    const now = Date.now()
+    const lag = (now - lastTickAt) - SAMPLE_INTERVAL_MS
+    lastTickAt = now
     if (lag > STALL_LOG_THRESHOLD_MS) logStall(lag)
-    expected = Date.now() + 2000
-    const timer = setTimeout(tick, 2000)
+    const timer = setTimeout(tick, SAMPLE_INTERVAL_MS)
     timer.unref?.()
   }
-  const timer = setTimeout(tick, 2000)
+  const timer = setTimeout(tick, SAMPLE_INTERVAL_MS)
   timer.unref?.()
 }
 
