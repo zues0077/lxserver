@@ -29,7 +29,7 @@ export {
   isDrainOnly,
   hasActiveStream,
 } from './stream'
-export { detectAudioDurationMs } from './audioMeta'
+export { detectAudioDurationMs, id3v2Size } from './audioMeta'
 export { loadConfig as loadXiaoAiConfig } from './config'
 export { buildTrackKey, getCachedTrack, getCachedTrackUrl, setCachedTrackUrl, clearTrackCache } from './playCache'
 export { sleepTimer } from './sleepTimer'

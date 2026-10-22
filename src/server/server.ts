@@ -54,6 +54,7 @@ import {
   getStreamRounds,
   detectAudioFormat,
   detectAudioDurationMs,
+  id3v2Size,
   loadXiaoAiConfig,
   buildTrackKey,
   getCachedTrack,
@@ -360,6 +361,13 @@ let lastXiaoAiTrack: {
 } | null = null
 /** 当前这一路流从第几秒开始：前端据此把设备上报的「流内位置」换算成「曲内位置」 */
 let lastXiaoAiSeekSec = 0
+/**
+ * 音箱/云端上报的曲目时长（毫秒），从 /status 的 play_song_detail 里捞。
+ *
+ * 兜底用：本地文件时长探测偶发失败（比如 ID3 里塞了超大封面）时，
+ * seek 至少要有个量级正确的时长来夹取位置，否则会退化成「从头重播」。
+ */
+let lastXiaoAiDeviceDurationMs = 0
 
 const probeAudioCached = async (url: string) => {
   const hit = audioProbeCache.get(url)
@@ -397,12 +405,28 @@ const probeLocalFileDuration = (filePath: string): number => {
   let fd: number | undefined
   try {
     fd = fs.openSync(filePath, 'r')
+    const totalBytes = fs.statSync(filePath).size
     const buffer = Buffer.alloc(8192)
     const read = fs.readSync(fd, buffer, 0, buffer.length, 0)
-    const head = buffer.subarray(0, read)
-    const format = detectAudioFormat(head)
+    let head = buffer.subarray(0, read)
+    let sizeForCalc = totalBytes
+    let format = detectAudioFormat(head)
+
+    // ID3v2 里经常内嵌整张封面（实测有 300KB 的），此时前 8KB 全是标签，
+    // 第一个音频帧还在标签后面 → 帧扫描一上来就跳出循环，时长算成 0。
+    // 按标签长度把读窗口挪到音频数据起点再读一次（同时把体积也扣掉标签）。
+    const tagSize = id3v2Size(head)
+    if (tagSize > 0 && tagSize + 64 < totalBytes && (format === '' || format === 'mp3')) {
+      const shifted = Buffer.alloc(8192)
+      const got = fs.readSync(fd, shifted, 0, shifted.length, tagSize)
+      if (got > 16) {
+        head = shifted.subarray(0, got)
+        sizeForCalc = totalBytes - tagSize
+        format = detectAudioFormat(head)
+      }
+    }
     if (!format) return 0
-    return detectAudioDurationMs(head, format, fs.statSync(filePath).size)
+    return detectAudioDurationMs(head, format, sizeForCalc)
   } catch {
     return 0
   } finally {
@@ -7307,12 +7331,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 return
               }
 
-              const totalSec = track.durationMs > 0 ? track.durationMs / 1000 : 0
+              // 时长三档兜底：投送时探测到的 → 现场再探一次（探测偶发失败时会补回来）
+              // → 设备上报的曲目时长。三者都没有就不夹取，按用户拖的位置直接跳，
+              // 也好过退化成「从头重播」。
+              if (track.durationMs <= 0 && track.target.path) {
+                track.durationMs = probeLocalFileDuration(track.target.path)
+              }
+              const knownMs = track.durationMs > 0 ? track.durationMs : lastXiaoAiDeviceDurationMs
+              const totalSec = knownMs > 0 ? knownMs / 1000 : 0
               // 贴到结尾会切出 0.5 秒碎片，夹到 duration-3（songloft 同款守卫）
               const maxSec = totalSec > 4 ? Math.floor(totalSec - 3) : Math.max(0, Math.floor(totalSec))
-              const seekSec = Math.max(0, Math.min(Math.floor(requested), maxSec))
+              const seekSec =
+                totalSec > 0 ? Math.max(0, Math.min(Math.floor(requested), maxSec)) : Math.max(0, Math.floor(requested))
               // 剩余时长：平滑下发按它算码率，传整首会让数据喂得比播放慢 → 卡顿
-              const remainingMs = track.durationMs > 0 ? Math.max(1000, track.durationMs - seekSec * 1000) : 0
+              const remainingMs = knownMs > 0 ? Math.max(1000, knownMs - seekSec * 1000) : 0
               const base = track.target
 
               let nextTarget: XiaoAiTrackTarget
@@ -7456,6 +7488,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               // 音箱播完会自己重拉同一个 URL，所以 >=2 就等于「已经放完一遍」，
               // 走 player_play_music 的机型不报进度，这个信号比猜时长可靠。
               const rounds = getStreamRounds(lastXiaoAiStreamSid)
+              // 设备上报的曲目时长：本地探测失败时给 seek 兜底，避免「拖到哪都从头播」
+              const reportedDuration = Number(
+                (result as any)?.raw?.play_song_detail?.duration || (result as any)?.durationMs || 0,
+              )
+              if (reportedDuration > 0) lastXiaoAiDeviceDurationMs = reportedDuration
               sendJson({
                 success: true,
                 ...result,
