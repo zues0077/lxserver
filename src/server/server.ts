@@ -24,11 +24,12 @@ import formidable from 'formidable'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
-import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails } from './userApi'
+import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot } from './userApi'
 import { getSourceGuardStatus } from './sourceGuard'
 import { getSourceProbeStatus } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
+import { getActiveHostActivities } from './sourceActivity'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
 import { checkPersistentVolumes } from './volumeCheck'
@@ -1578,7 +1579,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         sourceGuard: getSourceGuardStatus(),
         sourceProbe: getSourceProbeStatus(probeDetail),
         // 事件循环/内存/GC 诊断：卡顿归因三要素（配合 app.log 里的 [GC] 与慢定时器日志）
-        diagnostics: getEventLoopStats()
+        diagnostics: getEventLoopStats(),
+        // 音源活动账本：谁在发请求、谁刚回来响应、谁在加载、谁已被自动降速
+        sourceActivity: getSourceActivitySnapshot(),
+        // 宿主正在进行的批量动作（音源巡检等）：这类卡顿的真凶是宿主自己
+        hostActivity: getActiveHostActivities()
       }))
       return
     }

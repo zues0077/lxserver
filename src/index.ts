@@ -952,7 +952,7 @@ if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { startSourceGuard, attributeStall } = require('@/server/sourceGuard')
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { getLoadedApiRefs, unloadSource, reloadSingleSource, getRecentSlowTimerCallbacks, getTrackedTimerDetails, setSlowCallbackAttributeHook } = require('@/server/userApi')
+  const { getLoadedApiRefs, unloadSource, reloadSingleSource, getRecentSlowTimerCallbacks, getTrackedTimerDetails, getRecentSourceActivity, setSlowCallbackAttributeHook } = require('@/server/userApi')
   // 通道 2：慢回调直报。回调耗时是精确测量，不依赖会低估的事件循环估值。
   setSlowCallbackAttributeHook(attributeStall)
   startSourceGuard({
@@ -962,6 +962,8 @@ if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
     // 卡顿联动归因的数据面：慢定时器回调（硬证据）+ 定时器登记明细（佐证）
     getRecentSlowTimers: getRecentSlowTimerCallbacks,
     getTrackedTimers: getTrackedTimerDetails,
+    // 行为级证据：卡顿窗口内谁在加载、谁的响应刚回来（覆盖「一批响应同时回来」型卡顿）
+    getRecentActivity: getRecentSourceActivity,
     // 正在往音箱下发音频时，护栏必须让路：
     // 复检要卸载/重载自定义源脚本，重载会在主线程同步 eval 整个（混淆过的）脚本，
     // 实测 2~3 秒——事件循环一卡，正在下发的音频就断流，音箱缓冲被抽干，

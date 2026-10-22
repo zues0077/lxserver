@@ -21,6 +21,7 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { syncLog } from '../utils/log4js'
+import { getActiveHostActivities, registerStallHit } from './sourceActivity'
 
 // ============================ 类型 ============================
 
@@ -90,6 +91,23 @@ export interface GuardDeps {
         intervalMs: number
         registeredAt: number
         ageMs?: number
+    }>
+    /**
+     * 卡顿窗口内「有活动」的音源（卡顿归因第二信号，行为级证据）。
+     *
+     * 慢回调只覆盖「回调本身同步执行很久」这一种情形；而「一批响应同时回来」
+     * 与「脚本正在加载」这两类卡顿在回调视角上是分散的，必须靠宿主请求埋点与
+     * 加载埋点才能看见。这是行为级信号，不依赖脚本内容，混淆脚本同样有效。
+     */
+    getRecentActivity?: (windowMs: number) => Array<{
+        owner: string
+        id: string
+        name: string
+        kinds: Array<'loading' | 'callback' | 'request' | 'inflight'>
+        callbacks: number
+        inflight: number
+        loadCostMs: number
+        agoMs: number
     }>
     /**
      * 服务当前是否「忙到不能被打扰」（例如正在往音箱下发音频）。
@@ -781,6 +799,14 @@ export interface StallAttribution {
     stallMs: number
     suspects: StallSuspect[]
     action: 'none' | 'warn' | 'isolated' | 'deferred'
+    /** 本次归因触发的自动降速动作（请求并发闸门），没有则为 undefined */
+    throttle?: string
+    /**
+     * 卡顿时刻宿主正在进行的批量动作（如音源巡检）。
+     * 巡检会同时驱动几十个脚本发请求，这时的卡顿真凶是宿主自己，
+     * 列出的嫌疑人只是「恰好有响应回来」，据此禁用音源会误伤。
+     */
+    hostActivity?: string[]
 }
 
 const stallAttributionLog: StallAttribution[] = []
@@ -800,6 +826,8 @@ const summarizeAttribution = (a: StallAttribution) => ({
     stallMs: a.stallMs,
     suspects: a.suspects.map(s => `${s.name}（${s.evidence}）`),
     action: a.action,
+    throttle: a.throttle,
+    hostActivity: a.hostActivity,
 })
 
 export function getStallAttributions(): Array<ReturnType<typeof summarizeAttribution>> {
@@ -853,7 +881,33 @@ export function attributeStall(stallMs: number): StallAttribution | null {
         })
     }
 
-    // ---- 信号二：活动长定时器（佐证，仅在没有硬证据时列出）----
+    // ---- 信号二：活动账本（行为证据）----
+    // 卡顿窗口内谁在加载、谁的响应刚回来，就是最直接的行为线索：
+    //   - 脚本加载 = 主线程同步 eval，实测 61KB 脚本要 6 秒；
+    //   - 响应回来 = 沙箱边界 decontextify + JSON.parse 的同步开销，
+    //     一批响应同时回来时这些开销会叠成数秒阻塞。
+    if (suspects.length === 0) {
+        const active = guardDeps?.getRecentActivity?.(current.stallSuspectWindowMs) || []
+        for (const a of active) {
+            // 仅「正在加载」与「刚有响应回来」算证据；单纯有在途请求可能是常规播放
+            if (!a.kinds.includes('loading') && !a.kinds.includes('callback')) continue
+            const key = `${a.owner}_${a.id}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            const ago = (Math.round(a.agoMs / 100) / 10).toFixed(1)
+            suspects.push({
+                owner: a.owner,
+                id: a.id,
+                name: a.name,
+                evidence: a.kinds.includes('loading')
+                    ? `脚本加载中（最近一次加载耗时 ${a.loadCostMs}ms，同步 eval 会独占事件循环）`
+                    : `${ago}s 前有响应回来（并发回来时沙箱边界的同步序列化开销会叠加）`,
+            })
+            if (suspects.length >= 3) break
+        }
+    }
+
+    // ---- 信号三：活动长定时器（弱佐证，仅在前两类都没命中时列出）----
     if (suspects.length === 0) {
         const tracked = guardDeps?.getTrackedTimers?.() || []
         for (const t of tracked) {
@@ -884,13 +938,30 @@ export function attributeStall(stallMs: number): StallAttribution | null {
         return attribution
     }
 
+    const primary = suspects[0]
     const names = suspects.map(s => `${s.name}（${s.evidence}）`).join('; ')
     console.warn(`[自检护栏][归因] 主线程卡顿 ${stallMs}ms → 疑似音源: ${names}`)
+
+    // 宿主正在跑批量动作（典型是音源巡检）时，卡顿真凶很可能是宿主自己，
+    // 列出的嫌疑人只是「恰好有响应回来」。标出来，避免据此禁用无辜的音源。
+    const hostActive = getActiveHostActivities()
+    if (hostActive.length > 0) {
+        attribution.hostActivity = hostActive.map(h => `${h.kind}（已进行 ${Math.round(h.elapsedMs / 1000)}s）`)
+        console.warn(`[自检护栏][归因] ⓘ 卡顿期间宿主活动: ${attribution.hostActivity.join('、')}` +
+            ' —— 若巡检正在跑，本条嫌疑人仅供参考，勿据此禁用音源')
+    }
+
+    // L2 自动降速：被归因命中就累计，连续命中达到阈值后压低该脚本的请求并发。
+    // 这是纯运行时治理——不动脚本一个字，混淆脚本一样有效，也不需要预先识别脚本内容。
+    const throttleNote = registerStallHit(primary.owner, primary.id, primary.name)
+    if (throttleNote) {
+        attribution.throttle = throttleNote
+        console.warn(`[自检护栏][降速] ${primary.name} ${throttleNote}`)
+    }
 
     if (!current.stallIsolateEnabled) {
         // 告警模式：只标记，不动音源。观察计数仅用于日志，与隔离模式的计数独立。
         attribution.action = 'warn'
-        const primary = suspects[0]
         const key = `${primary.owner}_${primary.id}`
         const streak = (warnStreak.get(key) || 0) + 1
         warnStreak.set(key, streak)
@@ -907,7 +978,6 @@ export function attributeStall(stallMs: number): StallAttribution | null {
         return attribution
     }
 
-    const primary = suspects[0]
     const key = `${primary.owner}_${primary.id}`
     const streak = (stallStreak.get(key) || 0) + 1
     stallStreak.set(key, streak)
