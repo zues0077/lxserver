@@ -29,6 +29,7 @@ import path from 'node:path'
 import needle from 'needle'
 import { getProxyAgent } from '@/modules/utils/proxy.js'
 import { syncLog } from '@/utils/log4js'
+import { localTime } from '@/utils/time'
 import { markSourceBusy } from './sourceGuard'
 import { beginProbeQuiet, endProbeQuiet } from './probeQuiet'
 import { beginHostActivity, endHostActivity } from './sourceActivity'
@@ -51,6 +52,14 @@ export interface PlatformProbeState {
   lastError: string
   /** 该平台的关闭是否由本模块自动执行（true 才会被自动恢复） */
   autoDisabled: boolean
+  /**
+   * 被本模块自动关闭时的「连续失败次数」归档值。
+   * 关闭那一刻把 failCount 快照到这里再把 failCount 清零，避免「连续失败 66 次」这种只增不减的展示；
+   * 平台恢复可用时随 autoDisabled 一并清零。
+   */
+  disabledFailCount?: number
+  /** 被本模块自动关闭的真实时间戳（区别于最后巡检时刻 lastCheckAt） */
+  disabledAt?: number
   /**
    * 「平台侧疑似异常」停探截止时间。
    * 该平台在过半音源上同时失败（测试曲目不可播/平台限流）时，再探一遍结果也一样，
@@ -176,7 +185,7 @@ export interface ProbeStatusSnapshot {
   /** 已排队、等待巡检的「新增音源」数量（撞上正在跑的轮次时会排队，不会丢） */
   pendingNewSources: number
   /** 当前生效的「自动关闭」平台清单 */
-  autoDisabledPlatforms: Array<{ owner: string; sourceId: string; sourceName: string; platform: string; since: number }>
+  autoDisabledPlatforms: Array<{ owner: string; sourceId: string; sourceName: string; platform: string; since: number; disabledAt?: number; failCount?: number }>
   /** 逐平台明细：仅在 includeDetail=true 时返回，避免 /health 常规轮询被撑大 */
   details?: ProbePlatformDetail[]
 }
@@ -341,7 +350,7 @@ const audit = (owner: string, action: string, payload: Record<string, any>) => {
   try {
     const dir = ownerDir(owner)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    const line = JSON.stringify({ at: new Date().toISOString(), action, ...payload })
+    const line = JSON.stringify({ at: localTime(), action, ...payload })
     fs.appendFileSync(path.join(dir, AUDIT_FILE), line + '\n', 'utf-8')
   } catch { /* 审计失败不影响主流程 */ }
 }
@@ -944,7 +953,7 @@ export function reportManualFailure(ev: ManualFailureReport): { counted: boolean
   const ps = sourceState.platforms[ev.platform]
   if (!ps || ps.autoDisabled) return none
 
-  ps.failCount += 1
+  ps.failCount = Math.min(99, ps.failCount + 1)
   ps.lastCheckAt = Date.now()
   ps.lastError = ev.error
 
@@ -952,6 +961,10 @@ export function reportManualFailure(ev: ManualFailureReport): { counted: boolean
   if (ev.hasControlGroup && conf.autoDisablePlatform && ps.failCount >= conf.failThreshold) {
     ps.status = 'down'
     ps.autoDisabled = true
+    // 关闭即归档清零：把当前连续失败次数快照下来展示，再让 failCount 归零重新计
+    ps.disabledFailCount = ps.failCount
+    ps.disabledAt = Date.now()
+    ps.failCount = 0
     if (setPlatformDisabled(ev.owner, ev.sourceId, ev.platform, true)) disabled = true
     audit(ev.owner, 'disable-platform', {
       sourceId: ev.sourceId, sourceName: ev.sourceName, platform: ev.platform,
@@ -1123,6 +1136,8 @@ export async function runSourceProbe(
           // 之前被自动关闭的平台恢复可用 → 立即自动重新开启（恢复一定是安全的，不必等后置校验）
           if (platformState.autoDisabled) {
             platformState.autoDisabled = false
+            platformState.disabledFailCount = 0
+            platformState.disabledAt = 0
             setPlatformDisabled(job.target.owner, job.target.id, job.platform, false)
             result.restored.push(`${job.target.name}/${job.platform}`)
             audit(job.target.owner, 'restore-platform', { sourceId: job.target.id, sourceName: job.target.name, platform: job.platform })
@@ -1131,7 +1146,8 @@ export async function runSourceProbe(
           }
           platformState.status = 'ok'
         } else {
-          platformState.failCount++
+          // 失败计数上限 99，避免「连续失败 N 次」在停探期/关闭后只增不减变成无意义的极大值
+          platformState.failCount = Math.min(99, platformState.failCount + 1)
           platformState.lastError = shorten(lastError)
           // 是否「不可用」要等平台侧系统性判定后再落定，这里先按证据不足处理
           platformState.status = 'unknown'
@@ -1236,6 +1252,11 @@ export async function runSourceProbe(
         result.platformsDown++
         if (conf.autoDisablePlatform && !ps.autoDisabled) {
           ps.autoDisabled = true
+          // 关闭即归档清零：把连续失败次数快照下来展示，再让 failCount 归零重新计，
+          // 避免「连续失败 66 次」这种只增不减的展示（问题：failCount 停探期/关闭后不清零）
+          ps.disabledFailCount = ps.failCount
+          ps.disabledAt = Date.now()
+          ps.failCount = 0
           setPlatformDisabled(target.owner, target.id, platform, true)
           result.newlyDisabled.push(`${target.name}/${platform}`)
           audit(target.owner, 'disable-platform', {
@@ -1399,7 +1420,11 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
             sourceId,
             sourceName: sourceState.name,
             platform,
-            since: platformState.lastCheckAt,
+            // since 语义修正：原本误写成 lastCheckAt（最后巡检时刻），这里改用真实的禁用时刻 disabledAt
+            since: platformState.disabledAt ?? platformState.lastCheckAt,
+            disabledAt: platformState.disabledAt ?? 0,
+            // 关闭后的连续失败次数以归档值展示（failCount 已归零重新计）
+            failCount: platformState.disabledFailCount ?? 0,
           })
         }
         if (includeDetail) {
@@ -1410,7 +1435,8 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
             platform,
             status: platformState.status,
             autoDisabled: !!platformState.autoDisabled,
-            failCount: platformState.failCount || 0,
+            // 关闭中的平台用归档的连续失败次数展示；其余用当前实时计数（上限 99）
+            failCount: platformState.autoDisabled ? (platformState.disabledFailCount ?? 0) : (platformState.failCount || 0),
             lastCheckAt: platformState.lastCheckAt || 0,
             lastOkAt: platformState.lastOkAt || 0,
             lastError: platformState.lastError || '',

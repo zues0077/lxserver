@@ -29,6 +29,7 @@ import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clea
 import { getSourceProbeStatus } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
+import { getAppVersion } from '@/utils/version'
 import { getActiveHostActivities } from './sourceActivity'
 import { setUserAuthVerifier } from './userAuth'
 import * as customSourceHandlers from './customSourceHandlers'
@@ -1572,6 +1573,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify({
         status: 'ok',
+        version: getAppVersion(),
         uptimeSeconds: Math.floor(process.uptime()),
         customSourceCount: getLoadedApisCount(),
         lastReloadDurationMs: getLastReloadDurationMs(),

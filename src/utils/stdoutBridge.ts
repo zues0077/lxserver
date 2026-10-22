@@ -22,6 +22,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { localTime } from './time'
 
 // ---------------------------------------------------------------------------
 // stdout -> 文件桥接
@@ -54,7 +55,7 @@ const stringifyArg = (arg: unknown): string => {
 const appendStdoutLog = (level: string, args: unknown[]): void => {
   if (stdoutLogSize < 0) return // 初始化失败，已降级
   try {
-    const line = `[${new Date().toISOString()}] [${level}] ${args.map(stringifyArg).join(' ')}\n`
+    const line = `[${localTime()}] [${level}] ${args.map(stringifyArg).join(' ')}\n`
     if (stdoutLogSize > STDOUT_LOG_MAX_BYTES) {
       fs.truncateSync(STDOUT_LOG_FILE, 0)
       stdoutLogSize = 0
@@ -154,7 +155,7 @@ export const installStdoutBridge = (): void => {
       const info: LongTimerInfo = {
         kind: 'timeout',
         delayMs: delay,
-        createdAt: new Date().toISOString(),
+        createdAt: localTime(),
         stack: captureStack(),
       }
       noteLongTimer('timeout', delay)
@@ -175,7 +176,7 @@ export const installStdoutBridge = (): void => {
       const info: LongTimerInfo = {
         kind: 'interval',
         delayMs: delay,
-        createdAt: new Date().toISOString(),
+        createdAt: localTime(),
         stack: captureStack(),
       }
       noteLongTimer('interval', delay)
