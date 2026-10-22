@@ -339,6 +339,8 @@ class XiaoAiService {
     const config = loadConfig()
     const songName = String(params.song?.name || '').trim()
     const singer = String(params.song?.singer || '').trim()
+    /** 本次各设备实际下发的 audioID，用于判断「曲名不一致」是否为预期（占位封面的曲名不是这首歌） */
+    const usedAudioIds: string[] = []
     const results = await this.fanOut(params.deviceIds, 'play', async (client, deviceId, hardware) => {
       const musicApiModel = needUseMusicApi(hardware, config.disabledModels)
       // 歌词模式只在「走 player_play_music 的触屏机型 + 有歌名」时开启；
@@ -357,6 +359,7 @@ class XiaoAiService {
         lyricsMode: lyricsWanted,
       })
       if (outcome.ok) {
+        usedAudioIds.push(outcome.audioId || '')
         const idPart = outcome.audioId ? `（）audioID=${outcome.audioId}` : ''
         const lyricPart = lyricsWanted ? '｜歌词模式' : ''
         const line = `[XiaoAi] 下发方式 ${outcome.via}${idPart}${lyricPart} → ${deviceId}`
@@ -380,9 +383,13 @@ class XiaoAiService {
     // 表现就是播错歌 / 断断续续，这里把它写进日志，免得用户只看到「能播但不对劲」。
     const firstOk = results.find(item => item.ok)
     if (firstOk) {
+      // 曲库没搜到这首歌时下发的是「默认封面占位 audioID」，音箱回报的曲名就是占位曲名
+      // （Theme Of Loft），拿它和真实歌名比必然不一致。这是预期状态，不该报警。
+      const placeholderOnly =
+        usedAudioIds.length > 0 && usedAudioIds.every(id => !id || id === DEFAULT_MUSIC_AUDIO_ID)
       setTimeout(() => {
         void this.getStatus(firstOk.deviceId)
-          .then(status => this.reportPlaybackMismatch(status, songName))
+          .then(status => this.reportPlaybackMismatch(status, songName, placeholderOnly))
           .catch(() => {})
       }, 3000)
     }
@@ -390,7 +397,7 @@ class XiaoAiService {
   }
 
   /** 播放内容自检：试听片段 / 播错歌 都记一条可读告警 */
-  private reportPlaybackMismatch(status: any, expectedTitle: string) {
+  private reportPlaybackMismatch(status: any, expectedTitle: string, placeholderAudioId = false) {
     const raw = (status?.raw || {}) as any
     const detail = raw?.extra_track_list?.[0] || raw?.play_song_detail?.extra_track_list?.[0]
     if (!detail) return
@@ -410,6 +417,9 @@ class XiaoAiService {
       )
       return
     }
+    // 默认封面占位 ID：音箱回报的曲名就是占位曲名（Theme Of Loft），
+    // 和真实歌名比较必然不一致，属预期，不能当作「播错歌」
+    if (placeholderAudioId) return
     if (expectedTitle && title && !title.includes(expectedTitle) && !expectedTitle.includes(title)) {
       console.warn(`[XiaoAi] 音箱当前曲目（${title}）与投送的（${expectedTitle}）不一致`)
     }
