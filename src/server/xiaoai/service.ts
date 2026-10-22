@@ -117,6 +117,16 @@ class XiaoAiService {
   private inited = false
   /** ffmpeg 可用性（异步探测结果；未探测完时按可用处理，避免界面闪一下"不可用"） */
   private ffmpegReady = true
+  /**
+   * 由 server 注入：本次投送之后音箱有没有真的来拉我们这一路流。
+   * 用来分辨「曲库把 audioID 标成试听」与「音箱真的去播了云端试听」——
+   * 前者只是元数据，后者才会导致播错歌。
+   */
+  private streamPulledProbe: (() => boolean) | null = null
+
+  setStreamPulledProbe(fn: () => boolean) {
+    this.streamPulledProbe = fn
+  }
 
   /** 首次使用时从磁盘恢复登录态 */
   private ensureInit() {
@@ -386,8 +396,16 @@ class XiaoAiService {
     if (!detail) return
     const title = String(detail.title || '')
     if (detail.isSongPreview) {
+      // isSongPreview 只说明「这个 audioID 在小米曲库里是试听资源」，不代表正在播试听：
+      // 歌词模式下发的是 player_play_music + 我们自己的 stream.url，音箱照常拉流。
+      // 只有「投送之后压根没有流被拉走」才说明它真的跑去播云端试听了。
+      const pulled = this.streamPulledProbe ? this.streamPulledProbe() : true
+      if (pulled) {
+        console.log(`[XiaoAi] 曲库把「${title || '未知'}」标为试听资源，但音箱已拉取本机流，按正常播放处理`)
+        return
+      }
       console.warn(
-        `[XiaoAi] 音箱正在播小米曲库的试听片段：${title || '未知'}（audio_id=${detail.audio_id || '?'}）。` +
+        `[XiaoAi] 音箱正在播小米曲库的试听片段：${title || '未知'}（audio_id=${detail.audio_id || '?'}），且未拉取本机流。` +
           '若听到断断续续或播错歌，请在设置里关闭「触屏显示封面歌词」',
       )
       return

@@ -1290,7 +1290,13 @@ export async function callUserApiGetMusicUrl(
             try { userStates = JSON.parse(fs.readFileSync(statesPath, 'utf-8')) } catch (e) { }
         }
         // 预收集私有源 ID（用于屏蔽同名公开源）
-        if (fs.existsSync(metaPath)) {
+        //
+        // 例外：`_open` 是匿名/公共空间，它目录下的 sources.json 就是「公共源清单本身」，
+        // 不是某个用户的私有源。若把它当私有源收集，后面每个公共源都会命中
+        // `userApiIds.has(api.info.id)` 而被当作「被同名私有版本覆盖」跳过，
+        // 结果匿名用户永远没有候选源，取链直接报「未找到支持 xx 平台的自定义源」。
+        // 匿名请求（未登录播放器）与小爱投送的匿名分支都会落到这里，影响面很大。
+        if (clientUsername !== '_open' && fs.existsSync(metaPath)) {
             try {
                 const userSources = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
                 for (const s of userSources) userApiIds.add(s.id)

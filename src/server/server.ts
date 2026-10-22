@@ -790,6 +790,11 @@ const resolveXiaoAiTrack = async (
 // 定时关机到点时统一停掉当前选中的全部设备（只做停止播放，不承诺断电）
 sleepTimer.setStopHandler(() => xiaoAiService.stop())
 
+// 播放自检用：本次投送之后音箱是否真的来拉过我们这一路流。
+// 曲库把某些 audioID 标成「试听资源」，但音箱只要拉了本机流就是在放我们推的音频，
+// 不能仅凭元数据就告警「正在播试听片段」把用户引去关歌词开关。
+xiaoAiService.setStreamPulledProbe(() => lastXiaoAiStreamAt > lastXiaoAiPushAt)
+
 /** 小爱相关接口的鉴权：管理员口令，或已通过认证的播放器会话 */
 const isXiaoAiRequestAuthorized = (req: IncomingMessage): boolean => {
   const auth = req.headers['x-frontend-auth']
