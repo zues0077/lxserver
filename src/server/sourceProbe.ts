@@ -905,6 +905,9 @@ export async function runSourceProbe(
     const jobs: Job[] = []
     // 「停探」期间每个平台仍保留的哨兵探测数（见下方 suspectBackoff 分支）
     const suspectSamples = new Map<string, number>()
+    // 本轮因停探而被跳过的平台计数：> 0 说明该平台正处于停探期，
+    // 此时剩下的只是哨兵样本，不能拿去做「自动关闭平台」这种最重的处置
+    const suspectSkipCounts = new Map<string, number>()
 
     for (const target of targets) {
       const status = statusFor(target.owner)
@@ -942,6 +945,7 @@ export async function runSourceProbe(
             platformState.lastCheckAt = Date.now()
             platformState.lastError = '平台侧疑似异常（上轮过半音源同时失败），本轮停探'
             result.platformsSkipped++
+            suspectSkipCounts.set(platform, (suspectSkipCounts.get(platform) ?? 0) + 1)
             if (!result.suspectSkippedPlatforms.includes(platform)) result.suspectSkippedPlatforms.push(platform)
             continue
           }
@@ -1065,6 +1069,12 @@ export async function runSourceProbe(
         const ps = sourceState.platforms[platform]
         if (!ps || ps.status === 'skipped' || ps.status === 'ok') continue
         if (ps.failCount < conf.failThreshold) { ps.status = 'unknown'; continue }
+        // 停探期：这一轮剩下的只是哨兵样本（每平台 3 个），拿它去关闭平台属于
+        // 「用最少的证据做最重的处置」——哨兵的职责是观测平台是否恢复，不是定罪。
+        if ((suspectSkipCounts.get(platform) ?? 0) > 0) {
+          ps.status = 'unknown'
+          continue
+        }
         if (suspectPlatforms.has(platform)) {
           // 平台本身可疑：证据不足以归罪这个音源，不判定不可用、更不自动关闭
           ps.status = 'unknown'
