@@ -27,6 +27,14 @@ export interface StreamTokenPayload {
   /** 转 mp3 时的尾部淡出秒数（0/缺省 = 不淡出） */
   fadeOutSec?: number
   /**
+   * 从第 N 秒开始给流（拖动进度条后的重新投送）。
+   *
+   * 小爱没有 seek 指令，音箱只会从一个 URL 的第 0 字节开始播，
+   * 所以「跳到第 N 秒」只能由服务端产出一条**以 N 秒开头**的流，再重新投送一次。
+   * 带上这个字段时 durationMs 必须同步改成「剩余时长」，否则平滑下发按整首时长算码率会喂得太慢。
+   */
+  seekSec?: number
+  /**
    * 转码产物的落盘路径。
    * 音箱播完一首常会拿同一个 URL 重新拉流：第一次边转边发并落盘，
    * 第二次直接命中本地文件（支持 Range），既快又稳。
@@ -49,6 +57,7 @@ export const createStreamToken = (target: {
   durationMs?: number
   format?: 'mp3'
   fadeOutSec?: number
+  seekSec?: number
   mp3Path?: string
   ttlMs?: number
 }): string => {
@@ -64,6 +73,7 @@ export const createStreamToken = (target: {
   if (target.filename) payload.filename = String(target.filename)
   if (target.contentType) payload.contentType = String(target.contentType)
   if (Number(target.durationMs) > 0) payload.durationMs = Number(target.durationMs)
+  if (Number(target.seekSec) > 0) payload.seekSec = Math.floor(Number(target.seekSec))
   if (target.format === 'mp3') {
     payload.format = 'mp3'
     if (Number(target.fadeOutSec) > 0) payload.fadeOutSec = Number(target.fadeOutSec)
@@ -121,6 +131,7 @@ export const buildStreamUrl = (
     durationMs?: number
     format?: 'mp3'
     fadeOutSec?: number
+    seekSec?: number
     mp3Path?: string
   },
 ) => {

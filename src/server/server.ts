@@ -66,6 +66,9 @@ import {
   isMp3File,
   transcodeFileToMp3,
   isFfmpegAvailable,
+  seekSlicePath,
+  sliceMp3FromFile,
+  pruneSeekSlices,
 } from './xiaoai'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
@@ -338,6 +341,25 @@ let lastXiaoAiStreamSid = ''
 let lastXiaoAiPushAt = 0
 /** 本次这一路流「第一次被音箱请求」的时刻 */
 let lastXiaoAiStreamAt = 0
+/**
+ * 最近一次 /play 解析好的音源与时长（拖动进度条时复用）。
+ *
+ * 小爱没有 seek 指令，跳转只能「产出一条从第 N 秒开头的流 + 重新投送一次」。
+ * 重新投送必须复用这里存下的 target：重走 resolvePlayableAudio 要遍历几十个源、
+ * 每个候选做音频探测，实测 2~8 秒，拖完进度条等这么久等于不可用。
+ * 注意：seek 不会覆盖它（否则连续拖两次会基于切片再切片，位置叠加错乱）。
+ */
+let lastXiaoAiTrack: {
+  songInfo: Record<string, any>
+  quality: string
+  username: string
+  deviceIds: string[]
+  target: XiaoAiTrackTarget
+  /** 整首时长（毫秒），seek 时用它算剩余时长 */
+  durationMs: number
+} | null = null
+/** 当前这一路流从第几秒开始：前端据此把设备上报的「流内位置」换算成「曲内位置」 */
+let lastXiaoAiSeekSec = 0
 
 const probeAudioCached = async (url: string) => {
   const hit = audioProbeCache.get(url)
@@ -536,6 +558,8 @@ interface XiaoAiTrackTarget {
   fadeOutSec?: number
   /** 转码产物的预期落盘路径（中转 tee 到这里，第二次拉流直接命中） */
   mp3Path?: string
+  /** 从第 N 秒开始投送（拖动进度条后重新投送用） */
+  seekSec?: number
 }
 
 /** 扩展名 → Content-Type（本地缓存文件按真实格式命名过，可以直接推） */
@@ -7152,6 +7176,16 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (result.success) {
                 lastXiaoAiPushAt = Date.now()
                 lastXiaoAiStreamAt = 0
+                // 记下这次投送的音源，供后续拖动进度条复用（不重新取链）
+                lastXiaoAiSeekSec = 0
+                lastXiaoAiTrack = {
+                  songInfo,
+                  quality,
+                  username: verifiedUsername,
+                  deviceIds: Array.isArray(deviceIds) ? [...deviceIds] : [],
+                  target,
+                  durationMs: Number(target.durationMs) || 0,
+                }
                 // 定时关机（按曲数模式）：每成功投送一首扣一次
                 try {
                   const consumed = sleepTimer.consumeSong()
@@ -7253,6 +7287,112 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           })
           return
         }
+        if (pathname === '/api/music/xiaoai/seek' && req.method === 'POST') {
+          void readJsonBody().then(async payload => {
+            try {
+              // 和 /play 一样要求登录态：seek 会直接驱动音箱重新播放
+              const verifiedUsername = resolveXiaoAiUser(req)
+              if (verifiedUsername === null) {
+                sendJson({ success: false, message: 'Unauthorized' }, 401)
+                return
+              }
+              const track = lastXiaoAiTrack
+              if (!track) {
+                sendJson({ success: false, message: '还没有投送过歌曲，无法跳转' })
+                return
+              }
+              const requested = Number(payload.positionSec)
+              if (!Number.isFinite(requested) || requested < 0) {
+                sendJson({ success: false, message: 'positionSec 必须是非负数' })
+                return
+              }
+
+              const totalSec = track.durationMs > 0 ? track.durationMs / 1000 : 0
+              // 贴到结尾会切出 0.5 秒碎片，夹到 duration-3（songloft 同款守卫）
+              const maxSec = totalSec > 4 ? Math.floor(totalSec - 3) : Math.max(0, Math.floor(totalSec))
+              const seekSec = Math.max(0, Math.min(Math.floor(requested), maxSec))
+              // 剩余时长：平滑下发按它算码率，传整首会让数据喂得比播放慢 → 卡顿
+              const remainingMs = track.durationMs > 0 ? Math.max(1000, track.durationMs - seekSec * 1000) : 0
+              const base = track.target
+
+              let nextTarget: XiaoAiTrackTarget
+              let how = ''
+              if (base.path && seekSec > 0 && isMp3File(base.path)) {
+                // 本地完整 mp3：切一段（`-ss` + copy，不重编码），走原来的本地直发链路
+                const slicePath = seekSlicePath(track.username, track.songInfo, track.quality, seekSec)
+                const sliced = await sliceMp3FromFile(base.path, seekSec, slicePath)
+                if (!sliced.ok || !sliced.path) {
+                  sendJson({ success: false, message: `切片失败：${sliced.error || '未知原因'}` })
+                  return
+                }
+                pruneSeekSlices(track.username, track.songInfo, track.quality)
+                nextTarget = {
+                  ...base,
+                  path: sliced.path,
+                  contentType: 'audio/mpeg',
+                  durationMs: remainingMs,
+                  seekSec,
+                  via: `${base.via}｜seek ${seekSec}s`,
+                }
+                how = sliced.reused ? '切片复用' : '切片'
+              } else if (seekSec === 0) {
+                // 拖回开头：直接用原音源重投，不留切片
+                nextTarget = { ...base, durationMs: track.durationMs || base.durationMs, seekSec: 0 }
+                how = '回到开头'
+              } else {
+                // 远端源 / 本地非 mp3：只能边转边发（`-ss` 在 -i 前），同时 tee 到 seek 目录
+                const seekPath = seekSlicePath(track.username, track.songInfo, track.quality, seekSec)
+                nextTarget = {
+                  ...base,
+                  format: 'mp3',
+                  seekSec,
+                  durationMs: remainingMs,
+                  mp3Path: seekPath,
+                  via: `${base.via}｜seek ${seekSec}s（流式）`,
+                }
+                how = '流式 seek'
+              }
+
+              const config = loadXiaoAiConfig()
+              const baseUrl = resolvePlayBaseUrl(req, config.serverBaseUrl)
+              const streamPath = config.streamPath || '/api/music/xiaoai/stream'
+              const streamUrl = buildStreamUrl(baseUrl, streamPath, nextTarget)
+              try {
+                retireStreams()
+              } catch {
+                /* 没有旧流可断时忽略 */
+              }
+              const result = await xiaoAiService.play({
+                streamUrl,
+                deviceIds: track.deviceIds,
+                song: {
+                  name: String(track.songInfo.name || track.songInfo.title || ''),
+                  singer: String(track.songInfo.singer || ''),
+                },
+              })
+              if (!result.success) {
+                sendJson({ success: false, message: '跳转投送失败', seekSec })
+                return
+              }
+              lastXiaoAiSeekSec = seekSec
+              lastXiaoAiPushAt = Date.now()
+              lastXiaoAiStreamAt = 0
+              try {
+                const tokenStr = decodeURIComponent(streamUrl.split('token=')[1] || '')
+                lastXiaoAiStreamSid = parseStreamToken(tokenStr).sid || ''
+              } catch {
+                lastXiaoAiStreamSid = ''
+              }
+              const songLabel = `${track.songInfo.name || ''}${track.songInfo.singer ? ' - ' + track.songInfo.singer : ''}`
+              console.log(`[XiaoAi] 跳转 ${seekSec}s（${how}｜剩余 ${Math.round(remainingMs / 1000)}s）：${songLabel}`)
+              syncLog.info(`[XiaoAi] 跳转 ${seekSec}s（${how}｜剩余 ${Math.round(remainingMs / 1000)}s）：${songLabel}`)
+              sendJson({ success: true, seekSec, durationMs: remainingMs, streamUrl, via: how })
+            } catch (error: any) {
+              failed(error, '跳转失败')
+            }
+          })
+          return
+        }
         if (pathname === '/api/music/xiaoai/next' && req.method === 'POST') {
           void readJsonBody().then(async payload => {
             try {
@@ -7323,6 +7463,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 streamBytes: rounds.bytes,
                 // 音箱已经完整拉过一遍、现在又开始新一轮 → 这首确实播完了（最准的完成信号）
                 streamReplay: rounds.replay === true,
+                // 当前这一路流从第几秒开始：设备上报的 position 是「流内偏移」，
+                // 加上它才是曲内位置（songloft 的 streamSeekOffsetSec 同款，不加进度条会掉回 0）
+                seekOffsetMs: lastXiaoAiSeekSec * 1000,
                 // 实测「投送完成 → 音箱来拉流」的延迟：前端据此把切歌提前量调到真正够用
                 startDelayMs: lastXiaoAiStreamAt && lastXiaoAiPushAt ? lastXiaoAiStreamAt - lastXiaoAiPushAt : 0,
               })

@@ -94,6 +94,16 @@ export interface TranscodeOptions {
   fadeOutSec?: number
   /** 源音频总时长（毫秒），用于计算淡出起点 */
   durationMs?: number
+  /**
+   * 从第几秒开始产出（拖动进度条后的重新投送）。
+   *
+   * 小爱音箱没有 seek 指令，只能靠「产出一条以该位置开头的流 + 重新投送」实现跳转。
+   * `-ss` 必须放在 `-i` **之前**（input seek）：放在后面是解码后再丢弃，等于把前面全部解一遍，
+   * 一首 4 分钟的歌要多花几十秒。
+   *
+   * 注意：给了 seekSec 时，durationMs 要传「剩余时长」，淡出起点才会落在真正的曲尾。
+   */
+  seekSec?: number
 }
 
 /**
@@ -115,6 +125,10 @@ export const buildFfmpegArgs = (source: string, options: TranscodeOptions = {}):
     // 网络源偶发抖动时自动重连，避免转码中途断流（对本地文件无意义，故只给 http 源加）
     args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5')
   }
+  // 起播位置：必须在 -i 之前才是「输入 seek」（直接跳到目标位置再解码），
+  // 放在 -i 之后是「解码后丢弃」，本地文件尚可、远端源要多拉一大段数据。
+  const seekSec = Math.max(0, Math.floor(Number(options.seekSec) || 0))
+  if (seekSec > 0) args.push('-ss', String(seekSec))
   args.push('-i', source, '-vn')
 
   // 淡出至少要留 1 秒余量，短音频直接放弃淡出

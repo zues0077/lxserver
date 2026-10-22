@@ -1570,6 +1570,26 @@ let lastSeekTime = 0; // Throttling for live seeking
 let lastSeekPct = -1; // 上次执行 seek 时的进度百分比，用于避免原地抖动
 const SEEK_THROTTLE_MS = 100; // How often to update audio position while dragging (ms)
 
+/** 当前是否把播放交给小爱：投送模式下 audio 是暂停的，所有「改 audio.currentTime」都是空转 */
+function isRoutingToXiaoAi() {
+    return !!(window.XiaoAi && typeof window.XiaoAi.shouldRoute === 'function' && window.XiaoAi.shouldRoute());
+}
+
+/**
+ * 进度条用的总时长（秒）。
+ *
+ * 投送模式下 audio 里装的不是这首歌（上一首的或没加载），audio.duration 会偏小/为 NaN，
+ * 拿它算百分比会跳到错误位置；服务端解析出的真实时长才是准的。
+ */
+function uiDurationSec() {
+    if (isRoutingToXiaoAi() && window.XiaoAi && typeof window.XiaoAi.durationMs === 'function') {
+        const ms = Number(window.XiaoAi.durationMs());
+        if (ms > 0) return ms / 1000;
+    }
+    const local = Number(audio.duration);
+    return Number.isFinite(local) && local > 0 ? local : 0;
+}
+
 function startDragging(e, type) {
     if (e.type === 'touchstart') e.preventDefault(); // Prevent scrolling while seeking
     isDragging = type;
@@ -1579,8 +1599,16 @@ function startDragging(e, type) {
 
 function stopDragging() {
     if (isDragging === 'progress' && Number.isFinite(dragPercentage)) {
-        // 只有当最终位置与上次 seek 的位置差异较大时，才执行最后一次 seek
-        if (Math.abs(dragPercentage - lastSeekPct) > 0.001) {
+        if (isRoutingToXiaoAi()) {
+            // 投送模式：改 audio.currentTime 对音箱没有任何作用（audio 已 pause），
+            // 只能让服务端重签一条「从第 N 秒开头」的流再投送一次。这一步有 0.3~1s 断音，
+            // 所以只在松手时发一次，拖动过程中一次都不发。
+            const duration = uiDurationSec();
+            if (duration > 0 && typeof window.XiaoAi.seek === 'function') {
+                void window.XiaoAi.seek(Math.max(0, Math.min(1, dragPercentage)) * duration);
+            }
+        } else if (Math.abs(dragPercentage - lastSeekPct) > 0.001) {
+            // 只有当最终位置与上次 seek 的位置差异较大时，才执行最后一次 seek
             audio.currentTime = dragPercentage * audio.duration;
             if (typeof lyricPlayer !== 'undefined' && lyricPlayer) {
                 lyricPlayer.play(audio.currentTime * 1000);
@@ -1600,7 +1628,8 @@ function handleDragMove(e) {
 
     if (isDragging === 'progress') {
         const container = document.getElementById('progress-container');
-        if (!container || !audio.duration || !Number.isFinite(audio.duration)) return;
+        const barDuration = uiDurationSec();
+        if (!container || !barDuration) return;
         const rect = container.getBoundingClientRect();
         const x = clientX - rect.left;
         const pct = Math.max(0, Math.min(1, x / rect.width));
@@ -1609,7 +1638,7 @@ function handleDragMove(e) {
 
         // 1. Update UI immediately (Always smooth)
         document.getElementById('progress-bar').style.width = `${pct * 100}%`;
-        document.getElementById('time-current').innerText = formatTime(pct * audio.duration);
+        document.getElementById('time-current').innerText = formatTime(pct * barDuration);
 
         // 2. Throttled update of audio position (Live Seeking)
         const now = Date.now();
@@ -1617,17 +1646,24 @@ function handleDragMove(e) {
             // 只有当进度百分比发生较明显变化（大于 0.1%）时才执行 seek
             // 这可以防止鼠标微小抖动导致的“原地复读”感，并允许停下时正常播放（预览）
             if (Math.abs(pct - lastSeekPct) > 0.001) {
-                audio.currentTime = pct * audio.duration;
+                if (isRoutingToXiaoAi()) {
+                    // 投送模式：拖动过程中一次都不真跳。每跳一次 = 服务端重新投送一次，
+                    // 中间有 0.3~1s 断音，100ms 一次会把音箱打断到根本没法播；松手时统一跳。
+                    lastSeekTime = now;
+                    lastSeekPct = pct;
+                } else {
+                    audio.currentTime = pct * audio.duration;
 
-                // 同步更新歌词进度
-                if (typeof lyricPlayer !== 'undefined' && lyricPlayer) {
-                    lyricPlayer.play(audio.currentTime * 1000);
-                    // 强制歌词对齐但不等待平滑滚动，保持灵敏度
-                    scrollToActiveLine(true);
+                    // 同步更新歌词进度
+                    if (typeof lyricPlayer !== 'undefined' && lyricPlayer) {
+                        lyricPlayer.play(audio.currentTime * 1000);
+                        // 强制歌词对齐但不等待平滑滚动，保持灵敏度
+                        scrollToActiveLine(true);
+                    }
+
+                    lastSeekTime = now;
+                    lastSeekPct = pct;
                 }
-
-                lastSeekTime = now;
-                lastSeekPct = pct;
             }
         }
     } else if (isDragging === 'volume') {

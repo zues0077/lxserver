@@ -362,23 +362,37 @@ const serveTranscodedMp3 = async (
 ) => {
   const durationMs = Number(payload.durationMs) || 0
   const fadeOutSec = Number(payload.fadeOutSec) || 0
+  const seekSec = Math.max(0, Math.floor(Number(payload.seekSec) || 0))
   const filename = payload.filename || 'track.mp3'
 
   // 1. 已有转码产物
-  if (payload.mp3Path && fs.existsSync(payload.mp3Path) && isMp3File(payload.mp3Path)) {
-    syncLog.info(`[XiaoAi] mp3 缓存命中，本地直发：${filename}`)
-    serveLocalFile(req, res, payload.mp3Path, filename, payload.sid, durationMs)
+  //
+  // seek 场景要额外校验：切片产物只认 seek 目录下的文件。否则 token 里若沿用了
+  // `<缓存>/xiaoai/<key>.mp3`（整首），这里会命中它并从第 0 秒发出去 —— 拖动进度条
+  // 看起来"没反应"，实际上是被这份完整缓存截胡了。
+  const cachedMp3 = String(payload.mp3Path || '')
+  const seekDirMark = `${path.sep}seek${path.sep}`
+  const cachedUsable =
+    !!cachedMp3 &&
+    fs.existsSync(cachedMp3) &&
+    isMp3File(cachedMp3) &&
+    (seekSec <= 0 || cachedMp3.includes(seekDirMark))
+  if (cachedUsable) {
+    syncLog.info(`[XiaoAi] mp3 缓存命中，本地直发：${filename}${seekSec > 0 ? `（seek ${seekSec}s 切片）` : ''}`)
+    serveLocalFile(req, res, cachedMp3, filename, payload.sid, durationMs)
     return
   }
 
   // 2. 源是本地文件
   if (payload.path) {
-    if (isMp3File(payload.path)) {
+    // seek 时不能直接发整首：必须让 ffmpeg 带 `-ss` 重新产出一份，否则等于没跳。
+    if (isMp3File(payload.path) && seekSec <= 0) {
       serveLocalFile(req, res, payload.path, filename, payload.sid, durationMs)
       return
     }
-    const dest = payload.mp3Path || `${payload.path}.mp3`
-    const result = await transcodeFileToMp3(payload.path, dest, { fadeOutSec, durationMs })
+    const dest = cachedMp3 || `${payload.path}.mp3`
+    const result = await transcodeFileToMp3(payload.path, dest, { fadeOutSec, durationMs, seekSec })
+
     if (result.ok && result.path) {
       serveLocalFile(req, res, result.path, filename, payload.sid, durationMs)
       return
@@ -429,7 +443,7 @@ const serveTranscodedMp3 = async (
 
   const startedAt = Date.now()
   let sent = 0
-  const transcoder = createMp3Transcoder(url, { fadeOutSec, durationMs })
+  const transcoder = createMp3Transcoder(url, { fadeOutSec, durationMs, seekSec })
 
   // 首字节迟迟不来时给一条可读告警：音箱端表现是「点了播放没声音」，
   // 光看「已发 0B」不知道是源慢还是 ffmpeg 出错，这里把两种信息都记下来。

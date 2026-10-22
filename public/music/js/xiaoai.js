@@ -47,6 +47,10 @@
         /** 暂停被降级为 stop（该机型不支持暂停），恢复时需重新投送 */
         remoteStopped: false,
         lastVolume: 50,
+        /** 当前这一路流从第几秒开始（拖动进度条后非 0）：设备上报的是流内位置，加上它才是曲内位置 */
+        seekOffsetMs: 0,
+        /** 当前投送曲目的整首时长（毫秒）：拖动进度条换算秒数要用它，audio.duration 在投送模式下不可靠 */
+        trackDurationMs: 0,
         /** 下一次投送的来源标记（自动续播时由 advanceToNext 设置），仅用于日志排查 */
         nextCaller: '',
     };
@@ -721,6 +725,116 @@
         setWatchHint('自动续播监听中…');
     };
 
+    /**
+     * 当前投送曲目的整首时长（毫秒，0 = 还没解析出来）。
+     *
+     * 投送模式下 audio 里装的不是这首歌，`audio.duration` 可能是上一首的甚至 NaN，
+     * 所以拖动进度条换算秒数必须用这里的值，否则会跳到错误位置。
+     */
+    const durationMs = () => {
+        const total = Number(state.trackDurationMs) > 0 ? Number(state.trackDurationMs) : 0;
+        if (total > 0) return total;
+        const streamed = Number(watch.audioDurationMs) > 0 ? Number(watch.audioDurationMs) : 0;
+        return streamed > 0 ? streamed + Number(state.seekOffsetMs || 0) : 0;
+    };
+
+    /**
+     * 记下「这一路流从第 N 秒开始」，并把已播时长基准换成剩余时长。
+     *
+     * 投送模式下进度不是靠 audio.currentTime（audio 已被 pause），而是 watchdog 用
+     * 「now - playingSince」算已播时长、再和设备上报的流内位置比对。seek 后不同步，
+     * watchdog 会以为已经播到接近曲尾，立刻触发自动切歌。
+     *
+     * 时长必须换成「剩余时长」：墙钟预判、预取触发都按它算；传整首会让音箱被提前掐掉。
+     * 返回剩余时长（毫秒，0 = 时长未知）。
+     */
+    const setTimelineOffset = positionSec => {
+        const sec = Math.max(0, Math.floor(Number(positionSec) || 0));
+        state.seekOffsetMs = sec * 1000;
+        if (!state.trackDurationMs && Number(watch.audioDurationMs) > 0) {
+            state.trackDurationMs = Number(watch.audioDurationMs);
+        }
+        const totalMs = Number(state.trackDurationMs) > 0 ? Number(state.trackDurationMs) : 0;
+        const remainingMs = totalMs > 0 ? Math.max(1000, totalMs - sec * 1000) : 0;
+        if (remainingMs > 0) watch.audioDurationMs = remainingMs;
+        return remainingMs;
+    };
+
+    /** 重置时间轴基准并按新时长重启守望（seek 后调用） */
+    const resetTimeline = positionSec => {
+        const remainingMs = setTimelineOffset(positionSec);
+        if (!watch.active) return;
+        if (watch.song) startWatch(watch.song, remainingMs);
+    };
+
+    /**
+     * 把进度条画到第 positionSec 秒。
+     *
+     * 投送模式下 audio 是暂停的，timeupdate 不触发，进度条不会自己走；
+     * 不主动画一次的话，松手后会看到指针弹回原位，以为没生效。
+     */
+    const paintProgress = positionSec => {
+        const totalMs = durationMs();
+        if (!(totalMs > 0)) return;
+        const sec = Math.max(0, Math.min(Number(positionSec) || 0, totalMs / 1000));
+        const bar = document.getElementById('progress-bar');
+        if (bar) bar.style.width = `${((sec * 1000) / totalMs) * 100}%`;
+        const cur = document.getElementById('time-current');
+        if (cur) {
+            cur.innerText = typeof formatTime === 'function'
+                ? formatTime(sec)
+                : `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+        }
+        // 总时长也刷一遍：投送模式下 timeupdate 不触发，这里可能还停在上一首的时长
+        const tot = document.getElementById('time-total');
+        if (tot) {
+            tot.innerText = typeof formatTime === 'function'
+                ? formatTime(totalMs / 1000)
+                : `${Math.floor(totalMs / 60000)}:${String(Math.floor((totalMs / 1000) % 60)).padStart(2, '0')}`;
+        }
+    };
+
+    /**
+     * 跳到第 positionSec 秒（投送模式）。
+     *
+     * 小爱没有 seek 指令，服务端只能复用 /play 时解析好的音源，重签一个「从第 N 秒开头」的
+     * token 再投送一次，所以中间会有 0.3~1s 断音——这是设备能力上限，songloft 同样如此。
+     */
+    const seek = async positionSec => {
+        const sec = Math.max(0, Math.floor(Number(positionSec) || 0));
+        if (!shouldRoute()) return { success: false, message: '当前不是小爱播放' };
+        const wasPaused = !!state.remotePaused;
+        try {
+            const result = await request('/seek', { positionSec: sec });
+            if (result && result.success) {
+                const done = Math.max(0, Number(result.seekSec) || sec);
+                const stamp = `${Math.floor(done / 60)}:${String(done % 60).padStart(2, '0')}`;
+                if (wasPaused) {
+                    // 保持原来的暂停态：重新投送会让音箱开始播，补一次 pause
+                    setTimelineOffset(done);
+                    try {
+                        await request('/pause', {});
+                    } catch (e) {
+                        /* 暂停失败就让音箱继续播，比卡住好 */
+                    }
+                    stopWatch();
+                    setWatchHint(`已跳转到 ${stamp}（保持暂停）`);
+                } else {
+                    resetTimeline(done);
+                    setWatchHint(`已跳转到 ${stamp}`);
+                }
+                paintProgress(done);
+            } else {
+                setWatchHint((result && result.message) || '跳转失败');
+            }
+            return result || { success: false };
+        } catch (e) {
+            console.warn('[小爱] 跳转失败', e);
+            setWatchHint(`跳转失败：${e && e.message ? e.message : e}`);
+            return { success: false, message: String((e && e.message) || e) };
+        }
+    };
+
     /** 播放器自身暂停时不让守望继续判定，避免用户暂停被当成「播完」 */
     const markRemotePaused = paused => {
         state.remotePaused = !!paused;
@@ -1073,6 +1187,10 @@
             updatePlayButtonSafe(true);
             const via = pushed && pushed.via ? `（${pushed.via}）` : '';
             if (typeof setPlayerStatus === 'function') setPlayerStatus(`正在小爱音箱播放：${song.name || ''}${via}`, false);
+            // 投送模式下 audio 里没有这首歌，duration 是上一首的甚至 NaN；
+            // 拖动进度条换算秒数只能用服务端解析出的真实时长
+            state.trackDurationMs = Number(pushed && pushed.audioDurationMs) || 0;
+            state.seekOffsetMs = 0;
             // 投送成功后开始守望，用于自动下一首（带上服务端解析出的真实时长）
             startWatch(song, pushed && pushed.audioDurationMs);
         } catch (e) {
@@ -1182,6 +1300,11 @@
         stop,
         toggleTarget,
         toggleAutoNext,
+        /** 投送模式下拖动进度条：跳到指定秒数（服务端重投一条以该秒开头的流） */
+        seek,
+        resetTimeline,
+        /** 当前投送曲目的整首时长（毫秒），拖动进度条换算秒数用 */
+        durationMs,
         reload: loadConfig,
         // 供调试/自动化测试查看守望状态
         watchState: () => ({
@@ -1193,6 +1316,7 @@
             // 服务端解析出的真实时长与当前采用的时长（排查「切早/切晚」时看这两个值）
             audioDurationMs: watch.audioDurationMs,
             durationMs: (watch.state && watch.state.durationMs) || 0,
+            seekOffsetMs: state.seekOffsetMs,
         }),
     };
 
