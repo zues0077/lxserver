@@ -306,11 +306,19 @@ const resolvePlayBaseUrl = (req: IncomingMessage, configured: string): string =>
   return getRequestOrigin(req)
 }
 
-/** 小爱投播接口的身份校验：返回 null 表示校验不通过，调用方应回 401 */
+/**
+ * 小爱投播接口的身份校验：返回 null 表示校验不通过，调用方应回 401。
+ *
+ * 匿名用户统一成 `_open`（不是 `open`）：
+ *  - 普通歌曲缓存的匿名目录叫 `_open`（fileCache.getCacheDir 的约定）
+ *  - 返回 `open` 会让小爱去 `cache/open/` 找缓存，**永远命中不了**播放器已经缓存好的歌，
+ *    每次投送都要重新下载；同时 `cache/open/xiaoai/` 的转码产物也不在
+ *    「权限与缓存限制」的统计范围内（统计/清理只看 `_open`），等于永远不受限额约束。
+ */
 const resolveXiaoAiUser = (req: IncomingMessage): string | null => {
   const clientUsername = req.headers['x-user-name'] as string | undefined
   if (!clientUsername || clientUsername === 'default' || clientUsername === 'open' || clientUsername === '_open') {
-    return 'open'
+    return '_open'
   }
   const verified = verifyUserAuth(req)
   if (!verified || verified !== clientUsername) return null
@@ -743,6 +751,12 @@ const applyMp3Unification = async (
   }
 
   if (target.url) {
+    // 源本身就是 mp3：不必转码（省 CPU，也避免 320k 再编码带来的音质损失）。
+    // 判据用探测到的 Content-Type 与 URL 后缀，任一命中即视为 mp3 直投。
+    const mime = String(target.contentType || '').toLowerCase()
+    const looksMp3 =
+      mime.includes('audio/mpeg') || mime.includes('audio/mp3') || /\.mp3(\?|#|$)/i.test(target.url)
+    if (looksMp3) return { ...target, contentType: 'audio/mpeg' }
     if (!(await isFfmpegAvailable())) return target
     return {
       ...target,

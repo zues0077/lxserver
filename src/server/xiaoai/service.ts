@@ -3,6 +3,7 @@ import { MinaAuth, type LoginResult, type QRPollResult, type TokenInfo } from '.
 import { MinaClient, PLAY_STATUS_PAUSED, type MinaDevice } from './client'
 import { DEFAULT_MUSIC_AUDIO_ID, needUseMusicApi } from './constants'
 import { isFfmpegAvailable } from './transcode'
+import { syncLog } from '../../utils/log4js'
 import { httpRequest } from './http'
 import {
   loadConfig,
@@ -346,8 +347,13 @@ class XiaoAiService {
         lyricsMode: lyricsWanted,
       })
       if (outcome.ok) {
-        const idPart = outcome.audioId ? `（audioID=${outcome.audioId}）` : ''
-        console.log(`[XiaoAi] 下发方式 ${outcome.via}${idPart} → ${deviceId}`)
+        const idPart = outcome.audioId ? `（）audioID=${outcome.audioId}` : ''
+        const lyricPart = lyricsWanted ? '｜歌词模式' : ''
+        const line = `[XiaoAi] 下发方式 ${outcome.via}${idPart}${lyricPart} → ${deviceId}`
+        console.log(line)
+        // 同时写进文件日志：容器部署时 stdout 在外部看不到，
+        // 「到底走了哪条回退分支」是排查触屏歌词问题最关键的线索
+        syncLog.info(line)
       }
       return outcome.ok
     })

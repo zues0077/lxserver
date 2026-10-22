@@ -373,6 +373,9 @@ const serveTranscodedMp3 = async (
     'Accept-Ranges': 'none',
     'X-Accel-Buffering': 'no',
   })
+  // 立刻把响应头推给音箱：ffmpeg 从网络源拉流要几秒才出第一帧，
+  // 不先 flush 的话音箱在「收到响应」这一步就超时了（听感就是点了没反应）。
+  res.flushHeaders?.()
 
   // tee：转码数据同时落盘，音箱播完重拉同一 URL 时就能命中本地文件
   let fileStream: fs.WriteStream | null = null
@@ -391,6 +394,15 @@ const serveTranscodedMp3 = async (
   const startedAt = Date.now()
   let sent = 0
   const transcoder = createMp3Transcoder(url, { fadeOutSec, durationMs })
+
+  // 首字节迟迟不来时给一条可读告警：音箱端表现是「点了播放没声音」，
+  // 光看「已发 0B」不知道是源慢还是 ffmpeg 出错，这里把两种信息都记下来。
+  const firstByteTimer = setTimeout(() => {
+    if (sent === 0) {
+      syncLog.warn(`[XiaoAi] mp3 转码 12 秒仍无输出，源可能很慢或不可达：${filename}`)
+    }
+  }, 12000)
+  ;(firstByteTimer as unknown as { unref?: () => void }).unref?.()
 
   // 注意：不能用 req 的 close 事件——IncomingMessage 的 close 在请求体读完就会触发，
   // 不是「客户端断开」，用它会在转码刚开始时就把 ffmpeg 杀掉。
@@ -414,6 +426,7 @@ const serveTranscodedMp3 = async (
 
   const finish = async () => {
     const outcome = await transcoder.done
+    clearTimeout(firstByteTimer)
     try {
       if (fileStream) {
         await new Promise<void>(resolve => fileStream!.end(resolve))

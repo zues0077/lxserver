@@ -106,7 +106,17 @@ export const buildFfmpegArgs = (source: string, options: TranscodeOptions = {}):
   const bitrate = options.bitrate || DEFAULT_MP3_BITRATE
   const fadeSec = Math.max(0, Number(options.fadeOutSec) || 0)
   const durationMs = Number(options.durationMs) || 0
-  const args = ['-hide_banner', '-nostdin', '-loglevel', 'error', '-i', source, '-vn']
+  const isRemote = /^https?:\/\//i.test(source)
+
+  const args = ['-hide_banner', '-nostdin', '-loglevel', 'error']
+  // 降低探测开销：网络源默认要分析 5 秒/5MB 才出第一帧，音箱端就是「点了播放半天没声」
+  args.push('-probesize', '1M', '-analyzeduration', '1000000')
+  if (isRemote) {
+    // 网络源偶发抖动时自动重连，避免转码中途断流（对本地文件无意义，故只给 http 源加）
+    args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5')
+  }
+  args.push('-i', source, '-vn')
+
   // 淡出至少要留 1 秒余量，短音频直接放弃淡出
   const durationSec = durationMs > 0 ? durationMs / 1000 : 0
   if (fadeSec > 0 && durationSec > fadeSec + 1) {
