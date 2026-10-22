@@ -1029,19 +1029,23 @@ if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
         const api = musicSdk?.[platform]
         const search = api?.musicSearch?.search
         if (typeof search !== 'function') return null
-        const res = await search.call(api.musicSearch, '周杰伦', 1, 3)
+        const res = await search.call(api.musicSearch, '周杰伦', 1, 10)
         const list = Array.isArray(res?.list) ? res.list : []
-        const pick = list.find((it: any) => it && it.songmid)
-        if (!pick) return null
-        return {
-          source: platform,
-          songmid: String(pick.songmid),
-          name: pick.name,
-          singer: pick.singer,
-          hash: pick.hash,
-          albumId: pick.albumId,
-          interval: pick.interval,
-        }
+        // 取多首而非一首：单曲恰好无版权/需会员会让该平台全部音源集体失败，
+        // 被误判成「平台侧异常」而赦免真凶。多候选让「第一首失败换下一首」真正生效。
+        const picks = list
+          .filter((it: any) => it && it.songmid)
+          .slice(0, 3)
+          .map((it: any) => ({
+            source: platform,
+            songmid: String(it.songmid),
+            name: it.name,
+            singer: it.singer,
+            hash: it.hash,
+            albumId: it.albumId,
+            interval: it.interval,
+          }))
+        return picks.length ? picks : null
       } catch {
         return null
       }

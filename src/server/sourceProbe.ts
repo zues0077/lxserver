@@ -105,7 +105,12 @@ export interface ProbeDeps {
   /** 取可用于探测的候选测试曲目（通常来自用户缓存索引） */
   getCachedSongs: () => ProbeTestSong[]
   /** 内置 SDK 搜索兜底：按平台取一首测试曲目 */
-  searchTestSong?: (platform: string) => Promise<ProbeTestSong | null>
+  /**
+   * 内置 SDK 搜索兜底，可返回多首候选。
+   * 只给一首的话，这一首恰好无版权/需会员就会让该平台所有音源集体失败，
+   * 进而被误判成「平台侧异常」—— 多候选是降误判最省事的手段。
+   */
+  searchTestSong?: (platform: string) => Promise<ProbeTestSong[] | ProbeTestSong | null>
 }
 
 export interface ProbeRunResult {
@@ -116,6 +121,11 @@ export interface ProbeRunResult {
   platformsOk: number
   platformsDown: number
   platformsSkipped: number
+  /**
+   * 本轮探测失败但被「平台侧疑似异常」赦免、未计入不可用的平台数。
+   * 没有这个数字，日志会出现「可用 56、不可用 0」而几十个失败人间蒸发的怪象。
+   */
+  platformsDeferred: number
   /** 本次新关闭的平台 */
   newlyDisabled: string[]
   /** 本次恢复可用的平台 */
@@ -187,6 +197,8 @@ interface ProbeConfig {
   testSongs: Record<string, Partial<ProbeTestSong>>
   /** 平台失败率超过该比例即视为「平台侧系统性异常」，本轮暂缓自动处置 */
   systemicFailureRatio: number
+  /** 「平台侧异常」成立所允许的最高成功率：高于此值说明有音源能播，不构成平台侧问题 */
+  suspectMaxOkRatio: number
   /** 平台侧疑似异常的平台停探半个周期（省掉注定失败的重复探测，配置可关） */
   suspectBackoff: boolean
 }
@@ -199,6 +211,38 @@ interface ProbeConfig {
  * 证据不足时宁可只报告、不自动处置。
  */
 const DEFAULT_SYSTEMIC_RATIO = 0.5
+/**
+ * 「平台侧异常」成立还要求该平台的成功比例低到没有对照组。
+ *
+ * 光看失败比例会得出荒谬结论：实测一轮 kw 探测 36 个、18 个成功（成功率 50%），
+ * 照样被判「平台侧系统性异常」。既然有一半音源能播，测试曲目就是可播的、平台也没限流，
+ * 剩下那些失败只可能是音源自己的后端挂了 —— 此时赦免等于把真凶全部放走。
+ *
+ * 只有成功率低到几乎没人能播，才谈得上「曲目不可播 / 平台整体限流」。
+ */
+const DEFAULT_SUSPECT_MAX_OK_RATIO = 0.05
+/**
+ * 失败原因里属于「音源侧硬故障」的特征。
+ *
+ * 聚合音源生态里几十个源共用同一批第三方后端，一个后端挂会让几十个源同时失败，
+ * 于是失败比例自然过半、触发上面的赦免。但这些失败与「测试曲目选得不好」毫无关系：
+ * 域名解析失败、连接被重置、源站 5xx、接口已废弃、加密方案过期 —— 都是铁证。
+ * 命中这些特征的失败，即使所在平台被判疑似异常，也不应被赦免。
+ */
+const HARD_FAILURE_PATTERN = new RegExp([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT',
+  'EHOSTUNREACH', 'EPIPE', 'socket hang up', 'getaddrinfo',
+  'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'certificate',
+  'Unknown cipher', 'unsupported cipher', 'digital envelope',
+  'HTTP\\s*5\\d\\d', '\\b5\\d\\d\\b\\s*(?:错误|Error)',
+  '已废弃', '已停用', '已下线', '已关闭', '请升级',
+].join('|'), 'i')
+
+/** 失败信息是否属于音源自身的硬故障（而非测试曲目不可播这类软失败） */
+const isHardFailure = (message: unknown): boolean => {
+  if (typeof message !== 'string' || !message) return false
+  return HARD_FAILURE_PATTERN.test(message)
+}
 /** 单个平台每轮最多尝试几首测试曲目（第一首失败后换歌重试，降低单曲失灵的误判） */
 const MAX_SONG_ATTEMPTS = 3
 /**
@@ -240,6 +284,7 @@ const configOf = (): ProbeConfig => {
     probeOnNewSource: c['customSource.probe.probeOnNewSource'] !== false,
     testSongs: rawTestSongs && typeof rawTestSongs === 'object' && !Array.isArray(rawTestSongs) ? rawTestSongs : {},
     systemicFailureRatio: ratioNumber(c['customSource.probe.systemicFailureRatio'], DEFAULT_SYSTEMIC_RATIO),
+    suspectMaxOkRatio: ratioNumber(c['customSource.probe.suspectMaxOkRatio'], DEFAULT_SUSPECT_MAX_OK_RATIO),
     suspectBackoff: c['customSource.probe.suspectBackoff'] !== false,
   }
 }
@@ -684,12 +729,15 @@ const pickTestSongs = async (platform: string, deps: ProbeDeps): Promise<ProbeTe
   searchAttempted.add(platform)
   try {
     const found = await deps.searchTestSong(platform)
-    if (found && found.songmid) {
+    const foundList = (Array.isArray(found) ? found : [found]).filter(
+      (it): it is ProbeTestSong => !!it && !!it.songmid
+    )
+    if (foundList.length) {
       // 兜底搜索到的曲目也放进池子，后续轮次可直接复用
       const exist = cachedSongPool.get(platform)
-      if (exist) exist.push(found)
-      else cachedSongPool.set(platform, [found])
-      return [found]
+      if (exist) exist.push(...foundList)
+      else cachedSongPool.set(platform, [...foundList])
+      return foundList.slice(0, MAX_SONG_ATTEMPTS)
     }
   } catch { /* ignore */ }
   return []
@@ -854,7 +902,7 @@ export async function runSourceProbe(
   const startedAt = Date.now()
   const empty: ProbeRunResult = {
     startedAt, durationMs: 0, sourcesChecked: 0, platformsChecked: 0,
-    platformsOk: 0, platformsDown: 0, platformsSkipped: 0,
+    platformsOk: 0, platformsDown: 0, platformsSkipped: 0, platformsDeferred: 0,
     newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [], suspectSkippedPlatforms: [],
     message: '未执行',
   }
@@ -889,7 +937,7 @@ export async function runSourceProbe(
 
     const result: ProbeRunResult = {
       startedAt, durationMs: 0, sourcesChecked: targets.length, platformsChecked: 0,
-      platformsOk: 0, platformsDown: 0, platformsSkipped: 0,
+      platformsOk: 0, platformsDown: 0, platformsSkipped: 0, platformsDeferred: 0,
       newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [], suspectSkippedPlatforms: [],
       message: '',
     }
@@ -1032,20 +1080,45 @@ export async function runSourceProbe(
       platformStats.set(job.platform, stat)
     }
     const suspectPlatforms = new Set<string>()
-    // 只有样本量够的平台才续期「停探」。定罪本身仍按原样（含小样本），
-    // 这样小音源库依旧受保护，但停探期不会因为哨兵全挂而无限续期。
+    /**
+     * 真正「几乎没人能播」的平台：失败比例过半 **且** 成功率低到没有对照组。
+     * 只有这一档才整档赦免失败，并续期停探。
+     *
+     * 有对照组的平台（失败过半但仍有若干音源成功）只赦免「软失败」，
+     * 命中硬故障特征（域名解析失败/连接重置/源站 5xx/接口已废弃/加密方案过期）的照常定罪 ——
+     * 已经证明曲目能播，那么这些源失败只能是它们自己的后端出了问题。
+     */
+    const fullSuspectPlatforms = new Set<string>()
+    /** 需要续期「停探」的平台（无对照组且样本量够，见 SUSPECT_MIN_SAMPLE） */
     const backoffPlatforms = new Set<string>()
     for (const [platform, stat] of platformStats) {
       if (stat.checked > 0 && stat.failed / stat.checked >= conf.systemicFailureRatio) {
         suspectPlatforms.add(platform)
         result.suspectPlatforms.push({ platform, checked: stat.checked, failed: stat.failed, ok: stat.ok })
+        const hasControlGroup = stat.ok / stat.checked > conf.suspectMaxOkRatio
+        if (hasControlGroup) continue
+        fullSuspectPlatforms.add(platform)
+        // 只有样本量够的平台才续期「停探」。定罪本身仍按原样（含小样本），
+        // 这样小音源库依旧受保护，但停探期不会因为哨兵全挂而无限续期。
         if (stat.checked >= SUSPECT_MIN_SAMPLE) backoffPlatforms.add(platform)
       }
     }
     if (suspectPlatforms.size) {
       result.suspectPlatforms.sort((a, b) => b.failed / b.checked - a.failed / a.checked)
-      console.warn('[音源巡检] ⚠ 以下平台在过半音源上同时失败，疑似平台侧问题（测试曲目不可播/平台限流），' +
-        `本轮暂缓自动处置：${result.suspectPlatforms.map(s => `${s.platform}(失败${s.failed}/探测${s.checked}，可用${s.ok})`).join('、')}`)
+      const fmt = (s: { platform: string; checked: number; failed: number; ok: number }) =>
+        `${s.platform}(失败${s.failed}/探测${s.checked}，可用${s.ok}${fullSuspectPlatforms.has(s.platform) ? '' : '，有对照组→硬故障仍处置'})`
+      console.warn('[音源巡检] ⚠ 以下平台在过半音源上同时失败：' +
+        `${result.suspectPlatforms.map(fmt).join('、')}`)
+    }
+    if (fullSuspectPlatforms.size) {
+      const noSuccess = result.suspectPlatforms.filter(
+        s => s.ok === 0 && fullSuspectPlatforms.has(s.platform)
+      ).map(s => s.platform)
+      if (noSuccess.length) {
+        console.warn('[音源巡检] ⓘ ' +
+          `${noSuccess.join('、')} 本轮没有任何音源探测成功，更可能是测试曲目不可播或平台整体不可用，` +
+          `而不是这些音源同时坏了；若每轮都如此，可在 config.js 里用 customSource.probe.testSongs 指定曲目`)
+      }
     }
 
     // 记录停探截止时间（半个周期）：这些平台下一轮不再重复探测，省下的时间留给真正需要探的平台
@@ -1076,9 +1149,13 @@ export async function runSourceProbe(
           continue
         }
         if (suspectPlatforms.has(platform)) {
-          // 平台本身可疑：证据不足以归罪这个音源，不判定不可用、更不自动关闭
-          ps.status = 'unknown'
-          continue
+          // 整档赦免：该平台几乎没有音源能播，失败更可能是测试曲目不可播 / 平台限流。
+          // 有对照组时只赦免软失败 —— 已经证明曲目能播，命中硬故障特征的就是这个音源自己的后端挂了
+          if (fullSuspectPlatforms.has(platform) || !isHardFailure(ps.lastError)) {
+            ps.status = 'unknown'
+            result.platformsDeferred++
+            continue
+          }
         }
         ps.status = 'down'
         result.platformsDown++
@@ -1134,6 +1211,7 @@ export async function runSourceProbe(
     result.message =
       `巡检 ${targets.length} 个音源的 ${result.platformsChecked} 个平台：` +
       `可用 ${result.platformsOk}、不可用 ${result.platformsDown}、跳过 ${result.platformsSkipped}` +
+      (result.platformsDeferred ? `（另有 ${result.platformsDeferred} 个失败因平台疑似异常暂缓，未计入不可用）` : '') +
       (result.newlyDisabled.length ? `；新关闭 ${result.newlyDisabled.length} 个平台` : '') +
       (result.restored.length ? `；恢复 ${result.restored.length} 个平台` : '') +
       (result.removed.length ? `；移除 ${result.removed.length} 个音源` : '') +

@@ -140,6 +140,9 @@ const config: LX.Config = {
   'customSource.probe.probeOnNewSource': true, // 新增音源是否立即巡检
   'customSource.probe.testSongs': {}, // 各平台测试曲目覆盖（留空则用缓存/内置搜索）
   'customSource.probe.systemicFailureRatio': 0.5, // 某平台在超过该比例的音源上同时失败 → 判定为平台侧异常，本轮只记录不自动处置
+  // 判定「平台侧异常」还要求该平台成功率低于此值。有音源能播就说明曲目可播、平台没限流，
+  // 此时过半失败是音源自己的后端挂了，不能整档赦免（只赦免非硬故障的失败）
+  'customSource.probe.suspectMaxOkRatio': 0.05,
 }
 
 export default config
