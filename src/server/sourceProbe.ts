@@ -31,6 +31,7 @@ import { getProxyAgent } from '@/modules/utils/proxy.js'
 import { syncLog } from '@/utils/log4js'
 import { markSourceBusy } from './sourceGuard'
 import { beginProbeQuiet, endProbeQuiet } from './probeQuiet'
+import { beginHostActivity, endHostActivity } from './sourceActivity'
 import type { ScheduledTask, TaskExecutionResult } from './task/types'
 
 export const PROBE_TASK_ID = 'custom_source_health_probe'
@@ -856,6 +857,9 @@ export async function runSourceProbe(
   statesCache.clear()
   searchAttempted.clear() // 每轮重新允许一次内置搜索，平台恢复后仍能拿到测试曲目
   poolRefreshedThisRound = false
+  // 巡检自身就是卡顿来源之一（并发回调的同步序列化开销会叠加），
+  // 这里留痕，好让归因把「巡检期内的卡顿」与「音源自发的卡顿」区分开
+  beginHostActivity('sourceProbe', `巡检中（${options.firstProbe ? '首轮' : '周期'}）`)
   // 巡检期会触发大量「预期内的失败解析」，开启静默把逐条错误聚合到轮末摘要
   beginProbeQuiet()
   // 探测期间会有持续的解析与网络开销，标记为「忙碌」避免被自检护栏误判成异常空转
@@ -937,6 +941,11 @@ export async function runSourceProbe(
     let cursor = 0
     const worker = async () => {
       while (true) {
+        // 处理完一个平台就让出一次事件循环：
+        // 并发回来的一批响应，每个都要在沙箱边界做 decontextify + JSON.parse，
+        // 挨在一起就糊成数秒的同步阻塞（实测巡检自身曾造成 7~15 秒卡顿）。
+        // setImmediate 只让出一个 tick，对巡检总时长的影响可以忽略。
+        await new Promise<void>(resolve => { setImmediate(resolve) })
         const index = cursor++
         if (index >= jobs.length) return
         const job = jobs[index]
@@ -1120,6 +1129,7 @@ export async function runSourceProbe(
     return failed
   } finally {
     running = false
+    endHostActivity('sourceProbe')
     clearInterval(busyTicker)
     // 退出静默，并把抑制掉的源错误日志汇总成少量几行（巡检期失败属预期内噪音）
     try {

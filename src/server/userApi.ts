@@ -8,6 +8,17 @@ import {
 } from './sourceGuard'
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { syncLog } from '../utils/log4js'
+import {
+    acquireRequestSlot,
+    getActivitySnapshot,
+    getRecentActivity,
+    jitterDelay,
+    noteCallback,
+    noteLoadEnd,
+    noteLoadStart,
+    noteRequest,
+    resetActivity,
+} from './sourceActivity'
 
 import needle from 'needle'
 import * as crypto from 'crypto'
@@ -247,6 +258,21 @@ export function getRecentSlowTimerCallbacks(): SlowTimerRecord[] {
     return recentSlowTimerCallbacks.slice()
 }
 
+/**
+ * 卡顿归因第三信号：卡顿窗口内**有活动**的音源。
+ *
+ * 慢回调只覆盖「回调本身同步执行很久」，而「一批响应同时回来」和「脚本正在加载」
+ * 这两类卡顿在回调视角上是分散的，必须靠请求/加载埋点才能看见。
+ */
+export function getRecentSourceActivity(windowMs: number): ReturnType<typeof getRecentActivity> {
+    return getRecentActivity(windowMs)
+}
+
+/** 诊断面板用：活动账本快照（在途请求数、累计请求/回调、加载耗时、是否被降速）。 */
+export function getSourceActivitySnapshot(): ReturnType<typeof getActivitySnapshot> {
+    return getActivitySnapshot()
+}
+
 const reportSlowTimerCallback = (ref: { owner: string; id: string; name: string }, kind: string, intervalMs: number | undefined, costMs: number): void => {
     if (costMs < SLOW_TIMER_CALLBACK_MS) return
     const msg = `[自定义源-${ref.name}] ${kind}回调耗时 ${costMs}ms（间隔 ${intervalMs ?? '未知'}ms）——` +
@@ -380,8 +406,17 @@ export function extractMetadata(script: string): Partial<UserApiInfo> {
 async function createLxRequest(
     isUnsafe: boolean = false,
     onSniffUpdate?: (alert: { name?: string, log?: string, updateUrl?: string }) => void,
-    pendingAborts?: Set<() => void>
+    pendingAborts?: Set<() => void>,
+    meta?: { owner: string; id: string; name: string }
 ) {
+    // 活动账本埋点：脚本视角的「发起请求」与「响应回来」都要记下来。
+    // 卡顿归因靠的就是这两个时间锚点——一批响应同时回来时，每个回调都要在
+    // 沙箱边界做 decontextify（同步深拷贝）+ JSON.parse，叠在一起就是数秒阻塞。
+    const owner = meta?.owner || ''
+    const id = meta?.id || ''
+    const name = meta?.name || ''
+    const tracked = !!owner && !!id
+
     // 自定义音源脚本调用 lx.request 是同步的，无法在调用时 await，
     // 因此这里预先按 http/https 各建一个 agent，调用时按目标协议取用。
     // 走 customSource 分类的独立开关（未配置时沿用 proxy.all.*）。
@@ -411,70 +446,107 @@ async function createLxRequest(
         }
 
         const abortHolder: { fn: (() => void) | null } = { fn: null }
+        let cancelled = false
+        let slotRelease: (() => void) | null = null
+        let slotReleased = false
+        const releaseSlotOnce = () => {
+            // 槽位只能还一次：回调正常结束与 abort 可能都走到这里
+            if (slotReleased) return
+            slotReleased = true
+            slotRelease?.()
+        }
+        if (tracked) noteRequest(owner, id, name)
 
-        const request = needle.request(method, url, data, requestOptions, (err: any, resp: any, body: any) => {
-            if (abortHolder.fn) pendingAborts?.delete(abortHolder.fn)
-            try {
-                if (err) {
-                    callback.call(null, decontextify(err), null, null)
-                } else {
-                    let parsedBody = body
-                    if (typeof body === 'string') {
-                        try {
-                            parsedBody = JSON.parse(body)
-                        } catch { }
-                    }
+            const launch = () => {
+                if (cancelled) { releaseSlotOnce(); return }
+                const request = needle.request(method, url, data, requestOptions, (err: any, resp: any, body: any) => {
+                    // 响应回来的时刻是卡顿归因的关键锚点，必须抢在任何同步处理之前记下
+                    if (tracked) noteCallback(owner, id, name)
+                    if (abortHolder.fn) pendingAborts?.delete(abortHolder.fn)
+                    try {
+                        if (err) {
+                            callback.call(null, decontextify(err), null, null)
+                        } else {
+                            let parsedBody = body
+                            if (typeof body === 'string') {
+                                try {
+                                    parsedBody = JSON.parse(body)
+                                } catch { }
+                            }
 
-                    // 自动嗅探第三方脚本通过 HTTP 响应返回的更新提醒 (例如独家音源、各大更新接口)
-                    if (onSniffUpdate && parsedBody && typeof parsedBody === 'object') {
-                        const targetData = parsedBody.data || parsedBody
-                        const updateMsg = targetData.updateMsg || targetData.log || targetData.updateLog || targetData.msg
-                        const updateUrl = targetData.updateUrl || targetData.url || targetData.downloadUrl
-                        if (updateMsg && (updateUrl || typeof updateMsg === 'string' && updateMsg.includes('更新'))) {
-                            onSniffUpdate({
-                                log: String(updateMsg),
-                                updateUrl: updateUrl ? String(updateUrl) : ''
-                            })
+                            // 自动嗅探第三方脚本通过 HTTP 响应返回的更新提醒 (例如独家音源、各大更新接口)
+                            if (onSniffUpdate && parsedBody && typeof parsedBody === 'object') {
+                                const targetData = parsedBody.data || parsedBody
+                                const updateMsg = targetData.updateMsg || targetData.log || targetData.updateLog || targetData.msg
+                                const updateUrl = targetData.updateUrl || targetData.url || targetData.downloadUrl
+                                if (updateMsg && (updateUrl || typeof updateMsg === 'string' && updateMsg.includes('更新'))) {
+                                    onSniffUpdate({
+                                        log: String(updateMsg),
+                                        updateUrl: updateUrl ? String(updateUrl) : ''
+                                    })
+                                }
+                            }
+
+                            let safeResp: any = {
+                                statusCode: resp.statusCode,
+                                statusMessage: resp.statusMessage,
+                                headers: resp.headers,
+                                body: decontextify(parsedBody)
+                            }
+
+                            // 核心修复：原生 VM 模式下，将响应对象通过 JSON 转换以修复原型链，但保留原始 Body 引用（如果不是对象）
+                            if (isUnsafe) {
+                                const jsonBody = (typeof parsedBody === 'object' && !Buffer.isBuffer(parsedBody))
+                                    ? JSON.parse(JSON.stringify(parsedBody))
+                                    : parsedBody;
+
+                                safeResp = JSON.parse(JSON.stringify({
+                                    statusCode: resp.statusCode,
+                                    statusMessage: resp.statusMessage,
+                                    headers: resp.headers
+                                }));
+                                safeResp.body = jsonBody;
+                            }
+
+                            callback.call(null, null, safeResp, safeResp.body)
                         }
+                    } catch (error: any) {
+                        callback.call(null, decontextify(error), null, null)
+                    } finally {
+                        // 槽位在回调彻底结束后才归还：回调体内的 decontextify/JSON.parse
+                        // 才是真正的同步开销，提前还槽会让下一路请求挤进同一个阻塞段
+                        releaseSlotOnce()
                     }
+                })
 
-                    let safeResp: any = {
-                        statusCode: resp.statusCode,
-                        statusMessage: resp.statusMessage,
-                        headers: resp.headers,
-                        body: decontextify(parsedBody)
-                    }
-
-                    // 核心修复：原生 VM 模式下，将响应对象通过 JSON 转换以修复原型链，但保留原始 Body 引用（如果不是对象）
-                    if (isUnsafe) {
-                        const jsonBody = (typeof parsedBody === 'object' && !Buffer.isBuffer(parsedBody))
-                            ? JSON.parse(JSON.stringify(parsedBody))
-                            : parsedBody;
-
-                        safeResp = JSON.parse(JSON.stringify({
-                            statusCode: resp.statusCode,
-                            statusMessage: resp.statusMessage,
-                            headers: resp.headers
-                        }));
-                        safeResp.body = jsonBody;
-                    }
-
-                    callback.call(null, null, safeResp, safeResp.body)
-                }
-            } catch (error: any) {
-                callback.call(null, decontextify(error), null, null)
+            const abortFn = () => {
+                const reqObj = (request as any).request
+                if (reqObj && !reqObj.aborted) reqObj.abort()
             }
-        })
+            abortHolder.fn = abortFn
+            if (cancelled) abortFn()
+            else if (pendingAborts) pendingAborts.add(abortFn)
+        }
 
-        const abortFn = () => {
-            const reqObj = (request as any).request
-            if (reqObj && !reqObj.aborted) reqObj.abort()
+        if (tracked) {
+            // 并发闸门：被自动降速的脚本会在这里排队，拿到槽位才真正发出请求。
+            // 脚本视角 lx.request 仍是同步返回 abort 函数，行为不变。
+            void acquireRequestSlot(owner, id).then(release => {
+                slotRelease = release
+                launch()
+            })
+        } else {
+            launch()
         }
-        abortHolder.fn = abortFn
-        if (pendingAborts) {
-            pendingAborts.add(abortFn)
+
+        return () => {
+            cancelled = true
+            if (abortHolder.fn) {
+                abortHolder.fn()
+                pendingAborts?.delete(abortHolder.fn)
+            }
+            releaseSlotOnce()
         }
-        return abortFn
     }
 }
 
@@ -512,6 +584,10 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
         trackedTimerRegistry.delete(id)
     }
     const trackedSetTimeout = (fn: Function, ms?: number, ...args: any[]) => {
+        // 长周期定时器加随机抖动：几个脚本的周期任务（典型是 600s 自排健康探测）
+        // 撞在同一刻会叠加成数秒阻塞，错峰后峰值明显下降。
+        // 账本与慢回调上报仍记标称周期，避免误判成「脚本自己把周期改了」。
+        const delay = typeof ms === 'number' ? jitterDelay(ms) : ms
         const id = setTimeout(() => {
             unregisterTimer(id)
             if (disposed) return
@@ -521,11 +597,12 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
             } finally {
                 reportSlowTimerCallback(fullApiInfo, '定时器', ms, Date.now() - startedAt)
             }
-        }, ms)
+        }, delay)
         registerTimer(id, 'timeout', ms)
         return id
     }
     const trackedSetInterval = (fn: Function, ms?: number, ...args: any[]) => {
+        const intervalDelay = typeof ms === 'number' ? jitterDelay(ms) : ms
         const id = setInterval(() => {
             if (disposed) return
             const startedAt = Date.now()
@@ -534,7 +611,7 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
             } finally {
                 reportSlowTimerCallback(fullApiInfo, '间隔定时器', ms, Date.now() - startedAt)
             }
-        }, ms)
+        }, intervalDelay)
         registerTimer(id, 'interval', ms)
         return id
     }
@@ -647,7 +724,8 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                     console.log(`[自定义源] [更新嗅探] 嗅探到源 ${fullApiInfo.name} 的更新提示: ${alert.log}`)
                 }
             },
-            pendingAborts
+            pendingAborts,
+            { owner: fullApiInfo.owner, id: fullApiInfo.id, name: fullApiInfo.name }
         ),
         send: (eventName: string, data: any) => {
             if (disposed) return
@@ -1233,7 +1311,26 @@ export async function callUserApiGetMusicUrl(
 
 // 辅助函数：加载单个音源（全量加载与增量重载共用同一实现，保证行为一致）
 // 返回值 needsSave 表示该音源的元数据（支持平台列表/版本等）发生了变化，需要回写 sources.json
+/**
+ * 加载埋点包装：脚本加载/重载要在主线程同步 eval 整个脚本（实测 61KB 脚本约 6 秒），
+ * 期间事件循环被完全独占。把这段时间窗记进活动账本，卡顿归因才能把
+ * 「谁正在加载」列为嫌疑人——此前这类卡顿一律归因失败。
+ */
 async function loadOneSource(
+    dirPath: string,
+    owner: string,
+    source: any,
+    stats: { loadedCount: number; isolatedCount?: number }
+): Promise<{ needsSave: boolean }> {
+    noteLoadStart(owner, source.id, source.name)
+    try {
+        return await loadOneSourceInner(dirPath, owner, source, stats)
+    } finally {
+        noteLoadEnd(owner, source.id, source.name)
+    }
+}
+
+async function loadOneSourceInner(
     dirPath: string,
     owner: string,
     source: any,
@@ -1409,6 +1506,13 @@ function unloadLoadedApi(apiKey: string) {
         loadedApis.delete(apiKey)
         try { old.dispose?.() } catch (e) { }
     }
+    // 清掉活动账本：音源已卸载，账本不该继续把它列为卡顿嫌疑人
+    if (old?.info?.owner && old?.info?.id) {
+        resetActivity(old.info.owner, old.info.id)
+        return
+    }
+    const idx = apiKey.indexOf('_')
+    if (idx > 0) resetActivity(apiKey.slice(0, idx), apiKey.slice(idx + 1))
 }
 
 /** 释放某个用户空间下所有已加载实例（全量重载前调用）。 */
