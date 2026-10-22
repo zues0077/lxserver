@@ -1002,6 +1002,99 @@ const validateReturnedMusicUrl = (rawUrl: any, sourceName?: string): string => {
     return trimmed
 }
 
+/** 取链的默认超时（毫秒）。脚本自身没有超时概念，卡住会让整个轮询无限期挂着。 */
+const DEFAULT_CALL_TIMEOUT_MS = 20000
+/** 链接可用性校验的请求超时（毫秒）。只在拿不到结论时才会拖时间，给小一点避免拖慢整次取链 */
+const VERIFY_TIMEOUT_MS = 3000
+
+/**
+ * 状态码是否代表「这个链接确定取不到」。
+ *
+ * 只认 404 / 410 / 5xx：403 / 401 / 405 几乎都是防盗链或 upstream 不支持 HEAD，
+ * 判死会误杀大量可用的源，得不偿失。导出是为了让单测能直接覆盖这张判定表。
+ */
+export const isUnplayableStatusCode = (code?: number): boolean =>
+    code === 404 || code === 410 || (typeof code === 'number' && code >= 500)
+
+const configNumber = (key: string, fallback: number): number => {
+    const raw = (global.lx && global.lx.config) ? (global.lx.config as any)[key] : undefined
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+/**
+ * 给取链调用套一层超时。
+ *
+ * 脚本里没有超时概念：某个源内部串行试十几二十个后端、或请求一个不响应的域名，
+ * 宿主就会一直 await 下去。轮询是串行的，一个卡住的源能把整次播放拖到不可用。
+ * 超时只是让宿主不再等待（脚本自身无法被强制中断），后续回调由 disposed 机制兜底。
+ */
+export const withTimeout = <T>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+        let settled = false
+        const timer = setTimeout(() => {
+            if (settled) return
+            settled = true
+            reject(new Error(message))
+        }, ms)
+        promise.then(
+            value => { if (!settled) { settled = true; clearTimeout(timer); resolve(value) } },
+            error => { if (!settled) { settled = true; clearTimeout(timer); reject(error) } }
+        )
+    })
+
+/**
+ * 校验音源返回的链接是否真的可取，返回 null 表示可用，否则返回不可用原因。
+ *
+ * 为什么需要它：字符串校验挡不住「URL 长得完全正常、实际是 404」。
+ * 实测某源对不存在的歌曲照样返回 `xxx.php?id=000000000&...`，实际请求是 nginx 404 页面，
+ * 宿主却判定「✓ 成功返回链接」并就此停止轮询 —— 后面三十多个能真正播放的源一个都不试，
+ * 用户点下去就是播放失败。
+ *
+ * 只把「确定取不到」判为失败：404 / 410 / 5xx。
+ * 403 / 401 / 405 更可能是防盗链或 upstream 不支持 HEAD，一律放行，绝不误杀可用的源。
+ * 网络错误与超时同样放行 —— 我们只是在做一次尽力的复核。
+ */
+export const verifyUrlPlayable = async (url: string, sourceName: string): Promise<string | null> => {
+    if ((global.lx && global.lx.config as any) && (global.lx.config as any)['customSource.verifyPlayable'] === false) {
+        return null
+    }
+    let referer = ''
+    try { referer = new URL(url).origin } catch { /* ignore */ }
+    const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ...(referer ? { 'Referer': referer } : {}),
+    }
+    const agent = await getProxyAgent(url, 'music').catch(() => undefined)
+    const request = async (method: 'head' | 'get'): Promise<number | undefined> => {
+        const resp: any = await needle(method, url, null, {
+            follow_max: 2,
+            response_timeout: VERIFY_TIMEOUT_MS,
+            read_timeout: VERIFY_TIMEOUT_MS,
+            agent,
+            headers: method === 'get' ? { ...headers, Range: 'bytes=0-0' } : headers,
+        })
+        return typeof resp?.statusCode === 'number' ? resp.statusCode : undefined
+    }
+    // 只把「确定取不到」判为失败：404 / 410 / 5xx。
+    // 403 / 401 / 405 更可能是防盗链或 upstream 不支持 HEAD，一律放行，绝不误杀可用的源。
+    // 网络错误与超时同样放行 —— 我们只是在做一次尽力的复核。
+    try {
+        const headCode = await request('head')
+        if (!isUnplayableStatusCode(headCode)) return null
+        // HEAD 判死不可尽信：不少 CDN / 防盗链只认 GET，HEAD 一律回 404 或 405。
+        // 所以再拿 1 字节的 Range GET 复核一次，两次都说取不到才判失败。
+        const getCode = await request('get')
+        if (!isUnplayableStatusCode(getCode)) return null
+        return typeof getCode === 'number' && getCode >= 500
+            ? `音源 [${sourceName}] 返回的链接源站报错（HTTP ${getCode}）`
+            : `音源 [${sourceName}] 返回的链接实际不存在（HTTP ${getCode}）`
+    } catch {
+        // 网络不通、超时、不支持 HEAD —— 一律当作可用，避免误伤
+        return null
+    }
+}
+
 // 调用自定义源的 getMusicUrl
 export async function callUserApiGetMusicUrl(
     source: string,
@@ -1241,6 +1334,8 @@ export async function callUserApiGetMusicUrl(
     // 2. 如果有多个源支持 -> 每个源试一次 (轮询)
 
     const attempts: any[] = []
+    // 单个音源取链的超时上限：脚本内部可能串行试十几个后端，默认给 20s。
+    const callTimeoutMs = configNumber('customSource.callTimeoutMs', DEFAULT_CALL_TIMEOUT_MS)
 
     if (supportedCount === 1) {
         const api = candidates[0]
@@ -1250,12 +1345,20 @@ export async function callUserApiGetMusicUrl(
             try {
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (第 ${i + 1}/${maxRetries} 次, 所属: ${api.info.owner})`)
 
-                const rawUrl = await api.callRequest('musicUrl', source, {
-                    musicInfo: normalizedSongInfo,
-                    quality: quality,
-                    type: quality
-                })
+                const rawUrl = await withTimeout(
+                    api.callRequest('musicUrl', source, {
+                        musicInfo: normalizedSongInfo,
+                        quality: quality,
+                        type: quality
+                    }),
+                    callTimeoutMs,
+                    `音源 [${api.info.name}] 取链超时（超过 ${callTimeoutMs}ms 未返回）`
+                )
                 const url = validateReturnedMusicUrl(rawUrl, api.info.name)
+                // 字符串校验挡不住「URL 正常但请求下来是 404」——实测某源对不存在的歌
+                // 照样返回可解析的链接，宿主判成功后停止轮询，用户点开就是播放失败。
+                const unplayable = await verifyUrlPlayable(url, api.info.name)
+                if (unplayable) throw new Error(unplayable)
 
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
                 const att = { name: api.info.name, status: 'success', message: `第 ${i + 1} 次尝试成功` }
@@ -1281,12 +1384,20 @@ export async function callUserApiGetMusicUrl(
             try {
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (所属: ${api.info.owner})`)
 
-                const rawUrl = await api.callRequest('musicUrl', source, {
-                    musicInfo: normalizedSongInfo,
-                    quality: quality,
-                    type: quality
-                })
+                const rawUrl = await withTimeout(
+                    api.callRequest('musicUrl', source, {
+                        musicInfo: normalizedSongInfo,
+                        quality: quality,
+                        type: quality
+                    }),
+                    callTimeoutMs,
+                    `音源 [${api.info.name}] 取链超时（超过 ${callTimeoutMs}ms 未返回）`
+                )
                 const url = validateReturnedMusicUrl(rawUrl, api.info.name)
+                // 同上：链接长得正常但请求下来是 404，必须判失败并继续试下一个源，
+                // 否则「第一个源假成功」会把后面几十个真能播的源全挡住。
+                const unplayable = await verifyUrlPlayable(url, api.info.name)
+                if (unplayable) throw new Error(unplayable)
 
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
                 const att = { name: api.info.name, status: 'success' }

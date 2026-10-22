@@ -143,6 +143,11 @@ const config: LX.Config = {
   // 判定「平台侧异常」还要求该平台成功率低于此值。有音源能播就说明曲目可播、平台没限流，
   // 此时过半失败是音源自己的后端挂了，不能整档赦免（只赦免非硬故障的失败）
   'customSource.probe.suspectMaxOkRatio': 0.05,
+
+  // ===== 自定义源「取链」（用户点播放时的实时解析） =====
+  // 与巡检无关：这里控制的是用户实际播放时，逐个音源要链接的行为。
+  'customSource.callTimeoutMs': 20000, // 单个音源取链的超时上限（脚本内部可能串行试十几个后端）
+  'customSource.verifyPlayable': true, // 拿到链接后再探一次，挡掉「URL 正常但实际 404」的假成功
 }
 
 export default config

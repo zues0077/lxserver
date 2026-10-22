@@ -1,6 +1,6 @@
 {
   "name": "lxserver",
-  "version": "1.5.12",
+  "version": "1.5.13",
   "private": true,
   "description": "LX Music 数据同步服务端（增强版）：内置 Web 播放器、自定义源自检护栏与平台可用性巡检",
   "scripts": {

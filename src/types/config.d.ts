@@ -583,5 +583,24 @@ declare namespace LX {
      * 而不是音源本身坏了。调低该值会更保守 (更多平台被暂缓处置), 调高会更激进。
      */
     'customSource.probe.systemicFailureRatio'?: number
+    /**
+     * 判定「平台侧系统性异常」还要求的成功率上限 (默认 0.05)。
+     *
+     * 平台失败比例过半时,若仍有音源探测成功 (成功比例高于该值),说明测试曲目可播、平台没整体限流,
+     * 此时只赦免「软失败」,命中硬故障特征的音源照常定罪并关闭平台。调高该值会更保守。
+     */
+    'customSource.probe.suspectMaxOkRatio'?: number
+    /**
+     * 用户点播放时,单个自定义音源取链的超时上限 (默认 20000ms)。
+     *
+     * 脚本内部可能串行试十几个后端,不套超时会把整次播放拖到不可用。
+     */
+    'customSource.callTimeoutMs'?: number
+    /**
+     * 取链成功后是否再探一次链接真实可达 (默认 true)。
+     *
+     * 用于挡掉「URL 格式正常但实际请求是 404」的假成功 —— 假成功会让轮询停在坏源上。
+     */
+    'customSource.verifyPlayable'?: boolean
   }
 }
