@@ -352,11 +352,20 @@ export class MinaClient {
     return fallback
   }
 
-  /** 把 player_get_play_status 的 info 解析成结构化对象（兼容 string / object 两种返回） */
-  parseStatusInfo(raw: { code: number; data?: any } | null): PlayStatusInfo {
-    const data = (raw?.data as any) || {}
-    // 部分固件把字段直接放在 data 上（无 info 包裹），先兼容这种形态
-    const info = data.info && typeof data.info === 'object' ? data.info : data
+  /**
+   * 把 player_get_play_status 的返回解析成结构化对象。
+   * 兼容性要点（实测触屏固件）：
+   *  - 真机返回 { code, info }，其中 info 可能是 JSON 字符串，需要 JSON.parse
+   *  - 也兼容 { code, data } 或把字段直接平铺在 raw 上的旧形态
+   */
+  parseStatusInfo(raw: { code: number; data?: any; info?: any } | null): PlayStatusInfo {
+    // 优先读 info（真机固件形态），其次 data；都没有则退回 raw 自身（平铺形态）
+    const top = (raw?.info ?? raw?.data) as any
+    const source = (top && (typeof top === 'object' || typeof top === 'string')) ? top : (raw as any) || {}
+    // 部分固件在 data/info 外层又包了一层 info 对象，再剥一层
+    const info = (source && typeof source === 'object' && source.info && typeof source.info === 'object')
+      ? source.info
+      : source
     let parsed: Record<string, unknown> = {}
     if (info && typeof info === 'object') {
       parsed = info as Record<string, unknown>
@@ -379,13 +388,19 @@ export class MinaClient {
     const volume = typeof parsed.volume === 'number'
       ? parsed.volume
       : (typeof sd.volume === 'number' ? sd.volume : -1)
+    // 把「外层 raw 的 extra_track_list（试听片段判定用）」一并带回，避免 preview 判定失效；
+    // 同时保留 play_song_detail，供前端版权闸门提示读取 unplayableCode。
+    const outer = (raw ?? {}) as any
     return {
       status: Number.isFinite(status) ? status : -1,
       volume,
       position,
       duration,
       title,
-      raw: parsed,
+      raw: {
+        ...parsed,
+        extra_track_list: outer.extra_track_list ?? (parsed as any).extra_track_list,
+      } as Record<string, unknown>,
     }
   }
 
