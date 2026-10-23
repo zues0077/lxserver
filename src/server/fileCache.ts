@@ -10,6 +10,7 @@ import { PassThrough } from 'stream'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 import { buildLyrics, parseLyrics } from '../utils/lrcTool'
 import { formatPlayTime } from '../utils/common'
+import { syncLog } from '@/utils/log4js'
 import { getUserSpace } from '../user'
 
 // --- Cache Naming Patterns ---
@@ -692,6 +693,52 @@ export const judgeAudioMismatch = (params: {
     return null
 }
 
+/**
+ * 比对「源音频自带的标签」与「用户点的歌」是不是同一首。
+ * 返回 null = 无法判断或匹配；返回字符串 = 不匹配原因。
+ *
+ * 这是唯一能识别「音源对无效 ID 返回另一首完整歌」的判据——那种音频时长看着正常、
+ * 码率也正常（实测 3:53 / 320kbps），只靠时长/码率完全拦不住。
+ *
+ * 只在「双重不匹配」时才判定串歌：歌名和歌手都跟请求对不上。
+ * 单边不匹配放行（换平台的曲名常带后缀、翻唱版歌手写法不同），避免误杀。
+ */
+export const judgeMetadataMismatch = (
+    requestName: unknown,
+    requestSinger: unknown,
+    tagTitle: unknown,
+    tagArtist: unknown,
+): string | null => {
+    const norm = (value: unknown) => String(value || '')
+        .toLowerCase()
+        .replace(/\([^)]*\)|\[[^\]]*\]|（[^）]*）|【[^】]*】/g, '')
+        .replace(/(live|remix|remaster(ed)?|伴奏|纯音乐|cover|feat\.?.*|版)$/g, '')
+        .replace(/[\s\-_/·,，.。!！?？'"“”‘’、:：;；&+]/g, '')
+        .trim()
+
+    const reqName = norm(requestName)
+    const reqSinger = norm(requestSinger)
+    const srcName = norm(tagTitle)
+    const srcSinger = norm(tagArtist)
+    if (!reqName || !srcName) return null // 源无标签：无从判断，放行
+
+    const alike = (a: string, b: string) => {
+        if (!a || !b) return true // 缺一边就不作为否决依据
+        if (a === b) return true
+        if (a.length >= 2 && b.length >= 2 && (a.includes(b) || b.includes(a))) return true
+        // 字符重叠率兜底：中文歌名常有一两个字差异（繁简/译名）
+        const setB = new Set(b.split(''))
+        let hit = 0
+        for (const ch of a.split('')) if (setB.has(ch)) hit++
+        return hit / Math.max(1, Math.min(a.length, b.length)) >= 0.5
+    }
+
+    const nameOk = alike(reqName, srcName)
+    const singerOk = !reqSinger || !srcSinger ? true : alike(reqSinger, srcSinger)
+    if (nameOk || singerOk) return null
+    return `音源返回的是另一首歌（标签「${String(tagTitle).slice(0, 40)}${tagArtist ? ' - ' + String(tagArtist).slice(0, 20) : ''}」，请求「${String(requestName).slice(0, 40)}」）`
+}
+
 const inspectAudioFile = (filePath: string, requestedQuality?: string) => {
     const audioContainer = detectAudioContainer(filePath)
     const ext = audioContainer === 'unknown' || audioContainer === 'encrypted'
@@ -712,6 +759,9 @@ const inspectAudioFile = (filePath: string, requestedQuality?: string) => {
             sampleRate: Number(tagger.sampleRate) || undefined,
             bitDepth: Number(tagger.bitDepth) || undefined,
             duration,
+            // 源文件自带的标签（写标签前读取），用来判断「音源是不是给了别的歌」
+            title: tagger.title ? String(tagger.title) : undefined,
+            artist: tagger.artist ? String(tagger.artist) : undefined,
         }
     } catch (e) {
         const detectedQuality = detectQualityFromBitrate(undefined, ext)
@@ -723,6 +773,8 @@ const inspectAudioFile = (filePath: string, requestedQuality?: string) => {
             sampleRate: undefined,
             bitDepth: undefined,
             duration: undefined,
+            title: undefined,
+            artist: undefined,
         }
     } finally {
         try { if (tagger) tagger.dispose() } catch (e) { }
@@ -1751,7 +1803,9 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
                             sizeBytes: cached.size,
                         })
                         if (reason) {
-                            console.warn(`[文件缓存] 命中与曲目不符的缓存 (${cached.filename})：${reason}，予以忽略并剔除`)
+                            const line = `[文件缓存] 命中与曲目不符的缓存 (${cached.filename})：${reason}，予以忽略并剔除`
+                            console.warn(line)
+                            syncLog.warn(line)
                             indexManager.remove(normalizedUsername, id, folder, cached.quality)
                             try { fs.unlinkSync(filePath) } catch { }
                             continue
@@ -2518,9 +2572,12 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                     actualSec: actualDurationSec,
                     bitrate: inspection.bitrate,
                     sizeBytes: tempSize,
-                })
+                }) || judgeMetadataMismatch(songInfo.name, songInfo.singer, inspection.title, inspection.artist)
                 if (mismatch) {
-                    console.warn(`[文件缓存] ${mismatch}，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`)
+                    const line = `[文件缓存] ${mismatch}，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`
+                    console.warn(line)
+                    // console 只进容器 stdout，容器外看不到；排障必须双写文件日志
+                    syncLog.warn(line)
                     safeUnlink(fileStream, tempPath)
                     fail(new Error(`${mismatch}，已拒绝写入缓存`))
                     return
