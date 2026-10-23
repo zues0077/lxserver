@@ -10,6 +10,7 @@ import { PassThrough } from 'stream'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 import { buildLyrics, parseLyrics } from '../utils/lrcTool'
 import { formatPlayTime } from '../utils/common'
+import { judgeAudioMismatch, judgeMetadataMismatch } from '@/utils/audioGuard'
 import { syncLog } from '@/utils/log4js'
 import { getUserSpace } from '../user'
 
@@ -648,95 +649,6 @@ export const parseDurationSeconds = (value: unknown): number => {
     if (parts.length === 2) return Math.round(parts[0] * 60 + parts[1])
     if (parts.length === 3) return Math.round(parts[0] * 3600 + parts[1] * 60 + parts[2])
     return 0
-}
-
-/**
- * 判定一份音频是否与请求的曲目明显不符（占位音、静音、试听片段、别的版本）。
- * 返回 null = 可用；返回字符串 = 拒绝原因。
- *
- * 原则：只在「能可靠判定」时才拒绝。误杀正常音频会让用户点歌直接失败，
- * 比听到一段占位音更难解释，所以阈值一律取宽。
- *
- * 两条判据分支：
- *  1. 期望时长已知（调用方给了 interval）：沿用原有的试听片段判据，另加「时长明显偏离」
- *     ——音源对无效 ID 返回别的歌时，时长通常差 30s 以上。
- *  2. 期望时长未知（调用方没给 interval，`/play` 的兜底路径常见）：原来整段校验被跳过，
- *     脏文件直接落盘。这里改用绝对阈值兜底：正常音乐不会有 <30s 或 <64kbps 的音频。
- */
-export const judgeAudioMismatch = (params: {
-    expectedSec: number
-    actualSec: number
-    bitrate?: number
-    sizeBytes?: number
-}): string | null => {
-    const expected = Math.max(0, Number(params.expectedSec) || 0)
-    const actual = Math.max(0, Number(params.actualSec) || 0)
-    const bitrate = Number(params.bitrate) || 0
-    const size = Number(params.sizeBytes) || 0
-
-    if (expected > 60 && actual > 0) {
-        if (actual < 60) return `音频过短 (${actual}s / 预期 ${expected}s)`
-        if (actual < expected * 0.5) return `明显短于预期 (${actual}s / 预期 ${expected}s)`
-        if (actual <= 90 && expected - actual > 45) return `疑似试听片段 (${actual}s / 预期 ${expected}s)`
-        // 明显偏长（如串成了整张专辑/长混音）：只在差得离谱时拦，避免误杀正常的现场版/前奏差异
-        if (actual - expected > Math.max(120, expected * 0.6)) return `时长与曲目严重不符 (${actual}s / 预期 ${expected}s)`
-        return null
-    }
-
-    if (expected === 0 && actual > 0) {
-        if (actual < 30) return `音频过短，疑似占位音 (${actual}s)`
-        if (bitrate > 0 && bitrate < 64) return `码率过低，疑似静音占位 (${bitrate}kbps)`
-    }
-    if (actual === 0 && size > 0 && size < 300 * 1024) {
-        return `音频无法解析且文件过小 (${size} bytes)`
-    }
-    return null
-}
-
-/**
- * 比对「源音频自带的标签」与「用户点的歌」是不是同一首。
- * 返回 null = 无法判断或匹配；返回字符串 = 不匹配原因。
- *
- * 这是唯一能识别「音源对无效 ID 返回另一首完整歌」的判据——那种音频时长看着正常、
- * 码率也正常（实测 3:53 / 320kbps），只靠时长/码率完全拦不住。
- *
- * 只在「双重不匹配」时才判定串歌：歌名和歌手都跟请求对不上。
- * 单边不匹配放行（换平台的曲名常带后缀、翻唱版歌手写法不同），避免误杀。
- */
-export const judgeMetadataMismatch = (
-    requestName: unknown,
-    requestSinger: unknown,
-    tagTitle: unknown,
-    tagArtist: unknown,
-): string | null => {
-    const norm = (value: unknown) => String(value || '')
-        .toLowerCase()
-        .replace(/\([^)]*\)|\[[^\]]*\]|（[^）]*）|【[^】]*】/g, '')
-        .replace(/(live|remix|remaster(ed)?|伴奏|纯音乐|cover|feat\.?.*|版)$/g, '')
-        .replace(/[\s\-_/·,，.。!！?？'"“”‘’、:：;；&+]/g, '')
-        .trim()
-
-    const reqName = norm(requestName)
-    const reqSinger = norm(requestSinger)
-    const srcName = norm(tagTitle)
-    const srcSinger = norm(tagArtist)
-    if (!reqName || !srcName) return null // 源无标签：无从判断，放行
-
-    const alike = (a: string, b: string) => {
-        if (!a || !b) return true // 缺一边就不作为否决依据
-        if (a === b) return true
-        if (a.length >= 2 && b.length >= 2 && (a.includes(b) || b.includes(a))) return true
-        // 字符重叠率兜底：中文歌名常有一两个字差异（繁简/译名）
-        const setB = new Set(b.split(''))
-        let hit = 0
-        for (const ch of a.split('')) if (setB.has(ch)) hit++
-        return hit / Math.max(1, Math.min(a.length, b.length)) >= 0.5
-    }
-
-    const nameOk = alike(reqName, srcName)
-    const singerOk = !reqSinger || !srcSinger ? true : alike(reqSinger, srcSinger)
-    if (nameOk || singerOk) return null
-    return `音源返回的是另一首歌（标签「${String(tagTitle).slice(0, 40)}${tagArtist ? ' - ' + String(tagArtist).slice(0, 20) : ''}」，请求「${String(requestName).slice(0, 40)}」）`
 }
 
 const inspectAudioFile = (filePath: string, requestedQuality?: string) => {
