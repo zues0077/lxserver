@@ -4810,13 +4810,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         cacheAuditRunning = true
         try {
           const report = await fileCache.auditCache({ username, limit, apply, intervalMs: 150 })
-          if (!apply && limit === 0) lastCacheAudit = { at: Date.now(), report }
+          // 明细只回非 clean 的：全绿时返回 37 条「没问题」对排查没有信息量
+          const publicItems = report.items.filter(item => item.verdict !== 'clean')
+          // 缓存用的也得是过滤后的版本，否则下次走 cachedReport 分支又会把全量明细吐出来
+          if (!apply && limit === 0) lastCacheAudit = { at: Date.now(), report: { ...report, items: publicItems } }
           res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' })
           res.end(JSON.stringify({
             success: true,
             ...report,
-            // 明细只回非 clean 的：全绿时返回 37 条「没问题」对排查没有信息量
-            items: report.items.filter(item => item.verdict !== 'clean'),
+            items: publicItems,
           }))
         } catch (error: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
