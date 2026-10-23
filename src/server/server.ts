@@ -1111,6 +1111,45 @@ const getCacheRequestUsername = (req: IncomingMessage): string | null => {
   return verifyUserAuth(req)
 }
 
+/** 最近一次全量体检结果（dry-run），供 /api/music/cache/audit 复用，避免每次刷新都重新解码 */
+let lastCacheAudit: { at: number; report: any } | null = null
+/** 同一时间只跑一个体检：全量体检要逐条解码文件，并发会把 IO 打满 */
+let cacheAuditRunning = false
+
+/**
+ * 启动后台体检（dry-run，只出清单不删文件）。
+ *
+ * 1.5.27 之前写入的缓存没有来源核验标记，里面可能混着「音源对失效 ID 兜底返回的别曲」——
+ * 现场样本是一条 3:53 / 320kbps 的完整歌，时长和码率都正常，本地两条判据同时失效。
+ * 只有回查音源自己登记的曲目信息才能识别，所以这里在启动后跑一次并写日志。
+ * 删除动作不在启动流程里做：误删用户缓存不可逆，必须由人通过 POST confirm 触发。
+ */
+const scheduleCacheAuditOnStartup = () => {
+  if ((global.lx?.config as any)?.['cache.originAuditOnStart'] === false) return
+  const timer = setTimeout(() => {
+    void (async () => {
+      if (cacheAuditRunning) return
+      cacheAuditRunning = true
+      try {
+        const report = await fileCache.auditCache({ username: '_open', apply: false, intervalMs: 200 })
+        lastCacheAudit = { at: Date.now(), report }
+        syncLog.info(
+          `[文件缓存] 启动体检完成：共 ${report.total} 条，干净 ${report.clean}，可疑 ${report.dirty}，无法判定 ${report.unverified}`,
+        )
+        for (const item of report.items.filter(entry => entry.verdict === 'dirty').slice(0, 20)) {
+          syncLog.warn(`[文件缓存] 启动体检发现可疑缓存 (${item.filename})：${item.reason}`)
+        }
+      } catch (error: any) {
+        syncLog.warn(`[文件缓存] 启动体检失败（不影响服务）：${error?.message || error}`)
+      } finally {
+        cacheAuditRunning = false
+      }
+    })()
+  }, 120000)
+  // 不要因为这个定时器拖住进程退出
+  timer.unref?.()
+}
+
 /** 定期清理过期用户 Token（每小时） */
 setInterval(() => {
   const now = Date.now()
@@ -4735,6 +4774,56 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
+        return
+      }
+
+      // 缓存来源体检：逐条核验缓存音频与曲目是不是同一首，专门识别「音源对失效 ID 兜底返回别曲」。
+      // GET 永远是 dry-run（只出报告）；删除必须走 POST + {"confirm":true}。
+      // 误删用户缓存不可逆，所以默认行为只能是「报告」，不能是「清理」。
+      if (pathname === '/api/music/cache/audit' && (req.method === 'GET' || req.method === 'POST')) {
+        const username = getCacheRequestUsername(req)
+        if (!username) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        if (cacheAuditRunning) {
+          res.writeHead(409, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: '体检正在进行中，完成后再试' }))
+          return
+        }
+        let payload: any = {}
+        if (req.method === 'POST') {
+          try { payload = JSON.parse((await readBody(req)) || '{}') } catch { payload = {} }
+        }
+        const rawLimit = req.method === 'POST' ? payload?.limit : urlObj.searchParams.get('limit')
+        const limit = Math.max(0, Number(rawLimit) || 0)
+        const apply = req.method === 'POST' && payload?.confirm === true
+
+        // 全量 dry-run 的结果复用（启动时已跑过一次），避免每次刷新页面都重新解码几十个文件
+        if (req.method === 'GET' && limit === 0 && lastCacheAudit && Date.now() - lastCacheAudit.at < 10 * 60 * 1000) {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' })
+          res.end(JSON.stringify({ success: true, cachedReport: true, ...lastCacheAudit.report }))
+          return
+        }
+
+        cacheAuditRunning = true
+        try {
+          const report = await fileCache.auditCache({ username, limit, apply, intervalMs: 150 })
+          if (!apply && limit === 0) lastCacheAudit = { at: Date.now(), report }
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' })
+          res.end(JSON.stringify({
+            success: true,
+            ...report,
+            // 明细只回非 clean 的：全绿时返回 37 条「没问题」对排查没有信息量
+            items: report.items.filter(item => item.verdict !== 'clean'),
+          }))
+        } catch (error: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: error?.message || '体检失败' }))
+        } finally {
+          cacheAuditRunning = false
+        }
         return
       }
 
@@ -10175,6 +10264,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
     }
     resolve(null)
     void registerLocalSyncEvent(wss as LX.SocketServer)
+    // 启动 2 分钟后跑一次缓存来源体检（dry-run）：老缓存可能混着音源兜底返回的别曲
+    scheduleCacheAuditOnStartup()
   })
 
   host = `http://${ip.includes(':') ? `[${ip}]` : ip}:${port}`

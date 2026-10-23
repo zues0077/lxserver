@@ -11,6 +11,7 @@ const { MusicTagger, MetaPicture } = require('music-tag-native')
 import { buildLyrics, parseLyrics } from '../utils/lrcTool'
 import { formatPlayTime } from '../utils/common'
 import { judgeAudioMismatch, judgeMetadataMismatch } from '@/utils/audioGuard'
+import { verifyTrackOrigin } from './sourceVerify'
 import { syncLog } from '@/utils/log4js'
 import { getUserSpace } from '../user'
 
@@ -201,6 +202,8 @@ export interface CacheItem {
     embedLyricError?: string
     coverCheckedVersion?: number
     coverCheckedMtime?: number
+    /** 源侧核验通过的时间戳（毫秒）。缺这个字段说明是 1.5.27 之前写入的老条目，尚未核验过 */
+    originVerifiedAt?: number
     coverCheckedSize?: number
     bitrate?: number
     sampleRate?: number
@@ -1677,6 +1680,118 @@ export const setCacheLocation = (location: string) => {
 
 export const getCacheLocation = () => currentCacheLocation
 
+/** 缓存体检结论 */
+export interface CacheAuditFinding {
+    verdict: 'dirty' | 'clean' | 'unverified'
+    reason?: string
+    id: string
+    name: string
+    singer: string
+    filename: string
+    quality: string
+    /** 文件真实时长（秒） */
+    actualSec: number
+    /** 索引/请求声明的时长（秒） */
+    expectedSec: number
+    bitrate?: number
+}
+
+/**
+ * 体检单条缓存：解码真实时长 → 跑三道判据（时长/码率、ID3 标签、源侧登记）。
+ *
+ * 为什么不能只看索引里的 `interval`：脏缓存的 `interval` 本身就是被污染过的
+ * （现场那条记录 interval=03:53，正好等于兜底音频的长度），用索引值自比一定会「一致」。
+ * 所以必须重新解码文件，拿真实时长去和源侧登记比对。
+ */
+export const auditCacheItem = async (
+    item: CacheItem,
+    username: string,
+    folder: 'cache' | 'music' = 'cache',
+): Promise<CacheAuditFinding> => {
+    const dir = getCacheDir(username, folder === 'music')
+    const filePath = path.join(dir, item.filename || '')
+    const base: CacheAuditFinding = {
+        verdict: 'unverified',
+        id: item.id,
+        name: item.name,
+        singer: item.singer,
+        filename: item.filename,
+        quality: item.quality,
+        actualSec: 0,
+        expectedSec: parseDurationSeconds(item.interval),
+        bitrate: item.bitrate,
+    }
+    if (!item.filename || !fs.existsSync(filePath)) {
+        return { ...base, verdict: 'dirty', reason: '文件不存在（索引残留）' }
+    }
+
+    let inspection: ReturnType<typeof inspectAudioFile> | null = null
+    try {
+        inspection = inspectAudioFile(filePath, item.quality)
+    } catch {
+        inspection = null
+    }
+    const actualSec = inspection?.duration ? Math.round(inspection.duration / 1000) : 0
+    const bitrate = Number(inspection?.bitrate) || Number(item.bitrate) || 0
+    const size = fs.existsSync(filePath) ? fs.statSync(filePath).size : item.size
+    base.actualSec = actualSec
+    base.bitrate = bitrate
+
+    const local = judgeAudioMismatch({ expectedSec: base.expectedSec, actualSec, bitrate, sizeBytes: size })
+        || judgeMetadataMismatch(item.name, item.singer, inspection?.title, inspection?.artist)
+    if (local) return { ...base, verdict: 'dirty', reason: local }
+
+    if (actualSec <= 0) return { ...base, verdict: 'unverified', reason: '无法解码出时长' }
+
+    const origin = await verifyTrackOrigin(item, actualSec, { expectedSec: base.expectedSec })
+    if (origin.verdict === 'suspect') return { ...base, verdict: 'dirty', reason: origin.reason }
+    if (origin.verdict === 'ok') return { ...base, verdict: 'clean' }
+    return { ...base, verdict: 'unverified', reason: origin.searched ? '源侧信息不足，无法判定' : '缺少音源标识，无法回查' }
+}
+
+/** 命中路径的核验去重：同一份文件在飞行中只核验一次 */
+const originVerifyInflight = new Set<string>()
+
+/**
+ * 命中缓存后的旁路核验（fire-and-forget）。
+ *
+ * `checkCache` 是同步函数、被投送链路直接调用，不能在这里等网络。
+ * 所以先照常返回缓存，后台再核验；核验不通过就删文件 + 移出索引，
+ * 下一次请求自然会重新解析。代价是「最多多放错一次」，换来投送延迟零增加。
+ */
+const scheduleOriginVerify = (
+    username: string,
+    folder: 'cache' | 'music',
+    songId: string,
+    cached: CacheItem,
+    filePath: string,
+    songInfo: any,
+) => {
+    const key = `${username}|${folder}|${songId}|${cached.quality}`
+    if (originVerifyInflight.has(key)) return
+    originVerifyInflight.add(key)
+
+    void (async () => {
+        try {
+            const finding = await auditCacheItem(cached, username, folder)
+            if (finding.verdict === 'dirty') {
+                const line = `[文件缓存] 命中后核验为脏缓存 (${cached.filename})：${finding.reason}，予以剔除`
+                console.warn(line)
+                syncLog.warn(line)
+                indexManager.remove(username, songId, folder, cached.quality)
+                try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath) } catch { }
+            } else if (finding.verdict === 'clean') {
+                // 核验通过就打标记，之后命中不再重复回查音源
+                indexManager.update(username, { ...cached, originVerifiedAt: Date.now() }, folder)
+            }
+        } catch {
+            /* 核验是增强项，任何异常都不影响播放 */
+        } finally {
+            originVerifyInflight.delete(key)
+        }
+    })()
+}
+
 export const checkCache = (songInfo: any, username?: string, isLyricCheck: boolean = false) => {
     try {
         const id = normalizeSongId(songInfo)
@@ -1723,6 +1838,12 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
                             continue
                         }
                     }
+                    // 老条目（1.5.27 之前写入）没有源侧核验标记：命中时挂一个后台核验。
+                    // 本地两条判据在这类条目上常常同时失效（标签缺失 + 时长接近），
+                    // 只有问过音源才知道音频到底是不是这首。
+                    if (!isLyricCheck && !cached.originVerifiedAt) {
+                        scheduleOriginVerify(normalizedUsername, folder, id, cached, filePath, songInfo)
+                    }
                     return {
                         exists: true,
                         path: filePath,
@@ -1731,8 +1852,7 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
                         quality: cached.quality,
                         folder: folder,
                         url: `/api/music/cache/file/${encodeURIComponent(normalizedUsername)}/${encodeURIComponent(fileName)}?folder=${folder}`
-                    }
-                } else {
+                    }                } else {
                     // Stale index entry, cleanup
                     if (!isLyricCheck) indexManager.remove(normalizedUsername, id, folder, cached.quality)
                 }
@@ -2479,12 +2599,29 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                 const expectedDurationSec = parseDurationSeconds(songInfo.interval || songInfo.meta?.interval)
                 const actualDurationSec = inspection.duration ? Math.round(inspection.duration / 1000) : 0
                 const tempSize = fs.existsSync(tempPath) ? fs.statSync(tempPath).size : 0
-                const mismatch = judgeAudioMismatch({
+                let mismatch = judgeAudioMismatch({
                     expectedSec: expectedDurationSec,
                     actualSec: actualDurationSec,
                     bitrate: inspection.bitrate,
                     sizeBytes: tempSize,
                 }) || judgeMetadataMismatch(songInfo.name, songInfo.singer, inspection.title, inspection.artist)
+                if (!mismatch) {
+                    // 两条本地判据都放行时，还有两种「它们根本判不了」的情形：
+                    //   ① 源文件没有 ID3 标签 → judgeMetadataMismatch 无从比对；
+                    //   ② 时长接近（现场样本 3:53 vs 请求 4:04，差 11s 卡在阈值内）→ 时长判据不触发。
+                    // 两者叠加就是 1.5.27 漏掉的那条脏缓存。这时改用音源自己的搜索结果当裁判，
+                    // 正常曲目（有标签且时长吻合）不会走到这里，不产生额外网络开销。
+                    const tagMissing = !String(inspection.title || '').trim() && !String(inspection.artist || '').trim()
+                    const driftSec = expectedDurationSec > 0 ? Math.abs(actualDurationSec - expectedDurationSec) : 0
+                    if (actualDurationSec > 0 && (tagMissing || driftSec > 8)) {
+                        try {
+                            const origin = await verifyTrackOrigin(songInfo, actualDurationSec, { expectedSec: expectedDurationSec })
+                            if (origin.verdict === 'suspect') mismatch = origin.reason || '源侧核验不通过'
+                        } catch {
+                            /* 核验是增强项，异常时按原有判据放行 */
+                        }
+                    }
+                }
                 if (mismatch) {
                     const line = `[文件缓存] ${mismatch}，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`
                     console.warn(line)
@@ -3725,3 +3862,82 @@ export const deleteSubDirectory = (username: string | undefined, folder: 'cache'
     }
 }
 
+
+/** 单次体检的汇总结果 */
+export interface CacheAuditReport {
+    total: number
+    checked: number
+    clean: number
+    dirty: number
+    unverified: number
+    removed: number
+    applied: boolean
+    items: CacheAuditFinding[]
+    startedAt: number
+    finishedAt: number
+}
+
+/**
+ * 存量缓存体检：逐条解码真实时长，用「时长/码率 + ID3 标签 + 源侧登记」三道判据核验来源。
+ *
+ * `apply=false`（默认）只出报告不动文件——误删用户缓存是不可逆的，
+ * 所以删除必须由调用方显式确认。核验通过（clean）的条目会写 `originVerifiedAt`，
+ * 之后的命中路径不再重复回查音源。
+ *
+ * 只扫 cache 目录：music 目录是用户主动下载的资产，不属于缓存治理范围。
+ */
+export const auditCache = async (options: {
+    username?: string
+    limit?: number
+    intervalMs?: number
+    apply?: boolean
+    onProgress?: (done: number, total: number) => void
+} = {}): Promise<CacheAuditReport> => {
+    const normalizedUsername = (options.username && options.username !== '_open' && options.username !== 'default')
+        ? options.username
+        : '_open'
+    const limit = Math.max(0, Number(options.limit) || 0)
+    const intervalMs = Math.max(0, Number(options.intervalMs ?? 200) || 0)
+    const apply = !!options.apply
+
+    const all = indexManager.getAll(normalizedUsername, 'cache')
+    const targets = limit > 0 ? all.slice(0, limit) : all
+    const findings: CacheAuditFinding[] = []
+    let removed = 0
+
+    for (const item of targets) {
+        const finding = await auditCacheItem(item, normalizedUsername, 'cache')
+        findings.push(finding)
+
+        if (finding.verdict === 'clean') {
+            indexManager.update(normalizedUsername, { ...item, originVerifiedAt: Date.now() }, 'cache')
+        } else if (finding.verdict === 'dirty' && apply) {
+            const dir = getCacheDir(normalizedUsername, false)
+            const filePath = path.join(dir, item.filename || '')
+            indexManager.remove(normalizedUsername, item.id, 'cache', item.quality)
+            try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath) } catch { }
+            removed++
+            const line = `[文件缓存] 体检剔除脏缓存 (${item.filename})：${finding.reason}`
+            console.warn(line)
+            syncLog.warn(line)
+        }
+        options.onProgress?.(findings.length, targets.length)
+        if (intervalMs > 0 && findings.length < targets.length) {
+            await new Promise(resolve => setTimeout(resolve, intervalMs))
+        }
+    }
+
+    const count = (verdict: CacheAuditFinding['verdict']) => findings.filter(item => item.verdict === verdict).length
+    return {
+        total: targets.length,
+        checked: findings.length,
+        clean: count('clean'),
+        dirty: count('dirty'),
+        unverified: count('unverified'),
+        removed,
+        applied: apply,
+        items: findings,
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+    }
+}
