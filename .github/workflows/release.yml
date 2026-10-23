@@ -108,16 +108,23 @@ jobs:
 
       # 一次性把本平台的安装包传进 Release：文件名带空格，必须用 find -print0 取，
       # 直接 glob 会被空格拆词。--clobber 支持同版本重跑覆盖。
+      # 只收带架构标识的产物：electron-builder 在多架构构建时还会额外生成
+      # 「LX Music Server <ver> Setup.exe / Portable.exe」这类三合一整合包（各 300MB+），
+      # 与分架构包功能重复，历史 Release 也没有它们，这里过滤掉。
       - name: Upload installers to Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.init.outputs.VERSION }}
         run: |
-          shopt -s nullglob
+          set -euo pipefail
           files=()
           while IFS= read -r -d '' f; do
-            files+=("$f")
+            base=$(basename "$f")
+            case "$base" in
+              *x64*|*ia32*|*arm64*|*armv7l*|*x86_64*|*amd64*) files+=("$f") ;;
+              *) echo "跳过无架构标识的整合包：$base" ;;
+            esac
           done < <(find dist-electron -maxdepth 1 -type f \
             \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \) -print0)
 
@@ -176,16 +183,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.init.outputs.VERSION }}
+          REPO: ${{ github.repository }}
         run: |
-          EXPECTED=14
-          count=$(gh release view "$VERSION" --json assets --jq '.assets | length')
+          # 本 job 不 checkout，没有 .git 目录，gh 无法推断仓库，必须显式 --repo
+          EXPECTED=15
+          count=$(gh release view "$VERSION" --repo "$REPO" --json assets --jq '.assets | length')
           echo "Release $VERSION 当前资产数：$count（期望 >= $EXPECTED）"
-          gh release view "$VERSION" --json assets --jq '.assets[] | "  \(.name)  \(.size)"'
+          gh release view "$VERSION" --repo "$REPO" --json assets --jq '.assets[] | "  \(.name)  \(.size)"'
 
           if [ "$count" -lt "$EXPECTED" ]; then
             echo "::error::资产数 $count < $EXPECTED，构建产物不完整，保持 draft 不发布"
             exit 1
           fi
 
-          gh release edit "$VERSION" --draft=false --latest
+          gh release edit "$VERSION" --repo "$REPO" --draft=false --latest
           echo "已发布 $VERSION"
