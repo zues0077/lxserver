@@ -1,12 +1,22 @@
 name: Publish Docker image to GHCR
 
+# 发版策略（2026-10-23 起）：
+#   1. 推 main **不再构建镜像**，也不再消耗 Actions 分钟，只做代码托管。
+#   2. 只有打 vX.Y.Z tag 才出正式镜像（tag 与 package.json 版本必须一致）。
+#   3. 想在 246/120 实机试跑而不发版：Actions 页手动 Run，选 workflow_dispatch，
+#      产物是 `test-<短SHA>`，不覆盖 latest、不动版本号。
+# 额度背景：私有仓库的分钟数计费，免费额度 2000/月（macOS ×10、Windows ×2、Linux ×1）。
+
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      test_tag:
+        description: '测试镜像后缀（留空则用 commit 短 SHA，产物形如 test-abc1234）'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -14,17 +24,38 @@ permissions:
 
 concurrency:
   group: ghcr-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   docker:
-    name: Build and publish multi-platform image
+    name: Build and publish image
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Read version and short SHA
+        id: v
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHORT=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "short=$SHORT" >> $GITHUB_OUTPUT
+          echo "版本号: $VERSION  commit: $SHORT"
+
+      # 打 tag 时强制 tag 与 package.json 一致，避免镜像 tag 与代码版本错位
+      - name: Verify tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if [ "v${{ steps.v.outputs.version }}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json 版本 v${{ steps.v.outputs.version }} 不一致"
+            exit 1
+          fi
+          echo "tag 校验通过：${GITHUB_REF_NAME}"
+
+      # 多架构只在发版时构建；手动测试构建只出 amd64，省一半时间
       - name: Set up QEMU
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -37,36 +68,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 版本号统一以 package.json 为准，镜像 tag 直接用版本号，不再用 commit sha
-      - name: Read version from package.json
-        id: pkg
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "镜像版本号: $VERSION"
-
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/lxserver
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=v${{ steps.pkg.outputs.version }}
-            type=raw,value=${{ steps.pkg.outputs.version }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=v${{ steps.v.outputs.version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=${{ steps.v.outputs.version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=ref,event=tag
+            type=raw,value=test-${{ inputs.test_tag != '' && inputs.test_tag || steps.v.outputs.short }},enable=${{ github.event_name == 'workflow_dispatch' }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.description=LX Music Sync Server with incremental custom-source reload and event-loop watchdog
             org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.version=${{ steps.pkg.outputs.version }}
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          # 发版：amd64 + arm64；手动测试：只出 amd64（之前还带 arm/v7，QEMU 模拟把单次构建拖到 8 分钟，已去掉）
+          platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
