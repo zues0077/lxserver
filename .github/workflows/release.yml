@@ -6,12 +6,13 @@ name: Build and Release
 # 一旦超出就会在第一个 upload-artifact 步骤直接报
 # 「Artifact storage quota has been hit」，后续 job 全部跳过，Release 一个资产都出不来。
 # Release 资产不占 artifact 配额，因此直传是根治办法。
+#
+# 2026-10-23 起：**暂停自动出桌面版本**。打 tag 不再触发本 workflow，
+# 打 tag / 合 main 只走 docker-publish.yml 推 GHCR 镜像。
+# 需要出桌面安装包时，到 Actions 页手动 Run workflow（workflow_dispatch）即可。
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: write
