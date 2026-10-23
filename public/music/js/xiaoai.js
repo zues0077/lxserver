@@ -638,6 +638,26 @@
         if (el) el.textContent = watch.hint || '自动续播待命（播放时生效）';
     };
 
+    /**
+     * 音箱曲库版权闸门提示：unplayableCode===2 表示这首歌被音箱判成 VIP 不可播，
+     * 服务端/转码/音源都正常，音箱直接不来拉流，表现就是「投出去不响」。
+     * 这里把原因显式告诉用户，避免误以为是软件 bug。
+     */
+    const updateVipWarning = raw => {
+        const el = $('xiaoai-vip-warning');
+        if (!el) return;
+        const psd = (raw && raw.play_song_detail) || {};
+        if (psd.unplayableCode === 2) {
+            const title = psd.title ? `《${psd.title}》` : '这首歌';
+            const cp = psd.cp_origin ? `（来源：${psd.cp_origin}）` : '';
+            el.textContent = `⚠️ ${title}${cp} 被音箱版权闸门判定为 VIP 不可播（unplayableCode=2），音箱不会出声。` +
+                '这是音箱曲库限制、非服务端问题，请换源或换歌。';
+            el.classList.remove('hidden');
+        } else {
+            el.classList.add('hidden');
+        }
+    };
+
     const startHeartbeat = () => {
         try {
             if (!watch.worker && !watch.workerBroken && typeof Worker === 'function') {
@@ -1070,6 +1090,8 @@
                 startDelayMs: Number(data.startDelayMs) || 0,
                 userPaused: !!state.remotePaused,
             };
+            // 版权闸门提示：音箱把这首歌判成 VIP 不可播时给出明确原因
+            updateVipWarning(data.raw);
         } catch (e) {
             sample = { ok: false, at: Date.now() };
         } finally {
@@ -1117,6 +1139,8 @@
             caller: (meta && meta.caller) || 'manual',
         });
         if (!data.success) throw new Error(data.message || '投送失败');
+        // 投送成功后立刻检查版权闸门：音箱把这首歌判成 VIP 不可播时给出明确提示
+        updateVipWarning(data.raw);
         return data;
     };
 

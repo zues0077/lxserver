@@ -694,7 +694,16 @@ const resolveXiaoAiTrackRaw = async (
   )
 
   // 5. 现解析：原源 → 换源 → 音质降级，每个候选都做音频探测
-  const resolved = await resolvePlayableAudio(songInfo, quality, verifiedUsername)
+  let resolved = await resolvePlayableAudio(songInfo, quality, verifiedUsername)
+  // 偶发音源抖动（kg 平台尤甚）：首轮全失败时再给一次机会，避免无谓的 400 投送失败
+  if (!resolved.url) {
+    await new Promise(r => setTimeout(r, 800))
+    const retried = await resolvePlayableAudio(songInfo, quality, verifiedUsername)
+    if (retried.url) {
+      console.log(`[XiaoAi] 音源首轮失败，重试解析成功：${filename}`)
+      resolved = retried
+    }
+  }
   if (!resolved.url) {
     const detail = resolved.failures.slice(0, 3).join('；') || '没有可用音源'
     console.warn(`[XiaoAi] 音源全部不可播：${filename} → ${detail}`)
@@ -818,6 +827,15 @@ const applyMp3Unification = async (
 }
 
 /**
+ * 小爱音箱不兼容无损封装：flac/ape/wav 在部分固件上「能拉流但不出声」，且部分曲库会把无损曲
+ * 判成 VIP 版权闸门（unplayableCode=2）直接不拉流。所以无论用户选什么音质，投送一律降为最高有损
+ * 320k，再走 unifyMp3 统一转 mp3。
+ */
+const LOSSLESS_QUALITIES = new Set([
+  'flac', 'flac24bit', 'hires', 'atmos', 'atmos_plus', 'master', 'ape', 'wav',
+])
+
+/**
  * 投送前确定音频来源（对外入口），在原始解析结果上再叠加 mp3 统一。
  */
 const resolveXiaoAiTrack = async (
@@ -827,6 +845,12 @@ const resolveXiaoAiTrack = async (
   verifiedUsername: string,
   directStreamUrl = '',
 ): Promise<XiaoAiTrackTarget> => {
+  // 无损音质对小爱无意义：直接降为 320k，避免「投出去不响 / 被版权闸门拦掉」
+  if (LOSSLESS_QUALITIES.has(quality)) {
+    console.log(`[XiaoAi] 无损音质 ${quality} 对小爱无意义，统一降为 320k 转码投送`)
+    quality = '320k'
+  }
+
   const target = await resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, directStreamUrl)
   try {
     return await applyMp3Unification(target, songInfo, quality, verifiedUsername)
@@ -7004,7 +7028,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           }
         }
         const failed = (error: any, fallback: string) => {
-          sendJson({ success: false, message: error?.message || fallback }, 400)
+          const msg = error?.message || fallback
+          // 排障盲区：此前投送失败只回 400、不在服务端留任何痕迹（如 kg 源瞬态 400 无处可查）。
+          // 这里把原因与调用场景都记进日志，便于事后定位。
+          console.error(`[XiaoAi] 接口失败（${fallback}）：${msg}`)
+          syncLog.error(`[XiaoAi] 接口失败（${fallback}）：${msg}`)
+          sendJson({ success: false, message: msg }, 400)
         }
 
         // --- 配置读写 ---

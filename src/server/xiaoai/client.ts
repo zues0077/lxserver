@@ -354,7 +354,9 @@ export class MinaClient {
 
   /** 把 player_get_play_status 的 info 解析成结构化对象（兼容 string / object 两种返回） */
   parseStatusInfo(raw: { code: number; data?: any } | null): PlayStatusInfo {
-    const info = (raw?.data as any)?.info
+    const data = (raw?.data as any) || {}
+    // 部分固件把字段直接放在 data 上（无 info 包裹），先兼容这种形态
+    const info = data.info && typeof data.info === 'object' ? data.info : data
     let parsed: Record<string, unknown> = {}
     if (info && typeof info === 'object') {
       parsed = info as Record<string, unknown>
@@ -365,13 +367,24 @@ export class MinaClient {
         parsed = {}
       }
     }
+    // 触屏/部分固件把 title/duration/position 放在 play_song_detail 下，顶层不报；
+    // 顶层取不到时回退到 play_song_detail，保证曲名与进度能正常显示。
+    const sd = (parsed.play_song_detail && typeof parsed.play_song_detail === 'object')
+      ? (parsed.play_song_detail as Record<string, unknown>)
+      : {}
     const status = Number(parsed.status)
+    const title = String(parsed.title || sd.title || parsed.audioName || sd.media_name || '')
+    const duration = Number(parsed.duration) || Number(sd.duration) || 0
+    const position = Number(parsed.position) || Number(sd.position) || 0
+    const volume = typeof parsed.volume === 'number'
+      ? parsed.volume
+      : (typeof sd.volume === 'number' ? sd.volume : -1)
     return {
       status: Number.isFinite(status) ? status : -1,
-      volume: typeof parsed.volume === 'number' ? parsed.volume : -1,
-      position: Number(parsed.position) || 0,
-      duration: Number(parsed.duration) || 0,
-      title: String(parsed.title || parsed.audioName || parsed.media_name || ''),
+      volume,
+      position,
+      duration,
+      title,
       raw: parsed,
     }
   }
