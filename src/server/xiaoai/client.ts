@@ -1,3 +1,4 @@
+// [cache-bust 1.5.25] 强制 CI 重新编译以带上 C8(无损降320k)/A(失败日志)/B(status字段)/parseStatusInfo 修复 — 2026-10-23
 import {
   DEFAULT_HTTP_TIMEOUT,
   DEFAULT_MUSIC_AUDIO_ID,
