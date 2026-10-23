@@ -28,6 +28,7 @@ import { promisify } from 'util'
 
 import * as tunnel from 'tunnel'
 import { getProxyAgent } from '../modules/utils/proxy.js'
+import { tryResolveByAccount, isEnabled, isPriority, isSupportedSource, getPlatform } from './musicAccount'
 const inflate = promisify(zlib.inflate)
 const deflate = promisify(zlib.deflate)
 
@@ -1270,6 +1271,32 @@ export async function callUserApiGetMusicUrl(
         delete normalizedSongInfo.hash
     }
 
+    // ========== 平台账号优先通道 ==========
+    // 配置了某平台自己的会员账号时，先用账号取链：账号能拿到更高音质，
+    // 也能播自定义源拿不到的付费曲目。取不到再回落自定义音源，不打断原有链路。
+    if (isEnabled() && isPriority()) {
+        const acct = await tryResolveByAccount(source, normalizedSongInfo, quality)
+        if (acct?.url) {
+            const platformName = getPlatform(source)?.name || source
+            const attempt = {
+                name: `我的${platformName}账号`,
+                status: 'success',
+                message: `账号直连成功（${acct.via || '账号通道'}${acct.isVip ? '，会员音质' : ''}）`,
+            }
+            if (onProgress) await onProgress(attempt)
+            return {
+                url: acct.url,
+                type: acct.quality || quality,
+                sourceName: `我的${platformName}账号`,
+                sourceId: `account:${source}`,
+                attempts: [attempt],
+                // 只有确实还有自定义源可试时才告诉上层「可换源」，
+                // 否则会让播放器显示一个点了也没用的换源按钮
+                hasMoreSources: isSourceSupported(source, clientUsername),
+            }
+        }
+    }
+
     let supportedCount = 0;
     let lastError: Error | null = null;
 
@@ -1415,10 +1442,39 @@ export async function callUserApiGetMusicUrl(
     supportedCount = candidates.length
 
     if (supportedCount === 0) {
+        // 没有任何自定义源可用时，账号就是唯一出路 —— 这种情况不该受「优先级」影响，
+        // 否则会出现「明明配了会员账号，却因为没装自定义源而播不了」。
+        if (isEnabled()) {
+            const acct = await tryResolveByAccount(source, normalizedSongInfo, quality)
+            if (acct?.url) {
+                const platformName = getPlatform(source)?.name || source
+                const attempt = {
+                    name: `我的${platformName}账号`,
+                    status: 'success',
+                    message: `无可用自定义源，账号直连成功（${acct.via || '账号通道'}${acct.isVip ? '，会员音质' : ''}）`,
+                }
+                if (onProgress) await onProgress(attempt)
+                return {
+                    url: acct.url,
+                    type: acct.quality || quality,
+                    sourceName: `我的${platformName}账号`,
+                    sourceId: `account:${source}`,
+                    attempts: [attempt],
+                    hasMoreSources: false,
+                }
+            }
+        }
+
         const hasExcluded = Array.isArray(excludeApiSources) && excludeApiSources.length > 0
-        const errMsg = hasExcluded
-            ? `支持 ${source} 平台的自定义源均已尝试且无法播放（已尝试 ${excludeApiSources.length} 个音源）`
-            : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
+        const accountTried = isEnabled() && isSupportedSource(source)
+        let errMsg: string
+        if (hasExcluded) {
+            errMsg = `支持 ${source} 平台的自定义源均已尝试且无法播放（已尝试 ${excludeApiSources.length} 个音源）`
+        } else if (accountTried) {
+            errMsg = `未找到支持 ${source} 平台的自定义源，你配置的账号本次也未能取到链接（详见服务端日志 [平台账号]）`
+        } else {
+            errMsg = `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
+        }
         if (onProgress) await onProgress({ name: '系统', status: 'fail', message: errMsg })
         const err: any = new Error(errMsg)
         err.allSourcesExhausted = true
@@ -1526,6 +1582,30 @@ export async function callUserApiGetMusicUrl(
                 attempts.push(att)
                 if (onProgress) await onProgress(att)
                 continue
+            }
+        }
+    }
+
+    // ========== 账号兜底通道 ==========
+    // 配置为「自定义源优先」时，所有源都失败才轮到自己的账号。
+    // 这条路径的意义在于：自定义源拿不到（版权受限/源挂了）时，会员账号可能还能播。
+    if (isEnabled() && !isPriority()) {
+        const acct = await tryResolveByAccount(source, normalizedSongInfo, quality)
+        if (acct?.url) {
+            const platformName = getPlatform(source)?.name || source
+            const attempt = {
+                name: `我的${platformName}账号`,
+                status: 'success',
+                message: `自定义源全部失败，账号兜底成功（${acct.via || '账号通道'}）`,
+            }
+            if (onProgress) await onProgress(attempt)
+            return {
+                url: acct.url,
+                type: acct.quality || quality,
+                sourceName: `我的${platformName}账号`,
+                sourceId: `account:${source}`,
+                attempts: [...attempts, attempt],
+                hasMoreSources: false,
             }
         }
     }

@@ -80,6 +80,13 @@ const config: LX.Config = {
   'proxy.app.enabled': undefined,
   'proxy.app.address': '',
 
+  // ===== 平台账号（用自己的会员账号听各平台歌曲）=====
+  // 账号 Cookie 不存这里：config.js 会被本地备份与 WebDAV 同步上云，
+  // Cookie 是登录凭证，单独加密存在 data/music-accounts.json（见 src/server/musicAccount/store.ts）
+  'musicAccount.enabled': false, // 总开关：开启后取链时才会尝试用已配置的平台账号
+  'musicAccount.priority': true, // true=首选自己账号，失败再回落自定义音源；false=自定义音源失败后才试账号
+  'musicAccount.timeoutMs': 15000, // 单次账号取链的超时上限(ms)，超时即回落自定义音源
+
   // 访问路径配置
   'admin.path': '/admin', // 后台管理路径
   'player.path': '/', // 播放器路径，默认为根路径 /

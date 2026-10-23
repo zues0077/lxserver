@@ -184,6 +184,18 @@ class App {
         });
         this.initTagSelectors();
 
+        // 平台账号开关：改完立即落盘，不跟随「保存配置」按钮
+        // （账号开关与 Cookie 都走独立接口，避免被 config.js 备份带上云）
+        document.getElementById('music-acc-enabled')?.addEventListener('change', () => {
+            this.saveMusicAccountConfig();
+        });
+        document.getElementById('music-acc-priority')?.addEventListener('change', () => {
+            this.saveMusicAccountConfig();
+        });
+        document.getElementById('music-acc-timeout')?.addEventListener('change', () => {
+            this.saveMusicAccountConfig();
+        });
+
         // 日志查看
         document.getElementById('refresh-logs-btn')?.addEventListener('click', () => this.loadLogs());
         document.getElementById('log-type-select')?.addEventListener('change', () => this.loadLogs());
@@ -515,6 +527,7 @@ class App {
                 break;
             case 'config':
                 this.loadConfig();
+                this.refreshMusicAccounts();
                 break;
             case 'logs':
                 this.loadLogs();
@@ -4938,6 +4951,215 @@ class App {
         if (modal) {
             modal.classList.add('hidden');
         }
+    }
+
+    // ============================================================
+    // 平台账号：用自己的会员账号听各平台歌曲
+    // 数据来自 /api/music/accounts（后端按 PLATFORMS 返回，新增平台无需改这里）
+    // ============================================================
+
+    async refreshMusicAccounts() {
+        const listEl = document.getElementById('music-accounts-list');
+        if (!listEl) return;
+        listEl.innerHTML = '<div class="music-acc-loading">正在加载平台账号状态…</div>';
+
+        try {
+            const res = await this.request('/api/music/accounts');
+            const data = (res && res.data) || {};
+
+            // 同步总开关
+            const enabledEl = document.getElementById('music-acc-enabled');
+            const priorityEl = document.getElementById('music-acc-priority');
+            const timeoutEl = document.getElementById('music-acc-timeout');
+            if (enabledEl) enabledEl.checked = !!data.enabled;
+            if (priorityEl) priorityEl.checked = data.priority !== false;
+            if (timeoutEl) timeoutEl.value = data.timeoutMs || 15000;
+
+            const pathEl = document.getElementById('music-acc-store-path');
+            if (pathEl && data.storePath) {
+                pathEl.textContent = `账号以加密形式存于：${data.storePath}（不写入 config.js，不会随配置备份或 WebDAV 上云）`;
+            }
+
+            this.renderMusicAccounts(data.accounts || []);
+        } catch (e) {
+            listEl.innerHTML = `<div class="music-acc-loading">加载失败：${this.escapeHtml(e.message || String(e))}</div>`;
+        }
+    }
+
+    renderMusicAccounts(accounts) {
+        const listEl = document.getElementById('music-accounts-list');
+        if (!listEl) return;
+        if (!accounts.length) {
+            listEl.innerHTML = '<div class="music-acc-loading">后端未返回任何平台</div>';
+            return;
+        }
+
+        listEl.innerHTML = accounts.map(a => {
+            const v = a.lastVerify || {};
+            let statusClass = '';
+            let statusText = '未配置';
+            if (a.configured) {
+                statusText = '已配置';
+                if (v.ok) {
+                    if (v.verified === 'structural') {
+                        // 只做了结构校验的平台不标「已登录/会员」，避免给出没根据的绿色
+                        statusClass = 'ok';
+                        statusText = '结构校验通过';
+                    } else {
+                        statusClass = v.isVip ? 'vip' : 'ok';
+                        statusText = v.isVip ? '会员' : '已登录';
+                    }
+                } else if (v.at) {
+                    statusClass = 'bad';
+                    statusText = '校验未通过';
+                }
+            }
+
+            const meta = a.configured
+                ? `已保存 ${a.cookieLength} 字符（${this.escapeHtml(a.cookiePreview)}）`
+                : '尚未填写 Cookie';
+            const verifyMsg = v.message ? `<br><span style="opacity:.85">${this.escapeHtml(v.message)}</span>` : '';
+
+            return `
+            <div class="music-acc-item ${a.configured ? 'is-configured' : ''}" data-platform="${a.id}">
+                <div class="music-acc-item-head">
+                    <span class="music-acc-dot" style="background:${a.configured ? a.color : '#9ca3af'}"></span>
+                    <span class="music-acc-name">${this.escapeHtml(a.name)}</span>
+                    <span class="music-acc-status ${statusClass}">${statusText}</span>
+                </div>
+                <div class="music-acc-meta">${meta}${verifyMsg}</div>
+                <div class="music-acc-actions">
+                    <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">填写 Cookie</button>
+                    <button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('${a.id}')">验证</button>
+                    ${a.configured ? `<button type="button" class="btn-secondary" onclick="app.clearMusicAccount('${a.id}')">清除</button>` : ''}
+                    <button type="button" class="btn-secondary" onclick="app.openMusicAccountGuide('${a.id}')">如何获取</button>
+                </div>
+                <div class="music-acc-editor" id="music-acc-editor-${a.id}" style="display:none;">
+                    <textarea placeholder="粘贴从浏览器复制的 Cookie 整串，例如：MUSIC_U=xxx; __csrf=yyy; ..."></textarea>
+                    <div class="music-acc-actions" style="margin-top:.5rem;">
+                        <button type="button" class="btn-primary" onclick="app.saveMusicAccount('${a.id}')">保存</button>
+                        <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">取消</button>
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    editMusicAccount(platform) {
+        const box = document.getElementById(`music-acc-editor-${platform}`);
+        if (!box) return;
+        const willShow = box.style.display === 'none';
+        // 同时只展开一个编辑框，避免页面上堆好几个大文本框
+        document.querySelectorAll('.music-acc-editor').forEach(el => { el.style.display = 'none'; });
+        box.style.display = willShow ? 'block' : 'none';
+        if (willShow) box.querySelector('textarea')?.focus();
+    }
+
+    async saveMusicAccount(platform) {
+        const box = document.getElementById(`music-acc-editor-${platform}`);
+        const cookie = box?.querySelector('textarea')?.value || '';
+        if (!cookie.trim()) {
+            showError('请先粘贴 Cookie 内容');
+            return;
+        }
+        try {
+            await this.request('/api/music/accounts', {
+                method: 'POST',
+                body: JSON.stringify({ platform, cookie })
+            });
+            showSuccess('已保存（Cookie 加密存储，不会写入配置文件）');
+            box.style.display = 'none';
+            await this.refreshMusicAccounts();
+        } catch (e) {
+            showError(`保存失败：${e.message}`);
+        }
+    }
+
+    async clearMusicAccount(platform) {
+        const ok = await (window.showConfirm
+            ? window.showConfirm('确认清除', '清除后将无法用该账号取链，需要重新填写 Cookie。确认继续？')
+            : Promise.resolve(window.confirm('确认清除该平台的账号 Cookie？')));
+        if (!ok) return;
+        try {
+            await this.request('/api/music/accounts', {
+                method: 'DELETE',
+                body: JSON.stringify({ platform })
+            });
+            showSuccess('已清除');
+            await this.refreshMusicAccounts();
+        } catch (e) {
+            showError(`清除失败：${e.message}`);
+        }
+    }
+
+    async verifyMusicAccount(platform) {
+        showInfo('正在验证，请稍候…');
+        try {
+            const res = await this.request('/api/music/accounts/verify', {
+                method: 'POST',
+                body: JSON.stringify({ platform })
+            });
+            const info = (res && res.data) || {};
+            if (info.ok) {
+                showSuccess(info.isVip ? '验证通过：账号有效且为会员' : '验证通过：账号有效');
+            } else {
+                showError(`验证未通过：${info.message || '未知原因'}`);
+            }
+            await this.refreshMusicAccounts();
+        } catch (e) {
+            showError(`验证失败：${e.message}`);
+        }
+    }
+
+    async saveMusicAccountConfig() {
+        try {
+            const enabledEl = document.getElementById('music-acc-enabled');
+            const priorityEl = document.getElementById('music-acc-priority');
+            const timeoutEl = document.getElementById('music-acc-timeout');
+            await this.request('/api/music/accounts/config', {
+                method: 'POST',
+                body: JSON.stringify({
+                    enabled: enabledEl ? enabledEl.checked : undefined,
+                    priority: priorityEl ? priorityEl.checked : undefined,
+                    timeoutMs: timeoutEl ? Number(timeoutEl.value) : undefined
+                })
+            });
+            return true;
+        } catch (e) {
+            showError(`保存账号设置失败：${e.message}`);
+            return false;
+        }
+    }
+
+    /** 打开抓取引导。引导文案由后端平台定义下发，这里只负责展示。 */
+    async openMusicAccountGuide(platform) {
+        try {
+            // 引导文案由后端平台定义下发（前端不内置平台清单，避免两处维护）
+            if (!this.musicAccountGuides) this.musicAccountGuides = {};
+            if (!this.musicAccountGuides[platform]) {
+                const guide = await this.request(`/api/music/accounts/guide?platform=${encodeURIComponent(platform)}`);
+                this.musicAccountGuides[platform] = (guide && guide.data) || null;
+            }
+            const g = this.musicAccountGuides[platform];
+            const modal = document.getElementById('music-acc-guide-modal');
+            const titleEl = document.getElementById('music-acc-guide-title');
+            const domainEl = document.getElementById('music-acc-guide-domain');
+            const stepsEl = document.getElementById('music-acc-guide-steps');
+            const benefitEl = document.getElementById('music-acc-guide-benefit');
+            if (!modal) return;
+            if (titleEl) titleEl.textContent = `如何获取 ${g?.name || platform} 的 Cookie`;
+            if (domainEl) domainEl.textContent = g?.cookieDomain || '-';
+            if (stepsEl) stepsEl.innerHTML = (g?.guide || []).map(s => `<li>${this.escapeHtml(s)}</li>`).join('');
+            if (benefitEl) benefitEl.textContent = g?.benefit || '';
+            modal.style.display = 'flex';
+        } catch (e) {
+            showError(`获取引导失败：${e.message}`);
+        }
+    }
+
+    closeMusicAccountGuide() {
+        const modal = document.getElementById('music-acc-guide-modal');
+        if (modal) modal.style.display = 'none';
     }
 }
 

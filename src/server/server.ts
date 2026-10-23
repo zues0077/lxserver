@@ -45,6 +45,7 @@ import { getDownloadQualityCandidates } from './downloadQuality'
 import crypto from 'node:crypto'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
+import * as musicAccount from './musicAccount'
 import {
   xiaoAiService,
   buildStreamUrl,
@@ -7747,9 +7748,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const source = songInfo.source
             let result: any
 
+            // 账号通道独立于自定义源存在：即使一个自定义源都没装，
+            // 只要管理员配了自己的平台 Cookie，也应该能播。所以这里放宽进入条件。
+            const accountUsable = musicAccount.isEnabled() &&
+              musicAccount.isSupportedSource(source) &&
+              musicAccount.hasAccount(source)
+
             let customSourceError: string | null = null
             let attempts: any[] = []
-            if (isSourceSupported(source, verifiedUsername)) {
+            if (isSourceSupported(source, verifiedUsername) || accountUsable) {
               try {
                 console.log(`[歌曲播放] 使用自定义源解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
 
@@ -7769,12 +7776,18 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
             } else {
               // isSourceSupported = false: 无任何自定义源支持此平台，立即通知前端
-              void pushProgress({ name: '系统', status: 'fail', message: `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源` })
+              const why = musicAccount.isSupportedSource(source)
+                ? `未找到支持 ${source} 平台的自定义源；如已在「平台账号」里填写 Cookie，请确认总开关已打开`
+                : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
+              void pushProgress({ name: '系统', status: 'fail', message: why })
             }
 
             // 自定义源失败则直接报错（内置 SDK 无独立解析能力，回退无意义）
             if (!result) {
-              const errMsg = customSourceError || `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
+              const fallbackMsg = accountUsable
+                ? `自定义源与你配置的账号都未能取到链接（账号见 /health 日志里的 [平台账号] 记录）`
+                : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
+              const errMsg = customSourceError || fallbackMsg
               const err: any = new Error(errMsg)
               err.attempts = attempts
               throw err
@@ -8664,6 +8677,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'configBackup.retentionDays': global.lx.config['configBackup.retentionDays'] ?? 7,
             'configBackup.dir': global.lx.config['configBackup.dir'] ?? '',
             'snapshot.backupPath': global.lx.config['snapshot.backupPath'] ?? '',
+            'musicAccount.enabled': global.lx.config['musicAccount.enabled'] ?? false,
+            'musicAccount.priority': global.lx.config['musicAccount.priority'] !== false,
+            'musicAccount.timeoutMs': global.lx.config['musicAccount.timeoutMs'] ?? 15000,
             subsonicPortConflict: global.lx.subsonicPortConflict || null,
             configFilePath: global.lx.configPath || process.env.CONFIG_PATH || path.join(global.lx.dataPath, 'config.js'),
           }
@@ -8879,6 +8895,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
               if (newConfig['subsonic.enableDebug'] !== undefined) global.lx.config['subsonic.enableDebug'] = newConfig['subsonic.enableDebug']
               // [本地配置备份] configBackup 配置
+              // 平台账号（Cookie 本体不在这里保存，只存开关；Cookie 走 /api/music/accounts）
+              if (newConfig['musicAccount.enabled'] !== undefined) global.lx.config['musicAccount.enabled'] = !!newConfig['musicAccount.enabled']
+              if (newConfig['musicAccount.priority'] !== undefined) global.lx.config['musicAccount.priority'] = !!newConfig['musicAccount.priority']
+              if (newConfig['musicAccount.timeoutMs'] !== undefined) {
+                const tm = Number(newConfig['musicAccount.timeoutMs'])
+                global.lx.config['musicAccount.timeoutMs'] = Number.isFinite(tm) ? Math.min(60000, Math.max(3000, Math.floor(tm))) : 15000
+              }
+
               if (newConfig['configBackup.enable'] !== undefined) global.lx.config['configBackup.enable'] = !!newConfig['configBackup.enable']
               if (newConfig['configBackup.retentionDays'] !== undefined) {
                 const rd = Number(newConfig['configBackup.retentionDays'])
@@ -9302,6 +9326,146 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       }
 
       // Test Proxy API
+      // ==================== 平台账号（用自己的会员账号听歌） ====================
+      // 全部要求管理员身份：Cookie 是登录凭证，绝不能让普通用户读写。
+      if (pathname === '/api/music/accounts' && req.method === 'GET') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          success: true,
+          data: {
+            enabled: musicAccount.isEnabled(),
+            priority: musicAccount.isPriority(),
+            timeoutMs: global.lx.config['musicAccount.timeoutMs'] ?? 15000,
+            accounts: musicAccount.getAccounts(),
+            storePath: musicAccount.getStoreFilePath(),
+          },
+        }))
+        return
+      }
+
+      // 设置（或清空）某平台 Cookie
+      if (pathname === '/api/music/accounts' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { platform, cookie } = JSON.parse(body)
+            const result = musicAccount.setAccount(String(platform || ''), String(cookie || ''))
+            res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(result))
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // 删除某平台账号
+      if (pathname === '/api/music/accounts' && req.method === 'DELETE') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { platform } = JSON.parse(body || '{}')
+            const result = musicAccount.removeAccount(String(platform || ''))
+            res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(result))
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // 验证某平台 Cookie（探测登录态与会员状态）
+      if (pathname === '/api/music/accounts/verify' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { platform } = JSON.parse(body)
+            const info = await musicAccount.verifyAccount(String(platform || ''))
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, data: info }))
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // 抓取引导：把平台定义里的域名/步骤/收益下发给前端，前端不内置平台清单，避免两处维护
+      if (pathname === '/api/music/accounts/guide' && req.method === 'GET') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        const plat = new URL(req.url || '', 'http://localhost').searchParams.get('platform') || ''
+        const info = musicAccount.getPlatform(String(plat))
+        if (!info) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: `不支持的平台：${plat}` }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: true, data: info }))
+        return
+      }
+
+      // 更新账号功能开关
+      if (pathname === '/api/music/accounts/config' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const patch = JSON.parse(body || '{}')
+            if (typeof patch.enabled === 'boolean') global.lx.config['musicAccount.enabled'] = patch.enabled
+            if (typeof patch.priority === 'boolean') global.lx.config['musicAccount.priority'] = patch.priority
+            if (typeof patch.timeoutMs === 'number' && patch.timeoutMs >= 3000) {
+              global.lx.config['musicAccount.timeoutMs'] = patch.timeoutMs
+            }
+            if (typeof global.lx?.saveConfig === 'function') global.lx.saveConfig()
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, data: {
+              enabled: musicAccount.isEnabled(),
+              priority: musicAccount.isPriority(),
+              timeoutMs: global.lx.config['musicAccount.timeoutMs'],
+            } }))
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
       if (pathname === '/api/config/test-proxy' && req.method === 'POST') {
         const auth = req.headers['x-frontend-auth']
         if (auth !== global.lx.config['admin.password']) {

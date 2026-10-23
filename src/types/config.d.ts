@@ -251,6 +251,21 @@ declare namespace LX {
     'player.password'?: string
 
     /**
+     * 平台账号总开关：开启后取链时会尝试用已配置的平台账号(Cookie)
+     */
+    'musicAccount.enabled'?: boolean
+
+    /**
+     * true=首选自己账号，失败再回落自定义音源；false=自定义音源失败后才尝试账号
+     */
+    'musicAccount.priority'?: boolean
+
+    /**
+     * 单次账号取链超时上限(ms)
+     */
+    'musicAccount.timeoutMs'?: number
+
+    /**
      * 是否启用自定义歌曲目录
      */
     'user.enableCustomMusicDir'?: boolean
