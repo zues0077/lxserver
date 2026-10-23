@@ -104,6 +104,18 @@ export interface OriginCheckResult extends OriginVerdict {
 }
 
 /**
+ * 这个来源能不能回查音源。
+ *
+ * `local`（本地音乐/直链下载）没有对应的音源脚本，谈不上「音源兜底返回别曲」——
+ * 体检时这类条目必须直接放过，否则报告里会堆满「无法判定」，把真正可疑的几条埋掉。
+ */
+export const canVerifyOrigin = (source: string | undefined | null): boolean => {
+    const key = String(source || '').trim()
+    if (!key) return false
+    return !!musicSdk?.[key]?.musicSearch?.search
+}
+
+/**
  * 核验一份音频的来源是否与请求的曲目一致。
  *
  * @param songInfo 至少包含 name / source，url 解析来源同源

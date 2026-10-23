@@ -1134,7 +1134,7 @@ const scheduleCacheAuditOnStartup = () => {
         const report = await fileCache.auditCache({ username: '_open', apply: false, intervalMs: 200 })
         lastCacheAudit = { at: Date.now(), report }
         syncLog.info(
-          `[文件缓存] 启动体检完成：共 ${report.total} 条，干净 ${report.clean}，可疑 ${report.dirty}，无法判定 ${report.unverified}`,
+          `[文件缓存] 启动体检完成：共 ${report.total} 条，干净 ${report.clean}，可疑 ${report.dirty}，无法判定 ${report.unverified}，本地来源跳过 ${report.skipped}`,
         )
         for (const item of report.items.filter(entry => entry.verdict === 'dirty').slice(0, 20)) {
           syncLog.warn(`[文件缓存] 启动体检发现可疑缓存 (${item.filename})：${item.reason}`)

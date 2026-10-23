@@ -11,7 +11,7 @@ const { MusicTagger, MetaPicture } = require('music-tag-native')
 import { buildLyrics, parseLyrics } from '../utils/lrcTool'
 import { formatPlayTime } from '../utils/common'
 import { judgeAudioMismatch, judgeMetadataMismatch } from '@/utils/audioGuard'
-import { verifyTrackOrigin } from './sourceVerify'
+import { verifyTrackOrigin, canVerifyOrigin } from './sourceVerify'
 import { syncLog } from '@/utils/log4js'
 import { getUserSpace } from '../user'
 
@@ -1694,6 +1694,8 @@ export interface CacheAuditFinding {
     /** 索引/请求声明的时长（秒） */
     expectedSec: number
     bitrate?: number
+    /** 来源没有对应音源脚本（local/直链），不具备回查条件，按通过处理 */
+    skipped?: boolean
 }
 
 /**
@@ -1742,6 +1744,12 @@ export const auditCacheItem = async (
     if (local) return { ...base, verdict: 'dirty', reason: local }
 
     if (actualSec <= 0) return { ...base, verdict: 'unverified', reason: '无法解码出时长' }
+
+    // local / 直链来源没有音源脚本，不存在「音源兜底返回别曲」这回事。
+    // 直接在本地判据通过后放行，否则体检报告会被这类条目占满「无法判定」。
+    if (!canVerifyOrigin(item.source)) {
+        return { ...base, verdict: 'clean', skipped: true, reason: '本地/直链来源，无音源可回查' }
+    }
 
     const origin = await verifyTrackOrigin(item, actualSec, { expectedSec: base.expectedSec })
     if (origin.verdict === 'suspect') return { ...base, verdict: 'dirty', reason: origin.reason }
@@ -3870,6 +3878,8 @@ export interface CacheAuditReport {
     clean: number
     dirty: number
     unverified: number
+    /** 本地/直链来源、不具备回查条件的条目数（计入 clean，单独统计便于读报告） */
+    skipped: number
     removed: number
     applied: boolean
     items: CacheAuditFinding[]
@@ -3928,12 +3938,14 @@ export const auditCache = async (options: {
     }
 
     const count = (verdict: CacheAuditFinding['verdict']) => findings.filter(item => item.verdict === verdict).length
+    const skipped = findings.filter(item => item.skipped).length
     return {
         total: targets.length,
         checked: findings.length,
-        clean: count('clean'),
+        clean: count('clean') - skipped,
         dirty: count('dirty'),
         unverified: count('unverified'),
+        skipped,
         removed,
         applied: apply,
         items: findings,
