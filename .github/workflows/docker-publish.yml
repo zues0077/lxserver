@@ -90,8 +90,9 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          # 发版：amd64 + arm64；手动测试：只出 amd64（之前还带 arm/v7，QEMU 模拟把单次构建拖到 8 分钟，已去掉）
-          platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          # 发版：amd64 + arm64 + armv7（armv7 走 QEMU 模拟，是构建变慢的主因，但兼容老设备需要保留）
+          # 手动测试：只出 amd64，省一半时间
+          platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64,linux/arm/v7' || 'linux/amd64' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
