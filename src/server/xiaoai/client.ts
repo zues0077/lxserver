@@ -360,23 +360,38 @@ export class MinaClient {
    *  - 也兼容 { code, data } 或把字段直接平铺在 raw 上的旧形态
    */
   parseStatusInfo(raw: { code: number; data?: any; info?: any } | null): PlayStatusInfo {
-    // 优先读 info（真机固件形态），其次 data；都没有则退回 raw 自身（平铺形态）
-    const top = (raw?.info ?? raw?.data) as any
-    const source = (top && (typeof top === 'object' || typeof top === 'string')) ? top : (raw as any) || {}
-    // 部分固件在 data/info 外层又包了一层 info 对象，再剥一层
-    const info = (source && typeof source === 'object' && source.info && typeof source.info === 'object')
-      ? source.info
-      : source
-    let parsed: Record<string, unknown> = {}
-    if (info && typeof info === 'object') {
-      parsed = info as Record<string, unknown>
-    } else if (typeof info === 'string') {
-      try {
-        parsed = JSON.parse(info)
-      } catch {
-        parsed = {}
+    // 真机经 MINA /remote/ubus 返回的是**双层包裹**：{ code, data: { code, info: "<json 字符串>" } }。
+    // 之前只在 info 是「对象」时才继续剥，遇到 info 是「字符串」就停在外层 {code,info}，
+    // 导致 play_song_detail 取不到、title/duration/unplayableCode 全空（状态栏空白、VIP 闸门失效）。
+    // 改为循环剥 data/info，遇字符串就 JSON.parse，直到取到含 play_song_detail/status/试听列表的终态对象。
+    const peel = (value: any): Record<string, any> => {
+      let cur: any = value
+      for (let depth = 0; depth < 6; depth++) {
+        if (typeof cur === 'string') {
+          try {
+            cur = JSON.parse(cur)
+          } catch {
+            return {}
+          }
+          continue
+        }
+        if (cur && typeof cur === 'object') {
+          // 已到终态（含播放详情/状态/试听列表）就停，避免把业务字段再往下剥
+          if ('play_song_detail' in cur || 'status' in cur || 'extra_track_list' in cur || 'track_list' in cur) {
+            return cur as Record<string, any>
+          }
+          const next = (cur as any).info ?? (cur as any).data
+          if (next !== undefined && next !== null) {
+            cur = next
+            continue
+          }
+          return cur as Record<string, any>
+        }
+        return {}
       }
+      return cur && typeof cur === 'object' ? (cur as Record<string, any>) : {}
     }
+    const parsed = peel(raw)
     // 触屏/部分固件把 title/duration/position 放在 play_song_detail 下，顶层不报；
     // 顶层取不到时回退到 play_song_detail，保证曲名与进度能正常显示。
     const sd = (parsed.play_song_detail && typeof parsed.play_song_detail === 'object')
@@ -400,7 +415,8 @@ export class MinaClient {
       title,
       raw: {
         ...parsed,
-        extra_track_list: outer.extra_track_list ?? (parsed as any).extra_track_list,
+        extra_track_list:
+          parsed.extra_track_list ?? outer.extra_track_list ?? outer?.data?.extra_track_list,
       } as Record<string, unknown>,
     }
   }

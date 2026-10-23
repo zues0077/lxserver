@@ -848,6 +848,7 @@ const resolveXiaoAiTrack = async (
   // 无损音质对小爱无意义：直接降为 320k，避免「投出去不响 / 被版权闸门拦掉」
   if (LOSSLESS_QUALITIES.has(quality)) {
     console.log(`[XiaoAi] 无损音质 ${quality} 对小爱无意义，统一降为 320k 转码投送`)
+    syncLog.info(`[XiaoAi] 无损音质 ${quality} 对小爱无意义，统一降为 320k 转码投送`)
     quality = '320k'
   }
 
