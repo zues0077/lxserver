@@ -81,6 +81,12 @@ export interface PlayOutcome {
   via: 'player_play_music(歌词)' | 'player_play_music(默认封面)' | 'player_play_music' | 'player_play_url'
   /** 实际使用的曲库 audioID（走 player_play_url 时为空） */
   audioId?: string
+  /**
+   * 失败原因（ok=false 时给出）。
+   * 之前只回 ok=false 一个布尔，上层日志只能写「设备未受理」，
+   * 用户反馈「点了没反应」时无从判断是云端拒了、设备拒了还是鉴权掉了。
+   */
+  error?: string
 }
 
 /**
@@ -155,44 +161,57 @@ export class MinaClient {
         type: keepLight ? 1 : 2,
         media: 'app_ios',
       })
-      return { ok: this.isDeviceOk(result), via: 'player_play_url' }
+      const ok = this.isDeviceOk(result)
+      return { ok, via: 'player_play_url', error: ok ? undefined : this.deviceReason(result) }
     }
 
     if (!useMusicApi) return playUrl()
 
     const fallbackAudioId = options.audioId || DEFAULT_MUSIC_AUDIO_ID
+    /** 逐级回退过程中最后一次失败原因，全失败时带回去 */
+    let lastReason = ''
 
     if (lyricsMode) {
       // 1. 搜到的真实 audioID（能对上歌词与封面）
       const searched = options.audioId || ''
       if (searched) {
-        const ok = await this.playMusicUrl(deviceId, url, hardware, {
+        const r = await this.playMusicUrlDetailed(deviceId, url, hardware, {
           keepLight,
           audioId: searched,
           audioType: 'MUSIC',
         })
-        if (ok) return { ok: true, via: 'player_play_music(歌词)', audioId: searched }
-        console.warn(`[XiaoAi] 曲库 audioID=${searched} 播放失败，回退默认封面`)
+        if (r.ok) return { ok: true, via: 'player_play_music(歌词)', audioId: searched }
+        lastReason = r.reason
+        console.warn(`[XiaoAi] 曲库 audioID=${searched} 播放失败，回退默认封面：${r.reason}`)
       }
       // 2. 默认 audioID（仍在歌词模式，屏幕至少要有个封面位）
-      const defaultOk = await this.playMusicUrl(deviceId, url, hardware, {
+      const d1 = await this.playMusicUrlDetailed(deviceId, url, hardware, {
         keepLight,
         audioId: fallbackAudioId,
         audioType: 'MUSIC',
       })
-      if (defaultOk) return { ok: true, via: 'player_play_music(默认封面)', audioId: fallbackAudioId }
+      if (d1.ok) return { ok: true, via: 'player_play_music(默认封面)', audioId: fallbackAudioId }
+      lastReason = d1.reason
 
       // 3. 退回普通 Music API（audio_type 跟随灯环设置）
-      const normalOk = await this.playMusicUrl(deviceId, url, hardware, { keepLight, audioId: fallbackAudioId })
-      if (normalOk) return { ok: true, via: 'player_play_music', audioId: fallbackAudioId }
+      const d2 = await this.playMusicUrlDetailed(deviceId, url, hardware, { keepLight, audioId: fallbackAudioId })
+      if (d2.ok) return { ok: true, via: 'player_play_music', audioId: fallbackAudioId }
+      lastReason = d2.reason
 
       // 4. 最后退回 player_play_url：宁可没有封面歌词，也要能出声
       console.warn(`[XiaoAi] 设备 ${deviceId} 多次 player_play_music 失败，回退 player_play_url`)
-      return playUrl()
+      const final = await playUrl()
+      if (final.ok) return final
+      return { ...final, error: [lastReason, final.error].filter(Boolean).join(' / ') || '设备未受理' }
     }
 
-    const ok = await this.playMusicUrl(deviceId, url, hardware, { keepLight, audioId: options.audioId })
-    return { ok, via: 'player_play_music', audioId: options.audioId || DEFAULT_MUSIC_AUDIO_ID }
+    const r = await this.playMusicUrlDetailed(deviceId, url, hardware, { keepLight, audioId: options.audioId })
+    return {
+      ok: r.ok,
+      via: 'player_play_music',
+      audioId: options.audioId || DEFAULT_MUSIC_AUDIO_ID,
+      error: r.ok ? undefined : r.reason,
+    }
   }
 
   /**
@@ -207,6 +226,16 @@ export class MinaClient {
     _hardware = '',
     options: { keepLight?: boolean; audioId?: string; audioType?: 'MUSIC' | '' } = {},
   ): Promise<boolean> {
+    return (await this.playMusicUrlDetailed(deviceId, audioUrl, _hardware, options)).ok
+  }
+
+  /** 同上，但带回失败原因（日志/排障用） */
+  private async playMusicUrlDetailed(
+    deviceId: string,
+    audioUrl: string,
+    _hardware = '',
+    options: { keepLight?: boolean; audioId?: string; audioType?: 'MUSIC' | '' } = {},
+  ): Promise<{ ok: boolean; reason: string }> {
     const finalAudioId = options.audioId || DEFAULT_MUSIC_AUDIO_ID
     const audioType = options.audioType !== undefined ? options.audioType : options.keepLight ? 'MUSIC' : ''
     const music = {
@@ -240,7 +269,8 @@ export class MinaClient {
       startaudioid: finalAudioId,
       music: JSON.stringify(music),
     })
-    return this.isDeviceOk(result)
+    const ok = this.isDeviceOk(result)
+    return { ok, reason: ok ? '' : this.deviceReason(result) }
   }
 
   /** 播放控制原语：play / pause / stop / next / prev */
@@ -278,9 +308,19 @@ export class MinaClient {
    *          | 'failed' 指令下发失败
    */
   async playerPauseVerified(deviceId: string, hardware = '', options: PlayOptions = {}): Promise<'paused' | 'stopped' | 'failed'> {
-    // 触屏机型走 music api 时，pause 的状态机经常不更新，直接用 stop 表达暂停语义
+    // 触屏机型走 music api 时，pause 的状态机经常不更新，直接用 stop 表达暂停语义。
+    // 但 stop 不一定会丢掉媒体上下文：实测 LX04 停完进度仍在原处、/resume 能原位续播。
+    // 所以停完再看一眼进度——还在就报 paused（前端可继续），清零了才报 stopped（需要重新投送）。
     if (needUseMusicApi(hardware, options.disabledModels)) {
-      return (await this.playerStop(deviceId)) ? 'stopped' : 'failed'
+      if (!(await this.playerStop(deviceId))) return 'failed'
+      for (let i = 0; i < 2; i++) {
+        await delay(500)
+        const info = this.parseStatusInfo(await this.getPlayerStatus(deviceId))
+        if (info.status === -1) continue // 读不到状态时别急着下结论
+        if (info.status !== PLAY_STATUS_PLAYING && Number(info.position) > 0) return 'paused'
+        break
+      }
+      return 'stopped'
     }
 
     const pauseOK = await this.playerPause(deviceId)
@@ -338,6 +378,20 @@ export class MinaClient {
     for (const song of songList) {
       const name = String(song?.name || '').toLowerCase()
       if (name !== titleLower) continue
+      const songArtistName = String(song?.artist?.name || '').toLowerCase()
+      if (firstArtist && songArtistName && !songArtistName.includes(firstArtist) && !firstArtist.includes(songArtistName)) continue
+      const audioId = String(song?.audioID || '')
+      if (audioId) return audioId
+    }
+
+    // 严格匹配（歌名完全相等）没命中时，再放宽到「歌名互相包含 + 歌手对得上」：
+    // 曲库里的名字常带 (Live)/(伴奏)/Remastered 后缀，严格相等会漏掉；
+    // 一旦漏掉就退到占位 audioID，触屏上会一直显示占位曲名（Theme Of Loft）。
+    // 仍然要求歌手匹配，避免拿别的歌顶替（那会让音箱去播云端另一首）。
+    for (const song of songList) {
+      const name = String(song?.name || '').toLowerCase()
+      if (!name) continue
+      if (!name.includes(titleLower) && !titleLower.includes(name)) continue
       const songArtistName = String(song?.artist?.name || '').toLowerCase()
       if (firstArtist && songArtistName && !songArtistName.includes(firstArtist) && !firstArtist.includes(songArtistName)) continue
       const audioId = String(song?.audioID || '')
@@ -473,6 +527,24 @@ export class MinaClient {
       if (!Number.isNaN(code) && code !== 0) return false
     }
     return true
+  }
+
+  /**
+   * 把 ubus 结果翻成人话失败原因。
+   * 排障时最需要区分的是「云端就没受理」（result=null）与「云端受理但设备拒绝」（data.code≠0）。
+   */
+  private deviceReason(result: UbusResponse | null): string {
+    if (!result) return '云端未受理（MINA 请求失败或返回 code≠0）'
+    const data = result.data as Record<string, unknown> | undefined
+    if (data && typeof data === 'object' && 'code' in data) {
+      const code = Number(data.code)
+      if (!Number.isNaN(code) && code !== 0) {
+        const msg = String((data as any).message || (data as any).msg || '').trim()
+        return `设备拒绝（code=${code}${msg ? ` ${msg}` : ''}）`
+      }
+    }
+    if (result.message) return `设备返回：${result.message}`
+    return '设备未受理'
   }
 
   /** 设备级串行队列 */

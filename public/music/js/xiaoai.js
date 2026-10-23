@@ -496,12 +496,23 @@
         try {
             const data = await request('/volume', { volume });
             const ok = data.results?.some(r => r.ok);
+            // 音箱会把音量量化到固定档位（设 33 实际 35），服务端已回读真实值，
+            // 这里以它为准，否则滑块和音箱实际音量会对不上。
+            const applied = Number.isFinite(Number(data.volume)) && Number(data.volume) >= 0 ? Number(data.volume) : volume;
             if (ok) {
-                state.lastVolume = volume;
+                state.lastVolume = applied;
+                const valueEl = $('xiaoai-volume-value');
+                if (range && String(range.value) !== String(applied)) range.value = String(applied);
+                if (valueEl) valueEl.textContent = String(applied);
                 // 记住上次设置：音箱本身不提供「读上次设了多少」，重开页面只能靠服务端配置回填
-                void saveConfig({ volume });
+                void saveConfig({ volume: applied });
             }
-            setMessage(ok ? `音量已设为 ${volume}` : '音量设置失败', !ok);
+            setMessage(
+                ok
+                    ? (applied !== volume ? `音量已设为 ${applied}（设备按 ${applied} 档位生效）` : `音量已设为 ${applied}`)
+                    : '音量设置失败',
+                !ok
+            );
         } catch (e) {
             setMessage(e.message, true);
         }
@@ -639,23 +650,36 @@
     };
 
     /**
-     * 音箱曲库版权闸门提示：unplayableCode===2 表示这首歌被音箱判成 VIP 不可播，
-     * 服务端/转码/音源都正常，音箱直接不来拉流，表现就是「投出去不响」。
-     * 这里把原因显式告诉用户，避免误以为是软件 bug。
+     * 音箱曲库版权闸门提示（unplayableCode===2）。
+     *
+     * 实测这个字段只说明「曲库把该 audioID 标成 VIP 资源」，不等于没声音：
+     * 曲库命中 VIP 歌时，音箱照样来拉我们的直链、进度正常推进、时长等于我们的文件。
+     * 之前不看实际拉流就断言「音箱不会出声」，属于误报。改成只在「确实没拉流」时警告。
      */
-    const updateVipWarning = raw => {
+    const updateVipWarning = status => {
         const el = $('xiaoai-vip-warning');
         if (!el) return;
+        const raw = status && status.raw;
         const psd = (raw && raw.play_song_detail) || {};
-        if (psd.unplayableCode === 2) {
-            const title = psd.title ? `《${psd.title}》` : '这首歌';
-            const cp = psd.cp_origin ? `（来源：${psd.cp_origin}）` : '';
-            el.textContent = `⚠️ ${title}${cp} 被音箱版权闸门判定为 VIP 不可播（unplayableCode=2），音箱不会出声。` +
-                '这是音箱曲库限制、非服务端问题，请换源或换歌。';
-            el.classList.remove('hidden');
-        } else {
+        if (psd.unplayableCode !== 2) {
             el.classList.add('hidden');
+            return;
         }
+        // 歌名优先用本地正在点播的这首：曲库没命中时设备回报的是占位曲名（Theme Of Loft）
+        const localName = (watch.song && watch.song.name)
+            || (typeof window.getCurrentSong === 'function' && (window.getCurrentSong() || {}).name)
+            || '';
+        const title = localName ? `《${localName}》` : (psd.title ? `《${psd.title}》` : '这首歌');
+        const cp = psd.cp_origin ? `（来源：${psd.cp_origin}）` : '';
+        const pulled = status.streamPulled === true;
+        if (pulled) {
+            el.textContent = `ℹ️ ${title}${cp} 在音箱曲库里属 VIP 资源（unplayableCode=2），` +
+                '但音箱已正常拉取本机流并在播放，此提示只说明曲库版权归属，可忽略。';
+        } else {
+            el.textContent = `⚠️ ${title}${cp} 被音箱版权闸门判定为 VIP 不可播（unplayableCode=2），` +
+                '且音箱未拉取本机流，可能不会出声。这是音箱曲库限制、非服务端问题，请换源或换歌。';
+        }
+        el.classList.remove('hidden');
     };
 
     const startHeartbeat = () => {
@@ -1090,8 +1114,8 @@
                 startDelayMs: Number(data.startDelayMs) || 0,
                 userPaused: !!state.remotePaused,
             };
-            // 版权闸门提示：音箱把这首歌判成 VIP 不可播时给出明确原因
-            updateVipWarning(data.raw);
+            // 版权闸门提示：unplayableCode=2 时结合「是否已拉流」判断到底有没有声音
+            updateVipWarning(data);
         } catch (e) {
             sample = { ok: false, at: Date.now() };
         } finally {
@@ -1139,8 +1163,8 @@
             caller: (meta && meta.caller) || 'manual',
         });
         if (!data.success) throw new Error(data.message || '投送失败');
-        // 投送成功后立刻检查版权闸门：音箱把这首歌判成 VIP 不可播时给出明确提示
-        updateVipWarning(data.raw);
+        // 投送成功时还没有播放状态，先按无状态处理（不提示），等守望第一次采样再判断
+        updateVipWarning(data);
         return data;
     };
 

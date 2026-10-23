@@ -53,6 +53,21 @@ export const getStreamRounds = (sid?: string) =>
     : { full: 0, bytes: 0, total: 0, replay: false, complete: false }
 
 /**
+ * 传输过程中增量记字节。
+ *
+ * 之前只在整首传完后由 recordStreamRound 一次性累加，导致 5 分钟的长歌在播到第 1 分钟时
+ * /status 的 streamBytes 恒为 0，排障时看不出「音箱到底有没有在拉」。这里按块累加。
+ */
+export const addStreamBytes = (sid: string | undefined, n: number) => {
+  if (!sid || !n) return
+  const current = streamRounds.get(sid)
+  if (!current) return
+  current.bytes += n
+  if (streamRounds.size > 300) streamRounds.clear()
+  streamRounds.set(sid, current)
+}
+
+/**
  * 已经「被换掉」的流。
  *
  * 音箱播完一首会立刻拿同一个 URL 再拉一遍（songloft-plugin-miot #437），
@@ -230,10 +245,11 @@ const noteReplayRequest = (sid?: string): boolean => {
  * 判据：单次传输量达到整首的一半，才算「放过一遍」。音箱偶尔会用 Range 分片拉，
  * 那种只补一小段的请求不能算，否则会把一首歌误判成播完。
  */
-const recordStreamRound = (sid: string | undefined, sent: number, total: number, fromStart = true) => {
+const recordStreamRound = (sid: string | undefined, sent: number, total: number, fromStart = true, countBytes = true) => {
   if (!sid || !sent || !total) return
   const current = streamRounds.get(sid) || { full: 0, bytes: 0, total: 0, replay: false, complete: false }
-  current.bytes += sent
+  // countBytes=false 用于「传输期间已按块累加过字节」的路径，避免结束时重复计数
+  if (countBytes) current.bytes += sent
   current.total = total
   // 只认「从头开始且传够半首」的传输：中途 Range 续传可能也传了半首以上，但那是补片段
   if (fromStart && sent >= total * 0.5) current.full += 1
@@ -295,6 +311,8 @@ const serveLocalFile = (
     const startedAt = Date.now()
     let firstByteMs = -1
     let sent = 0
+    /** 已统计但还没计入 streamRounds 的字节（按块累加） */
+    let pendingBytes = 0
     try {
       const buf = await fs.promises.readFile(filePath)
       const total = buf.length
@@ -321,11 +339,22 @@ const serveLocalFile = (
       readable.on('data', (chunk: Buffer) => {
         if (firstByteMs < 0) firstByteMs = Date.now() - startedAt
         sent += chunk.length
+        // 按 256KB 粒度增量记账：/status 的 streamBytes 在长歌播放期间也能看到增长
+        pendingBytes += chunk.length
+        if (pendingBytes >= 256 * 1024) {
+          addStreamBytes(sid, pendingBytes)
+          pendingBytes = 0
+        }
       })
       // Range 只传了整首的一部分，码率要按比例折算，否则节流会把这一段摊到整首的时长上
       const scaledMs = durationMs > 0 && total > 0 ? (durationMs * slice.length) / total : 0
       const stats = await pumpDownstream(readable, res, Math.round(scaledMs))
-      recordStreamRound(sid, stats.sent || sent, total, fromStart)
+      if (pendingBytes > 0) {
+        addStreamBytes(sid, pendingBytes)
+        pendingBytes = 0
+      }
+      // 字节已在上面按块累加，这里只更新「拉了几遍 / 是否传完」
+      recordStreamRound(sid, stats.sent || sent, total, fromStart, false)
       const pace = stats.paceLeadMs ? `（平滑 ${Math.round(stats.paceLeadMs / 1000)}s）` : '（无平滑/无时长）'
       syncLog.info(
         `[XiaoAi] 本地直发 ${filename || path.basename(filePath)}：已发 ${stats.sent}B / 总 ${total}B` +

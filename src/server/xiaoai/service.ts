@@ -311,15 +311,19 @@ class XiaoAiService {
   private async fanOut(
     deviceIds: string[] | undefined,
     action: string,
-    run: (client: MinaClient, deviceId: string, hardware: string) => Promise<boolean>
+    run: (client: MinaClient, deviceId: string, hardware: string) => Promise<boolean | { ok: boolean; error?: string }>
   ): Promise<DeviceActionResult[]> {
     const targets = await this.resolveTargets(deviceIds)
     const client = await this.getClient()
     return Promise.all(
       targets.map(async target => {
         try {
-          const ok = await run(client, target.deviceID, target.hardware)
-          return { deviceId: target.deviceID, name: target.name, ok }
+          const outcome = await run(client, target.deviceID, target.hardware)
+          const ok = typeof outcome === 'boolean' ? outcome : outcome.ok
+          const error = typeof outcome === 'boolean' ? undefined : outcome.error
+          // 失败原因一定要带出去：不然上层日志只能写「设备未受理」，
+          // 用户反馈「点了没反应」时无法区分云端拒绝 / 设备拒绝 / 鉴权失效。
+          return error ? { deviceId: target.deviceID, name: target.name, ok, error } : { deviceId: target.deviceID, name: target.name, ok }
         } catch (error: any) {
           console.warn(`[XiaoAi] ${action} 失败 (${target.name}):`, error?.message || error)
           return { deviceId: target.deviceID, name: target.name, ok: false, error: error?.message || String(error) }
@@ -372,7 +376,7 @@ class XiaoAiService {
         // 「到底走了哪条回退分支」是排查触屏歌词问题最关键的线索
         syncLog.info(line)
       }
-      return outcome.ok
+      return { ok: outcome.ok, error: outcome.error }
     })
     const label = songName ? `${songName}${singer ? ` - ${singer}` : ''}` : '未命名曲目'
     for (const item of results) {
@@ -479,11 +483,24 @@ class XiaoAiService {
     return { results, success: results.some(item => item.ok) }
   }
 
-  /** 设置音量（多设备同时生效） */
+  /** 设置音量（多设备同时生效）；回读真实音量后返回，避免与设备量化档位不一致 */
   async setVolume(volume: number, deviceIds?: string[]) {
-    const value = Math.max(0, Math.min(100, Math.round(Number(volume) || 0)))
-    const results = await this.fanOut(deviceIds, 'volume', (client, deviceId) => client.setVolume(deviceId, value))
-    return { volume: value, results, success: results.some(item => item.ok) }
+    const requested = Math.max(0, Math.min(100, Math.round(Number(volume) || 0)))
+    const results = await this.fanOut(deviceIds, 'volume', (client, deviceId) => client.setVolume(deviceId, requested))
+    // 小爱把音量量化到固定档位（实测设 33 实际 35、42 实际 40、53 实际 55），
+    // 直接回显请求值会让界面滑块与音箱实际音量对不上，所以设完回读一次。
+    let reported = requested
+    const firstOk = results.find(item => item.ok)
+    if (firstOk) {
+      try {
+        const client = await this.getClient()
+        const read = await client.getVolume(firstOk.deviceId)
+        if (Number.isFinite(read) && read >= 0) reported = read
+      } catch {
+        /* 回读失败时退回请求值，不影响设置结果 */
+      }
+    }
+    return { volume: reported, requested, results, success: results.some(item => item.ok) }
   }
 
   /** 单设备播放状态（用于界面回显与自动续播判定） */

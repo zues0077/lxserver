@@ -599,6 +599,30 @@ const AUDIO_MIME_BY_EXT: Record<string, string> = {
 }
 
 /**
+ * 给一次「换源解析」套总预算。
+ *
+ * 换源内部虽然已有 deadline，但它只在每次调用「之前」检查，单次 callUserApiGetMusicUrl
+ * 或探测挂住时不受约束；再叠加「首轮 + 重试」两趟，实测一首查无此歌的曲子能拖到 121 秒，
+ * 前端表现就是「点了投送没反应」。这里加外层硬预算兜住最坏情况。
+ */
+const withResolveBudget = async <T>(p: Promise<T>, ms: number, fallback: T, label: string): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      p,
+      new Promise<T>(resolve => {
+        timer = setTimeout(() => {
+          console.warn(`[XiaoAi] ${label}超预算 ${Math.round(ms / 1000)}s，先按失败处理`)
+          resolve(fallback)
+        }, ms)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/**
  * 投送前确定音频来源，优先级：
  *   本地缓存 → 客户端直链 → 预解析地址（需探测） → 现解析（换源 + 探测）
  * 开了「先缓存再投送」且缓存未命中时，会先把整首下载到本地再投送。
@@ -694,14 +718,36 @@ const resolveXiaoAiTrackRaw = async (
   )
 
   // 5. 现解析：原源 → 换源 → 音质降级，每个候选都做音频探测
-  let resolved = await resolvePlayableAudio(songInfo, quality, verifiedUsername)
+  //    两趟都套硬预算（首轮 15s + 重试 10s），最坏 25s 左右给结论，不再让用户干等两分钟。
+  const emptyResolved: ResolvedPlayableAudio = {
+    url: '',
+    sourceName: '',
+    quality,
+    contentType: '',
+    durationMs: 0,
+    failures: ['解析超时'],
+  }
+  let resolved = await withResolveBudget(
+    resolvePlayableAudio(songInfo, quality, verifiedUsername),
+    15000,
+    emptyResolved,
+    '首轮换源',
+  )
   // 偶发音源抖动（kg 平台尤甚）：首轮全失败时再给一次机会，避免无谓的 400 投送失败
   if (!resolved.url) {
-    await new Promise(r => setTimeout(r, 800))
-    const retried = await resolvePlayableAudio(songInfo, quality, verifiedUsername)
+    await new Promise(r => setTimeout(r, 500))
+    const retried = await withResolveBudget(
+      resolvePlayableAudio(songInfo, quality, verifiedUsername),
+      10000,
+      { ...emptyResolved, failures: ['重试解析超时'] },
+      '重试换源',
+    )
     if (retried.url) {
       console.log(`[XiaoAi] 音源首轮失败，重试解析成功：${filename}`)
       resolved = retried
+    } else {
+      // 两轮都失败：把重试的失败原因并进来，日志里能看到完整线索
+      resolved = { ...resolved, failures: [...resolved.failures, ...retried.failures].slice(0, 6) }
     }
   }
   if (!resolved.url) {
@@ -7028,12 +7074,19 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             return {}
           }
         }
-        const failed = (error: any, fallback: string) => {
+        const failed = (error: any, fallback: string, level: 'error' | 'warn' = 'error') => {
           const msg = error?.message || fallback
+          const line = `[XiaoAi] 接口失败（${fallback}）：${msg}`
           // 排障盲区：此前投送失败只回 400、不在服务端留任何痕迹（如 kg 源瞬态 400 无处可查）。
-          // 这里把原因与调用场景都记进日志，便于事后定位。
-          console.error(`[XiaoAi] 接口失败（${fallback}）：${msg}`)
-          syncLog.error(`[XiaoAi] 接口失败（${fallback}）：${msg}`)
+          // 但参数类错误（用户填了非法值）不算故障，记 WARN 即可——
+          // 一律记 ERROR 会把真正的上游故障淹没在噪声里。
+          if (level === 'warn') {
+            console.warn(line)
+            syncLog.warn(line)
+          } else {
+            console.error(line)
+            syncLog.error(line)
+          }
           sendJson({ success: false, message: msg }, 400)
         }
 
@@ -7189,6 +7242,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const songInfo = normalizeSongInfo(payload.songInfo || payload.song || {}) || {}
               const quality = String(payload.quality || songInfo.quality || '320k')
               const deviceIds = Array.isArray(payload.deviceIds) ? payload.deviceIds.map(String) : undefined
+              // 参数校验前置：缺歌名/来源属于调用方问题，按 WARN 记一条就够了，
+              // 不要走到深层解析再抛异常被记成 ERROR（会污染故障告警）。
+              const hasSource = !!(songInfo.source || songInfo.url || songInfo.streamUrl || String(payload.streamUrl || '').trim())
+              if (!hasSource) {
+                failed(new Error('缺少可投送的歌曲信息（需要 source 或可播放地址）'), '投送小爱失败', 'warn')
+                return
+              }
               const config = loadXiaoAiConfig()
               const baseUrl = resolvePlayBaseUrl(req, config.serverBaseUrl)
               const streamPath = config.streamPath || '/api/music/xiaoai/stream'
@@ -7247,6 +7307,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 } catch {
                   /* 定时器异常不能影响投送结果 */
                 }
+              }
+              // 排障盲区：以前「所有设备投送失败」只是把原因塞进响应体，服务端一条痕迹都没有，
+              // 用户反馈「点了没反应」时无从查起（catch 只覆盖抛异常，这类是正常返回的失败）。
+              if (!result.success) {
+                const detail = (Array.isArray(result.results) ? result.results : [])
+                  .map((item: any) => `${item?.deviceId || '?'}: ${item?.error || item?.message || '失败'}`)
+                  .join('；')
+                syncLog.error(`[XiaoAi] 投送失败（${songName}${singer ? ' - ' + singer : ''}）：${detail || '所有设备均未成功'}｜目标设备 ${(Array.isArray(deviceIds) ? deviceIds : []).join(',') || '-'}`)
               }
               sendJson({
                 success: result.success,
@@ -7352,12 +7420,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
               const track = lastXiaoAiTrack
               if (!track) {
-                sendJson({ success: false, message: '还没有投送过歌曲，无法跳转' })
+                sendJson({ success: false, message: '还没有投送过歌曲，无法跳转' }, 400)
                 return
               }
               const requested = Number(payload.positionSec)
               if (!Number.isFinite(requested) || requested < 0) {
-                sendJson({ success: false, message: 'positionSec 必须是非负数' })
+                sendJson({ success: false, message: 'positionSec 必须是非负数' }, 400)
                 return
               }
 
@@ -7455,26 +7523,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           })
           return
         }
-        if (pathname === '/api/music/xiaoai/next' && req.method === 'POST') {
-          void readJsonBody().then(async payload => {
-            try {
-              sendJson({ ...(await xiaoAiService.next(payload.deviceIds)) })
-            } catch (error: any) {
-              failed(error, '下一首失败')
-            }
-          })
-          return
-        }
-        if (pathname === '/api/music/xiaoai/prev' && req.method === 'POST') {
-          void readJsonBody().then(async payload => {
-            try {
-              sendJson({ ...(await xiaoAiService.prev(payload.deviceIds)) })
-            } catch (error: any) {
-              failed(error, '上一首失败')
-            }
-          })
-          return
-        }
+        // 原 /next、/prev 已移除：音箱的播放上下文只有我们推的这一路流，没有队列，
+        // 下发 player_next/prev 只会让当前这首从头重播（实测 position 由 5.5s 掉回 2.9s），
+        // 而真正的切歌是前端 advanceToNext → playSong → /play 重新投送。
+        // 留着这个接口只会让后来的调用方误以为它有用，所以直接删掉（未知接口会落到下面的 404）。
         if (pathname === '/api/music/xiaoai/volume' && req.method === 'POST') {
           void readJsonBody().then(async payload => {
             try {
@@ -7504,7 +7556,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               })
               sendJson({ success: true, sleepTimer: status })
             } catch (error: any) {
-              failed(error, '设置定时关机失败')
+              // 这里抛的都是「参数不合法」（方式/分钟数/曲数），属用户输入问题，记 WARN
+              failed(error, '设置定时关机失败', 'warn')
             }
           })
           return
@@ -7530,6 +7583,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 streamBytes: rounds.bytes,
                 // 音箱已经完整拉过一遍、现在又开始新一轮 → 这首确实播完了（最准的完成信号）
                 streamReplay: rounds.replay === true,
+                // 本次投送后音箱有没有真的来拉我们这一路流。
+                // unplayableCode=2 只说明「曲库把该 audioID 标成 VIP」，不代表没声音：
+                // 实测曲库命中 VIP 歌时音箱照样拉我们的直链、正常播放。
+                // 前端据此区分「曲库版权标记」与「真的不出声」。
+                streamPulled: lastXiaoAiStreamAt > lastXiaoAiPushAt,
+                // 设备在线：status=-1 表示读不到播放状态（设备离线 / 登录态失效）。
+                // 新增字段不影响既有语义，老前端忽略即可。
+                online: Number((result as any)?.status) >= 0,
                 // 当前这一路流从第几秒开始：设备上报的 position 是「流内偏移」，
                 // 加上它才是曲内位置（songloft 的 streamSeekOffsetSec 同款，不加进度条会掉回 0）
                 seekOffsetMs: lastXiaoAiSeekSec * 1000,
