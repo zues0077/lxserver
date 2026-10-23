@@ -1,13 +1,27 @@
 name: Build and Release
 
+# 关键变更（2026-10-23）：桌面产物不再走 actions/upload-artifact + download-artifact，
+# 改为各构建任务直接把文件 `gh release upload` 到同一个 Release。
+# 原因：免费账号 artifact 存储配额只有 500MB，而一次全平台桌面构建产物约 1.4GB，
+# 一旦超出就会在第一个 upload-artifact 步骤直接报
+# 「Artifact storage quota has been hit」，后续 job 全部跳过，Release 一个资产都出不来。
+# Release 资产不占 artifact 配额，因此直传是根治办法。
+
 on:
   workflow_dispatch:
   push:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # ── 1. 初始化阶段：获取版本号和更新日志 ──────────────────────────────────────
+  # ── 1. 初始化阶段：获取版本号、生成发布说明、建/复用 Release ────────────────
   init:
     runs-on: ubuntu-latest
     outputs:
@@ -23,20 +37,28 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "Detected version: $VERSION"
 
-      - name: Get Release Notes
+      - name: Prepare release with notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.get_version.outputs.VERSION }}
         run: |
           awk '/^## v/ {if (p) exit; p=1} p' changelog.md > RELEASE_NOTES.md || cp changelog.md RELEASE_NOTES.md
           echo "" >> RELEASE_NOTES.md
           echo "---" >> RELEASE_NOTES.md
           echo "* 本次版本由 @zues0077 维护构建 🚀" >> RELEASE_NOTES.md
 
-      - name: Upload metadata
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-metadata
-          path: RELEASE_NOTES.md
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION 已存在，复用并刷新发布说明"
+            gh release edit "$VERSION" --notes-file RELEASE_NOTES.md
+          else
+            echo "创建 draft Release $VERSION（构建全部成功后再正式发布）"
+            gh release create "$VERSION" \
+              --draft \
+              --title "LX Music Sync Server $VERSION" \
+              --notes-file RELEASE_NOTES.md
+          fi
 
-  # ── 2. 桌面端构建阶段：复用 electron-build 逻辑 ──────────────────────────────
+  # ── 2. 桌面端构建阶段：构建后直接上传到 Release ─────────────────────────────
   build_desktop:
     needs: init
     strategy:
@@ -84,106 +106,31 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
-      # 复用我们之前调试好的分项目上传逻辑
-      - name: Win x64 Setup
-        if: matrix.platform == 'win'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-win-x64-Setup
-          path: dist-electron/*x64 Setup.exe
+      # 一次性把本平台的安装包传进 Release：文件名带空格，必须用 find -print0 取，
+      # 直接 glob 会被空格拆词。--clobber 支持同版本重跑覆盖。
+      - name: Upload installers to Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.init.outputs.VERSION }}
+        run: |
+          shopt -s nullglob
+          files=()
+          while IFS= read -r -d '' f; do
+            files+=("$f")
+          done < <(find dist-electron -maxdepth 1 -type f \
+            \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \) -print0)
 
-      - name: Win x86 Setup
-        if: matrix.platform == 'win'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-win-x86-Setup
-          path: dist-electron/*ia32 Setup.exe
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::dist-electron 下没有任何安装包产物"
+            exit 1
+          fi
 
-      - name: Win arm64 Setup
-        if: matrix.platform == 'win'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-win-arm64-Setup
-          path: dist-electron/*arm64 Setup.exe
+          echo "待上传 ${#files[@]} 个文件："
+          printf '  %s\n' "${files[@]}"
+          gh release upload "$VERSION" "${files[@]}" --clobber
 
-      - name: Win x64 Portable
-        if: matrix.platform == 'win'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-win-x64-Portable
-          path: dist-electron/*x64 Portable.exe
-
-      - name: Win x86 Portable
-        if: matrix.platform == 'win'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-win-x86-Portable
-          path: dist-electron/*ia32 Portable.exe
-
-      - name: Win arm64 Portable
-        if: matrix.platform == 'win'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-win-arm64-Portable
-          path: dist-electron/*arm64 Portable.exe
-
-      - name: Mac x64 DMG
-        if: matrix.platform == 'mac'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-mac-x64-dmg
-          path: dist-electron/*x64.dmg
-
-      - name: Mac arm64 DMG
-        if: matrix.platform == 'mac'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-mac-arm64-dmg
-          path: dist-electron/*arm64.dmg
-
-      - name: Linux amd64 AppImage
-        if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-linux-amd64-AppImage
-          path: dist-electron/*x64.AppImage
-
-      - name: Linux arm64 AppImage
-        if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-linux-arm64-AppImage
-          path: dist-electron/*arm64.AppImage
-
-      - name: Linux armv7l AppImage
-        if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-linux-armv7l-AppImage
-          path: dist-electron/*armv7l.AppImage
-
-      - name: Linux amd64 Deb
-        if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-linux-amd64-deb
-          path: dist-electron/*amd64.deb
-
-      - name: Linux arm64 Deb
-        if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-linux-arm64-deb
-          path: dist-electron/*arm64.deb
-
-      - name: Linux armv7l Deb
-        if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-linux-armv7l-deb
-          path: dist-electron/*armv7l.deb
-
-  # ── 3. 服务端构建阶段：打包 Server Zip ──────────────────────────────────────
+  # ── 3. 服务端构建阶段：打包 Server Zip 并直传 Release ───────────────────────
   build_server:
     needs: init
     runs-on: ubuntu-latest
@@ -214,47 +161,31 @@ jobs:
           cd release
           zip -r lx-music-sync-server-${{ needs.init.outputs.VERSION }}-server.zip lx-music-sync-server
 
-      - name: Upload Server Zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: lxserver-server-zip
-          path: release/*.zip
+      - name: Upload Server Zip to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.init.outputs.VERSION }}
+        run: gh release upload "$VERSION" release/*.zip --clobber
 
-  # ── 4. 发布阶段：汇总所有产物并创建 Release ──────────────────────────────────
+  # ── 4. 发布阶段：校验资产齐全后把 draft 转正 ────────────────────────────────
   publish:
     needs: [init, build_desktop, build_server]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release_assets
-          merge-multiple: true
-
-      - name: Delete existing release (Cleanup)
+      - name: Verify assets then publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.init.outputs.VERSION }}
         run: |
-          gh release delete ${{ needs.init.outputs.VERSION }} --yes --cleanup-tag || echo "Release not found"
-          sleep 5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED=14
+          count=$(gh release view "$VERSION" --json assets --jq '.assets | length')
+          echo "Release $VERSION 当前资产数：$count（期望 >= $EXPECTED）"
+          gh release view "$VERSION" --json assets --jq '.assets[] | "  \(.name)  \(.size)"'
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ needs.init.outputs.VERSION }}
-          name: LX Music Sync Server ${{ needs.init.outputs.VERSION }}
-          body_path: release_assets/RELEASE_NOTES.md
-          files: |
-            release_assets/*.exe
-            release_assets/*.dmg
-            release_assets/*.AppImage
-            release_assets/*.deb
-            release_assets/*.zip
-          draft: false
-          prerelease: false
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if [ "$count" -lt "$EXPECTED" ]; then
+            echo "::error::资产数 $count < $EXPECTED，构建产物不完整，保持 draft 不发布"
+            exit 1
+          fi
+
+          gh release edit "$VERSION" --draft=false --latest
+          echo "已发布 $VERSION"
