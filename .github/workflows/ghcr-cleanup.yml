@@ -1,0 +1,64 @@
+name: GHCR cleanup
+
+# 为什么自己写脚本而不用 actions/delete-package-versions 的 delete-only-untagged-versions：
+#   多架构镜像 = 带 tag 的 index + 每平台 index + image manifest + attestation，
+#   后三类都是 **无 tag 版本**。盲删 untagged 会让索引悬空，docker pull 直接失败。
+#   scripts/ghcr-cleanup.py 会先用 OCI 接口解析父子关系，只删确定无引用的，且先子后父。
+#
+# 触发：每周日 03:17 UTC 定时跑；也支持手动 Run（默认 dry-run，勾 apply 才真删）。
+
+on:
+  schedule:
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: '真正执行删除（不勾 = dry-run，只打印待删清单）'
+        required: false
+        default: 'false'
+      keep_release:
+        description: '保留最近多少个正式版 tag'
+        required: false
+        default: '10'
+      dev_max_age_days:
+        description: 'dev/test 类 tag 保留天数'
+        required: false
+        default: '14'
+      orphan_max_age_days:
+        description: '孤儿 untagged 版本保留天数'
+        required: false
+        default: '7'
+
+permissions:
+  packages: write
+
+concurrency:
+  group: ghcr-cleanup
+  cancel-in-progress: true
+
+jobs:
+  cleanup:
+    name: Prune old GHCR versions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run cleanup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLY: ${{ github.event_name == 'schedule' && '--apply' || (inputs.apply == 'true' && '--apply' || '') }}
+        run: |
+          python scripts/ghcr-cleanup.py \
+            --token "$GH_TOKEN" \
+            --owner zues0077 \
+            --package lxserver \
+            --keep-release ${{ inputs.keep_release || '10' }} \
+            --dev-max-age-days ${{ inputs.dev_max_age_days || '14' }} \
+            --orphan-max-age-days ${{ inputs.orphan_max_age_days || '7' }} \
+            $APPLY
