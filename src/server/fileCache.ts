@@ -649,6 +649,49 @@ export const parseDurationSeconds = (value: unknown): number => {
     return 0
 }
 
+/**
+ * 判定一份音频是否与请求的曲目明显不符（占位音、静音、试听片段、别的版本）。
+ * 返回 null = 可用；返回字符串 = 拒绝原因。
+ *
+ * 原则：只在「能可靠判定」时才拒绝。误杀正常音频会让用户点歌直接失败，
+ * 比听到一段占位音更难解释，所以阈值一律取宽。
+ *
+ * 两条判据分支：
+ *  1. 期望时长已知（调用方给了 interval）：沿用原有的试听片段判据，另加「时长明显偏离」
+ *     ——音源对无效 ID 返回别的歌时，时长通常差 30s 以上。
+ *  2. 期望时长未知（调用方没给 interval，`/play` 的兜底路径常见）：原来整段校验被跳过，
+ *     脏文件直接落盘。这里改用绝对阈值兜底：正常音乐不会有 <30s 或 <64kbps 的音频。
+ */
+export const judgeAudioMismatch = (params: {
+    expectedSec: number
+    actualSec: number
+    bitrate?: number
+    sizeBytes?: number
+}): string | null => {
+    const expected = Math.max(0, Number(params.expectedSec) || 0)
+    const actual = Math.max(0, Number(params.actualSec) || 0)
+    const bitrate = Number(params.bitrate) || 0
+    const size = Number(params.sizeBytes) || 0
+
+    if (expected > 60 && actual > 0) {
+        if (actual < 60) return `音频过短 (${actual}s / 预期 ${expected}s)`
+        if (actual < expected * 0.5) return `明显短于预期 (${actual}s / 预期 ${expected}s)`
+        if (actual <= 90 && expected - actual > 45) return `疑似试听片段 (${actual}s / 预期 ${expected}s)`
+        // 明显偏长（如串成了整张专辑/长混音）：只在差得离谱时拦，避免误杀正常的现场版/前奏差异
+        if (actual - expected > Math.max(120, expected * 0.6)) return `时长与曲目严重不符 (${actual}s / 预期 ${expected}s)`
+        return null
+    }
+
+    if (expected === 0 && actual > 0) {
+        if (actual < 30) return `音频过短，疑似占位音 (${actual}s)`
+        if (bitrate > 0 && bitrate < 64) return `码率过低，疑似静音占位 (${bitrate}kbps)`
+    }
+    if (actual === 0 && size > 0 && size < 300 * 1024) {
+        return `音频无法解析且文件过小 (${size} bytes)`
+    }
+    return null
+}
+
 const inspectAudioFile = (filePath: string, requestedQuality?: string) => {
     const audioContainer = detectAudioContainer(filePath)
     const ext = audioContainer === 'unknown' || audioContainer === 'encrypted'
@@ -1696,14 +1739,19 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
                 if (!fileName) continue
                 const filePath = path.join(dir, fileName)
                 if (fs.existsSync(filePath)) {
-                    // [防投毒] 如果已知期望时长 > 60s，且缓存记录的时长/文件大小明显属于试听片段，忽略并清理脏缓存
-                    const expectedSec = parseDurationSeconds(songInfo.interval || songInfo.meta?.interval)
-                    if (expectedSec > 60 && !isLyricCheck) {
-                        const cachedDurSec = parseDurationSeconds(cached.interval)
-                        const isCachedTeaser = (cachedDurSec > 0 && (cachedDurSec < 60 || cachedDurSec < expectedSec * 0.5)) ||
-                            (cached.size && cached.size < 750 * 1024 && expectedSec > 120 && cached.quality === '128k')
-                        if (isCachedTeaser) {
-                            console.warn(`[文件缓存] 命中损坏的试听片段缓存 (${cached.filename})，予以忽略并剔除`)
+                    // [防投毒] 缓存记录的时长/码率与请求明显不符时（试听片段、静音占位、串成整张专辑），
+                    // 忽略并剔除脏缓存，让它重新走一次解析。
+                    // 这里不依赖「期望时长 > 60s」：调用方没给 interval 时（/play 的兜底路径）原来会整段跳过，
+                    // 结果就是占位音落盘后长期被命中，用户点歌听到静音还查不出原因。
+                    if (!isLyricCheck) {
+                        const reason = judgeAudioMismatch({
+                            expectedSec: parseDurationSeconds(songInfo.interval || songInfo.meta?.interval),
+                            actualSec: parseDurationSeconds(cached.interval),
+                            bitrate: cached.bitrate,
+                            sizeBytes: cached.size,
+                        })
+                        if (reason) {
+                            console.warn(`[文件缓存] 命中与曲目不符的缓存 (${cached.filename})：${reason}，予以忽略并剔除`)
                             indexManager.remove(normalizedUsername, id, folder, cached.quality)
                             try { fs.unlinkSync(filePath) } catch { }
                             continue
@@ -2459,29 +2507,23 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                 ext = inspection.extension || ext
                 const actualQuality = inspection.quality || quality || 'unknown'
 
-                // 试听片段 / 残缺音频防御检查：
-                // 如果期望时长 > 60s，但下载到的音频时长过短（如网易云等平台返回的 30s-45s 试听片段），拒绝写入缓存
+                // 试听片段 / 占位音 / 残缺音频防御检查：
+                // 期望时长来自调用方给的 interval；它缺失时（/play 的兜底路径）走绝对阈值分支，
+                // 否则占位音会直接落盘，之后每次点这首都命中它。
                 const expectedDurationSec = parseDurationSeconds(songInfo.interval || songInfo.meta?.interval)
                 const actualDurationSec = inspection.duration ? Math.round(inspection.duration / 1000) : 0
-                if (expectedDurationSec > 60 && actualDurationSec > 0) {
-                    const isTeaser = actualDurationSec < 60 ||
-                        (actualDurationSec < expectedDurationSec * 0.5) ||
-                        (actualDurationSec <= 90 && (expectedDurationSec - actualDurationSec) > 45)
-                    if (isTeaser) {
-                        console.warn(`[文件缓存] 检测到试听片段/音频残缺 (${actualDurationSec}s vs 预期 ${expectedDurationSec}s)，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`)
-                        safeUnlink(fileStream, tempPath)
-                        fail(new Error(`试听片段 (${actualDurationSec}s / 预期 ${expectedDurationSec}s)，已拒绝写入缓存`))
-                        return
-                    }
-                }
-                if (expectedDurationSec > 120 && actualDurationSec === 0) {
-                    const stat = fs.existsSync(tempPath) ? fs.statSync(tempPath) : null
-                    if (stat && stat.size < 300 * 1024) {
-                        console.warn(`[文件缓存] 检测到异常过小音频文件 (${stat.size} bytes vs 预期时长 ${expectedDurationSec}s)，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`)
-                        safeUnlink(fileStream, tempPath)
-                        fail(new Error(`音频文件过小 (${stat.size} bytes / 预期 ${expectedDurationSec}s)，已拒绝写入缓存`))
-                        return
-                    }
+                const tempSize = fs.existsSync(tempPath) ? fs.statSync(tempPath).size : 0
+                const mismatch = judgeAudioMismatch({
+                    expectedSec: expectedDurationSec,
+                    actualSec: actualDurationSec,
+                    bitrate: inspection.bitrate,
+                    sizeBytes: tempSize,
+                })
+                if (mismatch) {
+                    console.warn(`[文件缓存] ${mismatch}，拒绝写入缓存: ${songInfo.name || getFileName(songInfo, actualQuality, isOnlyDownload, username)}`)
+                    safeUnlink(fileStream, tempPath)
+                    fail(new Error(`${mismatch}，已拒绝写入缓存`))
+                    return
                 }
 
                 const finalBaseName = getFileName(songInfo, actualQuality, isOnlyDownload, username)

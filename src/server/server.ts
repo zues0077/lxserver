@@ -7423,8 +7423,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 sendJson({ success: false, message: '还没有投送过歌曲，无法跳转' }, 400)
                 return
               }
-              const requested = Number(payload.positionSec)
-              if (!Number.isFinite(requested) || requested < 0) {
+              const rawPosition = payload.positionSec
+              // Number(null)=0、Number('')=0 都是「有限非负数」，会让 null/空串静默退化成「跳到 0 秒」
+              const missingPosition = rawPosition === null || rawPosition === undefined || rawPosition === ''
+              const requested = Number(rawPosition)
+              if (missingPosition || !Number.isFinite(requested) || requested < 0) {
                 sendJson({ success: false, message: 'positionSec 必须是非负数' }, 400)
                 return
               }
