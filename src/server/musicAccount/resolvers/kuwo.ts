@@ -19,6 +19,13 @@
  *    rid 256484839：br=flac/320kmp3 → 48k aac（垃圾），br=192kmp3 → 128k mp3。
  *    所以「从高到低试，拿到第一个就收」会把 aac 当成功返回。
  *    这里改成**并行探完各档再择优**，既避开这个坑，也只用一次往返的时间。
+ *
+ * 3) **这个接口目前不校验账号权益，Cookie 带不带结果一样。**
+ *    2026-10-24 在 120 上用真实酷我账号 Cookie 做过三组对照（免费曲 / PAY≠0 付费曲 /
+ *    时长完整性），无 Cookie 与有 Cookie 拿到的 bitrate、format、duration 完全一致，
+ *    也不存在「试听片段」（duration 与曲目真实时长逐首对上）。
+ *    所以「配了账号音质更好」在酷我身上暂时**不成立** —— 别拿 Cookie 去解释音质差，
+ *    该看的是这首歌本身有没有那个档位的资源。Cookie 仍然照发，等平台收紧时才会用到。
  */
 
 import { request, withTimeout, extFromUrl, hasLoginKey } from '../http'
@@ -97,7 +104,7 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   return {
     ok: true,
     verified: 'structural',
-    message: '已完成结构校验；酷我不提供可用的登录态查询接口，会员状态以实际取链音质为准',
+    message: '已完成结构校验；酷我不提供可用的登录态查询接口，且取链接口目前不校验账号，音质取决于曲目本身',
   }
 }
 
