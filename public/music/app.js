@@ -23,6 +23,14 @@ function checkForUpdates() {
 }
 
 const API_BASE = '/api/music';
+// 提取服务端错误文案（服务端对「音源不支持某能力」返 400 + {error}，直接展示给用户）
+async function extractApiError(res, fallback) {
+    try {
+        const j = await res.json();
+        if (j && typeof j.error === 'string' && j.error) return j.error;
+    } catch (e) { /* 非 JSON 响应用兜底文案 */ }
+    return fallback;
+}
 let currentPage = 1;
 window.currentPage = 1;
 let currentSearch = { name: '', source: 'kw' };
@@ -3069,7 +3077,7 @@ async function enterArtist(id, source = 'wy', order = 'hot', tab = 'songs', isBa
 
         try {
             const detailRes = await fetch(`${API_BASE}/artistDetail?id=${id}&source=${source}`);
-            if (!detailRes.ok) throw new Error('Failed to fetch artist detail');
+            if (!detailRes.ok) throw new Error(await extractApiError(detailRes, 'Failed to fetch artist detail'));
             currentArtistInfo = await detailRes.json();
         } catch (e) {
             showError(`获取歌手详情失败: ${e.message}`);
@@ -3512,7 +3520,7 @@ async function loadArtistSongs(id, source, order, forceFetch = false) {
 
     try {
         const res = await fetch(`${API_BASE}/artistSongs?id=${id}&source=${source}&order=${order}`);
-        if (!res.ok) throw new Error('Failed to fetch songs');
+        if (!res.ok) throw new Error(await extractApiError(res, 'Failed to fetch songs'));
         const list = await res.json();
 
         const isCurrentRequest = String(window.currentArtistId) === String(id)
@@ -3762,7 +3770,7 @@ async function fetchAllArtistAlbums(id, source, signal, onProgress) {
     for (let page = 1; page <= ARTIST_ALBUM_MAX_PAGES; page++) {
         const query = new URLSearchParams({ id: String(id), source, page: String(page) });
         const res = await fetch(API_BASE + '/artistAlbums?' + query.toString(), { signal });
-        if (!res.ok) throw new Error('Failed to fetch artist albums page ' + page);
+        if (!res.ok) throw new Error(await extractApiError(res, 'Failed to fetch artist albums page ' + page));
 
         const data = await res.json();
         const pageList = Array.isArray(data.list) ? data.list : [];
@@ -4487,7 +4495,7 @@ async function enterAlbum(id, source = 'wy', initialInfo = null) {
 
     try {
         const res = await fetch(`${API_BASE}/albumSongs?id=${id}&source=${source}`);
-        if (!res.ok) throw new Error('Failed to fetch album songs');
+        if (!res.ok) throw new Error(await extractApiError(res, 'Failed to fetch album songs'));
         const data = await res.json();
         const rawSongs = data.list || (Array.isArray(data) ? data : []);
 

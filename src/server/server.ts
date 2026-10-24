@@ -7027,8 +7027,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
+        if (typeof musicSdk[source]?.extendDetail?.getArtistDetail !== 'function') {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持歌手详情` }))
+          return
+        }
         try {
-          const data = await musicSdk[source].extendDetail.getArtistDetail(id)
+          const data = await musicSdk[source].extendDetail.getArtistDetail(
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
@@ -7045,8 +7050,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
+        if (typeof musicSdk[source]?.extendDetail?.getArtistAlbums !== 'function') {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持歌手专辑列表` }))
+          return
+        }
         try {
-          const data = await musicSdk[source].extendDetail.getArtistAlbums(id, page)
+          const data = await musicSdk[source].extendDetail.getArtistAlbums(
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
@@ -7069,6 +7079,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           const MAX_PAGES = Number.isFinite(configuredMaxPages) && configuredMaxPages > 0
             ? Math.min(Math.floor(configuredMaxPages), 100)
             : 20
+        if (typeof musicSdk[source]?.extendDetail?.getArtistSongs !== 'function') {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持歌手歌曲列表` }))
+          return
+        }
           let allSongs: any[] = []
           for (let p = 1; p <= MAX_PAGES; p++) {
             const data = await musicSdk[source].extendDetail.getArtistSongs(id, p, PAGE_SIZE, order)
@@ -7092,8 +7107,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
+        if (typeof musicSdk[source]?.extendDetail?.getAlbumSongs !== 'function') {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持专辑歌曲列表` }))
+          return
+        }
         try {
-          const data = await musicSdk[source].extendDetail.getAlbumSongs(id)
+          const data = await musicSdk[source].extendDetail.getAlbumSongs(
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
