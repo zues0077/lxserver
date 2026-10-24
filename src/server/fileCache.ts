@@ -429,6 +429,91 @@ const isPlaceholderCoverUrl = (url: any) => {
 
 const hasUsableRemoteCover = (url: any) => typeof url === 'string' && /^https?:\/\//i.test(url) && !isPlaceholderCoverUrl(url)
 
+/**
+ * 小爱音箱起播前只缓冲约 2.1MB，必须在这个窗口内找到首个 MPEG 音频帧才会起播。
+ * 内嵌封面（APIC）一旦把 ID3v2 标签撑过这个窗（实测 2.4MB 封面 → 流冻结在 2228224B，
+ * 封面显示但永远不出声；同文件浏览器播放正常），必须把封面剥掉。
+ * 阈值留了余量：1.5MB（浏览器/电脑播放器不受影响，UI 封面走外置封面缓存或远端 URL 兜底）。
+ */
+const EMBED_TAG_SAFE_BYTES = 1536 * 1024
+
+/** 读 ID3v2 标签总长度；v2.4 帧长/总长为 syncsafe，v2.3 为大端 uint32 */
+const readId3v2TotalSize = (head: Buffer): number => {
+    if (head.length < 10 || head.toString('latin1', 0, 3) !== 'ID3') return 0
+    if (head[3] === 4) {
+        const size = ((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f)
+        return 10 + size + ((head[5] & 0x10) !== 0 ? 10 : 0)
+    }
+    if (head[3] === 3) return 10 + head.readUInt32BE(6)
+    return 0
+}
+
+/**
+ * 若音频文件的 ID3v2 标签超过小爱起播缓冲窗，重写标签并剥离全部封面帧（APIC/PIC），
+ * 其余帧（标题/歌手/专辑/USLT 歌词等）原样保留。成功剥离返回 true。
+ * 写临时文件后原子替换，避免并发读取（小爱本地直发流）拿到半截文件。
+ */
+const stripOversizedEmbeddedCover = (audioPath: string): boolean => {
+    try {
+        const head = Buffer.alloc(10)
+        const fd = fs.openSync(audioPath, 'r')
+        try {
+            fs.readSync(fd, head, 0, 10, 0)
+        } finally {
+            fs.closeSync(fd)
+        }
+        if (head[5] & 0x80) return false // unsync 标签重组有风险，不动
+        const totalSize = readId3v2TotalSize(head)
+        if (totalSize <= EMBED_TAG_SAFE_BYTES) return false
+
+        const ver = head[3]
+        const fileStat = fs.statSync(audioPath)
+        const audioLen = Math.max(0, fileStat.size - totalSize)
+        const tagBuf = Buffer.alloc(totalSize)
+        const audio = Buffer.alloc(audioLen)
+        const rfd = fs.openSync(audioPath, 'r')
+        try {
+            fs.readSync(rfd, tagBuf, 0, totalSize, 0)
+            if (audioLen > 0) fs.readSync(rfd, audio, 0, audioLen, totalSize)
+        } finally {
+            fs.closeSync(rfd)
+        }
+
+        const ss4 = (b: Buffer, o: number) => ((b[o] & 0x7f) << 21) | ((b[o + 1] & 0x7f) << 14) | ((b[o + 2] & 0x7f) << 7) | (b[o + 3] & 0x7f)
+        const encSS = (n: number) => Buffer.from([(n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f])
+        const frameSize = (b: Buffer, o: number) => (ver === 4 ? ss4(b, o) : b.readUInt32BE(o))
+        const encSize = (n: number) => (ver === 4 ? encSS(n) : (() => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b })())
+
+        let off = 10
+        const keep: Buffer[] = []
+        let dropped = false
+        while (off + 10 <= totalSize) {
+            const fid = tagBuf.toString('latin1', off, off + 4)
+            if (!/^[A-Z0-9]{4}$/.test(fid)) break // padding 或扩展区，直接停止
+            const fsz = frameSize(tagBuf, off)
+            if (fsz <= 0 || off + 10 + fsz > totalSize) break
+            if (fid === 'APIC' || fid === 'PIC') {
+                dropped = true
+            } else {
+                keep.push(tagBuf.subarray(off, off + 10 + fsz))
+            }
+            off += 10 + fsz
+        }
+        if (!dropped) return false // 超大标签不是封面撑的（少见），交由人工排查
+
+        const frames = Buffer.concat(keep)
+        const newHeader = Buffer.concat([Buffer.from('ID3', 'latin1'), Buffer.from([ver, head[4], 0]), encSize(frames.length)])
+        const tmpPath = audioPath + '.stripping'
+        fs.writeFileSync(tmpPath, Buffer.concat([newHeader, frames, audio]))
+        fs.renameSync(tmpPath, audioPath)
+        console.warn(`[文件缓存] ID3 标签 ${(totalSize / 1024 / 1024).toFixed(2)}MB 超出小爱起播缓冲窗，已剥离内嵌封面: ${path.basename(audioPath)}`)
+        return true
+    } catch (e) {
+        try { console.warn('[文件缓存] 剥离超大内嵌封面失败（不影响缓存可用性）:', (e as Error)?.message) } catch (e2) { }
+        return false
+    }
+}
+
 const detectAudioContainer = (filePath: string) => {
     try {
         const fd = fs.openSync(filePath, 'r')
@@ -1315,6 +1400,7 @@ export const batchUpdateMetadata = async (filenames: string[], username: string 
             } finally {
                 try { if (tagger) tagger.dispose() } catch (e) { }
             }
+            stripOversizedEmbeddedCover(filePath)
 
             const stats = fs.statSync(filePath)
             const hasEmbeddedCover = readEmbeddedCoverState(filePath)
@@ -2711,6 +2797,7 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                     } finally {
                         try { if (tagger) tagger.dispose() } catch (e) { }
                     }
+                    stripOversizedEmbeddedCover(finalPath)
 
                     const taggedStats = fs.statSync(finalPath)
                     let finalHasCover = readEmbeddedCoverState(finalPath)
@@ -2909,6 +2996,7 @@ export const replaceDownloadedMusicItem = async (
             } finally {
                 try { if (tagger) tagger.dispose() } catch (e) { }
             }
+            stripOversizedEmbeddedCover(targetAudioPath)
             finalHasCover = readEmbeddedCoverState(targetAudioPath)
         }
 
