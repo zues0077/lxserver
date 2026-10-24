@@ -7,6 +7,7 @@
  */
 
 import { request, withTimeout, extFromUrl, hasLoginKey } from '../http'
+import { getPlatform } from '../platforms'
 import type { AccountResolveResult, AccountInfo } from '../types'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -29,8 +30,10 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   // 酷我没有可靠的「查询当前登录用户」接口（/api/user/info 已 404），
   // 拿公开榜单接口试探是无效判据 —— 不带 Cookie 也照样 200，会把游客判成已登录。
   // 所以这里如实只给结构校验结果，会员状态以实际取链拿到的音质为准。
-  if (!hasLoginKey(cookie, ['kw_token', 'user_id', 'userid'])) {
-    return { ok: false, verified: 'structural', message: 'Cookie 里没有找到 kw_token 或 user_id，请确认已登录酷我后再复制' }
+  // 字段清单读平台定义，避免这里另写一份导致前后两套判据
+  const keys = getPlatform('kw')?.loginKeys ?? ['kw_token', 'user_id']
+  if (!hasLoginKey(cookie, keys)) {
+    return { ok: false, verified: 'structural', message: `Cookie 里没有找到 ${keys.join(' / ')}，请确认已登录酷我后再复制` }
   }
   return {
     ok: true,

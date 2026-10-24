@@ -126,7 +126,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
       '打开 https://music.migu.cn 并登录，登录后播放一首歌',
       'F12 →「网络 / Network」，筛选 music.migu.cn',
       '点 listen-url 这类音频接口，复制请求标头里的 Cookie 整行',
-      '关键字段：USERTICKET、pusk、userid',
+      '关键字段：pacmtoken（新版网页登录后必定有），另外 idmpauth / migu-utoken-sessionid / LTToken 也算',
       '未登录只能拿到 PQ(128k)，带登录 Cookie 才有 HQ(320k) / SQ',
     ],
     benefit: '登录后可解锁 HQ(320k)、SQ 无损音质',
