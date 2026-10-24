@@ -16,6 +16,7 @@ import * as kugou from './resolvers/kugou'
 import * as migu from './resolvers/migu'
 import { isSupportedSource, getPlatform } from './platforms'
 import { hasLoginKey } from './http'
+import { normalizeCookieInput, formatLabel } from './cookieParse'
 import * as store from './store'
 import * as qrLogin from './qrLogin'
 import type { AccountResolveResult, AccountInfo, PlatformResolver } from './types'
@@ -159,9 +160,75 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
   })
 }
 
+export interface SaveAccountResult {
+  success: boolean
+  error?: string
+  /** 识别到的格式：cookie-header / curl / netscape / json / kv */
+  format?: string
+  /** 格式的中文名，前端直接展示 */
+  formatText?: string
+  /** 有效 Cookie 条数 */
+  count?: number
+  /** 归一化后的长度 */
+  cookieLength?: number
+  /** 关键字段缺失等提示，不阻断保存 */
+  warnings?: string[]
+  /** 被丢弃的条目（多为已过期） */
+  dropped?: string[]
+}
+
+/**
+ * 保存账号：先把用户粘进来的任意内容归一化成 Cookie 头再落库。
+ *
+ * 这一步必须放在保存侧而不是取链侧 —— 用户粘错的格式（cURL、Netscape 文件）
+ * 也能保存成功，但取链时整串会被当成一个 Cookie，表现为「填了却播不了」，
+ * 排查成本极高。保存时就识别并回显，问题当场就能看见。
+ */
+export function saveAccount(platform: string, rawCookie: string): SaveAccountResult {
+  const p = getPlatform(platform)
+  if (!p) return { success: false, error: `不支持的平台：${platform}` }
+
+  const text = String(rawCookie ?? '').trim()
+  if (!text) {
+    // 空内容视为「清除该平台账号」，保持与原行为一致
+    return store.setCookie(platform, '') as SaveAccountResult
+  }
+
+  const parsed = normalizeCookieInput(text)
+  if (!parsed.ok) {
+    return {
+      success: false,
+      error: '没有从内容里解析出任何 Cookie。请粘贴「网络」面板里的 Cookie 请求头，或直接选择导出的 cookie.txt 文件',
+    }
+  }
+
+  const warnings: string[] = []
+  if (!hasLoginKey(parsed.cookie, p.loginKeys)) {
+    warnings.push(`未发现登录字段（应为 ${p.loginKeys.join(' / ')} 之一），可能只复制到游客 Cookie`)
+  }
+  // 只有 1 个 Cookie 基本不可能是正常登录态（网易云最少也要 MUSIC_U + __csrf），
+  // 2~3 个就不再提示了 —— 各平台精简登录确实可能就只有两三个，报多了是噪音
+  if (parsed.count === 1) {
+    warnings.push('只解析出 1 个 Cookie，几乎肯定不完整，建议用浏览器扩展一键同步')
+  }
+  if (parsed.dropped.length) {
+    warnings.push(`已自动丢弃 ${parsed.dropped.length} 个过期 Cookie`)
+  }
+
+  const res = store.setCookie(platform, parsed.cookie)
+  return {
+    ...res,
+    format: parsed.format,
+    formatText: formatLabel(parsed.format),
+    count: parsed.count,
+    cookieLength: parsed.cookie.length,
+    warnings,
+    dropped: parsed.dropped,
+  }
+}
+
 // ---- 供接口层使用的 store 再导出，避免 API 直接依赖内部文件 ----
 export const getAccounts = store.listAccounts
-export const setAccount = store.setCookie
 export const removeAccount = store.removeCookie
 export const getStoreFilePath = store.getStoreFilePath
 
@@ -169,3 +236,6 @@ export const getStoreFilePath = store.getStoreFilePath
 export const qrLoginStart = qrLogin.start
 export const qrLoginPoll = qrLogin.poll
 export const qrLoginClose = qrLogin.close
+
+// ---- 浏览器扩展包（一键同步 Cookie） ----
+export { buildExtensionZip } from './extensionZip'

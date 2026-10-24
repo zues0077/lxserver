@@ -23,7 +23,12 @@ export interface MusicAccountPlatform {
   name: string
   /** 短名，用于紧凑展示 */
   short: string
-  /** 抓取 Cookie 时要在哪个域名下复制（浏览器 F12 → Application → Cookies） */
+  /**
+   * 实际发请求的接口域名。
+   * 抓 Cookie 要在「网络 / Network」面板按这个域名筛请求 ——
+   * 不能按父域（.kuwo.cn / .migu.cn）去 Application 面板里抄，
+   * 鉴权 Cookie 只在具体子域的接口请求里才齐全。
+   */
   cookieDomain: string
   /** 该平台 Cookie 里用于判断登录态的关键字段（命中任意一个即认为已登录） */
   loginKeys: string[]
@@ -49,10 +54,11 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     cookieDomain: 'music.163.com',
     loginKeys: ['MUSIC_U', '__csrf', 'MUSIC_A'],
     guide: [
-      '浏览器打开 https://music.163.com 并登录账号',
-      '按 F12 打开开发者工具 → 切到「应用 / Application」面板',
-      '左侧找到 Cookie → https://music.163.com',
-      '复制整行 Cookie（或至少包含 MUSIC_U 与 __csrf 的片段）',
+      '打开 https://music.163.com 并登录，登录后随便播一首歌（让 Cookie 下发完整）',
+      'F12 打开开发者工具 → 切到「网络 / Network」',
+      '筛选框输入 music.163.com，点任意一条请求',
+      '右侧「标头 / Headers」→ 请求标头里找到 Cookie，整行复制',
+      '关键字段：MUSIC_U（登录态）、__csrf',
     ],
     benefit: '会员可解锁 VIP 独占、无损及 Hi-Res 音质',
     color: '#C20C0C',
@@ -65,10 +71,11 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     cookieDomain: 'y.qq.com',
     loginKeys: ['qm_keyst', 'uin', 'wxuin'],
     guide: [
-      '浏览器打开 https://y.qq.com 并登录账号',
-      '按 F12 → 「应用 / Application」→ Cookie → https://y.qq.com',
-      '复制整行 Cookie（关键字段 uin 与 qm_keyst）',
-      '注意：仅带 uin 不带 qm_keyst 时通常仍按游客处理',
+      '打开 https://y.qq.com 并登录',
+      'F12 →「网络 / Network」，筛选 y.qq.com，点任意一条接口请求',
+      '右侧「标头 / Headers」→ 请求标头里的 Cookie，整行复制',
+      '关键字段：uin（可能带 o 前缀，如 o0123456789）、qm_keyst',
+      '只有 uin 没有 qm_keyst 会按游客处理，起不到会员作用',
     ],
     benefit: '会员可解锁 SQ 无损、臻品音质与付费曲目',
     color: '#31C27C',
@@ -81,12 +88,14 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     id: 'kw',
     name: '酷我音乐',
     short: '酷我',
-    cookieDomain: 'kuwo.cn',
-    loginKeys: ['kw_token', 'Hm_lvt_', 'user_id'],
+    cookieDomain: 'www.kuwo.cn',
+    loginKeys: ['kw_token', 'user_id', 'userid'],
     guide: [
-      '浏览器打开 http://www.kuwo.cn 并登录账号',
-      '按 F12 → 「应用 / Application」→ Cookie → .kuwo.cn',
-      '复制整行 Cookie（酷我需要 kw_token 才稳定）',
+      '打开 https://www.kuwo.cn 并登录，登录后播放一首歌',
+      'F12 →「网络 / Network」，筛选 www.kuwo.cn',
+      '点播放相关请求（如 /api/v1/www/music/playUrl），复制请求标头里的 Cookie 整行',
+      '关键字段：kw_token、user_id',
+      'kw_token 只在登录后的接口里下发，刚打开网页时可能还没有，所以必须先播一首歌',
     ],
     benefit: '会员可解锁 320k、无损与付费曲库',
     color: '#FFA000',
@@ -95,12 +104,13 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     id: 'kg',
     name: '酷狗音乐',
     short: '酷狗',
-    cookieDomain: 'kugou.com',
-    loginKeys: ['t', 'KugooID', 'kg_mid'],
+    cookieDomain: 'www.kugou.com',
+    loginKeys: ['t', 'KugooID'],
     guide: [
-      '浏览器打开 https://www.kugou.com 并登录账号',
-      '按 F12 → 「应用 / Application」→ Cookie → .kugou.com',
-      '复制整行 Cookie（会员高音质需要 t 与 KugooID）',
+      '打开 https://www.kugou.com 并登录',
+      'F12 →「网络 / Network」，筛选 kugou.com，点任意一条接口请求',
+      '复制请求标头里的 Cookie 整行',
+      '关键字段：t、KugooID（会员高音质靠这两个）',
     ],
     benefit: '会员可解锁高品音质与付费曲目',
     color: '#2E86FF',
@@ -113,10 +123,11 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     cookieDomain: 'music.migu.cn',
     loginKeys: ['migu_music', 'USERTICKET', 'pusk'],
     guide: [
-      '浏览器打开 https://music.migu.cn 并登录账号',
-      '按 F12 → 「应用 / Application」→ Cookie → .migu.cn',
-      '复制整行 Cookie',
-      '提示：未登录时咪咕仅能拿到 PQ(128k)，登录后才有 HQ/SQ',
+      '打开 https://music.migu.cn 并登录，登录后播放一首歌',
+      'F12 →「网络 / Network」，筛选 music.migu.cn',
+      '点 listen-url 这类音频接口，复制请求标头里的 Cookie 整行',
+      '关键字段：USERTICKET、pusk、userid',
+      '未登录只能拿到 PQ(128k)，带登录 Cookie 才有 HQ(320k) / SQ',
     ],
     benefit: '登录后可解锁 HQ(320k)、SQ 无损音质',
     color: '#FF6A00',

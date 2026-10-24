@@ -13,6 +13,7 @@ import * as netease from './netease'
 import * as kugou from './kugou'
 import { qqDriver, wxDriver } from './qq'
 import { getPlatform } from '../platforms'
+import { normalizeCookieInput } from '../cookieParse'
 import * as store from '../store'
 import type { QrDriver, QrStatus } from './types'
 
@@ -140,12 +141,15 @@ export async function poll(sessionId: string): Promise<QrPollPayload> {
       return { ok: true, status: result.status, message: result.message }
     }
 
-    const cookie = String(result.cookie || '').trim()
-    if (!cookie) {
+    const rawCookie = String(result.cookie || '').trim()
+    if (!rawCookie) {
       s.done = true
       sessions.delete(s.id)
       return { ok: false, status: 'failed', message: '登录成功但 Cookie 为空，请重试' }
     }
+    // 各家驱动拼出来的串格式不完全统一，落库前统一收敛成 k=v; k=v
+    const parsed = normalizeCookieInput(rawCookie)
+    const cookie = parsed.ok ? parsed.cookie : rawCookie
     const saved = store.setCookie(s.platform, cookie)
     s.done = true
     sessions.delete(s.id)

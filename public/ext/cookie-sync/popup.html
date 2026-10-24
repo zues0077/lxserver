@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; width: 360px; padding: 14px 16px 16px;
+      font: 13px/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      background: #16181d; color: #e6e8ee;
+    }
+    h1 { font-size: 14px; margin: 0 0 2px; font-weight: 600; }
+    .sub { color: #8b93a1; font-size: 11.5px; margin-bottom: 12px; }
+    label { display: block; font-size: 11.5px; color: #9aa2b1; margin: 10px 0 4px; }
+    input, select {
+      width: 100%; padding: 7px 9px; border-radius: 7px;
+      border: 1px solid #2c313b; background: #1e2128; color: #e6e8ee;
+      font-size: 12.5px; outline: none;
+    }
+    input:focus, select:focus { border-color: #4c7dff; }
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+    button {
+      width: 100%; margin-top: 10px; padding: 9px; border-radius: 8px; border: 0;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    #sync { background: #4c7dff; color: #fff; }
+    #sync:disabled { background: #333a48; color: #7b8496; cursor: default; }
+    #copy { background: #262b34; color: #c8cedb; font-weight: 500; }
+    #status {
+      margin-top: 11px; font-size: 12px; line-height: 1.6;
+      min-height: 34px; padding: 8px 10px; border-radius: 8px;
+      background: #1b1f26; color: #9aa2b1; word-break: break-word;
+    }
+    #status.ok { background: #10261c; color: #4ade80; }
+    #status.err { background: #2a1618; color: #f87171; }
+    #status.warn { background: #2a2213; color: #fbbf24; }
+    .hint { margin-top: 10px; font-size: 11px; color: #6b7383; line-height: 1.5; }
+    .plat { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: #9aa2b1; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #4ade80; }
+    .dot.off { background: #6b7383; }
+  </style>
+</head>
+<body>
+  <h1>同步 Cookie 到 LX</h1>
+  <div class="sub">读取当前页面的登录 Cookie，直接写入服务器</div>
+
+  <div class="plat"><span class="dot" id="dot"></span><span id="platText">检测中…</span></div>
+
+  <label>服务器地址</label>
+  <input id="server" placeholder="http://192.168.1.120:8027" spellcheck="false">
+
+  <label>管理员密码</label>
+  <input id="password" type="password" placeholder="后台登录密码" spellcheck="false">
+
+  <label>目标平台</label>
+  <div class="row">
+    <select id="platform">
+      <option value="wy">网易云音乐</option>
+      <option value="tx">QQ 音乐</option>
+      <option value="kw">酷我音乐</option>
+      <option value="kg">酷狗音乐</option>
+      <option value="mg">咪咕音乐</option>
+    </select>
+    <button id="refresh" style="margin-top:0;background:#262b34;color:#c8cedb;font-weight:500;flex:0 0 96px">重新读取</button>
+  </div>
+
+  <button id="sync">一键同步到服务器</button>
+  <button id="copy">复制为 Netscape Cookie 文件</button>
+
+  <div id="status">请先在页面里登录平台账号，再点「一键同步」</div>
+
+  <div class="hint">
+    仅在本机浏览器内读取你已登录的那几个音乐站点 Cookie，发送目标只有你填写的服务器。
+    如需换服务器，改地址后重新点同步即可。
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -687,10 +687,29 @@
                                 </div>
                                 <div class="modal-body">
                                     <div class="music-acc-guide-domain">
-                                        抓取域名：<code id="music-acc-guide-domain"></code>
+                                        在「网络 / Network」面板按 <code id="music-acc-guide-domain"></code> 筛请求
                                     </div>
                                     <ol id="music-acc-guide-steps" class="music-acc-guide-steps"></ol>
                                     <p class="config-hint-text" id="music-acc-guide-benefit"></p>
+
+                                    <div class="music-acc-ext">
+                                        <div class="music-acc-ext-head">
+                                            <span class="music-acc-ext-title">更省事：浏览器扩展一键同步</span>
+                                            <span class="music-acc-ext-badge">推荐</span>
+                                        </div>
+                                        <p class="config-hint-text">
+                                            装好后在已登录的平台页面点一下扩展图标，自动读取该站点的 Cookie（含 F12 里看不到的 HttpOnly 项）并直接写入本机，
+                                            不用自己找请求、也不会复制漏字段。
+                                        </p>
+                                        <ol class="music-acc-guide-steps">
+                                            <li>点下方「下载扩展包」，解压到一个固定目录（以后别删）</li>
+                                            <li>浏览器打开 <code>chrome://extensions</code>（Edge 为 <code>edge://extensions</code>）→ 右上角开启「开发者模式」</li>
+                                            <li>点「加载已解压的扩展程序」，选择解压出来的文件夹</li>
+                                            <li>停在音乐平台页面点扩展图标，填服务器地址与本页的管理员密码，点「一键同步」</li>
+                                        </ol>
+                                        <button type="button" class="btn-primary"
+                                            onclick="app.downloadCookieExtension()">下载扩展包（.zip）</button>
+                                    </div>
                                 </div>
                                 <div class="modal-footer">
                                     <button type="button" class="btn-secondary" onclick="app.closeMusicAccountGuide()">知道了</button>

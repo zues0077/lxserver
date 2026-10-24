@@ -9360,7 +9360,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         void readBody(req).then(async body => {
           try {
             const { platform, cookie } = JSON.parse(body)
-            const result = musicAccount.setAccount(String(platform || ''), String(cookie || ''))
+            // 用户粘进来的可能是 Cookie 头 / cURL / Netscape 文件 / JSON，
+            // 统一在保存时归一化，避免「填了却播不了」
+            const result = musicAccount.saveAccount(String(platform || ''), String(cookie || ''))
             res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(result))
           } catch (e: any) {
@@ -9444,6 +9446,31 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               : info.guide,
           },
         }))
+        return
+      }
+
+      // 浏览器扩展包：每次请求按 public/ext/cookie-sync 的当前内容现打 zip，
+      // 源码改了立刻生效，不会出现「下载到的扩展和服务器版本不一致」
+      if (pathname === '/api/music/accounts/extension.zip' && req.method === 'GET') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        try {
+          const buf = musicAccount.buildExtensionZip()
+          res.writeHead(200, {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': 'attachment; filename="lx-cookie-sync.zip"',
+            'Content-Length': buf.length,
+            'Cache-Control': 'no-store',
+          })
+          res.end(buf)
+        } catch (e: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+        }
         return
       }
 

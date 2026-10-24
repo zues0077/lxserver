@@ -23,11 +23,25 @@ export function parseCookie(cookie: string): Record<string, string> {
   return out
 }
 
-/** 判断 Cookie 是否含某平台的登录特征字段 */
+/**
+ * 判断 Cookie 是否含某平台的登录特征字段
+ *
+ * 匹配规则要精确：早先实现是「键名相同或以 key 开头」，结果单字母键
+ * （酷狗的 `t`）会把 theme / traceid 这类无关 Cookie 也算命中，
+ * 于是游客 Cookie 也能通过结构校验 —— 假绿灯比红灯更害人。
+ * 现在只在写成 `前缀*` 时才按前缀匹配。
+ */
 export function hasLoginKey(cookie: string, loginKeys: string[]): boolean {
-  const map = parseCookie(cookie)
-  const keys = Object.keys(map)
-  return loginKeys.some(k => keys.some(key => key === k || key.startsWith(k)))
+  const keys = Object.keys(parseCookie(cookie))
+  return loginKeys.some(raw => {
+    const k = String(raw || '').trim()
+    if (!k) return false
+    if (k.endsWith('*')) {
+      const prefix = k.slice(0, -1)
+      return prefix.length > 0 && keys.some(key => key.startsWith(prefix))
+    }
+    return keys.includes(k)
+  })
 }
 
 export interface RequestOpts {

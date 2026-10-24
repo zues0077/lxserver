@@ -5044,9 +5044,18 @@ class App {
                     <button type="button" class="btn-secondary" onclick="app.openMusicAccountGuide('${a.id}')">如何获取</button>
                 </div>
                 <div class="music-acc-editor" id="music-acc-editor-${a.id}" style="display:none;">
-                    <textarea placeholder="粘贴从浏览器复制的 Cookie 整串，例如：MUSIC_U=xxx; __csrf=yyy; ..."></textarea>
+                    <div class="music-acc-editor-tip">
+                        这几种内容都能直接粘进来，服务器会自动识别：<code>Cookie:</code> 请求头整行、cURL 命令、
+                        Netscape 的 <code>cookie.txt</code>、Cookie-Editor 导出的 JSON。
+                    </div>
+                    <textarea placeholder="粘贴 Cookie 请求头，或 cURL 命令，或直接导入 cookie.txt 文件…"></textarea>
                     <div class="music-acc-actions" style="margin-top:.5rem;">
                         <button type="button" class="btn-primary" onclick="app.saveMusicAccount('${a.id}')">保存</button>
+                        <label class="btn-secondary music-acc-file-btn">
+                            导入 cookie.txt
+                            <input type="file" accept=".txt,.json,text/plain,application/json"
+                                onchange="app.importMusicAccountFile('${a.id}', this)">
+                        </label>
                         <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">取消</button>
                     </div>
                 </div>
@@ -5060,27 +5069,97 @@ class App {
         const willShow = box.style.display === 'none';
         // 同时只展开一个编辑框，避免页面上堆好几个大文本框
         document.querySelectorAll('.music-acc-editor').forEach(el => { el.style.display = 'none'; });
+        // 编辑框展开时让这张卡片横跨整行，否则窄卡片里粘贴长 Cookie 几乎没法看
+        document.querySelectorAll('.music-acc-item').forEach(el => el.classList.remove('is-editing'));
         box.style.display = willShow ? 'block' : 'none';
-        if (willShow) box.querySelector('textarea')?.focus();
+        if (willShow) {
+            const item = box.closest('.music-acc-item');
+            if (item) item.classList.add('is-editing');
+            box.querySelector('textarea')?.focus();
+        }
     }
 
     async saveMusicAccount(platform) {
         const box = document.getElementById(`music-acc-editor-${platform}`);
         const cookie = box?.querySelector('textarea')?.value || '';
         if (!cookie.trim()) {
-            showError('请先粘贴 Cookie 内容');
+            showError('请先粘贴 Cookie 内容，或导入 cookie.txt 文件');
             return;
         }
         try {
-            await this.request('/api/music/accounts', {
+            // 服务端会把 Cookie 头 / cURL / Netscape 文件 / JSON 统一归一化，
+            // 并把「认出了什么、缺什么」回传，这样填错格式当场就能看见
+            const res = await this.request('/api/music/accounts', {
                 method: 'POST',
                 body: JSON.stringify({ platform, cookie })
             });
-            showSuccess('已保存（Cookie 加密存储，不会写入配置文件）');
+            const warnings = Array.isArray(res?.warnings) ? res.warnings : [];
+            const summary = res?.formatText
+                ? `已保存：识别为${res.formatText}，共 ${res.count} 个 Cookie`
+                : '已保存（Cookie 加密存储，不会写入配置文件）';
+
+            if (warnings.length) {
+                showInfo(`${summary}。注意：${warnings.join('；')}`);
+            } else {
+                showSuccess(`${summary}，已加密存储`);
+            }
+
             box.style.display = 'none';
             await this.refreshMusicAccounts();
+
+            // 解析干净就顺手验一次，省得用户还要再点一脚
+            if (!warnings.length) await this.verifyMusicAccount(platform, true);
         } catch (e) {
             showError(`保存失败：${e.message}`);
+        }
+    }
+
+    /** 从本地文件读入 Cookie（Netscape cookie.txt / Cookie-Editor JSON 都行） */
+    async importMusicAccountFile(platform, inputEl) {
+        const file = inputEl?.files && inputEl.files[0];
+        if (!file) return;
+        if (file.size > 512 * 1024) {
+            showError('文件太大（超过 512KB），大概是选错文件了');
+            inputEl.value = '';
+            return;
+        }
+        try {
+            const text = await file.text();
+            if (!text.trim()) {
+                showError('文件是空的');
+                return;
+            }
+            const box = document.getElementById(`music-acc-editor-${platform}`);
+            const ta = box?.querySelector('textarea');
+            if (ta) ta.value = text;
+            showInfo(`已读入 ${file.name}（${text.length} 字符），确认无误后点「保存」`);
+        } catch (e) {
+            showError(`读取文件失败：${e.message}`);
+        } finally {
+            inputEl.value = '';
+        }
+    }
+
+    /** 下载浏览器扩展包（服务端按当前源码现打 zip） */
+    async downloadCookieExtension() {
+        try {
+            const resp = await fetch(`${API_BASE}/api/music/accounts/extension.zip`, {
+                headers: { 'X-Frontend-Auth': this.password }
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'lx-cookie-sync.zip';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            // 交还内存，避免连续点几次后累积
+            setTimeout(() => URL.revokeObjectURL(url), 4000);
+            showSuccess('扩展包已下载：解压后在 chrome://extensions 打开「开发者模式」加载');
+        } catch (e) {
+            showError(`下载失败：${e.message}`);
         }
     }
 
@@ -5101,22 +5180,28 @@ class App {
         }
     }
 
-    async verifyMusicAccount(platform) {
-        showInfo('正在验证，请稍候…');
+    /**
+     * 验证账号
+     * @param {boolean} silent 保存后自动触发时为 true —— 只在列表上体现结果，不再弹一个 toast
+     */
+    async verifyMusicAccount(platform, silent = false) {
+        if (!silent) showInfo('正在验证，请稍候…');
         try {
             const res = await this.request('/api/music/accounts/verify', {
                 method: 'POST',
                 body: JSON.stringify({ platform })
             });
             const info = (res && res.data) || {};
-            if (info.ok) {
-                showSuccess(info.isVip ? '验证通过：账号有效且为会员' : '验证通过：账号有效');
-            } else {
-                showError(`验证未通过：${info.message || '未知原因'}`);
+            if (!silent) {
+                if (info.ok) {
+                    showSuccess(info.isVip ? '验证通过：账号有效且为会员' : `验证通过：${info.message || '账号有效'}`);
+                } else {
+                    showError(`验证未通过：${info.message || '未知原因'}`);
+                }
             }
             await this.refreshMusicAccounts();
         } catch (e) {
-            showError(`验证失败：${e.message}`);
+            if (!silent) showError(`验证失败：${e.message}`);
         }
     }
 

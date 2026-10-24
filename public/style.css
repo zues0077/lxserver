@@ -6466,3 +6466,91 @@ input:-webkit-autofill:active {
 .music-acc-qr-status.is-err {
     color: #ef4444;
 }
+
+/* ==========================================================
+   平台账号 · Cookie 输入区（多格式粘贴 / 文件导入）与扩展入口
+   ========================================================== */
+.music-acc-editor-tip {
+    font-size: 0.78rem;
+    line-height: 1.6;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+}
+
+.music-acc-editor-tip code,
+.music-acc-guide-steps code,
+.music-acc-guide-domain code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+    background: rgba(148, 163, 184, 0.14);
+    color: var(--text-primary);
+    /* 短标识整体不折行：`Cookie:` 被拆成 `C` + `ookie:` 会很难读 */
+    white-space: nowrap;
+}
+
+/* 只有域名可能很长，允许在任意位置断 */
+.music-acc-guide-domain code {
+    white-space: normal;
+    word-break: break-all;
+}
+
+/* 「导入 cookie.txt」本质是个 label 包着隐藏的 file input，外观沿用次要按钮 */
+.music-acc-file-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+}
+
+.music-acc-file-btn input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+/* 引导弹窗里的扩展推荐区：和手工步骤拉开层次，但不抢主按钮 */
+.music-acc-ext {
+    margin-top: 1.1rem;
+    padding: 0.95rem 1rem 1rem;
+    border-radius: 12px;
+    border: 1px solid rgba(59, 130, 246, 0.28);
+    background: rgba(59, 130, 246, 0.07);
+}
+
+.music-acc-ext-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.45rem;
+}
+
+.music-acc-ext-title {
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.music-acc-ext-badge {
+    font-size: 0.68rem;
+    line-height: 1;
+    padding: 0.22rem 0.42rem;
+    border-radius: 999px;
+    color: #fff;
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+}
+
+.music-acc-ext .music-acc-guide-steps {
+    margin: 0.55rem 0 0.85rem;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+/* 编辑框展开时横跨整行，方便粘贴长 Cookie */
+.music-acc-item.is-editing {
+    grid-column: 1 / -1;
+}
