@@ -7033,7 +7033,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
         try {
-          const data = await musicSdk[source].extendDetail.getArtistDetail(
+          const data = await musicSdk[source].extendDetail.getArtistDetail(id)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
@@ -7056,7 +7056,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
         try {
-          const data = await musicSdk[source].extendDetail.getArtistAlbums(
+          const data = await musicSdk[source].extendDetail.getArtistAlbums(id, page)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
@@ -7113,7 +7113,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
         try {
-          const data = await musicSdk[source].extendDetail.getAlbumSongs(
+          const data = await musicSdk[source].extendDetail.getAlbumSongs(id)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
