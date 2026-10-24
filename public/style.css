@@ -6385,3 +6385,84 @@ input:-webkit-autofill:active {
         grid-template-columns: 1fr;
     }
 }
+
+/* ==========================================================
+   平台账号视图容器 + 扫码登录
+   ========================================================== */
+.accounts-view-inner {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding-bottom: 2rem;
+}
+
+/* 扫码按钮与普通按钮区分：这是「更省事」的入口，给一点暖色提示 */
+.music-acc-qr-btn {
+    border-color: rgba(245, 158, 11, 0.55) !important;
+    color: #f59e0b !important;
+}
+
+.music-acc-qr-btn:hover {
+    background: rgba(245, 158, 11, 0.12) !important;
+}
+
+.music-acc-qr-stage {
+    position: relative;
+    width: 232px;
+    height: 232px;
+    margin: 0.25rem auto 0.9rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 10px;
+    box-sizing: border-box;
+    border-radius: 14px;
+    /* 二维码必须白底，深色主题下直接用页面底色会扫不出来 */
+    background: #fff;
+}
+
+.music-acc-qr-image {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+}
+
+.music-acc-qr-loading {
+    font-size: 0.85rem;
+    color: #6b7280;
+    text-align: center;
+    padding: 0 1rem;
+    line-height: 1.6;
+}
+
+.music-acc-qr-mask {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 14px;
+    background: rgba(17, 24, 39, 0.72);
+    color: #fff;
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.music-acc-qr-status {
+    text-align: center;
+    font-size: 0.9rem;
+    margin: 0.2rem 0 0.4rem;
+    min-height: 1.3em;
+}
+
+.music-acc-qr-status.is-ok {
+    color: #10b981;
+}
+
+.music-acc-qr-status.is-warn {
+    color: #f59e0b;
+}
+
+.music-acc-qr-status.is-err {
+    color: #ef4444;
+}

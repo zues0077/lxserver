@@ -9,6 +9,13 @@
  * 3. 本模块不依赖内置 musicSdk，避免上游更新时冲突。
  */
 
+export interface MusicAccountQrOption {
+  /** 扫码驱动 id，对应 qrLogin/index.ts 里的 DRIVERS */
+  driver: string
+  /** 按钮文案 */
+  label: string
+}
+
 export interface MusicAccountPlatform {
   /** 平台 id，同时是 LX source id */
   id: string
@@ -26,6 +33,12 @@ export interface MusicAccountPlatform {
   benefit: string
   /** 主色，用于界面标识 */
   color: string
+  /**
+   * 支持的扫码登录方式。
+   * 有值前端就显示「扫码登录」按钮；没有就只能手工填 Cookie
+   * （酷我 / 咪咕官方没有可用的扫码换 token 接口，硬做只会给出假按钮）。
+   */
+  qrLogins?: MusicAccountQrOption[]
 }
 
 export const PLATFORMS: MusicAccountPlatform[] = [
@@ -43,6 +56,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     ],
     benefit: '会员可解锁 VIP 独占、无损及 Hi-Res 音质',
     color: '#C20C0C',
+    qrLogins: [{ driver: 'wy', label: '扫码登录' }],
   },
   {
     id: 'tx',
@@ -58,6 +72,10 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     ],
     benefit: '会员可解锁 SQ 无损、臻品音质与付费曲目',
     color: '#31C27C',
+    qrLogins: [
+      { driver: 'tx', label: 'QQ 扫码' },
+      { driver: 'txwx', label: '微信扫码' },
+    ],
   },
   {
     id: 'kw',
@@ -86,6 +104,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     ],
     benefit: '会员可解锁高品音质与付费曲目',
     color: '#2E86FF',
+    qrLogins: [{ driver: 'kg', label: '扫码登录' }],
   },
   {
     id: 'mg',

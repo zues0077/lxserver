@@ -17,6 +17,7 @@ import * as migu from './resolvers/migu'
 import { isSupportedSource, getPlatform } from './platforms'
 import { hasLoginKey } from './http'
 import * as store from './store'
+import * as qrLogin from './qrLogin'
 import type { AccountResolveResult, AccountInfo, PlatformResolver } from './types'
 
 export { PLATFORMS, getPlatform, isSupportedSource } from './platforms'
@@ -163,3 +164,8 @@ export const getAccounts = store.listAccounts
 export const setAccount = store.setCookie
 export const removeAccount = store.removeCookie
 export const getStoreFilePath = store.getStoreFilePath
+
+// ---- 扫码登录（网易云 / QQ / 微信 / 酷狗） ----
+export const qrLoginStart = qrLogin.start
+export const qrLoginPoll = qrLogin.poll
+export const qrLoginClose = qrLogin.close

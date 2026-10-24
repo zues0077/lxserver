@@ -116,6 +116,8 @@ export function listAccounts(): Array<{
   cookiePreview: string
   updatedAt: number | null
   lastVerify: StoredAccount['lastVerify'] | null
+  /** 该平台支持的扫码方式（空数组 = 只能手工填 Cookie） */
+  qrLogins: Array<{ driver: string; label: string }>
 }> {
   const store = readStore()
   return PLATFORMS.map(p => {
@@ -137,6 +139,7 @@ export function listAccounts(): Array<{
       cookiePreview: cookie.length > 8 ? `${cookie.slice(0, 3)}…${cookie.slice(-3)}` : '',
       updatedAt: acc?.updatedAt ?? null,
       lastVerify: acc?.lastVerify ?? null,
+      qrLogins: p.qrLogins || [],
     }
   })
 }

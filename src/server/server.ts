@@ -9431,7 +9431,19 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ success: true, data: info }))
+        res.end(JSON.stringify({
+          success: true,
+          data: {
+            ...info,
+            // 支持扫码的平台，引导里先提一句「扫码更快」，避免用户上来就去 F12 抄 Cookie
+            guide: info.qrLogins?.length
+              ? [
+                `这个平台支持扫码登录：直接点「${info.qrLogins.map(q => q.label).join(' / ')}」用手机扫一下就完成，不需要手工复制 Cookie。下面是手工填写的方式：`,
+                ...info.guide,
+              ]
+              : info.guide,
+          },
+        }))
         return
       }
 
@@ -9458,6 +9470,78 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               priority: musicAccount.isPriority(),
               timeoutMs: global.lx.config['musicAccount.timeoutMs'],
             } }))
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // 扫码登录：取二维码（每种扫码方式一个 session，状态只留在服务端内存）
+      if (pathname === '/api/music/accounts/qr/start' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { platform, driver } = JSON.parse(body || '{}')
+            const payload = await musicAccount.qrLoginStart(
+              String(platform || ''),
+              driver ? String(driver) : undefined,
+            )
+            res.writeHead(payload.ok ? 200 : 400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              success: payload.ok,
+              data: payload,
+              error: payload.ok ? undefined : payload.error,
+            }))
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // 扫码登录：查询扫码结果（前端定时轮询，成功时后端已把 Cookie 保存好）
+      if (pathname === '/api/music/accounts/qr/poll' && req.method === 'GET') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        const session = new URL(req.url || '', 'http://localhost').searchParams.get('session') || ''
+        try {
+          const payload = await musicAccount.qrLoginPoll(session)
+          // 轮询一律 200：失败状态也要让前端读到 status 文案，而不是被当成网络错误
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: true, data: payload }))
+        } catch (e: any) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: true, data: { ok: false, status: 'failed', message: e?.message || String(e) } }))
+        }
+        return
+      }
+
+      // 扫码登录：关闭弹窗时释放会话
+      if (pathname === '/api/music/accounts/qr/close' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { session } = JSON.parse(body || '{}')
+            musicAccount.qrLoginClose(String(session || ''))
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true }))
           } catch (e: any) {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))

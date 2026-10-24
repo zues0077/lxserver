@@ -42,6 +42,11 @@ export interface RequestOpts {
   timeout?: number
   /** 返回原始文本而不尝试解析 JSON */
   raw?: boolean
+  /**
+   * 最多跟随几次重定向。默认 5。
+   * 扫码登录（QQ）需要自己读 302 的 Location 才能拿到 code，这里必须能设成 0。
+   */
+  followMax?: number
 }
 
 export interface RequestResult<T = any> {
@@ -63,7 +68,7 @@ export async function request<T = any>(url: string, opts: RequestOpts = {}): Pro
 
   const options: any = {
     headers,
-    follow_max: 5,
+    follow_max: opts.followMax ?? 5,
     response_timeout: opts.timeout ?? 12000,
     read_timeout: opts.timeout ?? 12000,
     agent: await getProxyAgent(url, 'music'),

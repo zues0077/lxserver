@@ -159,6 +159,14 @@
                     </svg>
                     <span>用户管理</span>
                 </a>
+                <a href="#" class="nav-item" data-view="accounts">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                        <circle cx="12" cy="7" r="4" />
+                        <path d="M17 11l2 2 3.5-3.5" />
+                    </svg>
+                    <span>平台账号</span>
+                </a>
                 <a href="#" class="nav-item" data-view="data">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
@@ -603,6 +611,122 @@
                     </div>
                 </div>
 
+
+                <!-- 平台账号视图：用自己的会员账号听各平台歌曲 -->
+                <div id="view-accounts" class="view">
+                    <div class="accounts-view-inner">
+                        <!-- ===== 平台账号：用自己的会员账号听各平台歌曲 ===== -->
+                        <!-- 刻意放在 form 之外：Cookie 是登录凭证，不走「保存配置」那条提交链路，
+                             而是通过 /api/music/accounts 单独加密存储，避免被配置备份/WebDAV 带上云。 -->
+                        <div class="config-card glass" id="music-accounts-card">
+                            <div class="config-card-header">
+                                <div class="config-card-icon"
+                                    style="background: linear-gradient(135deg, #f59e0b, #ea580c);">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5z" />
+                                        <circle cx="7.5" cy="12.5" r="1" fill="currentColor" stroke="none" />
+                                        <circle cx="10" cy="8" r="1" fill="currentColor" stroke="none" />
+                                        <circle cx="15" cy="10.5" r="1" fill="currentColor" stroke="none" />
+                                    </svg>
+                                </div>
+                                <div style="flex: 1; min-width: 0;">
+                                    <h3 class="config-card-title">平台账号</h3>
+                                    <p class="config-card-desc">
+                                        扫码或填入自己的平台账号，播放时优先用账号取链，可解锁会员音质与付费曲目；取不到再自动回落自定义音源。
+                                    </p>
+                                </div>
+                                <button type="button" class="btn-secondary" onclick="app.refreshMusicAccounts()"
+                                    style="white-space: nowrap; flex-shrink: 0;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                        style="width:15px;height:15px;">
+                                        <polyline points="23 4 23 10 17 10" />
+                                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                                    </svg>
+                                    刷新状态
+                                </button>
+                            </div>
+
+                            <div class="config-card-body">
+                                <!-- 总开关区 -->
+                                <div class="music-acc-toolbar">
+                                    <label class="pill-toggle-switch" title="关闭后取链完全不走账号通道">
+                                        <input type="checkbox" id="music-acc-enabled">
+                                        <span class="pill-toggle-track"><span class="pill-toggle-thumb"></span></span>
+                                        <span class="pill-toggle-label">启用账号取链</span>
+                                    </label>
+                                    <label class="pill-toggle-switch"
+                                        title="开启=先用账号取，失败再回落自定义音源；关闭=自定义源全部失败后才试账号">
+                                        <input type="checkbox" id="music-acc-priority">
+                                        <span class="pill-toggle-track"><span class="pill-toggle-thumb"></span></span>
+                                        <span class="pill-toggle-label">首选自己的账号</span>
+                                    </label>
+                                    <label class="music-acc-timeout-label">
+                                        取链超时
+                                        <input type="number" id="music-acc-timeout" class="input-field"
+                                            min="3000" max="60000" step="1000" style="width: 100px;">
+                                        ms
+                                    </label>
+                                </div>
+
+                                <!-- 平台列表（由 JS 渲染，新增平台时后端加一条即可，这里不用改） -->
+                                <div id="music-accounts-list" class="music-acc-list">
+                                    <div class="music-acc-loading">正在加载平台账号状态…</div>
+                                </div>
+
+                                <p class="config-hint-text" id="music-acc-store-path"></p>
+                            </div>
+                        </div>
+
+                        <!-- Cookie 获取引导弹窗 -->
+                        <div id="music-acc-guide-modal" class="modal" style="display: none;">
+                            <div class="modal-content glass" style="max-width: 560px;">
+                                <div class="modal-header">
+                                    <h3 id="music-acc-guide-title">如何获取 Cookie</h3>
+                                    <button type="button" class="modal-close"
+                                        onclick="app.closeMusicAccountGuide()">×</button>
+                                </div>
+                                <div class="modal-body">
+                                    <div class="music-acc-guide-domain">
+                                        抓取域名：<code id="music-acc-guide-domain"></code>
+                                    </div>
+                                    <ol id="music-acc-guide-steps" class="music-acc-guide-steps"></ol>
+                                    <p class="config-hint-text" id="music-acc-guide-benefit"></p>
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn-secondary" onclick="app.closeMusicAccountGuide()">知道了</button>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 扫码登录弹窗 -->
+                        <div id="music-acc-qr-modal" class="modal" style="display: none;">
+                            <div class="modal-content glass" style="max-width: 430px;">
+                                <div class="modal-header">
+                                    <h3 id="music-acc-qr-title">扫码登录</h3>
+                                    <button type="button" class="modal-close"
+                                        onclick="app.closeMusicAccountQR()">×</button>
+                                </div>
+                                <div class="modal-body">
+                                    <div class="music-acc-qr-stage">
+                                        <img id="music-acc-qr-image" class="music-acc-qr-image" alt="登录二维码"
+                                            style="display:none;">
+                                        <div id="music-acc-qr-loading" class="music-acc-qr-loading">正在获取二维码…</div>
+                                        <div id="music-acc-qr-mask" class="music-acc-qr-mask" style="display:none;">
+                                            <span id="music-acc-qr-mask-text">二维码已失效</span>
+                                        </div>
+                                    </div>
+                                    <p id="music-acc-qr-status" class="music-acc-qr-status">正在获取二维码…</p>
+                                    <p id="music-acc-qr-hint" class="config-hint-text"></p>
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn-secondary"
+                                        onclick="app.refreshMusicAccountQR()">刷新二维码</button>
+                                    <button type="button" class="btn-secondary"
+                                        onclick="app.closeMusicAccountQR()">关闭</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
 
                 <!-- 数据查看视图 -->
                 <div id="view-data" class="view">
@@ -1875,88 +1999,6 @@
 
                     </form>
 
-                    <!-- ===== 平台账号：用自己的会员账号听各平台歌曲 ===== -->
-                    <!-- 刻意放在 form 之外：Cookie 是登录凭证，不走「保存配置」那条提交链路，
-                         而是通过 /api/music/accounts 单独加密存储，避免被配置备份/WebDAV 带上云。 -->
-                    <div class="config-card glass" id="music-accounts-card" style="margin-top: 1.25rem;">
-                        <div class="config-card-header">
-                            <div class="config-card-icon"
-                                style="background: linear-gradient(135deg, #f59e0b, #ea580c);">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5z" />
-                                    <circle cx="7.5" cy="12.5" r="1" fill="currentColor" stroke="none" />
-                                    <circle cx="10" cy="8" r="1" fill="currentColor" stroke="none" />
-                                    <circle cx="15" cy="10.5" r="1" fill="currentColor" stroke="none" />
-                                </svg>
-                            </div>
-                            <div style="flex: 1; min-width: 0;">
-                                <h3 class="config-card-title">平台账号</h3>
-                                <p class="config-card-desc">
-                                    填入自己的平台账号 Cookie，播放时优先用账号取链，可解锁会员音质与付费曲目；取不到再自动回落自定义音源。
-                                </p>
-                            </div>
-                            <button type="button" class="btn-secondary" onclick="app.refreshMusicAccounts()"
-                                style="white-space: nowrap; flex-shrink: 0;">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                                    style="width:15px;height:15px;">
-                                    <polyline points="23 4 23 10 17 10" />
-                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                                </svg>
-                                刷新状态
-                            </button>
-                        </div>
-
-                        <div class="config-card-body">
-                            <!-- 总开关区 -->
-                            <div class="music-acc-toolbar">
-                                <label class="pill-toggle-switch" title="关闭后取链完全不走账号通道">
-                                    <input type="checkbox" id="music-acc-enabled">
-                                    <span class="pill-toggle-track"><span class="pill-toggle-thumb"></span></span>
-                                    <span class="pill-toggle-label">启用账号取链</span>
-                                </label>
-                                <label class="pill-toggle-switch"
-                                    title="开启=先用账号取，失败再回落自定义音源；关闭=自定义源全部失败后才试账号">
-                                    <input type="checkbox" id="music-acc-priority">
-                                    <span class="pill-toggle-track"><span class="pill-toggle-thumb"></span></span>
-                                    <span class="pill-toggle-label">首选自己的账号</span>
-                                </label>
-                                <label class="music-acc-timeout-label">
-                                    取链超时
-                                    <input type="number" id="music-acc-timeout" class="input-field"
-                                        min="3000" max="60000" step="1000" style="width: 100px;">
-                                    ms
-                                </label>
-                            </div>
-
-                            <!-- 平台列表（由 JS 渲染，新增平台时后端加一条即可，这里不用改） -->
-                            <div id="music-accounts-list" class="music-acc-list">
-                                <div class="music-acc-loading">正在加载平台账号状态…</div>
-                            </div>
-
-                            <p class="config-hint-text" id="music-acc-store-path"></p>
-                        </div>
-                    </div>
-
-                    <!-- Cookie 获取引导弹窗 -->
-                    <div id="music-acc-guide-modal" class="modal-overlay" style="display: none;">
-                        <div class="modal-content glass" style="max-width: 560px;">
-                            <div class="modal-header">
-                                <h3 id="music-acc-guide-title">如何获取 Cookie</h3>
-                                <button type="button" class="modal-close-btn"
-                                    onclick="app.closeMusicAccountGuide()">×</button>
-                            </div>
-                            <div class="modal-body">
-                                <div class="music-acc-guide-domain">
-                                    抓取域名：<code id="music-acc-guide-domain"></code>
-                                </div>
-                                <ol id="music-acc-guide-steps" class="music-acc-guide-steps"></ol>
-                                <p class="config-hint-text" id="music-acc-guide-benefit"></p>
-                            </div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn-secondary" onclick="app.closeMusicAccountGuide()">知道了</button>
-                            </div>
-                        </div>
-                    </div>
                 </div>
 
                 <!-- WebDAV 同步与云端备份视图 (现代化重构) -->

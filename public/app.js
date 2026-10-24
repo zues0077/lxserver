@@ -502,6 +502,7 @@ class App {
         const titles = {
             dashboard: '仪表盘',
             users: '用户管理',
+            accounts: '平台账号',
             data: '数据查看',
             config: '系统配置',
             logs: '系统日志',
@@ -527,6 +528,8 @@ class App {
                 break;
             case 'config':
                 this.loadConfig();
+                break;
+            case 'accounts':
                 this.refreshMusicAccounts();
                 break;
             case 'logs':
@@ -5020,6 +5023,11 @@ class App {
                 : '尚未填写 Cookie';
             const verifyMsg = v.message ? `<br><span style="opacity:.85">${this.escapeHtml(v.message)}</span>` : '';
 
+            // 支持扫码的平台把扫码按钮放前面：这是最省事的登录方式，不该藏在「填写 Cookie」后面
+            const qrBtns = (a.qrLogins || []).map(q =>
+                `<button type="button" class="btn-secondary music-acc-qr-btn" onclick="app.startMusicAccountQR('${a.id}','${q.driver}')">${this.escapeHtml(q.label)}</button>`
+            ).join('');
+
             return `
             <div class="music-acc-item ${a.configured ? 'is-configured' : ''}" data-platform="${a.id}">
                 <div class="music-acc-item-head">
@@ -5029,6 +5037,7 @@ class App {
                 </div>
                 <div class="music-acc-meta">${meta}${verifyMsg}</div>
                 <div class="music-acc-actions">
+                    ${qrBtns}
                     <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">填写 Cookie</button>
                     <button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('${a.id}')">验证</button>
                     ${a.configured ? `<button type="button" class="btn-secondary" onclick="app.clearMusicAccount('${a.id}')">清除</button>` : ''}
@@ -5159,6 +5168,202 @@ class App {
 
     closeMusicAccountGuide() {
         const modal = document.getElementById('music-acc-guide-modal');
+        if (modal) modal.style.display = 'none';
+    }
+
+    // ============================================================
+    // 平台账号 · 扫码登录
+    // 二维码由后端生成（QQ 还要绑 cookie 会话），前端只负责展示 + 轮询。
+    // 会话 id 是一次性的，关掉弹窗立刻通知后端释放，不在浏览器留任何登录材料。
+    // ============================================================
+
+    _qrState() {
+        if (!this.musicAccountQR) {
+            this.musicAccountQR = { platform: '', driver: '', session: '', timer: 0, fails: 0, settled: false, intervalMs: 2200 };
+        }
+        return this.musicAccountQR;
+    }
+
+    _qrEl(id) {
+        return document.getElementById(id);
+    }
+
+    _setQRStatus(text, cls) {
+        const el = this._qrEl('music-acc-qr-status');
+        if (!el) return;
+        el.textContent = text || '';
+        el.className = `music-acc-qr-status${cls ? ' ' + cls : ''}`;
+    }
+
+    _clearQRPoll() {
+        const st = this._qrState();
+        if (st.timer) {
+            window.clearInterval(st.timer);
+            st.timer = 0;
+        }
+    }
+
+    _closeQRSession(session) {
+        if (!session) return;
+        // 失败无所谓：后端会话本来就会在 15 分钟内自动回收
+        this.request('/api/music/accounts/qr/close', {
+            method: 'POST',
+            body: JSON.stringify({ session })
+        }).catch(() => { });
+    }
+
+    async startMusicAccountQR(platform, driver) {
+        const st = this._qrState();
+        this._clearQRPoll();
+        if (st.session) this._closeQRSession(st.session);
+        st.platform = platform;
+        st.driver = driver || '';
+        st.session = '';
+        st.fails = 0;
+        st.settled = false;
+
+        const modal = this._qrEl('music-acc-qr-modal');
+        const img = this._qrEl('music-acc-qr-image');
+        const loading = this._qrEl('music-acc-qr-loading');
+        const mask = this._qrEl('music-acc-qr-mask');
+        const hintEl = this._qrEl('music-acc-qr-hint');
+        if (modal) modal.style.display = 'flex';
+        if (img) {
+            img.style.display = 'none';
+            img.removeAttribute('src');
+        }
+        if (mask) mask.style.display = 'none';
+        if (hintEl) hintEl.textContent = '';
+        if (loading) {
+            loading.style.display = 'block';
+            loading.textContent = '正在获取二维码…';
+        }
+        this._setQRStatus('正在获取二维码…', '');
+
+        try {
+            const res = await this.request('/api/music/accounts/qr/start', {
+                method: 'POST',
+                body: JSON.stringify({ platform, driver })
+            });
+            const data = (res && res.data) || {};
+            st.session = data.sessionId || '';
+            st.intervalMs = data.pollIntervalMs || 2200;
+            if (!st.session) throw new Error('后端未返回扫码会话');
+
+            if (img && data.image) {
+                img.src = data.image;
+                img.style.display = 'block';
+            }
+            if (loading) loading.style.display = 'none';
+            if (hintEl) hintEl.textContent = data.hint || '';
+            this._setQRStatus('等待扫码', '');
+
+            st.timer = window.setInterval(() => this.pollMusicAccountQR(), st.intervalMs);
+            this.pollMusicAccountQR();
+        } catch (e) {
+            if (loading) {
+                loading.style.display = 'block';
+                loading.textContent = '二维码获取失败';
+            }
+            this._setQRStatus(e.message || '二维码获取失败', 'is-err');
+        }
+    }
+
+    async pollMusicAccountQR() {
+        const st = this._qrState();
+        if (!st.session || st.settled) return;
+        try {
+            const res = await this.request(`/api/music/accounts/qr/poll?session=${encodeURIComponent(st.session)}`);
+            const data = (res && res.data) || {};
+            st.fails = 0;
+            const status = data.status;
+            if (status === 'waiting') {
+                this._setQRStatus(data.message || '等待扫码', '');
+                return;
+            }
+            if (status === 'scanned') {
+                this._setQRStatus(data.message || '已扫码，请在手机上确认登录', 'is-warn');
+                return;
+            }
+            if (status === 'success') {
+                this._onQRLoginSuccess(data);
+                return;
+            }
+            if (status === 'expired') {
+                this._onQRLoginFail('二维码已失效', data.message || '请点击「刷新二维码」重试');
+                return;
+            }
+            this._onQRLoginFail('登录失败', data.message || '请点击「刷新二维码」重试');
+        } catch (e) {
+            st.fails += 1;
+            // 单次网络抖动不算失败，连续几次才收手，否则弱网下二维码会没完没了地重来
+            if (st.fails >= 5) {
+                this._onQRLoginFail('登录状态获取中断', e.message || '网络异常，请刷新二维码');
+            }
+        }
+    }
+
+    _onQRLoginSuccess(data) {
+        const st = this._qrState();
+        st.settled = true;
+        this._clearQRPoll();
+        const platform = st.platform;
+        st.session = '';
+
+        const mask = this._qrEl('music-acc-qr-mask');
+        const maskText = this._qrEl('music-acc-qr-mask-text');
+        if (mask) {
+            mask.style.display = 'flex';
+            if (maskText) maskText.textContent = '✓ 登录成功';
+        }
+        this._setQRStatus(data.message || '登录成功，账号已保存', 'is-ok');
+
+        window.setTimeout(() => {
+            const modal = this._qrEl('music-acc-qr-modal');
+            if (modal) modal.style.display = 'none';
+        }, 1200);
+
+        this.refreshMusicAccounts();
+        this._autoVerifyAfterQR(platform);
+    }
+
+    _onQRLoginFail(title, message) {
+        const st = this._qrState();
+        st.settled = true;
+        this._clearQRPoll();
+        const mask = this._qrEl('music-acc-qr-mask');
+        const maskText = this._qrEl('music-acc-qr-mask-text');
+        if (mask) {
+            mask.style.display = 'flex';
+            if (maskText) maskText.textContent = title;
+        }
+        this._setQRStatus(message, 'is-err');
+    }
+
+    /** 扫码成功后顺带做一次在线校验，让列表直接显示「会员 / 已登录」而不是「已配置」 */
+    async _autoVerifyAfterQR(platform) {
+        try {
+            await this.request('/api/music/accounts/verify', {
+                method: 'POST',
+                body: JSON.stringify({ platform })
+            });
+        } catch { /* 校验失败不影响登录结果，列表会显示校验未通过 */ }
+        this.refreshMusicAccounts();
+    }
+
+    refreshMusicAccountQR() {
+        const st = this._qrState();
+        if (!st.platform) return;
+        this.startMusicAccountQR(st.platform, st.driver);
+    }
+
+    closeMusicAccountQR() {
+        const st = this._qrState();
+        this._clearQRPoll();
+        if (st.session) this._closeQRSession(st.session);
+        st.session = '';
+        st.settled = true;
+        const modal = this._qrEl('music-acc-qr-modal');
         if (modal) modal.style.display = 'none';
     }
 }
