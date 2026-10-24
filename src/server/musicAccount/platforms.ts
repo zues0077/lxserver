@@ -32,6 +32,14 @@ export interface MusicAccountPlatform {
   cookieDomain: string
   /** 该平台 Cookie 里用于判断登录态的关键字段（命中任意一个即认为已登录） */
   loginKeys: string[]
+  /**
+   * 决定「能不能拿到高音质」的那个字段（可选）。
+   * 缺了它虽然仍算登录，但套餐权益基本吃不到，保存时要单独提醒 ——
+   * 典型是酷我：只在会员中心页面停留过就没有 kw_token，音质锁死在 128k。
+   */
+  essentialKey?: string
+  /** 缺 essentialKey 时给出的补救说明 */
+  essentialHint?: string
   /** 抓取步骤说明，展示在管理界面「如何获取」里 */
   guide: string[]
   /** 登录后能带来的收益说明 */
@@ -53,6 +61,8 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     short: '网易',
     cookieDomain: 'music.163.com',
     loginKeys: ['MUSIC_U', '__csrf', 'MUSIC_A'],
+    essentialKey: 'MUSIC_U',
+    essentialHint: '没有 MUSIC_U 就是游客身份，VIP / 无损都拿不到，请在 music.163.com 重新登录后播一首歌再取',
     guide: [
       '打开 https://music.163.com 并登录，登录后随便播一首歌（让 Cookie 下发完整）',
       'F12 打开开发者工具 → 切到「网络 / Network」',
@@ -70,6 +80,8 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     short: 'QQ',
     cookieDomain: 'y.qq.com',
     loginKeys: ['qm_keyst', 'uin', 'wxuin'],
+    essentialKey: 'qm_keyst',
+    essentialHint: '只有 uin 没有 qm_keyst 会被当游客，SQ / 臻品音质拿不到，请重新登录 QQ 音乐后再取',
     guide: [
       '打开 https://y.qq.com 并登录',
       'F12 →「网络 / Network」，筛选 y.qq.com，点任意一条接口请求',
@@ -89,13 +101,15 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     name: '酷我音乐',
     short: '酷我',
     cookieDomain: 'www.kuwo.cn',
-    loginKeys: ['kw_token', 'user_id', 'userid'],
+    loginKeys: ['kw_token', 'userid', 'user_id', 'websid', 'logintype', 'username'],
+    essentialKey: 'kw_token',
+    essentialHint: '缺 kw_token：它只在主站 www.kuwo.cn 的接口请求里下发，只在会员中心（vip1.kuwo.cn）停留过的 Cookie 里没有它，音质会锁在 128k。请到 www.kuwo.cn 播一首歌后重新同步',
     guide: [
-      '打开 https://www.kuwo.cn 并登录，登录后播放一首歌',
-      'F12 →「网络 / Network」，筛选 www.kuwo.cn',
-      '点播放相关请求（如 /api/v1/www/music/playUrl），复制请求标头里的 Cookie 整行',
-      '关键字段：kw_token、user_id',
-      'kw_token 只在登录后的接口里下发，刚打开网页时可能还没有，所以必须先播一首歌',
+      '打开 https://www.kuwo.cn 并登录，登录后播放一首歌（这一步必须做）',
+      'F12 →「网络 / Network」，筛选 www.kuwo.cn，点播放相关请求（如 /api/v1/www/music/playUrl）',
+      '复制请求标头里的 Cookie 整行',
+      '关键字段：kw_token、userid、websid',
+      'kw_token 只在主站登录后的接口里下发。只在会员中心（vip1.kuwo.cn）停留过的话，拿到的 Cookie 里没有它，音质只能到 128k',
     ],
     benefit: '会员可解锁 320k、无损与付费曲库',
     color: '#FFA000',

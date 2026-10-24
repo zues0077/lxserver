@@ -209,8 +209,14 @@ export function saveAccount(platform: string, rawCookie: string): SaveAccountRes
   }
 
   const warnings: string[] = []
-  if (!hasLoginKey(parsed.cookie, p.loginKeys)) {
+  const hasLogin = hasLoginKey(parsed.cookie, p.loginKeys)
+  if (!hasLogin) {
     warnings.push(`未发现登录字段（应为 ${p.loginKeys.join(' / ')} 之一），可能只复制到游客 Cookie`)
+  }
+  // 登录判据命中、但「决定音质的那一个字段」缺失时单独提醒。
+  // 这种情况最容易被忽略：状态显示已登录，实际权益一点没吃到（酷我锁 128k 就是这么来的）
+  if (hasLogin && p.essentialKey && !hasLoginKey(parsed.cookie, [p.essentialKey])) {
+    warnings.push(p.essentialHint || `缺少 ${p.essentialKey}，可能拿不到该账号的音质权益`)
   }
   // 只有 1 个 Cookie 基本不可能是正常登录态（网易云最少也要 MUSIC_U + __csrf），
   // 2~3 个就不再提示了 —— 各平台精简登录确实可能就只有两三个，报多了是噪音
