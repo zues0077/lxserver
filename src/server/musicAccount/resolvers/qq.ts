@@ -4,8 +4,16 @@
  * 走 `music.vkey.GetVkey` 的 `UrlGetVkey`，用 filename 指定音质档位，
  * 成功后把返回的 purl 拼到 `https://ws.stream.qqmusic.qq.com/` 前面。
  *
- * 关键点：请求体里的 `uin` 必须与 Cookie 里的登录 uin 一致，否则按游客处理，
- * 实测游客状态下 purl 恒为空 —— 这就是为什么必须把 uin 从 Cookie 里抠出来带上。
+ * ⚠️ 必须记住的实测事实（2026-10-24，别再凭想象改）：
+ *
+ * 1) **payload 里不能带真实 uin，鉴权完全靠 Cookie。**
+ *    微信登录的 Cookie 里 uin 是 1152921504822229000 这种超出 JS 安全整数的数，
+ *    一转 Number 就精度失真，整个请求被拒 `req_1.code=104009`（连免费歌都全灭）。
+ *    实测 `comm.uin=0` + `param.uin=''` + Cookie 里带 qm_keyst：免费歌正常出链（HTTP 206），
+ *    服务端还会把 filename 自动改写成歌曲真实的 media_mid。
+ *
+ * 2) **付费歌（pay_play=1）没有绿钻就是拿不到 purl**——midurlinfo 里 purl 为空串，
+ *    这是权限问题不是代码问题，错误信息里要说清楚，让用户知道该换歌而不是去修 bug。
  */
 
 import { request, withTimeout, parseCookie, extFromUrl } from '../http'
@@ -42,8 +50,11 @@ function uinOf(cookie: string): string {
 /**
  * 批量查询 vkey。filenames 与 songmids 一一对应，
  * 返回与 filenames 同序的 purl 数组（拿不到则为空串）。
+ *
+ * uin 一律传 0 / ''：鉴权只认 Cookie（见文件头说明），
+ * 真实 uin（尤其微信登录的超长数字）放进去反而触发 104009 全灭。
  */
-async function getVkey(songmids: string[], filenames: string[], uin: string, cookie: string): Promise<string[]> {
+async function getVkey(songmids: string[], filenames: string[], cookie: string): Promise<string[]> {
   const payload = {
     comm: {
       cv: 4747474,
@@ -54,7 +65,7 @@ async function getVkey(songmids: string[], filenames: string[], uin: string, coo
       notice: 0,
       platform: 'yqq.json',
       needNewCode: 1,
-      uin: Number(uin) || 0,
+      uin: 0,
     },
     req_1: {
       module: 'music.vkey.GetVkey',
@@ -63,7 +74,7 @@ async function getVkey(songmids: string[], filenames: string[], uin: string, coo
         guid: randomGuid(),
         songmid: songmids,
         songtype: songmids.map(() => 0),
-        uin,
+        uin: '',
         loginflag: 1,
         platform: '20',
         filename: filenames,
@@ -109,7 +120,11 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
 export async function resolve(songInfo: any, quality: string, cookie: string): Promise<AccountResolveResult> {
   const mid = String(songInfo?.songmid ?? songInfo?.meta?.songId ?? songInfo?.strMediaMid ?? '')
   if (!mid) return { ok: false, error: '歌曲缺少 QQ songmid，无法用账号取链' }
+  // filename 要用 strMediaMid（文件资源的 media_mid），songmid 只是歌曲 id；
+  // 没有 strMediaMid 时先拿 songmid 顶着，服务端会对免费歌自动改写成真实 media_mid
+  const mediaMid = String(songInfo?.strMediaMid ?? songInfo?.meta?.mediaMid ?? mid) || mid
 
+  // uin 只用作「是否带登录态」的判断，不再参与请求（见文件头说明）
   const uin = uinOf(cookie)
   if (uin === '0') {
     return { ok: false, error: 'Cookie 未包含登录 uin，请先重新抓取登录后的 Cookie' }
@@ -120,12 +135,12 @@ export async function resolve(songInfo: any, quality: string, cookie: string): P
   const chain = wanted >= 0 ? QUALITY_TABLE.slice(wanted) : QUALITY_TABLE.slice(5)
   if (!chain.length) return { ok: false, error: `不支持的音质：${quality}` }
 
-  const filenames = chain.map(q => `${q.prefix}${mid}${mid}.${q.ext}`)
+  const filenames = chain.map(q => `${q.prefix}${mediaMid}${mediaMid}.${q.ext}`)
   const songmids = chain.map(() => mid)
 
   let purls: string[] = []
   try {
-    purls = await withTimeout(getVkey(songmids, filenames, uin, cookie), 15000, 'QQ vkey 取链')
+    purls = await withTimeout(getVkey(songmids, filenames, cookie), 15000, 'QQ vkey 取链')
   } catch (e: any) {
     return { ok: false, error: `QQ 取链失败：${e.message}` }
   }
@@ -143,5 +158,5 @@ export async function resolve(songInfo: any, quality: string, cookie: string): P
     }
   }
 
-  return { ok: false, error: 'QQ 未返回可用链接（多为版权受限、非会员或 Cookie 过期）' }
+  return { ok: false, error: 'QQ 未返回可用链接：该曲多为付费/版权受限曲目（当前账号无绿钻权益拿不到），或 Cookie 已过期' }
 }
