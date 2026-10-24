@@ -1,9 +1,13 @@
 {
   "manifest_version": 3,
   "name": "LX 音乐账号 Cookie 同步",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "在当前音乐平台页面一键读取登录 Cookie，同步到自己的 LX 服务器，无需手工复制。",
-  "permissions": ["cookies", "storage", "activeTab"],
+  "permissions": [
+    "cookies",
+    "storage",
+    "activeTab"
+  ],
   "host_permissions": [
     "*://*.music.163.com/*",
     "*://*.qq.com/*",
@@ -11,7 +15,10 @@
     "*://*.kugou.com/*",
     "*://*.migu.cn/*"
   ],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "同步 Cookie 到 LX"

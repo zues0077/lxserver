@@ -5013,8 +5013,15 @@ class App {
                         statusText = v.isVip ? '会员' : '已登录';
                     }
                 } else if (v.at) {
-                    statusClass = 'bad';
-                    statusText = '校验未通过';
+                    // 结构校验失败不等于「Cookie 无效」——多半是平台换了字段名或压根没登录。
+                    // 标成中性的「待确认」，别用红色吓人，具体原因在下面的提示里
+                    if (v.verified === 'structural') {
+                        statusClass = '';
+                        statusText = '待确认';
+                    } else {
+                        statusClass = 'bad';
+                        statusText = '校验未通过';
+                    }
                 }
             }
 

@@ -121,7 +121,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     name: '咪咕音乐',
     short: '咪咕',
     cookieDomain: 'music.migu.cn',
-    loginKeys: ['migu_music', 'USERTICKET', 'pusk'],
+    loginKeys: ['*ticket*', '*utoken*', '*pacmtoken*', 'migu_music*', 'mg_auth*', 'pusk', 'userid'],
     guide: [
       '打开 https://music.migu.cn 并登录，登录后播放一首歌',
       'F12 →「网络 / Network」，筛选 music.migu.cn',

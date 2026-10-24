@@ -29,16 +29,24 @@ export function parseCookie(cookie: string): Record<string, string> {
  * 匹配规则要精确：早先实现是「键名相同或以 key 开头」，结果单字母键
  * （酷狗的 `t`）会把 theme / traceid 这类无关 Cookie 也算命中，
  * 于是游客 Cookie 也能通过结构校验 —— 假绿灯比红灯更害人。
- * 现在只在写成 `前缀*` 时才按前缀匹配。
+ *
+ * 现在只认两种写法：
+ *   - `kw_token`    精确匹配（区分大小写，Cookie 名本来大小写敏感）
+ *   - `*token*`     通配，`*` 代表任意串（用于「名字不确定但一定含 token」的平台，
+ *                   比如咪咕换了新版登录后字段名可能是 mg_auth_utoken 之类）
  */
 export function hasLoginKey(cookie: string, loginKeys: string[]): boolean {
   const keys = Object.keys(parseCookie(cookie))
   return loginKeys.some(raw => {
     const k = String(raw || '').trim()
     if (!k) return false
-    if (k.endsWith('*')) {
-      const prefix = k.slice(0, -1)
-      return prefix.length > 0 && keys.some(key => key.startsWith(prefix))
+    if (k.includes('*')) {
+      const pattern = k
+        .split('*')
+        .map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('.*')
+      const re = new RegExp(`^${pattern}$`)
+      return keys.some(key => re.test(key))
     }
     return keys.includes(k)
   })

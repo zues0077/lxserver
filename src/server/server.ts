@@ -9360,12 +9360,19 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         void readBody(req).then(async body => {
           try {
             const { platform, cookie } = JSON.parse(body)
+            // 记一条「请求到达」日志：用户反馈「同步了但后台没有」时，
+            // 先看日志区分「插件根本没送到」和「送到了但平台/字段不对」
+            console.log(`[平台账号] 收到保存请求：platform=${platform || '(空)'}，${String(cookie || '').length} 字符`)
             // 用户粘进来的可能是 Cookie 头 / cURL / Netscape 文件 / JSON，
             // 统一在保存时归一化，避免「填了却播不了」
             const result = musicAccount.saveAccount(String(platform || ''), String(cookie || ''))
+            if (!result.success) {
+              console.log(`[平台账号] 保存被拒：${result.error || '未知原因'}`)
+            }
             res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(result))
           } catch (e: any) {
+            console.log(`[平台账号] 保存异常：${e?.message || e}`)
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
           }

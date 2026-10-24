@@ -15,7 +15,7 @@ import * as kuwo from './resolvers/kuwo'
 import * as kugou from './resolvers/kugou'
 import * as migu from './resolvers/migu'
 import { isSupportedSource, getPlatform } from './platforms'
-import { hasLoginKey } from './http'
+import { hasLoginKey, parseCookie } from './http'
 import { normalizeCookieInput, formatLabel } from './cookieParse'
 import * as store from './store'
 import * as qrLogin from './qrLogin'
@@ -115,11 +115,15 @@ export async function verifyAccount(id: string): Promise<AccountInfo> {
   // 这一步挡掉「粘了半截 Cookie」「粘了别家 Cookie」这类最常见的手误，
   // 而且所有平台都能做，不依赖各家接口是否提供用户信息端点。
   if (!hasLoginKey(cookie, platform.loginKeys)) {
-    const miss = platform.loginKeys.join(' / ')
+    // 把「实际有哪些字段」一并回显：用户不必截图问人，自己就能看出
+    // 是没登录、还是平台换了新字段名（我们认不出来）
+    const present = Object.keys(parseCookie(cookie))
+    const names = present.slice(0, 14).join(', ') + (present.length > 14 ? ' …' : '')
     return {
       ok: false,
       verified: 'structural',
-      message: `Cookie 里没有找到登录字段（需要包含 ${miss} 之一），请确认已登录后再复制`,
+      message: `没有识别到登录字段（期望 ${platform.loginKeys.join(' / ')}）。当前 Cookie 里的字段是：${names || '（空）'}。`
+        + '如果你确认已经登录，请把这段字段名发我，我按新字段名适配。',
     }
   }
 
@@ -169,6 +173,8 @@ export interface SaveAccountResult {
   formatText?: string
   /** 有效 Cookie 条数 */
   count?: number
+  /** 解析出的字段名（前 30 个），前端可展示，便于用户判断有没有抄对 */
+  keys?: string[]
   /** 归一化后的长度 */
   cookieLength?: number
   /** 关键字段缺失等提示，不阻断保存 */
@@ -216,11 +222,22 @@ export function saveAccount(platform: string, rawCookie: string): SaveAccountRes
   }
 
   const res = store.setCookie(platform, parsed.cookie)
+
+  // 留一条可追溯的日志：用户反馈「同步了但后台没有」时，
+  // 看日志就能分清「没送到」还是「送到了但平台/字段不对」
+  console.log(
+    `[平台账号] 保存 ${platform}：识别为${formatLabel(parsed.format)}，${parsed.count} 个字段`
+    + `（${parsed.keys.slice(0, 14).join(', ')}${parsed.keys.length > 14 ? ' …' : ''}），`
+    + `${parsed.cookie.length} 字符`
+    + (warnings.length ? `；提示：${warnings.join('；')}` : ''),
+  )
+
   return {
     ...res,
     format: parsed.format,
     formatText: formatLabel(parsed.format),
     count: parsed.count,
+    keys: parsed.keys.slice(0, 30),
     cookieLength: parsed.cookie.length,
     warnings,
     dropped: parsed.dropped,

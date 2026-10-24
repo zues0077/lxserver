@@ -3,10 +3,10 @@
  *
  * 设计原则：
  * 1. 只读、只发：读当前已登录音乐站点的 Cookie，POST 到用户自己填的服务器，不落任何第三方。
- * 2. 同时支持「一键同步」和「复制为 Netscape 文件」两条路 ——
- *    服务器不可达时，用户仍可拿文件去别处用（go-music-dl 也吃这个格式）。
- * 3. Cookie 排序按 domain 从宽到窄，同名时具体子域的值覆盖父域，
- *    与服务端「后写覆盖」的语义一致。
+ * 2. 结果必须「可核对」：同步成功的提示里带上服务器实际收到的字段名，
+ *    用户一眼能看出是没登录（字段里没有 token 类）还是我们认不出新字段名。
+ * 3. 校验不阻塞：保存成功后立刻回显，校验在后台跑完再追加，避免「点了半天没反应」。
+ * 4. 出问题能取证：诊断信息可一键复制（只含字段名，不含值）。
  */
 
 const PLATFORMS = {
@@ -20,9 +20,21 @@ const PLATFORMS = {
 const $ = id => document.getElementById(id)
 const statusEl = $('status')
 
+/** 最近一次同步的完整上下文，供「复制诊断信息」使用 */
+let lastDiag = null
+
 function setStatus(text, kind) {
   statusEl.textContent = text
   statusEl.className = kind || ''
+}
+
+function appendStatus(text) {
+  statusEl.textContent = statusEl.textContent + '\n' + text
+}
+
+function fmtList(arr, max = 10) {
+  const uniq = [...new Set(arr)]
+  return uniq.slice(0, max).join(', ') + (uniq.length > max ? ` …（共 ${uniq.length} 个）` : '')
 }
 
 function currentPlatformFromUrl(url) {
@@ -47,10 +59,9 @@ function normalizeServer(v) {
 }
 
 /** 读某个域下的全部 Cookie（含 HttpOnly），已过期的丢掉 */
-async function readCookies(domain) {
-  const all = await chrome.cookies.getAll({ domain })
+async function readCookies(domain, tabUrl) {
   const now = Date.now() / 1000
-  return all
+  const pick = list => list
     .filter(c => {
       if (!c.name) return false
       if (c.expirationDate && c.expirationDate < now - 60) return false
@@ -63,6 +74,24 @@ async function readCookies(domain) {
       if (da !== db) return da - db
       return (a.name || '').localeCompare(b.name || '')
     })
+
+  let list = []
+  try {
+    list = await chrome.cookies.getAll({ domain })
+  } catch {
+    list = []
+  }
+
+  // domain 查询偶尔会空（cookie 全挂在更具体的子域、或命中权限边界），
+  // 再用当前页面 URL 兜一次 —— 这条查询返回的正是「该页面实际会带的那些」
+  if (!list.length && tabUrl) {
+    try {
+      list = await chrome.cookies.getAll({ url: tabUrl })
+    } catch {
+      /* 忽略，交给上层提示 */
+    }
+  }
+  return pick(list)
 }
 
 function toCookieHeader(cookies) {
@@ -84,15 +113,7 @@ function toNetscape(cookies) {
     const includeSub = domain.startsWith('.') ? 'TRUE' : 'FALSE'
     const exp = c.expirationDate ? Math.floor(c.expirationDate) : 0
     lines.push(
-      [
-        httpOnly + domain,
-        includeSub,
-        c.path || '/',
-        c.secure ? 'TRUE' : 'FALSE',
-        exp,
-        c.name,
-        c.value ?? '',
-      ].join('\t'),
+      [httpOnly + domain, includeSub, c.path || '/', c.secure ? 'TRUE' : 'FALSE', exp, c.name, c.value ?? ''].join('\t'),
     )
   }
   return lines.join('\n') + '\n'
@@ -107,7 +128,6 @@ async function ensurePermission(server) {
   }
   const has = await chrome.permissions.contains({ origins: [origin] })
   if (has) return
-  // 用户点过按钮，仍在手势有效期内，可以弹授权
   const granted = await chrome.permissions.request({ origins: [origin] })
   if (!granted) throw new Error('未授权访问该服务器地址，无法同步（可改用「复制为 Netscape 文件」）')
 }
@@ -123,19 +143,20 @@ async function apiPost(server, path, password, payload) {
   try {
     data = JSON.parse(text)
   } catch {
-    throw new Error(`服务器返回了非 JSON 内容（HTTP ${res.status}），请检查地址是否指向 LX 服务器`)
+    throw new Error(`服务器返回了非 JSON（HTTP ${res.status}）：${text.slice(0, 120)}`)
   }
   if (res.status === 401) throw new Error('管理员密码不正确')
-  return data
+  return { data, status: res.status }
 }
 
 let platformId = 'wy'
 let cookies = []
+let currentTabUrl = ''
 
 async function reload() {
   const tab = await chrome.tabs.query({ active: true, currentWindow: true })
-  const url = tab[0]?.url || ''
-  const detected = currentPlatformFromUrl(url)
+  currentTabUrl = tab[0]?.url || ''
+  const detected = currentPlatformFromUrl(currentTabUrl)
   $('dot').className = 'dot' + (detected ? '' : ' off')
 
   if (detected) {
@@ -147,15 +168,17 @@ async function reload() {
     platformId = $('platform').value
   }
 
-  cookies = await readCookies(PLATFORMS[platformId].domain)
+  cookies = await readCookies(PLATFORMS[platformId].domain, currentTabUrl)
   if (!cookies.length) {
-    setStatus(`没有读到 ${PLATFORMS[platformId].name} 的 Cookie。请先打开并登录该平台。`, 'warn')
+    setStatus(
+      `没有读到 ${PLATFORMS[platformId].name} 的 Cookie。\n`
+      + '请确认：① 当前标签页就是这个平台的页面；② 已经登录（不是游客）；③ 刷新一次页面再点「重新读取」。',
+      'warn',
+    )
     return
   }
-  const names = [...new Set(cookies.map(c => c.name))]
-  setStatus(
-    `已读取 ${names.length} 个 Cookie\n${names.slice(0, 8).join(', ')}${names.length > 8 ? ' …' : ''}`,
-  )
+  const names = cookies.map(c => c.name)
+  setStatus(`已读取 ${new Set(names).size} 个 Cookie\n字段：${fmtList(names)}`)
 }
 
 $('platform').addEventListener('change', async () => {
@@ -165,40 +188,62 @@ $('platform').addEventListener('change', async () => {
 
 $('refresh').addEventListener('click', reload)
 
+/** 校验放后台跑，不阻塞「已保存」的回显 */
+async function verifyInBackground(server, password) {
+  appendStatus('校验中…')
+  try {
+    const { data } = await apiPost(server, '/api/music/accounts/verify', password, { platform: platformId })
+    const info = data?.data || {}
+    if (lastDiag) lastDiag.verify = info
+    // 结构校验的结果里带着「当前实际字段名」，正是排查要的信息，原样展示
+    appendStatus(`校验：${info.message || (info.ok ? '通过' : '未通过')}`)
+  } catch (e) {
+    appendStatus(`校验失败：${e.message || e}`)
+  }
+}
+
 $('sync').addEventListener('click', async () => {
   const server = normalizeServer($('server').value)
   const password = $('password').value
   if (!server) return setStatus('请填写服务器地址，例如 http://192.168.1.120:8027', 'err')
   if (!password) return setStatus('请填写管理员密码（就是后台登录密码）', 'err')
 
+  platformId = $('platform').value || platformId
   await chrome.storage.local.set({ server, password })
   $('sync').disabled = true
   setStatus('正在同步…')
 
+  const names = cookies.map(c => c.name)
+  lastDiag = {
+    at: new Date().toISOString(),
+    url: currentTabUrl,
+    platform: platformId,
+    domain: PLATFORMS[platformId].domain,
+    count: new Set(names).size,
+    names: [...new Set(names)],
+    server,
+    save: null,
+    verify: null,
+  }
+
   try {
     await ensurePermission(server)
     if (!cookies.length) await reload()
-    if (!cookies.length) throw new Error('没有可同步的 Cookie，请确认已登录该平台')
+    if (!cookies.length) throw new Error('没有可同步的 Cookie：请确认已登录该平台并刷新页面')
 
     const cookie = toCookieHeader(cookies)
-    const r = await apiPost(server, '/api/music/accounts', password, { platform: platformId, cookie })
+    const { data: r } = await apiPost(server, '/api/music/accounts', password, { platform: platformId, cookie })
+    lastDiag.save = r
     if (!r.success) throw new Error(r.error || '服务器拒绝保存')
 
-    let msg = `已同步 ${r.count ?? ''} 个 Cookie（识别为${r.formatText || 'Cookie'}）`
-    if (Array.isArray(r.warnings) && r.warnings.length) msg += '\n⚠ ' + r.warnings.join('\n⚠ ')
+    const lines = []
+    lines.push(`已保存到「${PLATFORMS[platformId].name}」：${r.count ?? names.length} 个字段（识别为${r.formatText || 'Cookie'}）`)
+    lines.push(`字段：${fmtList(r.keys && r.keys.length ? r.keys : names)}`)
+    for (const w of r.warnings || []) lines.push('⚠ ' + w)
+    setStatus(lines.join('\n'), (r.warnings || []).length ? 'warn' : 'ok')
 
-    // 顺手验一下，让用户当场知道这份 Cookie 有没有用
-    try {
-      const v = await apiPost(server, '/api/music/accounts/verify', password, { platform: platformId })
-      const info = v?.data
-      if (info) {
-        msg += `\n校验：${info.message || (info.ok ? '通过' : '未通过')}`
-      }
-    } catch {
-      /* 校验失败不影响已保存的事实，静默 */
-    }
-
-    setStatus(msg, 'ok')
+    // 保存已经成功，校验慢就慢，不挡着用户
+    verifyInBackground(server, password)
   } catch (e) {
     setStatus(e.message || String(e), 'err')
   } finally {
@@ -212,6 +257,24 @@ $('copy').addEventListener('click', async () => {
     if (!cookies.length) return setStatus('没有可复制的 Cookie', 'warn')
     await navigator.clipboard.writeText(toNetscape(cookies))
     setStatus('已复制 Netscape 格式，可直接粘贴到后台「填写 Cookie」框，或导入 go-music-dl', 'ok')
+  } catch (e) {
+    setStatus('复制失败：' + (e.message || e), 'err')
+  }
+})
+
+$('diag').addEventListener('click', async () => {
+  try {
+    const payload = lastDiag || {
+      at: new Date().toISOString(),
+      url: currentTabUrl,
+      platform: platformId,
+      domain: PLATFORMS[platformId].domain,
+      count: new Set(cookies.map(c => c.name)).size,
+      names: [...new Set(cookies.map(c => c.name))],
+      note: '尚未同步过',
+    }
+    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
+    setStatus('诊断信息已复制（只含字段名，不含 Cookie 值），可直接发给维护者', 'ok')
   } catch (e) {
     setStatus('复制失败：' + (e.message || e), 'err')
   }

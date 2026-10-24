@@ -27,11 +27,14 @@
     }
     #sync { background: #4c7dff; color: #fff; }
     #sync:disabled { background: #333a48; color: #7b8496; cursor: default; }
-    #copy { background: #262b34; color: #c8cedb; font-weight: 500; }
+    #copy, #diag { background: #262b34; color: #c8cedb; font-weight: 500; }
+    #diag { margin-top: 6px; font-size: 12px; }
     #status {
       margin-top: 11px; font-size: 12px; line-height: 1.6;
       min-height: 34px; padding: 8px 10px; border-radius: 8px;
       background: #1b1f26; color: #9aa2b1; word-break: break-word;
+      /* 结果里带字段名列表，必须保留换行，否则糊成一坨没法看 */
+      white-space: pre-wrap;
     }
     #status.ok { background: #10261c; color: #4ade80; }
     #status.err { background: #2a1618; color: #f87171; }
@@ -68,6 +71,7 @@
 
   <button id="sync">一键同步到服务器</button>
   <button id="copy">复制为 Netscape Cookie 文件</button>
+  <button id="diag">复制诊断信息</button>
 
   <div id="status">请先在页面里登录平台账号，再点「一键同步」</div>
 
