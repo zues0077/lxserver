@@ -1232,7 +1232,8 @@ const serveRemoteUrl = async (
  *
  * 做法：这次请求先按住几秒。前端一收到 replay 信号就会立刻投送下一首，
  * 新的一首会把这一路 retire 掉（连接被掐断），音箱就听不到这段回放。
- * 期间前端没投新歌（比如队列到头了）也只多等几秒，不会卡死。
+ * 期间前端没投新歌（队列到头 / 网页已关）也只多等这几秒，期满直接 410 停住，
+ * 不把整首重发——否则关掉网页后就是无限单曲循环（2026-10-24 实测坐实）。
  */
 const REPLAY_HOLD_MS = 4000
 
@@ -1279,6 +1280,16 @@ export const serveXiaoAiStream = async (req: IncomingMessage, res: ServerRespons
       }
       return
     }
+    // 按住期满仍没有新投送：前端不会再切歌了（队列到头 / 网页已关 / 前端掉线）。
+    // 原实现这里掉下去把整首重发一遍，音箱播完又重拉 → 实测无限单曲循环
+    // （2026-10-24 无页面投送：18:59/19:03/19:06 每隔约一个歌长整首重发一次）。
+    // 直接 410 让音箱停住；要继续听由前端重新投送（新流新 token）。
+    if (!res.headersSent) {
+      syncLog.info('[XiaoAi] 按住期满无前端切歌：拒绝重放上一首，音箱停止（防无限单曲循环）')
+      res.writeHead(410, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ success: false, message: 'replay hold expired without takeover' }))
+    }
+    return
   }
 
   // 统一 mp3：本地缓存、远端直投都收口到同一条转码通道

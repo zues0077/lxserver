@@ -980,6 +980,23 @@ function getUserAuthHeaders() {
 }
 window.getUserAuthHeaders = getUserAuthHeaders;
 
+// 页面关闭/刷新时告知服务端「小爱当前这首放完即止」：
+// 没有页面就没有人推下一首，音箱播完重拉同一 URL 会被服务端整首重发、无限单曲循环
+// （2026-10-24 实测坐实，与 stream.ts 的按住期满 410 双保险）。
+// 用 keepalive fetch 而非 sendBeacon：detach 需要 x-frontend-auth 头，sendBeacon 带不了。
+window.addEventListener('beforeunload', () => {
+    try {
+        const unloadHeaders = typeof getUserAuthHeaders === 'function' ? getUserAuthHeaders() : {};
+        if (!unloadHeaders['x-frontend-auth']) return;
+        fetch(API_BASE + '/xiaoai/detach', {
+            method: 'POST',
+            headers: Object.assign({ 'Content-Type': 'application/json' }, unloadHeaders),
+            body: '{}',
+            keepalive: true,
+        }).catch(() => {});
+    } catch (e) { /* 页面正在卸载，忽略一切错误 */ }
+});
+
 function isUserLoggedIn() {
     const user = localStorage.getItem('lx_sync_user');
     const token = localStorage.getItem('lx_user_token');
