@@ -56,6 +56,10 @@ echo [node] %NODE_EXE%
 echo.
 type "%~dp0msg\starting.txt"
 echo.
+rem 读取配置里的端口（默认 18080），启动后自动打开配置页
+set "SIGNER_PORT=18080"
+for /f "delims=" %%p in ('"%NODE_EXE%" -e "const fs=require('fs');try{const c=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));console.log(c.port||18080)}catch(e){console.log(18080)}" "%~dp0config.json" 2^>nul') do set "SIGNER_PORT=%%p"
+start "" cmd /c "ping -n 4 127.0.0.1 >nul & start http://localhost:%SIGNER_PORT%/ >nul 2>nul"
 "%NODE_EXE%" "%~dp0signer.js" %*
 set "RC=%ERRORLEVEL%"
 echo.

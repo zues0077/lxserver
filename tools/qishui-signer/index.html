@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>汽水签名器 · 配置</title>
+<style>
+  :root {
+    --bg: #16161f;
+    --panel: #20212e;
+    --panel-2: #272838;
+    --line: #34354a;
+    --text: #e6e7ee;
+    --muted: #9aa0b4;
+    --accent: #6c8cff;
+    --accent-2: #4f6fe0;
+    --ok: #4cd07d;
+    --warn: #f5b454;
+    --err: #ff6b6b;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", Segoe UI, Roboto, sans-serif;
+    line-height: 1.5; padding: 28px 16px 60px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 22px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 18px 18px 20px; margin-bottom: 18px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .tag { font-size: 11px; font-weight: 500; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); padding: 1px 7px; border-radius: 20px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
+  input[type=text], input[type=number], input[type=password] {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+    color: var(--text); border-radius: 8px; padding: 9px 11px; font-size: 14px; outline: none;
+  }
+  input:focus { border-color: var(--accent); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+  .server-row {
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+    margin-bottom: 12px; background: var(--panel-2);
+  }
+  .server-row .row-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .server-row .row-head .idx { font-size: 12px; color: var(--muted); }
+  .server-fields { display: grid; grid-template-columns: 1fr 200px; gap: 10px; }
+  @media (max-width: 560px) { .server-fields { grid-template-columns: 1fr; } }
+  .pw-wrap { position: relative; }
+  .pw-wrap input { padding-right: 64px; }
+  .pw-toggle {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    font-size: 12px; color: var(--accent); background: none; border: none; cursor: pointer;
+  }
+  button {
+    cursor: pointer; border: none; border-radius: 8px; font-size: 14px; padding: 10px 16px;
+    background: var(--accent); color: #fff; transition: background .15s;
+  }
+  button:hover { background: var(--accent-2); }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+  button.ghost:hover { color: var(--text); border-color: var(--accent); }
+  button.danger { background: transparent; border: 1px solid var(--err); color: var(--err); padding: 6px 10px; font-size: 12px; }
+  button.danger:hover { background: var(--err); color: #fff; }
+  .actions { display: flex; gap: 12px; align-items: center; margin-top: 6px; }
+  .add-btn { margin-top: 4px; }
+  .status { margin-top: 16px; font-size: 13px; }
+  .status .line { padding: 8px 12px; border-radius: 8px; margin-top: 8px; background: var(--panel-2); border: 1px solid var(--line); }
+  .status .ok { border-left: 3px solid var(--ok); }
+  .status .err { border-left: 3px solid var(--err); }
+  .status .warn { border-left: 3px solid var(--warn); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+  .sec-note { font-size: 12px; color: var(--warn); background: rgba(245,180,84,.08); border: 1px solid rgba(245,180,84,.3); border-radius: 8px; padding: 8px 11px; margin-top: 10px; }
+  code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>汽水签名器 · 配置</h1>
+  <div class="sub">本页即签名器本身（<code>http://localhost:18080/</code>）。改完点「保存并生效」即可，无需重启窗口。</div>
+
+  <div class="card">
+    <h2>签名器监听 <span class="tag">本机</span></h2>
+    <div class="grid2">
+      <div>
+        <label>端口</label>
+        <input type="number" id="port" min="1" max="65535" />
+        <div class="hint">LX 后台填的地址就是 <code id="selfUrlHint">http://本机IP:18080</code></div>
+      </div>
+      <div>
+        <label>绑定地址</label>
+        <input type="text" id="host" placeholder="0.0.0.0" />
+        <div class="hint">0.0.0.0 = 允许局域网内 LX 访问；127.0.0.1 = 仅本机</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>关联的 LX 服务器 <span class="tag">可多项</span></h2>
+    <div class="hint" style="margin-top:0;margin-bottom:10px;">
+      一个签名器可同时给多台 LX 服务器签名，<b>互不影响汽水账号</b>。每台填它的后台地址 + 后台密码（admin.password）。
+    </div>
+    <div id="servers"></div>
+    <button class="ghost add-btn" id="addServer">+ 添加一台 LX 服务器</button>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>高级：设备身份 / 客户端目录（改了需重启窗口才生效）</summary>
+      <div class="grid2">
+        <div>
+          <label>Device ID</label>
+          <input type="text" id="deviceId" placeholder="7300000000000001" />
+        </div>
+        <div>
+          <label>客户端版本号</label>
+          <input type="text" id="appVersion" placeholder="3.7.0" />
+        </div>
+        <div>
+          <label>Build ID</label>
+          <input type="text" id="buildId" placeholder="30080000" />
+        </div>
+        <div>
+          <label>客户端目录（留空自动探测）</label>
+          <input type="text" id="clientDir" placeholder="C:\...\Soda Music\3.7.0" />
+        </div>
+      </div>
+      <div class="sec-note">以上四项在启动时已加载进签名组件，网页里修改后需关闭再双击 <code>start-signer.bat</code> 才生效。</div>
+    </details>
+  </div>
+
+  <div class="actions">
+    <button id="save">保存并生效</button>
+    <button class="ghost" id="reload">重新读取</button>
+    <span id="savedHint" class="hint"></span>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div class="sec-note" style="margin-top:18px;">
+    安全：本页会显示各 LX 后台密码，且签名器能看到完整请求头（含 Cookie）。只在<b>自己家里/可信局域网</b>打开，别做端口转发到公网。
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id)
+const statusEl = $('status')
+
+function serverRow(idx, data = { url: '', password: '' }) {
+  const div = document.createElement('div')
+  div.className = 'server-row'
+  div.innerHTML = `
+    <div class="row-head">
+      <span class="idx">服务器 ${idx}</span>
+      <button class="danger" type="button">移除</button>
+    </div>
+    <div class="server-fields">
+      <div>
+        <input type="text" class="s-url" placeholder="http://192.168.1.120:8027" value="${escapeAttr(data.url)}" />
+      </div>
+      <div class="pw-wrap">
+        <input type="password" class="s-pw" placeholder="LX 后台密码" value="${escapeAttr(data.password)}" />
+        <button class="pw-toggle" type="button">显示</button>
+      </div>
+    </div>`
+  div.querySelector('.danger').addEventListener('click', () => { div.remove(); renumber() })
+  div.querySelector('.pw-toggle').addEventListener('click', e => {
+    const inp = div.querySelector('.s-pw')
+    if (inp.type === 'password') { inp.type = 'text'; e.target.textContent = '隐藏' }
+    else { inp.type = 'password'; e.target.textContent = '显示' }
+  })
+  return div
+}
+
+function escapeAttr(s) { return String(s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;') }
+function renumber() {
+  document.querySelectorAll('#servers .server-row').forEach((el, i) => {
+    el.querySelector('.idx').textContent = '服务器 ' + (i + 1)
+  })
+}
+
+function collectServers() {
+  return [...document.querySelectorAll('#servers .server-row')].map(el => ({
+    url: el.querySelector('.s-url').value.trim(),
+    password: el.querySelector('.s-pw').value
+  }))
+}
+
+function showStatus(result) {
+  statusEl.innerHTML = ''
+  if (!result) return
+  const self = document.createElement('div')
+  self.className = 'line ok'
+  self.textContent = '本签名器地址：' + (result.selfUrl || '')
+  statusEl.appendChild(self)
+
+  if (result.portChanged) {
+    const p = document.createElement('div')
+    p.className = 'line warn'
+    p.textContent = '端口已变更，请改用新端口打开本页：' + (result.selfUrl || '')
+    statusEl.appendChild(p)
+  }
+  if (result.bindError) {
+    const e = document.createElement('div')
+    e.className = 'line err'
+    e.textContent = '新端口绑定失败（已保持原端口）：' + result.bindError
+    statusEl.appendChild(e)
+  }
+
+  ;(result.results || []).forEach(r => {
+    const line = document.createElement('div')
+    line.className = 'line ' + (r.ok ? (r.online ? 'ok' : 'warn') : 'err')
+    line.textContent = (r.ok ? (r.online ? '✓ 已登记并连通' : '△ 已登记但 LX 侧探测签名器不可达') : '✗ 登记失败')
+      + ' — ' + r.url + '：' + (r.message || '')
+    statusEl.appendChild(line)
+  })
+}
+
+async function load() {
+  try {
+    const res = await fetch('/api/config')
+    const cfg = await res.json()
+    $('port').value = cfg.port
+    $('host').value = cfg.host || '0.0.0.0'
+    $('deviceId').value = cfg.deviceId || ''
+    $('appVersion').value = cfg.appVersion || ''
+    $('buildId').value = cfg.buildId || ''
+    $('clientDir').value = cfg.clientDir || ''
+    const box = $('servers')
+    box.innerHTML = ''
+    ;(cfg.servers || []).forEach((s, i) => box.appendChild(serverRow(i + 1, s)))
+    if (!(cfg.servers || []).length) box.appendChild(serverRow(1))
+    renumber()
+  } catch (e) {
+    statusEl.innerHTML = '<div class="line err">读取配置失败：' + e.message + '</div>'
+  }
+}
+
+async function save() {
+  const payload = {
+    port: Number($('port').value),
+    host: $('host').value.trim() || '0.0.0.0',
+    deviceId: $('deviceId').value.trim(),
+    appVersion: $('appVersion').value.trim(),
+    buildId: $('buildId').value.trim(),
+    clientDir: $('clientDir').value.trim(),
+    servers: collectServers()
+  }
+  $('savedHint').textContent = '保存中…'
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || ('HTTP ' + res.status))
+    showStatus(data)
+    $('savedHint').textContent = '已保存 ✓'
+    // 端口没变时刷新端口提示；变了则提示用户去新端口
+    if (data.selfUrl) $('selfUrlHint').textContent = data.selfUrl
+  } catch (e) {
+    statusEl.innerHTML = '<div class="line err">保存失败：' + e.message + '</div>'
+    $('savedHint').textContent = ''
+  }
+}
+
+$('addServer').addEventListener('click', () => {
+  $('servers').appendChild(serverRow(document.querySelectorAll('#servers .server-row').length + 1))
+  renumber()
+})
+$('save').addEventListener('click', save)
+$('reload').addEventListener('click', load)
+
+load()
+</script>
+</body>
+</html>
