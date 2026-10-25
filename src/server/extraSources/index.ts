@@ -21,7 +21,7 @@ const SEARCHERS: Record<string, (keyword: string, page: number, pageSize: number
   soda: soda.searchSongs,
 }
 
-const RESOLVERS: Record<string, (songInfo: any, quality: string, cookie: string) => Promise<{ url: string; quality: string; via: string; ext?: string }>> = {
+const RESOLVERS: Record<string, (songInfo: any, quality: string, cookie: string, username?: string) => Promise<{ url: string; quality: string; via: string; ext?: string }>> = {
   bili: bilibili.getAudioUrl,
   soda: soda.getAudioUrl,
 }
@@ -86,7 +86,7 @@ export async function searchAll(source: string, keyword: string, maxPages = 3, b
  * 取播放链接（自动带上已配置的账号 Cookie）。
  * 返回结构与 /api/music/url 的既有字段对齐：url / type / sourceName。
  */
-export async function getMusicUrl(source: string, songInfo: any, quality: string): Promise<{
+export async function getMusicUrl(source: string, songInfo: any, quality: string, username?: string): Promise<{
   url: string
   type: string
   sourceName: string
@@ -96,7 +96,8 @@ export async function getMusicUrl(source: string, songInfo: any, quality: string
   if (!resolver) throw new Error(`额外音源不支持：${source}`)
 
   const cookie = store.getCookie(source) || ''
-  const result = await resolver(songInfo, quality, cookie)
+  // username 只用于「取链失败时记待补」，让补传能落回播放者自己的缓存目录
+  const result = await resolver(songInfo, quality, cookie, username)
   if (!result?.url) throw new Error(`${displayName(source)} 未返回可用链接`)
 
   return {

@@ -5014,6 +5014,38 @@ class App {
         } catch (e) {
             statusEl.textContent = '状态读取失败';
         }
+        void this.loadQishuiPrefetchHint();
+    }
+
+    /** 待补清单 + 自动补传状态（签名器在线且清单非空时，后台每几分钟自己补 3 首） */
+    async loadQishuiPrefetchHint() {
+        const hintEl = document.getElementById('qishui-prefetch-hint');
+        if (!hintEl) return;
+        try {
+            const res = await this.request('/api/music/prefetch/status');
+            const d = (res && res.data) || {};
+            const count = (d.pending && d.pending.count) || 0;
+            const auto = d.auto || {};
+            const mins = Math.round((auto.intervalMs || 180000) / 60000);
+            if (!count) {
+                hintEl.textContent = auto.enabled
+                    ? `待补清单为空。自动补传已开启（每 ${mins} 分钟检查一次，无需手动点）`
+                    : '待补清单为空';
+                hintEl.style.color = '';
+                return;
+            }
+            let why = '';
+            if (!auto.enabled) why = '自动补传未开启'
+            else if (d.running || auto.lastSkip === 'already-running') why = '正在补传中'
+            else if (auto.lastSkip === 'signer-offline') why = '等签名器上线'
+            else if (auto.lastSkip === 'signer-not-configured') why = '等填签名器地址'
+            else if (auto.lastSkip === 'disabled-by-config') why = '已在配置里关闭自动补传'
+            else why = `每 ${mins} 分钟自动补 3 首`
+            hintEl.textContent = `待补 ${count} 首（受限曲，补进缓存后即以整曲播放）：${why}`
+            hintEl.style.color = '#f59e0b'
+        } catch (e) {
+            hintEl.textContent = ''
+        }
     }
 
     /** 保存并立即探测签名器 */
@@ -5036,6 +5068,7 @@ class App {
             if (d.online) {
                 if (statusEl) { statusEl.textContent = '在线，已生效'; statusEl.style.color = '#10b981'; }
                 this.toast && this.toast('签名器连接成功，汽水现在可播整曲');
+                void this.loadQishuiPrefetchHint();
             } else {
                 if (statusEl) { statusEl.textContent = '不可达：' + (d.message || ''); statusEl.style.color = '#f59e0b'; }
                 this.toast && this.toast('签名器不可达：' + (d.message || ''), 'error');

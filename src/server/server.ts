@@ -1709,7 +1709,7 @@ const resolveServerSong = async (
 
   // 额外音源（Bilibili / 汽水）直接取链：让缓存、下载、音质探测也能走通这条链路
   if (extraSources.isExtraSource(originalSong.source)) {
-    const extra = await extraSources.getMusicUrl(originalSong.source, originalSong, requestedQuality)
+    const extra = await extraSources.getMusicUrl(originalSong.source, originalSong, requestedQuality, username)
     return {
       url: extra.url,
       quality: extra.type,
@@ -7817,7 +7817,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 搜索由 extraSources 提供，取流同样自带（B站匿名可用，配了 Cookie 才有大会员音质）。
             if (extraSources.isExtraSource(source)) {
               try {
-                const extra = await extraSources.getMusicUrl(source, songInfo, quality || '128k')
+                const extra = await extraSources.getMusicUrl(source, songInfo, quality || '128k', verifiedUsername)
                 result = {
                   url: extra.url,
                   type: extra.type,
@@ -9744,10 +9744,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     tries: i.tries,
                     lastError: i.lastError,
                     at: i.at,
+                    // 补传会落回这个用户的缓存目录；空 = 匿名 _open
+                    username: i.username || '',
                   })),
                 },
                 running: extraSources.prefetch.isRunning(),
                 lastRun: extraSources.prefetch.lastResult(),
+                // 自动补传：签名器在线且有清单时，每几分钟自己补 3 首
+                auto: extraSources.prefetch.autoStatus(),
               },
             }))
           } catch (e: any) {
@@ -10763,6 +10767,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
     void registerLocalSyncEvent(wss as LX.SocketServer)
     // 启动 2 分钟后跑一次缓存来源体检（dry-run）：老缓存可能混着音源兜底返回的别曲
     scheduleCacheAuditOnStartup()
+    // 汽水待补：签名器在线且有清单时自己补，不用去后台点「补传」
+    try {
+      extraSources.prefetch.startAuto()
+    } catch (e: any) {
+      console.warn('[汽水待补] 自动补传启动失败（不影响服务运行）:', e?.message || e)
+    }
   })
 
   host = `http://${ip.includes(':') ? `[${ip}]` : ip}:${port}`

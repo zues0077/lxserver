@@ -31,6 +31,13 @@ export interface PendingItem {
   at: number
   tries: number
   lastError?: string
+  /**
+   * 这首歌是哪个用户播的。
+   * 补传时要落回他自己的缓存目录（cache/<username>/），否则匿名用户的配额、
+   * 统计、清理都算不到登录用户头上 —— 和 P-0806 的 _open 坑是同一类问题。
+   * 匿名播放（open/_open/default）不记，留给下游归一化成 _open。
+   */
+  username?: string
 }
 
 const MAX_ITEMS = 500
@@ -73,18 +80,27 @@ export function count(): number {
   return readAll().length
 }
 
+/** 匿名身份统一不记，交给 fileCache 归一化成 _open */
+function normalizeOwner(username?: string): string | undefined {
+  const u = String(username || '').trim()
+  if (!u || u === 'open' || u === '_open' || u === 'default') return undefined
+  return u
+}
+
 /** 记一首待补（同 id 只保留一条，tries 累加由 bump 负责） */
-export function add(song: any, reason: string, lastError?: string): PendingItem | null {
+export function add(song: any, reason: string, lastError?: string, username?: string): PendingItem | null {
   const source = String(song?.source || 'soda')
   const id = String(song?.id || song?.songmid || song?.meta?.trackId || '').trim()
   if (!id) return null
   const key = `${source}:${id}`
+  const owner = normalizeOwner(username)
   const items = readAll()
   const existed = items.find(i => i.key === key)
   if (existed) {
     existed.reason = reason
     existed.lastError = lastError
     existed.at = Date.now()
+    if (owner) existed.username = owner
     writeAll(items)
     return existed
   }
@@ -105,6 +121,7 @@ export function add(song: any, reason: string, lastError?: string): PendingItem 
     at: Date.now(),
     tries: 0,
     lastError,
+    username: owner,
   }
   items.unshift(item)
   writeAll(items)

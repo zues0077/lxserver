@@ -42,16 +42,24 @@ function saveConfig(cfg) {
   }
 }
 
-/** 问两个问题就够了：LX 服务器地址 + 后台密码 */
-function askSetup() {
+/** 问两个问题就够了：LX 服务器地址 + 后台密码（回车 = 保持原值） */
+function askSetup(defaults) {
+  const d = defaults || {}
   return new Promise(resolve => {
     const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout })
     console.log('')
-    console.log('第一次使用，请填两项（以后会记住，直接回车用上次的值）：')
-    rl.question('  LX 服务器地址（例：http://192.168.1.120:8027）: ', server => {
-      rl.question('  后台管理员密码: ', password => {
+    console.log(d.server ? '修改连接设置（直接回车 = 保持原来的值）：' : '第一次使用，请填两项（以后会记住）：')
+    const q1 = d.server
+      ? `  LX 服务器地址 [${d.server}]: `
+      : '  LX 服务器地址（例：192.168.1.120:8027）: '
+    rl.question(q1, server => {
+      const q2 = d.password ? '  后台管理员密码（回车保持不变）: ' : '  后台管理员密码: '
+      rl.question(q2, password => {
         rl.close()
-        resolve({ server: String(server || '').trim(), password: String(password || '').trim() })
+        resolve({
+          server: String(server || '').trim() || d.server || '',
+          password: String(password || '').trim() || d.password || '',
+        })
       })
     })
   })
@@ -70,33 +78,75 @@ const DEVICE_ID = arg('device', process.env.SODA_DEVICE_ID || savedCfg.deviceId 
 const APP_VER = arg('version', process.env.SODA_VERSION || '3.7.0')
 const BUILD_ID = arg('build', process.env.SODA_BUILD_ID || '30080000')
 
-/** 在几个常见位置找 app.asar.unpacked */
+/** 是不是目录（读不到就当不是，别让权限问题炸掉整个扫描） */
+function isDir(p) {
+  try { return fs.statSync(p).isDirectory() } catch { return false }
+}
+function safeReaddir(p) {
+  try { return fs.readdirSync(p) } catch { return [] }
+}
+
+/**
+ * 找 app.asar.unpacked（里面有 bdms.node + metasecml.dll）
+ * 客户端有两种装法，都要覆盖：
+ *   A) <root>\3.7.0\resources\app.asar.unpacked           （3.7 及更早）
+ *   B) <root>\Packages\3.8.0\app.asar.unpacked            （3.8 起的增量更新，多一层）
+ */
 function findUnpacked() {
+  const local = process.env.LOCALAPPDATA || ''
+  const root = local ? path.join(local, 'Programs', 'Soda Music') : ''
   const candidates = []
   if (CLIENT_DIR) candidates.push(path.join(CLIENT_DIR, 'resources', 'app.asar.unpacked'))
-  const local = process.env.LOCALAPPDATA || ''
-  if (local) candidates.push(path.join(local, 'Programs', 'Soda Music', APP_VER, 'resources', 'app.asar.unpacked'))
-  if (local) candidates.push(path.join(local, 'Programs', 'Soda Music', 'current', 'resources', 'app.asar.unpacked'))
+  if (root) {
+    candidates.push(path.join(root, APP_VER, 'resources', 'app.asar.unpacked'))
+    candidates.push(path.join(root, 'current', 'resources', 'app.asar.unpacked'))
+    candidates.push(path.join(root, 'Packages', APP_VER, 'app.asar.unpacked'))
+  }
   for (const c of candidates) {
     if (fs.existsSync(path.join(c, 'bdms.node'))) return c
   }
-  // 兜底：在 3.x 目录里翻
-  const root = local ? path.join(local, 'Programs', 'Soda Music') : ''
-  if (root && fs.existsSync(root)) {
-    for (const dir of fs.readdirSync(root)) {
-      const p = path.join(root, dir, 'resources', 'app.asar.unpacked')
-      if (fs.existsSync(path.join(p, 'bdms.node'))) return p
+
+  // 兜底：往两层翻，命中所有 unpacked 目录（客户端升级后版本目录名会变）
+  if (!root || !isDir(root)) return ''
+  const found = []
+  const probe = dir => {
+    if (fs.existsSync(path.join(dir, 'bdms.node')) && !found.includes(dir)) found.push(dir)
+  }
+  for (const n1 of safeReaddir(root)) {
+    const d1 = path.join(root, n1)
+    if (!isDir(d1)) continue
+    probe(d1)                                              // <root>\Packages\3.8.0 本身
+    probe(path.join(d1, 'resources', 'app.asar.unpacked')) // <root>\3.7.0\...
+    probe(path.join(d1, 'app.asar.unpacked'))
+    for (const n2 of safeReaddir(d1)) {
+      const d2 = path.join(d1, n2)
+      if (!isDir(d2)) continue
+      probe(d2)
+      probe(path.join(d2, 'resources', 'app.asar.unpacked'))
+      probe(path.join(d2, 'app.asar.unpacked'))
     }
   }
-  return ''
+  if (!found.length) return ''
+  // 优先用 --version 指定的版本（默认 3.7.0，是实测可用的那版），否则取最高版本
+  const prefer = found.find(p => p.includes(`${path.sep}${APP_VER}${path.sep}`))
+  if (prefer) return prefer
+  const rank = p => {
+    const m = p.match(/(\d+)\.(\d+)\.(\d+)/)
+    return m ? Number(m[1]) * 1e6 + Number(m[2]) * 1e3 + Number(m[3]) : 0
+  }
+  found.sort((a, b) => rank(b) - rank(a))
+  return found[0]
 }
 
 const unpacked = findUnpacked()
 if (!unpacked) {
-  console.error('[signer] 找不到 app.asar.unpacked/bdms.node')
-  console.error('  1) 确认这台电脑装过「汽水音乐」官方客户端并至少登录过一次')
-  console.error('  2) 或用 --client 指定目录，例如：')
-  console.error('     node signer.js --client "C:////Users////你////AppData////Local////Programs////Soda Music////3.7.0"')
+  const root = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Soda Music') : '(未取到 LOCALAPPDATA)'
+  console.error('[签名器] 找不到汽水客户端的 bdms.node')
+  console.error(`  已查找：${root}`)
+  console.error('  1) 确认这台电脑装了「汽水音乐」官方客户端，并至少登录过一次')
+  console.error('  2) 或用 --client 手动指定版本目录，例如：')
+  console.error('     node signer.js --client "C:\\Users\\你\\AppData\\Local\\Programs\\Soda Music\\3.7.0"')
+  console.error('  3) 若客户端刚升级，先打开一次客户端让它把 app.asar.unpacked 铺好')
   process.exit(1)
 }
 // metasecml.dll 与 bdms.node 同目录，切换 cwd 保证能被加载
@@ -166,7 +216,17 @@ function lanAddresses() {
 
 /** --pair：把地址自动登记到 lxserver，用户不用手抄 */
 async function pairTo(server, password, selfUrl) {
-  const url = `${server.replace(/\/+$/, '')}/api/music/prefetch/signer`
+  // HTTP 请求头只允许 ASCII，密码里有中文/全角字符会直接抛 ByteString 错误，
+  // 提前拦下来给一句人话提示，否则报错信息会完全看不出原因。
+  if (password && /[^\x20-\x7e]/.test(password)) {
+    console.log('[pair] ✗ 后台密码含中文或全角字符，HTTP 请求头放不下。')
+    console.log('       请改用密码里的英文/数字部分，或先把后台密码改成纯英文数字。')
+    return false
+  }
+  // 用户常常只填 IP:端口，漏了 http://，这里自动补，不让他卡在格式上
+  let base = String(server || '').trim().replace(/\/+$/, '')
+  if (!/^https?:\/\//i.test(base)) base = 'http://' + base
+  const url = `${base}/api/music/prefetch/signer`
   const body = JSON.stringify({ url: selfUrl })
   const headers = { 'Content-Type': 'application/json' }
   if (password) headers['x-frontend-auth'] = password
@@ -183,7 +243,12 @@ async function pairTo(server, password, selfUrl) {
     console.log(`[pair] ✗ 登记失败（HTTP ${res.status}）：${data.error || data.message || text.slice(0, 120)}`)
     return false
   } catch (e) {
-    console.log(`[pair] ✗ 连不上 ${server}：${e.message}`)
+    // fetch 失败时 e.message 只有 "fetch failed"，真正的 code 在 e.cause 里
+    const code = e.cause && (e.cause.code || e.cause.message)
+    console.log(`[pair] ✗ 连不上 ${server}：${e.message}${code ? `（${code}）` : ''}`)
+    if (code === 'ECONNREFUSED') console.log('       服务端没在监听：确认 LX 已启动，端口没写错。')
+    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') console.log('       域名解析失败：换成 IP 地址试试。')
+    if (code === 'ETIMEDOUT') console.log('       连接超时：两台机器是不是不在一个局域网？')
     return false
   }
 }
@@ -211,16 +276,18 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('')
   const selfUrl = `http://${primary}:${PORT}`
   void (async () => {
+    // --setup 用来「换 LX 服务器」：即使已有配置也强制重新问一遍
+    const forceSetup = args.includes('--setup')
     // 优先级：命令行 --pair > 配置文件 > 首次交互填写
-    let server = arg('pair', process.env.SIGNER_PAIR_SERVER || savedCfg.server || '')
-    let password = arg('password', process.env.SIGNER_PAIR_PASSWORD || savedCfg.password || '')
+    let server = forceSetup ? '' : arg('pair', process.env.SIGNER_PAIR_SERVER || savedCfg.server || '')
+    let password = forceSetup ? '' : arg('password', process.env.SIGNER_PAIR_PASSWORD || savedCfg.password || '')
 
-    // --setup 强制走向导（也方便自动化测试）
-    const canAsk = (process.stdin.isTTY || args.includes('--setup')) && !server
+    const canAsk = (process.stdin.isTTY || forceSetup) && !server
     if (canAsk) {
-      const answers = await askSetup()
+      const answers = await askSetup(savedCfg)
       server = answers.server || server
       password = answers.password || password
+      if (server && !/^https?:\/\//i.test(server)) server = 'http://' + server
       if (server) {
         saveConfig({ server, password, port: PORT, deviceId: DEVICE_ID })
       }

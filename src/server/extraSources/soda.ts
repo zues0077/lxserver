@@ -386,7 +386,7 @@ function toNumber(value: any): number {
  * @param cookie 账号 Cookie（可不传）。实测匿名即可拿到可播曲的直链；
  *               带 Cookie 时应能多解锁一部分（会员曲整曲仍需客户端签名，未验证）。
  */
-export async function getAudioUrl(songInfo: any, quality: string, cookie = ''): Promise<{
+export async function getAudioUrl(songInfo: any, quality: string, cookie = '', username = ''): Promise<{
   url: string
   quality: string
   via: string
@@ -448,7 +448,7 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = ''): 
     const signed = await trySignedStream(trackId, cookie).catch(() => null)
     if (signed) return signed
     const msg = '汽水未返回可用音频流（该曲可能已下架或仅支持客户端播放）'
-    pending.add(songInfo, 'no-stream', msg)
+    pending.add(songInfo, 'no-stream', msg, username)
     throw new Error(msg)
   }
 
@@ -462,7 +462,7 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = ''): 
     const shown = Math.round(streamDuration)
     const msg = `汽水该曲仅有 ${shown} 秒试听（版权限制，完整 ${Math.round(trackDuration)} 秒需官方客户端签名），请换源或换平台播放`
     // 记待补：等签名器在线时自动补，不让用户凭记忆重新找歌
-    pending.add(songInfo, 'preview-only', msg)
+    pending.add(songInfo, 'preview-only', msg, username)
     throw new Error(msg)
   }
 
