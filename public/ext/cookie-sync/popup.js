@@ -15,6 +15,9 @@ const PLATFORMS = {
   kw: { name: '酷我音乐', home: 'https://www.kuwo.cn', domain: 'kuwo.cn' },
   kg: { name: '酷狗音乐', home: 'https://www.kugou.com', domain: 'kugou.com' },
   mg: { name: '咪咕音乐', home: 'https://music.migu.cn', domain: 'migu.cn' },
+  bili: { name: 'Bilibili', home: 'https://www.bilibili.com', domain: 'bilibili.com' },
+  // 汽水音乐的登录态 Cookie（sessionid*）下发在 qishui.com 域，接口在 api.qishui.com
+  soda: { name: '汽水音乐', home: 'https://www.qishui.com', domain: 'qishui.com' },
 }
 
 const $ = id => document.getElementById(id)

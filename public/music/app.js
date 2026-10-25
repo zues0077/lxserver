@@ -2863,9 +2863,11 @@ function getSourceTag(source) {
         kg: 't-badge-blue border-blue-200 dark:border-blue-500/30',
         tx: 't-badge-green border-green-200 dark:border-emerald-500/30',
         wy: 't-badge-red border-red-200 dark:border-red-500/30',
-        mg: 't-badge-pink border-pink-200 dark:border-pink-500/30'
+        mg: 't-badge-pink border-pink-200 dark:border-pink-500/30',
+        bili: 't-badge-pink border-pink-200 dark:border-pink-500/30',
+        soda: 't-badge-green border-green-200 dark:border-emerald-500/30'
     };
-    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕' };
+    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', bili: 'B站', soda: '汽水' };
     const color = colors[source] || 't-bg-main t-text-muted t-border-main';
     const name = names[source] || (source ? source.toUpperCase() : '未知');
     return `<span class="song-tag ${color}">${name}</span>`;
@@ -2961,7 +2963,7 @@ function renderAlbumResults(list) {
 
     container.innerHTML = '<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3.5 md:gap-5 p-3 md:p-6"></div>';
     const grid = container.querySelector('div');
-    const sourceNames = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕' };
+    const sourceNames = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', bili: 'B站', soda: '汽水' };
 
     list.forEach((item) => {
         const div = document.createElement('div');
@@ -4176,7 +4178,7 @@ function renderAlbumMiniBar(info) {
     const miniBar = document.getElementById('album-mini-bar');
     if (!miniBar || !info) return;
 
-    const sourceNames = { kw: '酷我音乐', kg: '酷狗音乐', tx: 'QQ音乐', wy: '网易云音乐', mg: '咪咕音乐' };
+    const sourceNames = { kw: '酷我音乐', kg: '酷狗音乐', tx: 'QQ音乐', wy: '网易云音乐', mg: '咪咕音乐', bili: 'Bilibili', soda: '汽水音乐' };
     const sourceLabel = sourceNames[info.source] || (info.source ? info.source.toUpperCase() : '网易云');
     const favorited = isAlbumFavorited(info.id, info.source);
     const searchResults = document.getElementById('search-results');
@@ -4264,7 +4266,7 @@ function renderAlbumDetailHeader(info) {
 
     window.currentAlbumInfo = info;
 
-    const sourceNames = { kw: '酷我音乐', kg: '酷狗音乐', tx: 'QQ音乐', wy: '网易云音乐', mg: '咪咕音乐' };
+    const sourceNames = { kw: '酷我音乐', kg: '酷狗音乐', tx: 'QQ音乐', wy: '网易云音乐', mg: '咪咕音乐', bili: 'Bilibili', soda: '汽水音乐' };
     const sourceLabel = sourceNames[info.source] || (info.source ? info.source.toUpperCase() : '网易云');
     const favorited = isAlbumFavorited(info.id, info.source);
 
@@ -5653,7 +5655,7 @@ function timeToSeconds(timeStr) {
  * 辅助：获取源名称
  */
 function getSourceName(source) {
-    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕' };
+    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', bili: 'B站', soda: '汽水' };
     return names[source] || source.toUpperCase();
 }
 

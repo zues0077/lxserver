@@ -11,6 +11,8 @@
 
 import * as netease from './netease'
 import * as kugou from './kugou'
+import * as bilibili from './bilibili'
+import * as soda from './soda'
 import { qqDriver, wxDriver } from './qq'
 import { getPlatform } from '../platforms'
 import { normalizeCookieInput } from '../cookieParse'
@@ -23,6 +25,8 @@ const DRIVERS: Record<string, QrDriver> = {
   kg: { ttlSec: kugou.TTL_SEC, pollIntervalMs: kugou.POLL_INTERVAL_MS, create: kugou.create, check: kugou.check },
   tx: qqDriver,
   txwx: wxDriver,
+  bili: { ttlSec: bilibili.TTL_SEC, pollIntervalMs: bilibili.POLL_INTERVAL_MS, create: bilibili.create, check: bilibili.check },
+  soda: { ttlSec: soda.TTL_SEC, pollIntervalMs: soda.POLL_INTERVAL_MS, create: soda.create, check: soda.check },
 }
 
 interface Session {

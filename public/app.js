@@ -1639,6 +1639,8 @@ class App {
             'kw': '酷我',
             'kg': '酷狗',
             'mg': '咪咕',
+            'bili': 'B站',
+            'soda': '汽水',
             'local': '本地'
         };
         return map[source] || source || '';
@@ -4984,8 +4986,62 @@ class App {
             }
 
             this.renderMusicAccounts(data.accounts || []);
+            void this.loadQishuiSignerStatus();
         } catch (e) {
             listEl.innerHTML = `<div class="music-acc-loading">加载失败：${this.escapeHtml(e.message || String(e))}</div>`;
+        }
+    }
+
+    /** 读取汽水签名器状态（没配置也不报错，只是提示） */
+    async loadQishuiSignerStatus() {
+        const input = document.getElementById('qishui-signer-url');
+        const statusEl = document.getElementById('qishui-signer-status');
+        if (!input || !statusEl) return;
+        try {
+            const res = await this.request('/api/music/prefetch/signer');
+            const d = (res && res.data) || {};
+            if (document.activeElement !== input) input.value = d.url || '';
+            if (!d.configured) {
+                statusEl.textContent = '未配置（受限曲只能试听）';
+                statusEl.style.color = '';
+            } else if (d.online) {
+                statusEl.textContent = '在线' + (d.source === 'env' ? '（环境变量）' : '');
+                statusEl.style.color = '#10b981';
+            } else {
+                statusEl.textContent = '不可达：' + (d.message || '连接失败');
+                statusEl.style.color = '#f59e0b';
+            }
+        } catch (e) {
+            statusEl.textContent = '状态读取失败';
+        }
+    }
+
+    /** 保存并立即探测签名器 */
+    async saveQishuiSigner() {
+        const input = document.getElementById('qishui-signer-url');
+        const statusEl = document.getElementById('qishui-signer-status');
+        const url = (input && input.value || '').trim();
+        if (statusEl) { statusEl.textContent = '测试中…'; statusEl.style.color = ''; }
+        try {
+            const res = await this.request('/api/music/prefetch/signer', {
+                method: 'POST',
+                body: JSON.stringify({ url }),
+            });
+            const d = (res && res.data) || {};
+            if (!url) {
+                if (statusEl) statusEl.textContent = '已清空（不再使用签名器）';
+                this.toast && this.toast('已清空签名器地址');
+                return;
+            }
+            if (d.online) {
+                if (statusEl) { statusEl.textContent = '在线，已生效'; statusEl.style.color = '#10b981'; }
+                this.toast && this.toast('签名器连接成功，汽水现在可播整曲');
+            } else {
+                if (statusEl) { statusEl.textContent = '不可达：' + (d.message || ''); statusEl.style.color = '#f59e0b'; }
+                this.toast && this.toast('签名器不可达：' + (d.message || ''), 'error');
+            }
+        } catch (e) {
+            if (statusEl) { statusEl.textContent = '保存失败：' + (e.message || e); statusEl.style.color = '#ef4444'; }
         }
     }
 

@@ -1076,8 +1076,13 @@ class DownloadManager {
                 console.error(`Download error for ${task.song.name}:`, error);
                 task.errorMsg = error.message;
 
+                // 版权受限/仅试听类失败重试也没用（汽水受限曲会稳定报「仅有 N 秒试听」，
+                // B站偶尔报版权受限）。这类错误若不拦，一首歌要白跑 3 次解析，
+                // 一个 100 首的歌单里几十首受限就会把队列拖成「看着在转、其实在等超时」。
+                const permanentFailure = /仅有\s*\d+\s*秒试听|版权受限|暂不支持播放|未返回可用音频流/.test(String(task.errorMsg || error.message || ''));
+
                 // Retry logic
-                if (task.retryCount < task.maxRetries) {
+                if (!permanentFailure && task.retryCount < task.maxRetries) {
                     task.retryCount++;
                     task.status = 'error'; // Show error momentarily
                     this.renderTask(task);

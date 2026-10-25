@@ -14,6 +14,8 @@ import * as qq from './resolvers/qq'
 import * as kuwo from './resolvers/kuwo'
 import * as kugou from './resolvers/kugou'
 import * as migu from './resolvers/migu'
+import * as bilibili from './resolvers/bilibili'
+import * as soda from './resolvers/soda'
 import { isSupportedSource, getPlatform } from './platforms'
 import { hasLoginKey, parseCookie } from './http'
 import { normalizeCookieInput, formatLabel } from './cookieParse'
@@ -31,6 +33,8 @@ const RESOLVERS: Record<string, PlatformResolver> = {
   kw: kuwo,
   kg: kugou,
   mg: migu,
+  bili: bilibili,
+  soda: soda,
 }
 
 /** 会员状态缓存：避免每首歌都去探一次会员接口 */

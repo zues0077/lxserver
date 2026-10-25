@@ -668,6 +668,22 @@
                                     </label>
                                 </div>
 
+                                <!-- 汽水签名器（可选）：只有汽水需要，填一次即可，不用改环境变量 -->
+                                <div class="music-acc-toolbar" style="margin-top: 2px;">
+                                    <label class="music-acc-timeout-label" style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
+                                        汽水签名器
+                                        <input type="text" id="qishui-signer-url" class="input-field"
+                                            style="width: 280px; max-width: 100%;"
+                                            placeholder="http://192.168.1.x:18080（留空=不启用）">
+                                    </label>
+                                    <button type="button" class="btn-secondary" onclick="app.saveQishuiSigner()"
+                                        style="white-space: nowrap;">
+                                        保存并测试
+                                    </button>
+                                    <span id="qishui-signer-status" class="config-hint-text"
+                                        style="margin: 0; white-space: nowrap;">未配置</span>
+                                </div>
+
                                 <!-- 平台列表（由 JS 渲染，新增平台时后端加一条即可，这里不用改） -->
                                 <div id="music-accounts-list" class="music-acc-list">
                                     <div class="music-acc-loading">正在加载平台账号状态…</div>

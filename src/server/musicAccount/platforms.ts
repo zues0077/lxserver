@@ -143,6 +143,46 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     benefit: '登录后可解锁 HQ(320k)、SQ 无损音质',
     color: '#FF6A00',
   },
+  {
+    id: 'bili',
+    name: 'Bilibili',
+    short: 'B站',
+    // 取链/校验都打 api.bilibili.com，抓 Cookie 也在这里筛最准
+    cookieDomain: 'www.bilibili.com',
+    loginKeys: ['SESSDATA', 'bili_jct', 'DedeUserID'],
+    essentialKey: 'SESSDATA',
+    essentialHint: '没有 SESSDATA 等于游客身份，取流最高只有 192k；大会员的 Hi-Res / 杜比必须 SESSDATA 生效',
+    guide: [
+      '打开 https://www.bilibili.com 并登录（大会员账号才解锁 Hi-Res / 杜比）',
+      'F12 →「网络 / Network」，筛选 api.bilibili.com，任点一条请求',
+      '复制「请求标头」里的 Cookie 整行',
+      '关键字段：SESSDATA（登录态）、bili_jct、DedeUserID',
+      'SESSDATA 默认有效期约 180 天，过期后会显示未登录，重新扫码即可',
+    ],
+    benefit: '大会员可解锁 Hi-Res FLAC 与杜比全景声；非会员最高 192k',
+    color: '#FB7299',
+    qrLogins: [{ driver: 'bili', label: '扫码登录' }],
+  },
+  {
+    id: 'soda',
+    name: '汽水音乐',
+    short: '汽水',
+    // 登录态 Cookie（sessionid*）下发在 qishui.com 域，接口都在 api.qishui.com
+    cookieDomain: 'api.qishui.com',
+    loginKeys: ['sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard'],
+    essentialKey: 'sessionid_ss',
+    essentialHint: '缺 sessionid_ss 基本等于未登录；汽水 PC 网页端登录后会同时下发 sessionid / sid_tt / sid_guard',
+    guide: [
+      '打开 https://www.qishui.com 并登录（或用官方 PC 客户端登录后从客户端取）',
+      'F12 →「网络 / Network」，筛选 api.qishui.com，点任意一条 luna 接口',
+      '复制「请求标头」里的 Cookie 整行',
+      '关键字段：sessionid_ss、sessionid、sid_tt、sid_guard',
+      '⚠️ 提醒：汽水的会员曲目取流需要官方客户端签名，配了账号也拿不到整曲，详见下方说明',
+    ],
+    benefit: '可保存登录态；注意：cover/UGC 类曲目免登录就能播，会员无损与版权受限曲的整曲需要官方客户端签名，账号不解决',
+    color: '#06C270',
+    qrLogins: [{ driver: 'soda', label: '扫码登录（抖音 App）' }],
+  },
 ]
 
 const PLATFORM_MAP = new Map(PLATFORMS.map(p => [p.id, p]))

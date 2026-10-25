@@ -46,6 +46,7 @@ import crypto from 'node:crypto'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
 import * as musicAccount from './musicAccount'
+import * as extraSources from './extraSources'
 import {
   xiaoAiService,
   buildStreamUrl,
@@ -1705,6 +1706,19 @@ const resolveServerSong = async (
 ): Promise<ServerSongResolveResult> => {
   const originalSong = normalizeSongInfo({ ...rawSongInfo })
   if (!originalSong?.source) throw new Error('Missing song source')
+
+  // 额外音源（Bilibili / 汽水）直接取链：让缓存、下载、音质探测也能走通这条链路
+  if (extraSources.isExtraSource(originalSong.source)) {
+    const extra = await extraSources.getMusicUrl(originalSong.source, originalSong, requestedQuality)
+    return {
+      url: extra.url,
+      quality: extra.type,
+      songInfo: originalSong,
+      requestedSource: originalSong.source,
+      downloadSource: fileCache.detectDownloadSource(extra.url, originalSong.source),
+      sourceName: extra.sourceName,
+    }
+  }
 
   const qualities = allowQualityFallback
     ? getDownloadQualityCandidates(requestedQuality)
@@ -6876,6 +6890,37 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
 
         try {
+          // 额外音源（Bilibili / 汽水）自带搜索实现，不经过 musicSdk（那个目录会被上游覆盖）
+          if (extraSources.isExtraSource(source)) {
+            if (type !== 'song') {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({
+                success: false,
+                error: `${extraSources.displayName(source)} 暂不支持${type === 'singer' ? '歌手' : type === 'album' ? '专辑' : '歌单'}搜索，请切换到歌曲`,
+              }))
+              return
+            }
+            const pageSize = requestedLimit > 0 ? Math.min(requestedLimit, 50) : 20
+            const pageNo = requestedLimit > 0 ? Math.max(1, page) : 1
+            // 不传 limit = 搜索界面用法：串行翻 3 页拼成 60 条，前端一次拿全量本地分页
+            const data = requestedLimit > 0
+              ? await extraSources.searchSongs(source, name, pageNo, pageSize)
+              : await extraSources.searchAll(source, name)
+            const list = requestedLimit > 0 ? data.list.slice(0, requestedLimit) : data.list
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              list,
+              total: data.total,
+              allPage: data.allPage,
+              pageSize,
+              fetchedPages: (data as any).fetchedPages || pageNo,
+              stopReason: 'extra-source',
+              hasMore: requestedLimit > 0 ? pageNo < data.allPage : false,
+              source,
+            }))
+            return
+          }
+
           if (!musicSdk[source]) {
             throw new Error(`Source ${source} is not supported`)
           }
@@ -7768,6 +7813,25 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const source = songInfo.source
             let result: any
 
+            // 额外音源（Bilibili / 汽水）不依赖 musicSdk、也不依赖自定义源：
+            // 搜索由 extraSources 提供，取流同样自带（B站匿名可用，配了 Cookie 才有大会员音质）。
+            if (extraSources.isExtraSource(source)) {
+              try {
+                const extra = await extraSources.getMusicUrl(source, songInfo, quality || '128k')
+                result = {
+                  url: extra.url,
+                  type: extra.type,
+                  sourceName: extra.sourceName,
+                  sourceId: `extra:${source}`,
+                  attempts: [{ name: extra.sourceName, status: 'success' }],
+                }
+                void pushProgress({ name: extra.sourceName, status: 'success' })
+              } catch (e: any) {
+                console.error(`[额外音源] ${source} 取链失败:`, e?.message || e)
+                throw e
+              }
+            }
+
             // 账号通道独立于自定义源存在：即使一个自定义源都没装，
             // 只要管理员配了自己的平台 Cookie，也应该能播。所以这里放宽进入条件。
             const accountUsable = musicAccount.isEnabled() &&
@@ -7776,7 +7840,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
             let customSourceError: string | null = null
             let attempts: any[] = []
-            if (isSourceSupported(source, verifiedUsername) || accountUsable) {
+            if (!result && (isSourceSupported(source, verifiedUsername) || accountUsable)) {
               try {
                 console.log(`[歌曲播放] 使用自定义源解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
 
@@ -7794,7 +7858,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 attempts = userApiError.attempts || []
                 // 不抛出错误，继续尝试内置源
               }
-            } else {
+            } else if (!result) {
               // isSourceSupported = false: 无任何自定义源支持此平台，立即通知前端
               const why = musicAccount.isSupportedSource(source)
                 ? `未找到支持 ${source} 平台的自定义源；如已在「平台账号」里填写 Cookie，请确认总开关已打开`
@@ -9601,6 +9665,135 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
           }
         })
+        return
+      }
+
+      // ===== 汽水签名器地址（傻瓜化：后台填一次即可，不用改环境变量） =====
+      if (pathname === '/api/music/prefetch/signer' && (req.method === 'GET' || req.method === 'POST')) {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+
+        const reply = async () => {
+          const st = await extraSources.signer.status(true)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            success: true,
+            data: {
+              url: st.url,
+              source: extraSources.signer.signerSource(),
+              configured: st.configured,
+              online: st.online,
+              message: st.message,
+            },
+          }))
+        }
+
+        if (req.method === 'GET') { void reply(); return }
+
+        void readBody(req).then(async body => {
+          try {
+            const patch = JSON.parse(body || '{}')
+            const raw = String(patch.url || '').trim()
+            if (raw && !/^https?:\/\//i.test(raw)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, error: '地址必须以 http:// 或 https:// 开头' }))
+              return
+            }
+            // Config 类型里没有这个键（它属于额外音源的可选项），用 any 断言写入即可
+            ;(global.lx.config as any)['qishui.signerUrl'] = raw ? raw.replace(/\/+$/, '') : ''
+            if (typeof global.lx?.saveConfig === 'function') global.lx.saveConfig()
+            extraSources.signer.resetStatusCache()
+            await reply()
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // ===== 汽水待补清单 / 签名器（L2 骨架） =====
+      if (pathname === '/api/music/prefetch/status' && req.method === 'GET') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        const force = urlObj.searchParams.get('force') === '1'
+        void (async () => {
+          try {
+            const signerStatus = await extraSources.signer.status(force)
+            const items = extraSources.pending.list()
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              success: true,
+              data: {
+                signer: signerStatus,
+                pending: {
+                  count: items.length,
+                  items: items.slice(0, 50).map(i => ({
+                    key: i.key,
+                    name: i.song.name,
+                    singer: i.song.singer,
+                    reason: i.reason,
+                    tries: i.tries,
+                    lastError: i.lastError,
+                    at: i.at,
+                  })),
+                },
+                running: extraSources.prefetch.isRunning(),
+                lastRun: extraSources.prefetch.lastResult(),
+              },
+            }))
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })()
+        return
+      }
+
+      if (pathname === '/api/music/prefetch/flush' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const patch = JSON.parse(body || '{}')
+            const result = await extraSources.prefetch.flush({
+              username: String(patch.username || '_open'),
+              quality: String(patch.quality || '320k'),
+              limit: Number(patch.limit) || 10,
+              force: patch.force === true,
+            })
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, data: result }))
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      if (pathname === '/api/music/prefetch/clear' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        const removed = extraSources.pending.clear()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: true, data: { removed } }))
         return
       }
 
