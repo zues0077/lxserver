@@ -6,15 +6,16 @@
 
 ## Table of Contents
 
-- [I. Sources of Configuration & Effective Priority](#i-sources-of-configuration--effective-priority)
+- [I. Sources of Configuration & Effective Priority](#i-sources-of-configuration-effective-priority)
 - [II. System-level Configuration `data/config.js` (changeable via Admin Console)](#ii-system-level-configuration-dataconfigjs-changeable-via-admin-console)
-- [III. User-level Configuration — The User's "Private Superset of Defaults"](#iii-user-level-configuration--the-users-private-superset-of-defaults)
-- [IV. Web Player Client Settings `DEFAULT_SETTINGS` (in `app.js`)](#iv-web-player-client-settings-default_settingsin-appjs)
-- [V. Source Files (`data/users/source/<user>/`)](#v-source-file-datauserssourceuser)
+- [III. User-level Configuration — The User's "Private Superset of Defaults"](#iii-user-level-configuration-the-users-private-superset-of-defaults)
+- [IV. Web Player Client Settings `DEFAULT_SETTINGS` (in `app.js`)](#iv-web-player-client-settings-default_settings-in-appjs)
+- [V. Source File (`data/users/source/<user>/`)](#v-source-file-datauserssourceuser)
 - [VI. File/Cache Rules (`fileCache.ts`)](#vi-filecache-rules-filecachets)
 - [VII. Environment Variables (`environment variables`)](#vii-environment-variables-environment-variables)
-- [VIII. Priority Topology & Effective Ways](#viii-priority-topology--effective-ways)
+- [VIII. Priority Topology & Effective Ways](#viii-priority-topology-effective-ways)
 - [IX. Troubleshooting](#ix-troubleshooting)
+- [Extended Reading](#extended-reading)
 
 ---
 

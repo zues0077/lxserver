@@ -7,15 +7,16 @@
 ## Table of Contents
 
 - [Step 1: Access the Web Player](#step-1-access-the-web-player)
-- [Step 2: Login & User Creation](#step-2-login--user-creation)
-- [Step 3: Search & Play](#step-3-search--play)
-- [Step 4: Manage Playlists & Favorites](#step-4-manage-playlists--favorites)
-- [Step 5: Download & Server Cache](#step-5-download--server-cache)
+- [Step 2: Login & User Creation](#step-2-login-user-creation)
+- [Step 3: Search & Play](#step-3-search-play)
+- [Step 4: Manage Playlists & Favorites](#step-4-manage-playlists-favorites)
+- [Step 5: Download & Server Cache](#step-5-download-server-cache)
 - [Step 6: Connect the LX Music Desktop/Mobile Client](#step-6-connect-the-lx-music-desktopmobile-client)
 - [Step 7: Connect Subsonic Clients (Star Music/Feishin/Symfonium)](#step-7-connect-subsonic-clients-star-musicfeishinsymfonium)
 - [Step 8: XiaoAi Speaker Casting](#step-8-xiaoai-speaker-casting)
 - [Step 9: Admin Console (Users/Backup/Version/Restart)](#step-9-admin-console-usersbackupversionrestart)
 - [FAQ Quick Lookup](#faq-quick-lookup)
+- [Extended Reading](#extended-reading)
 
 ---
 

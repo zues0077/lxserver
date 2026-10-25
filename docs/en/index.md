@@ -16,6 +16,9 @@ hero:
       text: Web Player Guide
       link: /en/guide/web-player
     - theme: alt
+      text: Settings & Tutorials
+      link: /en/guide/app-settings
+    - theme: alt
       text: GitHub Repo
       link: https://github.com/zues0077/lxserver
 
@@ -38,6 +41,9 @@ features:
   - icon: 💻
     title: Cross-Platform & Easy Deployment
     details: One-click Docker deployment and cross-platform desktop clients (Win/Mac/Linux) with system tray and portable support.
+  - icon: ⚙️
+    title: Detailed Settings & Tutorials
+    details: Two dedicated docs — "Application Settings & Rules" and "Quick Start Tutorial" — walk through user creation, client connection, download/cache, and casting end to end.
 
 ---
 

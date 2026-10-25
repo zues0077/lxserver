@@ -16,6 +16,9 @@ hero:
       text: Web 播放器指南
       link: /guide/web-player
     - theme: alt
+      text: 设置与教程
+      link: /guide/app-settings
+    - theme: alt
       text: GitHub 仓库
       link: https://github.com/zues0077/lxserver
 
@@ -38,6 +41,9 @@ features:
   - icon: 💻
     title: 全平台与多端支持
     details: 提供 Docker 一键部署与跨平台桌面客户端（Win/Mac/Linux），支持托盘常驻与便携模式。
+  - icon: ⚙️
+    title: 详细设置与教程
+    details: 提供「应用设置与配置规则」与「快速上手教程」两个文档，从创建用户、连接客户端到下载缓存、投播串联全文。
 
 ---
 
