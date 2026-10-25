@@ -48,11 +48,21 @@
 - [移动端适配](#-移动端适配)
 - [快速启动](#-快速启动)
 - [服务连接与客户端配置](#-服务连接与客户端配置)
+- [应用设置与使用教程](#应用设置与使用教程)
 - [项目架构](#️-项目架构)
 - [配置说明](#️-配置说明)
 - [数据收集与隐私说明](#️-数据收集与隐私说明)
 - [贡献与致谢](#-贡献与致谢)
 - [开源协议](#-开源协议)
+
+## 应用设置与使用教程
+
+配置、设置、使用方式都有独立文档，不堆在 README 里：
+
+- [**应用设置与配置规则**](docs/guide/app-settings.md) — 设置从哪来（环境变量 > WebDAV > config.js > 后台 > 默认值）、各配置文件（`config.js`、`users`、`states.json`、`sources.json`）长什么样、Web 播放器 `DEFAULT_SETTINGS` 完整对照表、文件/缓存规则与变量 Parity
+- [**快速上手教程**](docs/guide/tutorial.md) — 从打开播放器、登录创建用户、搜索播放、下载/移动/缓存在哪、到连桌面/移动端/Subsonic/小爱投播
+
+---
 
 ## ✨ 核心特性
 
@@ -185,18 +195,18 @@
 | 标签 | 说明 |
 | :--- | :--- |
 | `latest` | 最新稳定版，跟随 `main` 分支 |
-| `v1.5.23` / `1.5.23` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
+| `v1.5.35` / `1.5.35` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
 | `v*` | 每个已发布版本都会保留，可随时回滚到历史版本 |
 
 ```bash
 # 固定版本（推荐）
-docker pull ghcr.io/zues0077/lxserver:1.5.23
+docker pull ghcr.io/zues0077/lxserver:1.5.35
 
 # 或跟随最新
 docker pull ghcr.io/zues0077/lxserver:latest
 ```
 
-> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.23`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
+> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.35`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
 > - 如果要另外发布到 Docker Hub，可使用备用工作流 `.github/workflows/docker.yml`（需自行配置 `DOCKER_USERNAME` / `DOCKER_PASSWORD` 密钥并手动触发，默认不参与自动发布）。
 
 ## 🔒 访问控制与安全
@@ -251,7 +261,7 @@ Web 播放器针对移动端做了深度优化，手机浏览器访问也能接�
 镜像地址（GitHub Packages / GHCR）：
 
 - 跟随最新：`ghcr.io/zues0077/lxserver:latest`
-- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.23`
+- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.35`
 - 完整标签说明见上方 [Docker 部署](#-docker-部署)
 
 **Docker Run 示例：**
@@ -265,7 +275,7 @@ docker run -d \
   -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.23
+  ghcr.io/zues0077/lxserver:1.5.35
 ```
 
 > ⚠️ **`--restart` 不要省**：面板里的「重启服务」（`POST /api/restart`）在容器内是通过结束进程实现的，
@@ -298,7 +308,7 @@ docker run -d \
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.23   # 或 :latest
+    image: ghcr.io/zues0077/lxserver:1.5.35   # 或 :latest
     container_name: lx-sync-server
     restart: unless-stopped          # 不要省：面板「重启服务」靠它拉起进程
     ports:
