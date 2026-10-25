@@ -2744,6 +2744,12 @@ select.form-input option:checked {
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
     animation: fadeInUp 0.3s ease-out;
+    /* 关键：弹窗高度不能超过可视区，否则头部的 X 和底部的按钮会被挤到屏幕外点不到。
+       这里改成「头部/底部固定、中间正文滚动」的三段式。 */
+    max-height: calc(100vh - 48px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
 .modal-header {
@@ -2753,6 +2759,7 @@ select.form-input option:checked {
     margin-bottom: 1.5rem;
     padding-bottom: 1rem;
     border-bottom: 1px solid var(--glass-border);
+    flex: 0 0 auto;
 }
 
 .modal-header h3 {
@@ -2787,6 +2794,12 @@ select.form-input option:checked {
 .modal-body {
     color: var(--text-primary);
     margin-bottom: 1.75rem;
+    /* 内容过长时只滚正文，head/footer 保持可见 */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding-right: 6px;
 }
 
 .modal-footer {
@@ -2796,6 +2809,7 @@ select.form-input option:checked {
     margin-top: 1.25rem;
     padding-top: 1.25rem;
     border-top: 1px solid var(--glass-border);
+    flex: 0 0 auto;
 }
 
 .modal-footer .btn-primary,

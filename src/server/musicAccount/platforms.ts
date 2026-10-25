@@ -181,7 +181,8 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     ],
     benefit: '可保存登录态；注意：cover/UGC 类曲目免登录就能播，会员无损与版权受限曲的整曲需要官方客户端签名，账号不解决',
     color: '#06C270',
-    qrLogins: [{ driver: 'soda', label: '扫码登录（抖音 App）' }],
+    // 汽水不提供扫码登录：官方二维码要用抖音 App 扫，且新设备几乎必触发短信二次验证，
+    // 走通概率低、体验差，不如直接提示「从客户端/网页复制 Cookie」。驱动代码保留在 qrLogin/soda.ts 以备后需。
   },
 ]
 

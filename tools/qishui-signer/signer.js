@@ -27,15 +27,46 @@ const http = require('http')
 const path = require('path')
 const fs = require('fs')
 
+// ---------------- 本地配置（记住服务器地址/密码，下次双击不用再填） ----------------
+const CONFIG_PATH = path.join(__dirname, 'signer-config.json')
+
+function loadConfig() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {} } catch { return {} }
+}
+function saveConfig(cfg) {
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8')
+    console.log(`[signer] 配置已保存：${CONFIG_PATH}`)
+  } catch (e) {
+    console.log(`[signer] 配置保存失败（不影响本次运行）：${e.message}`)
+  }
+}
+
+/** 问两个问题就够了：LX 服务器地址 + 后台密码 */
+function askSetup() {
+  return new Promise(resolve => {
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout })
+    console.log('')
+    console.log('第一次使用，请填两项（以后会记住，直接回车用上次的值）：')
+    rl.question('  LX 服务器地址（例：http://192.168.1.120:8027）: ', server => {
+      rl.question('  后台管理员密码: ', password => {
+        rl.close()
+        resolve({ server: String(server || '').trim(), password: String(password || '').trim() })
+      })
+    })
+  })
+}
+
 const args = process.argv.slice(2)
 const arg = (name, fallback) => {
   const i = args.indexOf(`--${name}`)
   return i >= 0 && args[i + 1] ? args[i + 1] : fallback
 }
 
-const PORT = Number(arg('port', process.env.SIGNER_PORT || 18080))
-const CLIENT_DIR = arg('client', process.env.SODA_CLIENT_DIR || '')
-const DEVICE_ID = arg('device', process.env.SODA_DEVICE_ID || '7300000000000001')
+const savedCfg = loadConfig()
+const PORT = Number(arg('port', process.env.SIGNER_PORT || savedCfg.port || 18080))
+const CLIENT_DIR = arg('client', process.env.SODA_CLIENT_DIR || savedCfg.clientDir || '')
+const DEVICE_ID = arg('device', process.env.SODA_DEVICE_ID || savedCfg.deviceId || '7300000000000001')
 const APP_VER = arg('version', process.env.SODA_VERSION || '3.7.0')
 const BUILD_ID = arg('build', process.env.SODA_BUILD_ID || '30080000')
 
@@ -147,11 +178,13 @@ async function pairTo(server, password, selfUrl) {
     if (res.ok && data.success) {
       const d = data.data || {}
       console.log(d.online ? `[pair] ✓ 已登记到 ${server}，连接正常` : `[pair] 已登记，但探测失败：${d.message || ''}`)
-    } else {
-      console.log(`[pair] ✗ 登记失败（HTTP ${res.status}）：${data.error || data.message || text.slice(0, 120)}`)
+      return true
     }
+    console.log(`[pair] ✗ 登记失败（HTTP ${res.status}）：${data.error || data.message || text.slice(0, 120)}`)
+    return false
   } catch (e) {
     console.log(`[pair] ✗ 连不上 ${server}：${e.message}`)
+    return false
   }
 }
 
@@ -176,13 +209,41 @@ server.listen(PORT, '0.0.0.0', () => {
   }
   if (!ips.length) console.log('  （没检测到局域网 IP，请确认已连上路由器）')
   console.log('')
-  const pairServer = arg('pair', process.env.SIGNER_PAIR_SERVER || '')
-  const pairPwd = arg('password', process.env.SIGNER_PAIR_PASSWORD || '')
-  if (pairServer) {
-    void pairTo(pairServer, pairPwd, `http://${primary}:${PORT}`)
-        .then(() => console.log('  注册完成后可以关闭这个提示，服务继续运行。'))
-  } else {
-    console.log('  小技巧：加 --pair http://<NAS地址>:8027 --password <后台密码> 可自动登记，免手抄。')
-  }
-  console.log('')
+  const selfUrl = `http://${primary}:${PORT}`
+  void (async () => {
+    // 优先级：命令行 --pair > 配置文件 > 首次交互填写
+    let server = arg('pair', process.env.SIGNER_PAIR_SERVER || savedCfg.server || '')
+    let password = arg('password', process.env.SIGNER_PAIR_PASSWORD || savedCfg.password || '')
+
+    // --setup 强制走向导（也方便自动化测试）
+    const canAsk = (process.stdin.isTTY || args.includes('--setup')) && !server
+    if (canAsk) {
+      const answers = await askSetup()
+      server = answers.server || server
+      password = answers.password || password
+      if (server) {
+        saveConfig({ server, password, port: PORT, deviceId: DEVICE_ID })
+      }
+    }
+
+    if (!server) {
+      console.log('  没有填写服务器地址：请手动把上面那行地址贴到 LX 后台即可。')
+      console.log('  想自动登记，下次双击时按提示填服务器地址和后台密码。')
+      console.log('')
+      return
+    }
+
+    console.log(`  正在把地址登记到 ${server} …`)
+    const ok = await pairTo(server, password, selfUrl)
+    if (ok) {
+      console.log('')
+      console.log('  ✅ 已自动登记，LX 后台可以直接用了。')
+      console.log('     以后双击本程序即可，不用再填。')
+    } else {
+      console.log('')
+      console.log('  ⚠️ 自动登记失败。不要紧，可以手动复制上面那行地址，')
+      console.log('     到 LX 后台「平台账号 → 汽水签名器」粘贴并点「保存并测试」。')
+    }
+    console.log('')
+  })()
 })

@@ -694,7 +694,8 @@
                         </div>
 
                         <!-- Cookie 获取引导弹窗 -->
-                        <div id="music-acc-guide-modal" class="modal" style="display: none;">
+                        <div id="music-acc-guide-modal" class="modal" style="display: none;"
+                            onclick="if (event.target === this) app.closeMusicAccountGuide()">
                             <div class="modal-content glass" style="max-width: 560px;">
                                 <div class="modal-header">
                                     <h3 id="music-acc-guide-title">如何获取 Cookie</h3>
