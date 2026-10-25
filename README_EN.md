@@ -188,7 +188,9 @@ The Web Player is deeply optimized for mobile devices, providing a near native A
 
 ## Settings & Usage Guides
 
-Settings, configuration, and how-to guides have their own docs and are not crammed into the README:/n/n- [**Application Settings & Rules**](docs/en/guide/app-settings.md) — Where settings come from (env vars > WebDAV > config.js > console > defaults), what each config file (`config.js` / `users` / `states.json` / `sources.json`) looks like, the full `DEFAULT_SETTINGS` table for the Web Player, plus file/cache rules and env parity
+Settings, configuration, and how-to guides have their own docs and are not cramped into the README:
+
+- [**Application Settings & Rules**](docs/en/guide/app-settings.md) — Where settings come from (env vars > WebDAV > config.js > console > defaults), what each config file (`config.js` / `users` / `states.json` / `sources.json`) looks like, the full `DEFAULT_SETTINGS` table for the Web Player, plus file/cache rules and env parity
 - [**Usage Tutorial**](docs/en/guide/tutorial.md) — From opening the player, creating and logging in, searching & playing, to downloading/moving/caching, and connecting Desktop/Mobile/Subsonic/XiaoAi
 
 ---

@@ -6,15 +6,16 @@
 
 ## 目录
 
-- [一、配置的来源与生效优先級](#一、配置的来源与生效优先級)
-- [二、系统级配置 `data/config.js`（管理后台全屏可改项）](#二、系统级配置-dataconfigjs管理后台全屏可改项)
-- [三、用户级配置用户的“私人加厚版默认值”](#三、用户级配置用户的"私人加厚版默认值")
-- [四、Web 播放器客户端设置 `DEFAULT_SETTINGS`（`app.js` 内）](#四、web-播放器客户端设置-default_settingsappjs-内)
-- [五、音源文件（`data/users/source/<用户>/`）](#五、音源文件-datauserssources用户)
-- [六、文件/缓存规则（`fileCache.ts`）](#六、文件缓存规则filecachets)
-- [七、环境变量（`environment variables`）](#七、环境变量environment-variables)
-- [八、优先级拓扑与修改生效方式速查](#九、优先级拓扑与修改生效方式速查)
-- [九、常见排错](#九、常见排错)
+- [一、配置的来源与生效优先級](#一配置的来源与生效优先級)
+- [二、系统级配置 `data/config.js`（管理后台全屏可改项）](#二系统级配置dataconfigjs管理后台全屏可改项)
+- [三、用户级配置（用户的私人加厚版默认值）](#三用户级配置用户的私人加厚版默认值)
+- [四、Web 播放器客户端设置 `DEFAULT_SETTINGS`（`app.js` 内）](#四web播放器客户端设置default_settingsappjs内)
+- [五、音源文件（`data/users/source/<用户>/`）](#五音源文件datauserssource用户)
+- [六、文件/缓存规则（`fileCache.ts`）](#六文件缓存规则filecachets)
+- [七、环境变量（`environment variables`）](#七环境变量environmentvariables)
+- [八、优先级拓扑与修改生效方式速查](#八优先级拓扑与修改生效方式速查)
+- [九、常见排错](#九常见排错)
+
 
 ---
 
@@ -279,7 +280,7 @@ ensureDir(username, isOnlyDownload) // 只下载时写到 music， cdn/cache 时
 
 ---
 
-## 九、优先级拓扑与修改生效方式速查
+## 八、优先级拓扑与修改生效方式速查
 
 ```
 [ 环 境 变 量 / 云 端 WebDAV ]  → 最高优先級 —— 需要重启
@@ -299,7 +300,7 @@ ensureDir(username, isOnlyDownload) // 只下载时写到 music， cdn/cache 时
 
 ---
 
-## 八、常见排错
+## 九、常见排错
 
 - 改了 `config.js` 不生效 → **不重启面板服务**；用“重启网络”或“重启服务”，看控制台；
 - 如果 `config.js` 不生效 → 前后端分开推，忘记同步 → 核查环境变量（Docker 里 `-e` 的传入同源）
