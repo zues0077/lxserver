@@ -7,7 +7,7 @@ const { MusicTagger, MetaPicture } = require('music-tag-native')
 import { getUserConfig } from '@/user'
 import { formatPlayTime } from '@/utils/common'
 import { buildLyrics } from '@/utils/lrcTool'
-import { getLyricFetcher, embedLyricsIntoFile, getAudioMetadataUnsupportedStatus } from './fileCache'
+import { getLyricFetcher, embedLyricsIntoFile, getAudioMetadataUnsupportedStatus, normalizeUsername } from './fileCache'
 import * as fileCache from './fileCache'
 
 export interface CustomCacheItem {
@@ -39,7 +39,8 @@ export interface CustomCacheItem {
 
 // 获取用户配置的自定义音乐目录
 export const getCustomMusicDir = (username: string): string | null => {
-    if (!username || username === '_open' || username === 'default') return null
+    // 匿名统一走 normalizeUsername，别再手写 alias 判断（'open' 漏过一次，见 P-0806）
+    if (normalizeUsername(username) === '_open') return null
     try {
         const userCfg = getUserConfig(username)
         if (userCfg?.enableCustomMusicDir && userCfg?.customMusicDir) {
