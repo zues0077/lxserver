@@ -61,6 +61,7 @@
 
 - [**应用设置与配置规则**](docs/guide/app-settings.md) — 设置从哪来（环境变量 > WebDAV > config.js > 后台 > 默认值）、各配置文件（`config.js`、`users`、`states.json`、`sources.json`）长什么样、Web 播放器 `DEFAULT_SETTINGS` 完整对照表、文件/缓存规则与变量 Parity
 - [**快速上手教程**](docs/guide/tutorial.md) — 从打开播放器、登录创建用户、搜索播放、下载/移动/缓存在哪、到连桌面/移动端/Subsonic/小爱投播
+- [**常见问题与排错（FAQ）**](docs/guide/faq.md) — 汽水扫码「没变化」、签名器怎么用、弹窗关不掉、cache/music 区别、容量清理误删歌、cover_cache 挂载、音质实测值、小爱投播、镜像版本对不上等高频踩坑
 
 ---
 

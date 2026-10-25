@@ -22,7 +22,7 @@
 
 ## Step 1: Access the Web Player
 
-Default address (root path after extraction): `http://IP:9527` (in Docker `9527` needs `-p 9527:9527`, see [Docker Deployment](README_EN.md#docker-deployment)).
+Default address (root path after extraction): `http://IP:9527` (in Docker `9527` needs `-p 9527:9527`, see [Docker Deployment](https://github.com/zues0077/lxserver/blob/main/README_EN.md#option-2-containerized-deployment-via-docker)).
 
 - If `ENABLE_WEBPLAYER_AUTH=true` is not configured → Play directly (guests can only access public playlists).
 - If `WEBPLAYER_PASSWORD` is required (default `123456`) → enter it; this is independent of the admin password.
@@ -104,7 +104,7 @@ In the "Local Music" page, click "**Move Directory**" → `batchSwitchFolder` �
 
 ## Step 6: Connect the LX Music Desktop/Mobile Client
 
-Go to the client's **Settings → Sync Settings** (see [Service Connection & Client Config](README_EN.md#service-connection--client-configuration)):
+Go to the client's **Settings → Sync Settings** (see [Service Connection & Client Config](https://github.com/zues0077/lxserver/blob/main/README_EN.md#service-connection--client-setup)):
 
 ### User Path Mode (Recommended)
 

@@ -45,7 +45,8 @@ export default defineConfig({
             items: [
               { text: '快速开始', link: '/guide/getting-started' },
               { text: '应用设置与配置规则', link: '/guide/app-settings' },
-              { text: '快速上手教程', link: '/guide/tutorial' }
+              { text: '快速上手教程', link: '/guide/tutorial' },
+              { text: '常见问题与排错', link: '/guide/faq' }
             ]
           },
           {
@@ -127,7 +128,8 @@ export default defineConfig({
             items: [
               { text: 'Getting Started', link: '/en/guide/getting-started' },
               { text: 'App Settings & Rules', link: '/en/guide/app-settings' },
-              { text: 'Usage Tutorial', link: '/en/guide/tutorial' }
+              { text: 'Usage Tutorial', link: '/en/guide/tutorial' },
+              { text: 'FAQ & Troubleshooting', link: '/en/guide/faq' }
             ]
           },
           {

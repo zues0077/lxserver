@@ -21,7 +21,7 @@
 
 ## 🏠 第一步：访问 Web 播放器
 
-默认地址（解压后的根路径）：`http://IP:9527`（Docker 中的 `9527` 需 `-p 9527:9527`，见 [Docker 部署](README.md#docker-部署)）。
+默认地址（解压后的根路径）：`http://IP:9527`（Docker 中的 `9527` 需 `-p 9527:9527`，见 [Docker 部署](https://github.com/zues0077/lxserver#docker-部署)）。
 
 - 若未配置 `ENABLE_WEBPLAYER_AUTH=true` → 进页即能播放（游客模式只能访问公开歌单）。
 - 需要 `WEBPLAYER_PASSWORD`（默认 `123456`）时才输入；这独立于管理后台密码。
@@ -103,7 +103,7 @@ Web 播放器搜的多源平台有：`wy`(网易) / `tx`(腾讯) / `kw`(酷我) 
 
 ## 🎵 第六步：连接 LX Music 桌面/移动端客户端
 
-进入客户端 **设置 → 同步设置**（见 [服务连接与客户端配置](README.md#服务连接与客户端配置)）：
+进入客户端 **设置 → 同步设置**（见 [服务连接与客户端配置](https://github.com/zues0077/lxserver#服务连接与客户端配置)）：
 
 ### 用户路径模式（推荐）
 
