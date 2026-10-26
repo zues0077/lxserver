@@ -28,6 +28,34 @@
    配置落盘到同目录 config.json，下次双击直接生效。
 
 
+客户端版本（自动识别，不用管）
+-----------------------------
+签名器启动时会自己认出客户端装在哪、是哪个版本，**不用手工填**。
+识别顺序（本机版与 NAS 的 wine 镜像版完全一致）：
+
+  1. <目录>\manifest.json          { version }
+  2. <目录>\..\manifest.json       同上
+  3. <目录>\..\..\config.json      { latestVersion }
+  4. <目录>\version.json           { version }
+  5. <目录>\package.json           { version }
+  6. 目录名里的 x.y.z
+
+认出哪个就是哪个，会体现在发给汽水的 UA 里。想固定成某个版本，就在配置页「高级」里
+手填「客户端版本」并保存（留空 = 每次启动重新识别）。
+
+唯一没法自动识别的是 Build ID（30080000 这类）——客户端文件里没有这个值，只能手填。
+
+
+找不到客户端 / 想先确认版本
+--------------------------
+跑 lxserver-soda-signer 仓库根目录的 find-soda-client.bat
+（桌面上的「汽水客户端版本识别」也放了一份，用法见同目录的说明 txt）。
+它会把本机所有 app.asar.unpacked 列出来、报出各自版本和版本来源，
+然后你按它给的目录用 --client 指定即可，例如：
+
+  node signer.js --client "C:\Users\你\AppData\Local\Programs\Soda Music\Packages\3.8.0\app.asar.unpacked"
+
+
 命令行 / 老用法（兜底）
 ---------------------
 - node signer.js --setup          强制重新填写 LX 服务器（交互式）

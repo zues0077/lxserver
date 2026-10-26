@@ -180,6 +180,29 @@
 
 > 详细说明（判定标准、测试曲目来源、全部配置项、被移除音源的恢复方式）见 [docs/guide/source-probe.md](docs/guide/source-probe.md)
 
+### 10. 平台账号与汽水签名器（新增）
+
+**平台账号**：后台侧边栏的独立视图，网易云 / QQ / 微信 / 酷狗 / 汽水 / B站 各有自己的卡片，扫码或直接填 Cookie 即可登录取链，登录态只存在这台服务器上。底部「使用权限」可勾选允许走账号通道的用户 —— **名单为空 = 所有人可用**（默认行为不变）；勾选后仅名单内用户走账号通道，其余自动回落公开音源（自定义源、B站/汽水匿名流）。
+
+**汽水签名器**：汽水的版权受限曲（整曲 / 无损）必须带官方客户端的签名头 `X-Helios` / `X-Medusa`，纯服务端算不出来。签名器就是替你算这两个头的小服务，两种部署方式，效果完全一样：
+
+| | 方案 A：Windows 桌面版 | 方案 B：Wine 容器（NAS） |
+| :--- | :--- | :--- |
+| 适合 | 手边有常开的 Windows，且装了汽水客户端 | 主力是 NAS，不想为签名专门开一台 Windows |
+| 程序 | 本仓库 `tools/qishui-signer/`（自带 node.exe，双击即起） | [zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer)（镜像仅 `linux/amd64`） |
+| 后台填的地址 | `http://<Windows 机 IP>:18080` | `http://<NAS IP>:18080` |
+| 客户端组件 | 本机自带，签名器自动找 | 从客户端取出 `bdms.node` + `metasecml.dll`，只读挂进容器 `/soda-client` |
+
+两种方案都带**网页配置面板**（`http://<签名器地址>:18080/`）：可改端口 / 绑定地址 / 登记多台 LX 服务器，保存即热生效；面板上能看到 bdms 是否加载、客户端版本、签名计数，以及每台 LX 当前是否已经看到它。签名器**无状态**，同一台可同时服务多台 LX，互不影响各自的汽水账号。
+
+上手三步：
+
+1. **确认客户端版本**：跑 `find-soda-client.bat`（在 [soda-signer 仓库](https://github.com/zues0077/lxserver-soda-signer) 根目录），它会找出 `app.asar.unpacked`、报出客户端版本；加 `-StageTo D:\soda-stage` 还能顺手整理出一个可直接挂载的目录（含 `manifest.json`，签名器就靠它认出客户端版本）。
+2. **起签名器**：方案 A 双击 `start-signer.bat`；方案 B 用该仓库里的 `docker-compose.yml`（把 `bdms.node` / `metasecml.dll` 所在目录挂到 `/soda-client:ro`）。
+3. **在后台登记**：LX 后台 →「平台账号」→ 汽水签名器，填签名器地址并保存，状态变为「签名器在线」即可。
+
+> 客户端版本**不需要跟着改代码**：签名器把识别到的版本经 `GET /config` 上报，lxserver **1.5.36+** 直接采用它拼 UA；客户端大版本升级后只需替换 `bdms.node` 并重启签名器。完整步骤与排错见 [FAQ 第二节](docs/guide/faq.md)。
+
 ## 🧩 相对上游的主要增强
 
 | 方向 | 内容 |

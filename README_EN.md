@@ -143,6 +143,29 @@ Some platforms declared by a source script are simply broken (tightened anti-abu
 
 > See [docs/guide/source-probe.md](docs/guide/source-probe.md) for criteria, test-track sources, all options and how to restore a removed source (Chinese only).
 
+### 10. Platform Accounts & Soda Signer (new)
+
+**Platform accounts** — a dedicated view in the admin sidebar. NetEase Cloud, QQ Music, WeChat, Kugou, Soda and Bilibili each get their own card; sign in by QR code or paste a cookie and links resolve through the logged-in account. Credentials stay on this server. The **Access** section at the bottom lets you pick which users may use the account channel — **empty list = available to everyone** (default, unchanged); once you tick users, only they use the account channel and everyone else falls back to public sources (custom sources, anonymous Bilibili/Soda streams).
+
+**Soda signer** — Soda's rights-restricted tracks (full length / lossless) require the official client's signature headers `X-Helios` / `X-Medusa`, which cannot be computed server-side. The signer is a small side service that computes them. Two deployment options, identical results:
+
+| | Option A: Windows desktop | Option B: Wine container (NAS) |
+| :--- | :--- | :--- |
+| Best for | An always-on Windows box with the Soda client installed | NAS-centric setups that shouldn't need a Windows machine |
+| Program | `tools/qishui-signer/` in this repo (bundles node.exe, double-click to start) | [zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer) (`linux/amd64` only) |
+| Address in admin | `http://<windows-ip>:18080` | `http://<nas-ip>:18080` |
+| Client binaries | Already on that machine; the signer finds them | Copy `bdms.node` + `metasecml.dll` out of the client and mount them read-only at `/soda-client` |
+
+Both ship a **web config panel** at `http://<signer-host>:18080/`: change port / bind address / register multiple LX servers, saved with hot reload. The panel shows whether bdms is loaded, the detected client version, the signature counter, and whether each LX server can currently see it. The signer is **stateless** — one instance can serve many LX servers without touching their Soda accounts.
+
+Three steps to get going:
+
+1. **Confirm the client version** — run `find-soda-client.bat` (repo root of [lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer)). It locates `app.asar.unpacked` and reports the client version; add `-StageTo D:\soda-stage` to have it assemble a mount-ready folder (including the `manifest.json` the signer uses for version detection).
+2. **Start the signer** — Option A: double-click `start-signer.bat`. Option B: use the repo's `docker-compose.yml` (mount the folder holding `bdms.node` / `metasecml.dll` at `/soda-client:ro`).
+3. **Register it in admin** — LX admin → Platform accounts → Soda signer, enter the address and save. Once the status reads "signer online", you're done.
+
+> No code change is needed when the client updates: the signer reports the detected version via `GET /config`, and lxserver **1.5.36+** uses it to build the UA. After a client upgrade, just replace `bdms.node` and restart the signer. Full steps and troubleshooting: [FAQ section 2](docs/en/guide/faq.md).
+
 ## 🧩 Enhancements over Upstream
 
 | Area | Detail |

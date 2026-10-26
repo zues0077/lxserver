@@ -44,6 +44,7 @@
   - Ships in this repo under `tools/qishui-signer/` (listens on `http://localhost:18080/` by default); double-click `start-signer.bat` on Windows.
   - **Web config page** (v1.5.34+): open `http://localhost:18080/` for a form with port / bind address / LX server list. Saving is **hot-reloaded** (port change hot-restarts the listener, server list re-registers immediately); config persists to `config.json`.
   - The signer is **stateless** (Soda account state lives in each LX server), so one signer can register with / sign for multiple LX servers **without affecting each other's Soda accounts** → enter the signer address in the console, multiple entries allowed.
+  - If the launcher window says it "cannot find bdms.node": open the Soda client once (components are unpacked on first launch). If that doesn't help, run `find-soda-client.bat` from the root of the [soda-signer repo](https://github.com/zues0077/lxserver-soda-signer) to see where it actually lives, then point at it with `--client "<that folder>"`.
 
 - **Option B: Wine container on your NAS, `lxserver-soda-signer`** (for NAS-only setups, no Windows needed; running on our 120 / 246)
   - Separate image repo: [zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer). Its image versioning is **independent** (currently **1.0.1**; tags `1.0.1` / `1.0` / `latest`) and unrelated to the lxserver version.
@@ -51,8 +52,14 @@
   - The image **does not contain** `bdms.node` / `metasecml.dll`: extract them from your own Soda client's `app.asar.unpacked` and **mount them read-only** (e.g. `/vol2/1000/Docker/soda-client:/soda-client:ro`).
   - linux/amd64 only (the Windows native module cannot be reliably translated on arm); the main image is untouched — pull it on demand.
   - **Same web panel** as Option A: open `http://<NAS IP>:18080/` to set port / bind address / multiple LX servers (URL + console password); saving is hot-reloaded. "Service status" shows the signer version, whether bdms loaded, UA, sign counters, and **whether each LX server currently sees it** (by asking LX's `GET /api/music/prefetch/signer`).
-  - The client version is **auto-detected** (from `manifest.json` / directory name in the mounted path) and reported via `GET /config`; lxserver **1.5.36+** uses the reported UA and version code directly, so a client upgrade needs no server-side code change.
-  - Deployment and troubleshooting live in that repo's README (mount path, env vars, a one-click `app.asar.unpacked` finder script, `/health` self-check, the stdin-pipe instant-exit pitfall, etc.).
+  - The client version is **auto-detected** — checked in order: `manifest.json` / `../manifest.json` / `../../config.json` / `version.json` / `package.json` / the directory name — and reported via `GET /config`; lxserver **1.5.36+** uses the reported UA and version code directly, so a client upgrade needs no server-side code change.
+  - **How to obtain the client folder**: the repo root ships `find-soda-client.bat` (double-click on Windows). It scans for every `app.asar.unpacked` on the machine and reports each one's client version and where that version came from; add `-StageTo D:\soda-stage` and it assembles `bdms.node` + `metasecml.dll` + `manifest.json` into a mount-ready folder you can copy straight to the NAS — no manual digging through `%LOCALAPPDATA%\Programs\Soda Music`.
+  - **⚠️ The panel shows an empty "client version"** (`detectedVersion: ""` in `/api/status`): the mounted folder has no version-bearing file and the directory name has no `x.y.z` (typical when only the contents of `app.asar.unpacked` were copied, without the outer `Packages/<ver>/`). The signer falls back to its built-in default `3.7.0` — signing still works but the reported version is wrong. Fix it by dropping a `manifest.json` into the mounted folder:
+    ```json
+    {"version":"3.8.0","shellMinVersion":"3.1.0"}
+    ```
+    Use your actual client version (`find-soda-client.bat` tells you), then restart the container — `detectedSource` becomes `manifest.json`.
+  - Deployment and troubleshooting live in that repo's README (mount path, env vars, `/health` self-check, the stdin / stderr pipe pitfalls that cause instant exit or failing outbound requests, etc.).
 
 **Which one**: a always-on Windows box with the Soda client → Option A is simplest; NAS-centric setup where you don't want to keep a Windows machine running just for signing → Option B. In the console, Option A's address is `http://<Windows IP>:18080`, Option B's is `http://<NAS IP>:18080`; everything else is identical.
 
