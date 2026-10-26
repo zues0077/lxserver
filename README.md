@@ -182,7 +182,7 @@
 
 ### 10. 平台账号与汽水签名器（新增）
 
-**平台账号**：后台侧边栏的独立视图，网易云 / QQ / 微信 / 酷狗 / 汽水 / B站 各有自己的卡片，扫码或直接填 Cookie 即可登录取链，登录态只存在这台服务器上。底部「使用权限」可勾选允许走账号通道的用户 —— **名单为空 = 所有人可用**（默认行为不变）；勾选后仅名单内用户走账号通道，其余自动回落公开音源（自定义源、B站/汽水匿名流）。
+**平台账号**：后台侧边栏的独立视图，网易云 / QQ / 微信 / 酷狗 / 汽水 / B站 各有自己的卡片，扫码或直接填 Cookie 即可登录取链（**汽水例外：它没有网页登录入口，只能从 PC 客户端取 Cookie**，详见 [FAQ 第一节](docs/guide/faq.md#soda-cookie)），登录态只存在这台服务器上。底部「使用权限」可勾选允许走账号通道的用户 —— **名单为空 = 所有人可用**（默认行为不变）；勾选后仅名单内用户走账号通道，其余自动回落公开音源（自定义源、B站/汽水匿名流）。
 
 **汽水签名器**：汽水的版权受限曲（整曲 / 无损）必须带官方客户端的签名头（3.7.x 为 `X-Helios` + `X-Medusa`，3.8.x 起为 `X-Neptune`），纯服务端算不出来。签名器就是替你算签名头的小服务，两种部署方式，效果完全一样：
 
@@ -212,7 +212,7 @@
 | **三道防误伤** | 探测音质跟随脚本声明、多首测试曲目重试、链接 4xx 时 Range GET 复核 |
 | **平台侧异常保护** | 某平台在同轮过半音源上同时失败时只报告不处置，避免一次误关整个音源库 |
 | **小爱音箱投播** | 扫码登录、多设备同时播放、自动续播；服务端中转音频流绕开防盗链 |
-| **平台账号与汽水签名器** | 网易 / QQ / 微信 / 酷狗 / 汽水 / B站 独立账号视图，扫码或填 Cookie 登录取链，可按用户白名单控制可用范围；汽水整曲 / 无损由独立签名器提供（Windows 端 `tools/qishui-signer/` 或 NAS 上的 [Wine 容器镜像](https://github.com/zues0077/lxserver-soda-signer)），客户端版本由签名器自动上报、服务端跟随 |
+| **平台账号与汽水签名器** | 网易 / QQ / 微信 / 酷狗 / 汽水 / B站 独立账号视图，扫码或填 Cookie 登录取链（汽水无网页登录，只能取 PC 客户端 Cookie），可按用户白名单控制可用范围；汽水整曲 / 无损由独立签名器提供（Windows 端 `tools/qishui-signer/` 或 NAS 上的 [Wine 容器镜像](https://github.com/zues0077/lxserver-soda-signer)），客户端版本由签名器自动上报、服务端跟随 |
 | **音源热重载优化** | 单文件变动只增量重载该音源，不再全量重载整个空间 |
 | **观测能力** | `/health` 暴露护栏与巡检状态，`?probeDetail=1` 查看逐平台失败明细；破坏性动作写入 `probe-audit.log` |
 
@@ -223,18 +223,18 @@
 | 标签 | 说明 |
 | :--- | :--- |
 | `latest` | 最新稳定版，跟随 `main` 分支 |
-| `v1.5.36` / `1.5.36` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
+| `v1.5.37` / `1.5.37` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
 | `v*` | 每个已发布版本都会保留，可随时回滚到历史版本 |
 
 ```bash
 # 固定版本（推荐）
-docker pull ghcr.io/zues0077/lxserver:1.5.36
+docker pull ghcr.io/zues0077/lxserver:1.5.37
 
 # 或跟随最新
 docker pull ghcr.io/zues0077/lxserver:latest
 ```
 
-> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.36`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
+> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.37`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
 > - 如果要另外发布到 Docker Hub，可使用备用工作流 `.github/workflows/docker.yml`（需自行配置 `DOCKER_USERNAME` / `DOCKER_PASSWORD` 密钥并手动触发，默认不参与自动发布）。
 
 ## 🔒 访问控制与安全
@@ -289,7 +289,7 @@ Web 播放器针对移动端做了深度优化，手机浏览器访问也能接�
 镜像地址（GitHub Packages / GHCR）：
 
 - 跟随最新：`ghcr.io/zues0077/lxserver:latest`
-- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.36`
+- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.37`
 - 完整标签说明见上方 [Docker 部署](#-docker-部署)
 
 **Docker Run 示例：**
@@ -303,7 +303,7 @@ docker run -d \
   -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.36
+  ghcr.io/zues0077/lxserver:1.5.37
 ```
 
 > ⚠️ **`--restart` 不要省**：面板里的「重启服务」（`POST /api/restart`）在容器内是通过结束进程实现的，
@@ -336,7 +336,7 @@ docker run -d \
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.36   # 或 :latest
+    image: ghcr.io/zues0077/lxserver:1.5.37   # 或 :latest
     container_name: lx-sync-server
     restart: unless-stopped          # 不要省：面板「重启服务」靠它拉起进程
     ports:

@@ -167,16 +167,17 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     id: 'soda',
     name: '汽水音乐',
     short: '汽水',
-    // 登录态 Cookie（sessionid*）下发在 qishui.com 域，接口都在 api.qishui.com
+    // 登录态 Cookie（sessionid*）只有官方 PC 客户端登录后才会下发；接口都在 api.qishui.com
+    // ⚠️ www.qishui.com 是纯下载落地页、没有账号入口，浏览器访客态只有 ttwid / odin_tt / n_mh，本文件不认这些字段
     cookieDomain: 'api.qishui.com',
     loginKeys: ['sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard'],
     essentialKey: 'sessionid_ss',
-    essentialHint: '缺 sessionid_ss 基本等于未登录；汽水 PC 网页端登录后会同时下发 sessionid / sid_tt / sid_guard',
+    essentialHint: '缺 sessionid_ss 基本等于未登录；这四个字段只在汽水 PC 客户端登录后才有，浏览器里的 qishui.com 游客 Cookie 无效',
     guide: [
-      '打开 https://www.qishui.com 并登录（或用官方 PC 客户端登录后从客户端取）',
-      'F12 →「网络 / Network」，筛选 api.qishui.com，点任意一条 luna 接口',
-      '复制「请求标头」里的 Cookie 整行',
-      '关键字段：sessionid_ss、sessionid、sid_tt、sid_guard',
+      '汽水没有网页端登录（www.qishui.com 只是下载页），必须先装官方 PC 客户端并在客户端里登录',
+      '登录后关闭客户端，读 %APPDATA%\\SodaMusic\\Network\\Cookies（Chromium 库，value 列是明文，无需解密）',
+      '把其中 sessionid / sessionid_ss / sid_tt / sid_guard 拼成一行 Cookie 格式填入下面的输入框',
+      '也可以用配套脚本自动完成：读库 → 拼 Cookie → 调 /luna/pc/me 校验 → 结果写进剪贴板',
       '⚠️ 提醒：汽水的会员曲目取流需要官方客户端签名，配了账号也拿不到整曲，详见下方说明',
     ],
     benefit: '可保存登录态；注意：cover/UGC 类曲目免登录就能播，会员无损与版权受限曲的整曲需要官方客户端签名，账号不解决',

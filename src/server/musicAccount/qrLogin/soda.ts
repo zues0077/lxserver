@@ -158,7 +158,7 @@ export async function check(state: SodaState): Promise<QrCheckResult> {
     return {
       status: 'failed',
       message: '该账号需要短信二次验证（抖音 App 扫码后还要收验证码），本服务未实现这一步。'
-        + '请在浏览器登录 www.qishui.com 后，把 api.qishui.com 请求里的 Cookie 粘过来。',
+        + '请改用汽水官方 PC 客户端登录，再取其 Cookie（浏览器里没有账号入口，取不到登录态）。',
     }
   }
 

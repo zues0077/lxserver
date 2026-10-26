@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.5.37 (2026-10-26)
+
+### 📝 修正汽水登录引导：汽水没有网页登录入口，只能取 PC 客户端 Cookie
+
+> 之前多处文案让用户「打开 www.qishui.com 并登录、F12 复制 Cookie」，但汽水官网只是下载落地页，
+> 浏览器里根本没有账号入口和播放器。照做的人只会拿到 `ttwid` / `odin_tt` / `n_mh` 这类游客 Cookie，
+> 同步过去服务器显示「未登录」，被误导成"工具坏了"。
+
+- **后台引导改写**（`src/server/musicAccount/platforms.ts`）：汽水卡片的「如何获取」改为
+  「装官方 PC 客户端登录 → 读 `%APPDATA%\SodaMusic\Network\Cookies`（value 列明文）→ 拼 `sessionid` /
+  `sessionid_ss` / `sid_tt` / `sid_guard` → 填入」，并明确提示浏览器访客态 Cookie 无效。
+- **浏览器扩展不再列汽水**（`public/ext/cookie-sync/`）：删掉 `soda` 平台项与 `*://*.qishui.com/*`
+  宿主权限（7 → 6 项），manifest 版本 1.0.3 → 1.0.4；README 增加「关于汽水音乐（不在本扩展支持范围）」一节，
+  说明为什么读不到、以及手动取 Cookie 的四步。
+- **扫码失败的提示改道**（`qrLogin/soda.ts`）：短信二次验证失败时不再引导去浏览器登录，
+  改为引导用 PC 客户端取 Cookie。
+- **文档同步**：FAQ 第一节从「扫码登录后没变化」重写为「汽水音乐怎么登录取链」，
+  说清无网页登录、游客 Cookie 无效、客户端 Cookie 明文可取；README 与 FAQ 里「汽水…扫码或填 Cookie」
+  的说法统一标注为「汽水只支持填 Cookie」。
+
 ## v1.5.36 (2026-10-26)
 
 ### 🔁 汽水客户端版本不再锁死服务端：签名器上报版本，服务端跟着走

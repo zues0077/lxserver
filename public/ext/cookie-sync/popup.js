@@ -16,8 +16,9 @@ const PLATFORMS = {
   kg: { name: '酷狗音乐', home: 'https://www.kugou.com', domain: 'kugou.com' },
   mg: { name: '咪咕音乐', home: 'https://music.migu.cn', domain: 'migu.cn' },
   bili: { name: 'Bilibili', home: 'https://www.bilibili.com', domain: 'bilibili.com' },
-  // 汽水音乐的登录态 Cookie（sessionid*）下发在 qishui.com 域，接口在 api.qishui.com
-  soda: { name: '汽水音乐', home: 'https://www.qishui.com', domain: 'qishui.com' },
+  // 汽水音乐不在本扩展支持范围：www.qishui.com 只是下载落地页、没有账号入口，
+  // 浏览器里只有 ttwid / odin_tt / n_mh 这类游客 Cookie，读出来的不是登录态。
+  // 汽水的 sessionid* 只在官方 PC 客户端登录后才下发，请改用服务器后台说明里的客户端提取方式。
 }
 
 const $ = id => document.getElementById(id)
