@@ -86,6 +86,7 @@ const config: LX.Config = {
   'musicAccount.enabled': false, // 总开关：开启后取链时才会尝试用已配置的平台账号
   'musicAccount.priority': true, // true=首选自己账号，失败再回落自定义音源；false=自定义音源失败后才试账号
   'musicAccount.timeoutMs': 15000, // 单次账号取链的超时上限(ms)，超时即回落自定义音源
+  'musicAccount.allowedUsers': [], // 使用权限名单：允许走账号取链的用户名（游客=_open）；空=所有人可用
 
   // 访问路径配置
   'admin.path': '/admin', // 后台管理路径

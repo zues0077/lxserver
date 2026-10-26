@@ -13,6 +13,7 @@
 import * as bilibili from './bilibili'
 import * as soda from './soda'
 import * as store from '../musicAccount/store'
+import { isUserAllowed } from '../musicAccount/permission'
 
 export type ExtraSourceId = 'bili' | 'soda'
 
@@ -95,7 +96,9 @@ export async function getMusicUrl(source: string, songInfo: any, quality: string
   const resolver = RESOLVERS[source]
   if (!resolver) throw new Error(`额外音源不支持：${source}`)
 
-  const cookie = store.getCookie(source) || ''
+  // 使用权限：名单外的用户不带账号 Cookie（B站/汽水匿名流本身就是公开音源，
+  // 不该把权限做成「整块封掉」，只收回「用管理员的会员 Cookie 换更高音质」这部分）。
+  const cookie = isUserAllowed(username) ? (store.getCookie(source) || '') : ''
   // username 只用于「取链失败时记待补」，让补传能落回播放者自己的缓存目录
   const result = await resolver(songInfo, quality, cookie, username)
   if (!result?.url) throw new Error(`${displayName(source)} 未返回可用链接`)

@@ -266,6 +266,12 @@ declare namespace LX {
     'musicAccount.timeoutMs'?: number
 
     /**
+     * 平台账号使用权限：允许走账号取链的用户名名单（游客固定写作 _open）。
+     * 空数组/未配置 = 所有人可用；非空时只有名单内用户能走账号通道，其余回落公开音源。
+     */
+    'musicAccount.allowedUsers'?: string[]
+
+    /**
      * 是否启用自定义歌曲目录
      */
     'user.enableCustomMusicDir'?: boolean

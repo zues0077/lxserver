@@ -693,6 +693,22 @@
                                 </div>
 
                                 <p class="config-hint-text" id="music-acc-store-path"></p>
+
+                                <!-- 使用权限：勾选哪些用户可以走平台账号取链；一个都不勾 = 所有人可用 -->
+                                <div class="music-acc-toolbar" style="margin-top: 6px; flex-direction: column; align-items: stretch; gap: 8px;">
+                                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                                        <span style="font-size: 13px; font-weight: 600;">使用权限</span>
+                                        <button type="button" class="btn-secondary" onclick="app.saveMusicAccountPerms()"
+                                            style="white-space: nowrap;">保存权限</button>
+                                        <span id="music-acc-perm-hint" class="config-hint-text" style="margin: 0;">
+                                            一个都不勾 = 所有用户（含游客）都可用账号；勾选后，未勾选用户只能用公开音源
+                                        </span>
+                                    </div>
+                                    <div id="music-acc-perm-list" class="config-hint-text"
+                                        style="display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;">
+                                        正在加载用户列表…
+                                    </div>
+                                </div>
                             </div>
                         </div>
 

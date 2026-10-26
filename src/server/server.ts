@@ -46,6 +46,7 @@ import crypto from 'node:crypto'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
 import * as musicAccount from './musicAccount'
+import { isUserAllowed, getAllowedUsers } from './musicAccount/permission'
 import * as extraSources from './extraSources'
 import {
   xiaoAiService,
@@ -7834,9 +7835,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
             // 账号通道独立于自定义源存在：即使一个自定义源都没装，
             // 只要管理员配了自己的平台 Cookie，也应该能播。所以这里放宽进入条件。
+            // 使用权限：名单外的用户不算「账号可用」（名单为空=所有人可用），
+            // 让下面「未找到支持平台的自定义源」的报错文案回到正确分支。
             const accountUsable = musicAccount.isEnabled() &&
               musicAccount.isSupportedSource(source) &&
-              musicAccount.hasAccount(source)
+              musicAccount.hasAccount(source) &&
+              isUserAllowed(verifiedUsername)
 
             let customSourceError: string | null = null
             let attempts: any[] = []
@@ -9426,6 +9430,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             enabled: musicAccount.isEnabled(),
             priority: musicAccount.isPriority(),
             timeoutMs: global.lx.config['musicAccount.timeoutMs'] ?? 15000,
+            allowedUsers: getAllowedUsers(),
             accounts: musicAccount.getAccounts(),
             storePath: musicAccount.getStoreFilePath(),
           },
@@ -9578,6 +9583,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const patch = JSON.parse(body || '{}')
             if (typeof patch.enabled === 'boolean') global.lx.config['musicAccount.enabled'] = patch.enabled
             if (typeof patch.priority === 'boolean') global.lx.config['musicAccount.priority'] = patch.priority
+            if (patch.allowedUsers !== undefined) {
+              // 使用权限名单：只收字符串，修剪去重；空数组=恢复「所有人可用」
+              if (!Array.isArray(patch.allowedUsers)) throw new Error('allowedUsers 必须是字符串数组')
+              const allowedList: string[] = (patch.allowedUsers as unknown[])
+                .filter((u): u is string => typeof u === 'string' && !!u.trim())
+                .map((u) => u.trim())
+              global.lx.config['musicAccount.allowedUsers'] = [...new Set(allowedList)]
+            }
             if (typeof patch.timeoutMs === 'number' && patch.timeoutMs >= 3000) {
               global.lx.config['musicAccount.timeoutMs'] = patch.timeoutMs
             }
@@ -9587,6 +9600,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               enabled: musicAccount.isEnabled(),
               priority: musicAccount.isPriority(),
               timeoutMs: global.lx.config['musicAccount.timeoutMs'],
+              allowedUsers: getAllowedUsers(),
             } }))
           } catch (e: any) {
             res.writeHead(400, { 'Content-Type': 'application/json' })

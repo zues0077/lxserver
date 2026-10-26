@@ -29,6 +29,7 @@ import { promisify } from 'util'
 import * as tunnel from 'tunnel'
 import { getProxyAgent } from '../modules/utils/proxy.js'
 import { tryResolveByAccount, isEnabled, isPriority, isSupportedSource, getPlatform } from './musicAccount'
+import { isUserAllowed } from './musicAccount/permission'
 const inflate = promisify(zlib.inflate)
 const deflate = promisify(zlib.deflate)
 
@@ -1182,6 +1183,8 @@ export async function callUserApiGetMusicUrl(
     enableAutoSwitchApiSource?: boolean,
     excludeApiSources?: string[]
 ): Promise<{ url: string, type: string, sourceName?: string, sourceId?: string, attempts?: any[], hasMoreSources?: boolean }> {
+    // 使用权限：后台「平台账号 → 使用权限」名单外的用户不消费账号 Cookie（名单为空=所有人可用）
+    const accountAllowed = isUserAllowed(clientUsername)
     // 标准化 songInfo 格式：将 meta 中的字段提升到顶层
     const normalizedSongInfo = { ...songInfo }
     if (songInfo.meta) {
@@ -1274,7 +1277,8 @@ export async function callUserApiGetMusicUrl(
     // ========== 平台账号优先通道 ==========
     // 配置了某平台自己的会员账号时，先用账号取链：账号能拿到更高音质，
     // 也能播自定义源拿不到的付费曲目。取不到再回落自定义音源，不打断原有链路。
-    if (isEnabled() && isPriority()) {
+    // accountAllowed：后台「使用权限」名单外的用户不走账号通道（名单为空=所有人可用）。
+    if (isEnabled() && isPriority() && accountAllowed) {
         const acct = await tryResolveByAccount(source, normalizedSongInfo, quality)
         if (acct?.url) {
             const platformName = getPlatform(source)?.name || source
@@ -1444,7 +1448,7 @@ export async function callUserApiGetMusicUrl(
     if (supportedCount === 0) {
         // 没有任何自定义源可用时，账号就是唯一出路 —— 这种情况不该受「优先级」影响，
         // 否则会出现「明明配了会员账号，却因为没装自定义源而播不了」。
-        if (isEnabled()) {
+        if (isEnabled() && accountAllowed) {
             const acct = await tryResolveByAccount(source, normalizedSongInfo, quality)
             if (acct?.url) {
                 const platformName = getPlatform(source)?.name || source
@@ -1589,7 +1593,7 @@ export async function callUserApiGetMusicUrl(
     // ========== 账号兜底通道 ==========
     // 配置为「自定义源优先」时，所有源都失败才轮到自己的账号。
     // 这条路径的意义在于：自定义源拿不到（版权受限/源挂了）时，会员账号可能还能播。
-    if (isEnabled() && !isPriority()) {
+    if (isEnabled() && !isPriority() && accountAllowed) {
         const acct = await tryResolveByAccount(source, normalizedSongInfo, quality)
         if (acct?.url) {
             const platformName = getPlatform(source)?.name || source

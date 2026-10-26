@@ -4986,6 +4986,7 @@ class App {
             }
 
             this.renderMusicAccounts(data.accounts || []);
+            void this.renderMusicAccountPerms(data.allowedUsers || []);
             void this.loadQishuiSignerStatus();
         } catch (e) {
             listEl.innerHTML = `<div class="music-acc-loading">加载失败：${this.escapeHtml(e.message || String(e))}</div>`;
@@ -5318,6 +5319,55 @@ class App {
         } catch (e) {
             showError(`保存账号设置失败：${e.message}`);
             return false;
+        }
+    }
+
+    /**
+     * 使用权限：渲染「哪些用户可以走平台账号取链」的勾选表。
+     * 游客固定显示（值 _open），已注册用户从 /api/users 拉取。
+     * 一个都不勾 = 所有人可用（后端按空名单处理）。
+     */
+    async renderMusicAccountPerms(allowedUsers) {
+        const box = document.getElementById('music-acc-perm-list');
+        if (!box) return;
+        const allowed = new Set(Array.isArray(allowedUsers) ? allowedUsers : []);
+        let users = [];
+        try {
+            const list = await this.request('/api/users');
+            users = (Array.isArray(list) ? list : []).map(u => u.name).filter(Boolean);
+        } catch (e) { /* 拉不到用户列表也照常渲染游客 */ }
+        // 游客排最前，其余按名字排序去重
+        const names = ['_open', ...users.filter(n => n !== '_open').sort((a, b) => a.localeCompare(b, 'zh'))];
+        const label = n => n === '_open' ? '游客（未登录）' : n;
+        box.innerHTML = names.map(n => `
+            <label style="display: inline-flex; align-items: center; gap: 5px; cursor: pointer; font-size: 13px;">
+                <input type="checkbox" class="music-acc-perm-user" value="${this.escapeHtml(n)}"
+                    ${allowed.has(n) ? 'checked' : ''}>
+                <span>${this.escapeHtml(label(n))}</span>
+            </label>`).join('')
+            + '<span style="opacity: .7;">← 勾选后保存生效</span>';
+    }
+
+    /** 保存使用权限名单（空名单 = 所有人可用） */
+    async saveMusicAccountPerms() {
+        const hintEl = document.getElementById('music-acc-perm-hint');
+        try {
+            const checked = [...document.querySelectorAll('#music-acc-perm-list input.music-acc-perm-user:checked')]
+                .map(el => el.value);
+            const res = await this.request('/api/music/accounts/config', {
+                method: 'POST',
+                body: JSON.stringify({ allowedUsers: checked })
+            });
+            const saved = (res && res.data && res.data.allowedUsers) || [];
+            if (hintEl) {
+                hintEl.textContent = saved.length
+                    ? `已保存：仅 ${saved.length} 个用户可用账号取链，其余用户只用公开音源`
+                    : '已保存：名单为空 = 所有用户（含游客）都可用账号';
+            }
+            this.toast && this.toast(checked.length ? `权限已保存（${checked.length} 个用户可用账号）` : '权限已保存（所有人可用）');
+        } catch (e) {
+            if (hintEl) hintEl.textContent = `保存失败：${e.message || e}`;
+            showError(`保存使用权限失败：${e.message || e}`);
         }
     }
 
