@@ -46,7 +46,7 @@
   - 同一签名器**无状态**（汽水账号态在各 LX 服务器里），可同时给多台 LX 登记 / 签名，**互不影响汽水账号** → 后台「汽水签名器」填的是签名器地址，可填多台。
 
 - **方案 B：NAS 上的 Wine 容器 `lxserver-soda-signer`**（适合 NAS / 无 Windows 的场景，120、246 上都已上线）
-  - 独立镜像仓库：[zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer)，镜像版本独立编号（当前 **1.0.0**，标签 `1.0.0` / `1.0` / `latest`），与 lxserver 主程序版本互不相干。
+  - 独立镜像仓库：[zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer)，镜像版本独立编号（当前 **1.0.1**，标签 `1.0.1` / `1.0` / `latest`），与 lxserver 主程序版本互不相干。
   - 在 Linux/amd64 上用 Wine 跑官方客户端的 Windows 原生签名组件，替 NAS 上的 lxserver 生成签名头。
   - **镜像本身不含** `bdms.node` / `metasecml.dll`：把它们从你自己的汽水客户端 `app.asar.unpacked` 里取出，**只读挂载**进容器（如 `/vol2/1000/Docker/soda-client:/soda-client:ro`）。
   - 只出 `linux/amd64`（Wine 承载的 Windows 原生模块无法在 arm 上可靠转译）；主镜像零改动，按需拉取。

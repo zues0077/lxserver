@@ -46,7 +46,7 @@
   - The signer is **stateless** (Soda account state lives in each LX server), so one signer can register with / sign for multiple LX servers **without affecting each other's Soda accounts** → enter the signer address in the console, multiple entries allowed.
 
 - **Option B: Wine container on your NAS, `lxserver-soda-signer`** (for NAS-only setups, no Windows needed; running on our 120 / 246)
-  - Separate image repo: [zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer). Its image versioning is **independent** (currently **1.0.0**; tags `1.0.0` / `1.0` / `latest`) and unrelated to the lxserver version.
+  - Separate image repo: [zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer). Its image versioning is **independent** (currently **1.0.1**; tags `1.0.1` / `1.0` / `latest`) and unrelated to the lxserver version.
   - Runs the official client's Windows-native signing component under Wine on linux/amd64 and generates signature headers on behalf of lxserver.
   - The image **does not contain** `bdms.node` / `metasecml.dll`: extract them from your own Soda client's `app.asar.unpacked` and **mount them read-only** (e.g. `/vol2/1000/Docker/soda-client:/soda-client:ro`).
   - linux/amd64 only (the Windows native module cannot be reliably translated on arm); the main image is untouched — pull it on demand.
