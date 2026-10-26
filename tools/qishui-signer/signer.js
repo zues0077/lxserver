@@ -45,6 +45,7 @@ function defaultConfig() {
     clientDir: '',                     // 汽水客户端目录（留空自动探测）
     deviceId: '7300000000000001',      // 设备身份（改了要重启生效）
     appVersion: '',                    // 客户端版本号；留空 = 启动时从客户端目录自动识别
+    appVersionAuto: true,              // true = 每次启动重新自动识别（用户手填后变 false）
     buildId: '30080000',               // 客户端 buildId（客户端里找不到，只能手填）
     servers: []                        // 关联的 LX 服务器：[{ url, password }]
   }
@@ -60,7 +61,11 @@ let config = defaultConfig()
 if (fs.existsSync(CONFIG_PATH)) {
   try {
     const loaded = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
-    if (loaded && typeof loaded === 'object') config = Object.assign(config, loaded)
+    if (loaded && typeof loaded === 'object') {
+      config = Object.assign(config, loaded)
+      // 老 config.json 没有这个字段：有显式 appVersion 就视为「固定」
+      if (loaded.appVersionAuto == null) config.appVersionAuto = !loaded.appVersion
+    }
   } catch (e) {
     console.error('[config] 读取 config.json 失败，沿用默认值/命令行：', e.message)
   }
@@ -83,7 +88,12 @@ override('port', arg('port', process.env.SIGNER_PORT), true)
 override('host', arg('host', process.env.SIGNER_HOST))
 override('clientDir', arg('client', process.env.SODA_CLIENT_DIR))
 override('deviceId', arg('device', process.env.SODA_DEVICE_ID))
-override('appVersion', arg('version', process.env.SODA_VERSION))
+// 命令行/环境变量显式给了版本号 → 视为「固定」，不再自动跟随
+const cliVersion = arg('version', process.env.SODA_VERSION)
+if (cliVersion) {
+  config.appVersion = String(cliVersion)
+  config.appVersionAuto = false
+}
 override('buildId', arg('build', process.env.SODA_BUILD_ID))
 
 // 旧式 --pair / --password → 视作第一个服务器
@@ -209,10 +219,10 @@ if (!unpacked) {
 // metasecml.dll 与 bdms.node 同目录，切换 cwd 保证能被加载
 process.chdir(unpacked)
 
-// 版本自动识别：配置里显式给了就用配置，否则从客户端目录推断
+// 版本自动识别：自动模式每次启动都重新识别；用户手填过则固定
 const detected = detectVersion(unpacked)
-if (!config.appVersion) {
-  config.appVersion = detected.version || '3.7.0'
+if (config.appVersionAuto || !config.appVersion) {
+  config.appVersion = detected.version || config.appVersion || '3.7.0'
   if (detected.version) console.log(`[signer] 自动识别客户端版本：${detected.version}（来源：${detected.source}）`)
   else console.log('[signer] 未能自动识别客户端版本，暂用 3.7.0（可在配置页手填）')
 }
@@ -301,6 +311,7 @@ function publicConfig() {
     clientDir: config.clientDir,
     deviceId: config.deviceId,
     appVersion: config.appVersion,
+    appVersionAuto: !!config.appVersionAuto,
     buildId: config.buildId,
     detectedVersion: detected.version,
     detectedSource: detected.source,
@@ -328,7 +339,16 @@ async function applyConfig(rawBody) {
   if (patch.host != null) config.host = String(patch.host || '0.0.0.0')
   if (patch.clientDir != null) config.clientDir = String(patch.clientDir || '')
   if (patch.deviceId != null) config.deviceId = String(patch.deviceId || '7300000000000001')
-  if (patch.appVersion != null) config.appVersion = String(patch.appVersion || '') || detected.version || '3.7.0'
+  if (patch.appVersion != null) {
+    const v = String(patch.appVersion || '').trim()
+    if (v) {
+      config.appVersion = v
+      config.appVersionAuto = false        // 手填 → 固定
+    } else {
+      config.appVersionAuto = true         // 清空 → 恢复自动跟随
+      config.appVersion = detected.version || config.appVersion || '3.7.0'
+    }
+  }
   if (patch.buildId != null) config.buildId = String(patch.buildId || '30080000')
   if (Array.isArray(patch.servers)) {
     config.servers = patch.servers

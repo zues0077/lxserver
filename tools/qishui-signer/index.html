@@ -228,7 +228,8 @@ async function load() {
     $('port').value = cfg.port
     $('host').value = cfg.host || '0.0.0.0'
     $('deviceId').value = cfg.deviceId || ''
-    $('appVersion').value = cfg.appVersion || ''
+    $('appVersion').value = cfg.appVersionAuto ? '' : (cfg.appVersion || '')
+    $('appVersion').placeholder = cfg.detectedVersion ? `自动识别：${cfg.detectedVersion}（留空=自动）` : '留空自动识别'
     $('buildId').value = cfg.buildId || ''
     $('clientDir').value = cfg.clientDir || ''
     const box = $('servers')
