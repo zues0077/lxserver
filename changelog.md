@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.5.36 (2026-10-26)
+
+### 🔁 汽水客户端版本不再锁死服务端：签名器上报版本，服务端跟着走
+
+> 之前 `soda.ts` 把 `LunaPC/3.7.0(30080000)` 与 `version_code=30080000` 写死在代码里。
+> 客户端一旦升级大版本，签名器镜像不用动，但服务端必须改代码重新发版——否则上游只回 0 字节。
+> 这一版把「版本」的所有权交还给签名器。
+
+- **签名器自动识别客户端版本**（`tools/qishui-signer/signer.js`）：启动时从客户端目录推断版本，
+  优先级 `Packages/<ver>/manifest.json` → `Packages/config.json` → 目录名，并在 `GET /config`
+  里多上报 `user_agent` / `app_version` / `build_id`。
+- **版本号语义显式化**：新增 `appVersionAuto`。留空 = 每次启动重新识别（自动跟随）；
+  手填 = 固定不动。老 `config.json` 没有该字段时，有显式版本即视为固定，行为不变。
+- **服务端跟随**（`src/server/extraSources/signer.ts` + `soda.ts`）：`deviceConfig()` 额外取回
+  `user_agent` / `app_version` / `build_id`；新增 `resolveAppProfile()` 从 UA 反解版本号，
+  UA 头与 `version_code` / `version_name` 优先用签名器上报值，缺失才回退内置 3.7.0 / 30080000。
+  **客户端升级后服务端零改动。**
+- **`--client` 可直接指向 `app.asar.unpacked`**：传父目录或 unpacked 目录都能识别。
+
+> ⚠️ `build id`（如 30080000）在客户端文件里找不到，无法自动识别；上游若因 build id 拒绝，仍需手填。
+
+### 🔐 平台账号取链支持按用户白名单控制
+
+- 新增 `src/server/musicAccount/permission.ts`，后台可配置允许使用平台账号取链的用户名单；
+  **名单为空 = 所有人可用**（与历史行为一致，升级不改变现有用法）。
+- 后台「平台账号」页与用户侧接口按白名单放行，未授权用户调用返回明确提示。
+- 配置项 `musicAccount.allowedUsers` 写入 `defaultConfig.ts` / `config.d.ts`。
+
 ## v1.5.28 (2026-10-23)
 
 ### 🔎 引入「音源侧登记信息」当裁判：补上 1.5.27 剩下的两条盲区
