@@ -50,6 +50,12 @@ features:
   - icon: 🚀
     title: Deployment, Proxy & HTTPS
     details: From Nginx / Caddy reverse proxy with Let's Encrypt auto-cert, to production Compose, upgrade/rollback, NAS practice, and deployment troubleshooting — run it stable and secure.
+  - icon: 🐮
+    title: Deploying on fnOS
+    details: Step-by-step for FeiNiu private cloud — image mirror ghcr.nju.edu.cn, four mounts, verify with /health, built-in proxy for HTTPS, plus trim-cli commands and errno reference.
+  - icon: 💾
+    title: Data Backup & Migration
+    details: Volume structure tree, what config.js / users / states.json / sources.json each do, WebDAV incremental backup and machine-migration steps, avoid double-write corruption.
   - icon: ❓
     title: FAQ & Troubleshooting
     details: Frequent gotchas — Soda scan "no change", signer usage, cache vs music, capacity cleanup deleting songs, cover_cache mount, XiaoAi casting — each explained as Symptom → Cause → Fix.

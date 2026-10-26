@@ -50,6 +50,12 @@ features:
   - icon: 🚀
     title: 部署、反代与 HTTPS
     details: 从 Nginx / Caddy 反代 + Let's Encrypt 自动证书，到生产级 Compose、升级回滚、NAS 实战与部署排错，把服务跑得稳又安全。
+  - icon: 🐮
+    title: fnOS 部署实战
+    details: 飞牛私有云分步教程：镜像源 ghcr.nju.edu.cn、四挂载、用 /health 验证、内置反代做 HTTPS，附 trim-cli 命令行与 errno 速查。
+  - icon: 💾
+    title: 数据备份与迁移
+    details: 卷结构树、config.js / users / states.json / sources.json 各自作用，WebDAV 增量备份与换机迁移步骤，避开双写损坏。
   - icon: ❓
     title: 常见问题与排错
     details: 汽水扫码「没变化」、签名器用法、cache/music 区别、容量清理误删歌、cover_cache 挂载、小爱投播等高频踩坑，按「现象 → 原因 → 解决」讲清。

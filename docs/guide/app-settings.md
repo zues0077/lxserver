@@ -6,15 +6,15 @@
 
 ## 目录
 
-- [一、配置的来源与生效优先級](#一配置的来源与生效优先級)
-- [二、系统级配置 `data/config.js`（管理后台全屏可改项）](#二系统级配置-dataconfigjs管理后台全屏可改项)
-- [三、用户级配置（用户的“私人加厚版默认值”）](#三用户级配置用户的私人加厚版默认值)
-- [四、Web 播放器客户端设置 `DEFAULT_SETTINGS`（`app.js` 内）](#四web-播放器客户端设置-default_settingsappjs-内)
-- [五、音源文件（`data/users/source/<用户>/`）](#五音源文件datauserssource用户)
-- [六、文件/缓存规则（`fileCache.ts`）](#六文件缓存规则filecachets)
-- [七、环境变量（`environment variables`）](#七环境变量environment-variables)
-- [八、优先级拓扑与修改生效方式速查](#八优先级拓扑与修改生效方式速查)
-- [九、常见排错](#九常见排错)
+- [一、配置的来源与生效优先級](#一、配置的来源与生效优先級)
+- [二、系统级配置 `data/config.js`（管理后台全屏可改项）](#二、系统级配置-data-config-js-管理后台全屏可改项)
+- [三、用户级配置（用户的“私人加厚版默认值”）](#三、用户级配置-用户的-私人加厚版默认值)
+- [四、Web 播放器客户端设置 `DEFAULT_SETTINGS`（`app.js` 内）](#四、web-播放器客户端设置-default-settings-app-js-内)
+- [五、音源文件（`data/users/source/<用户>/`）](#五、音源文件-data-users-source-用户)
+- [六、文件/缓存规则（`fileCache.ts`）](#六、文件-缓存规则-filecache-ts)
+- [七、环境变量（`environment variables`）](#七、环境变量-environment-variables)
+- [八、优先级拓扑与修改生效方式速查](#八、优先级拓扑与修改生效方式速查)
+- [九、常见排错](#九、常见排错)
 - [扩展阅读](#扩展阅读)
 
 ---

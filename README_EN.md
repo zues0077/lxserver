@@ -193,6 +193,8 @@ Settings, configuration, and how-to guides have their own docs and are not cramp
 - [**Application Settings & Rules**](docs/en/guide/app-settings.md) — Where settings come from (env vars > WebDAV > config.js > console > defaults), what each config file (`config.js` / `users` / `states.json` / `sources.json`) looks like, the full `DEFAULT_SETTINGS` table for the Web Player, plus file/cache rules and env parity
 - [**Usage Tutorial**](docs/en/guide/tutorial.md) — From opening the player, creating and logging in, searching & playing, to downloading/moving/caching, and connecting Desktop/Mobile/Subsonic/XiaoAi
 - [**Deployment, Proxy & HTTPS**](docs/en/guide/deployment.md) — Reverse proxy + Let's Encrypt/Caddy HTTPS, real client IP via `PROXY_HEADER`, hardening, production Compose, upgrade/rollback, NAS practice, and deployment troubleshooting
+- [**Deploying on fnOS (Step-by-Step)**](docs/en/guide/deploy-fnOS.md) — FeiNiu private cloud walkthrough: image mirror `ghcr.nju.edu.cn`, four mounts, verify with `/health`, built-in proxy for HTTPS, plus trim-cli commands and errno reference
+- [**Data Backup & Migration**](docs/en/guide/backup-migration.md) — Volume structure tree, what each file does (config.js / users / states.json / sources.json / music-accounts.json), WebDAV incremental backup and machine-migration steps
 - [**FAQ & Troubleshooting**](docs/en/guide/faq.md) — Soda scan "no change", how the signer works, popup won't close, cache vs music, capacity cleanup deleting songs, cover_cache mount, measured quality, XiaoAi casting, image/code version mismatch, and other frequent gotchas
 
 ---

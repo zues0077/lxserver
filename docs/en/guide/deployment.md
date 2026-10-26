@@ -3,17 +3,19 @@
 > This page **extends** [Getting Started](./getting-started): that one covers "how to get the service running"; this one covers "how to run it stably, securely, and on the public internet" — reverse proxy + HTTPS, obtaining the real client IP, security hardening, a production-grade Compose file, upgrades/rollbacks, NAS / mini-server tips, and deployment troubleshooting.
 > The full environment-variable reference lives in [App Settings & Rules](./app-settings); frequent gotchas are in [FAQ & Troubleshooting](./faq).
 
+<DeploymentChecklist lang="en" />
+
 ---
 
 ## Table of Contents
 
-- [1. Pick a Deployment Shape](#1-ee-e)
-- [2. Reverse Proxy & HTTPS (the core)](#2-eee-e-e)
-- [3. Security Hardening Checklist](#3-eu-e-e)
-- [4. Production-grade docker-compose](#4-u-e-e-e)
-- [5. Upgrade & Rollback](#5-ue-)
-- [6. NAS / Mini-server Tips](#6-ee-)
-- [7. Deployment Troubleshooting](#7-ee-ue)
+- [1. Pick a Deployment Shape](#_1-pick-a-deployment-shape)
+- [2. Reverse Proxy & HTTPS (the core)](#_2-reverse-proxy-https-the-core)
+- [3. Security Hardening Checklist](#_3-security-hardening-checklist)
+- [4. Production-grade docker-compose](#_4-production-grade-docker-compose)
+- [5. Upgrade & Rollback](#_5-upgrade-rollback)
+- [6. NAS / Mini-server Tips](#_6-nas-mini-server-tips)
+- [7. Deployment Troubleshooting](#_7-deployment-troubleshooting)
 
 ---
 

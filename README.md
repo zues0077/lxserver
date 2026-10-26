@@ -62,6 +62,8 @@
 - [**应用设置与配置规则**](docs/guide/app-settings.md) — 设置从哪来（环境变量 > WebDAV > config.js > 后台 > 默认值）、各配置文件（`config.js`、`users`、`states.json`、`sources.json`）长什么样、Web 播放器 `DEFAULT_SETTINGS` 完整对照表、文件/缓存规则与变量 Parity
 - [**快速上手教程**](docs/guide/tutorial.md) — 从打开播放器、登录创建用户、搜索播放、下载/移动/缓存在哪、到连桌面/移动端/Subsonic/小爱投播
 - [**部署、反代与 HTTPS 实战**](docs/guide/deployment.md) — 反代 + Let's Encrypt/Caddy HTTPS、取真实客户端 IP（`PROXY_HEADER`）、安全加固、生产级 Compose、升级回滚、NAS 实战、部署排错
+- [**fnOS 部署实战（分步教程）**](docs/guide/deploy-fnOS.md) — 飞牛私有云分步图文：镜像源 `ghcr.nju.edu.cn`、四挂载、用 `/health` 验证、内置反代做 HTTPS，附 trim-cli 命令行与 errno 速查
+- [**数据备份与迁移**](docs/guide/backup-migration.md) — 卷结构树、各文件作用（config.js / users / states.json / sources.json / music-accounts.json）、WebDAV 增量备份与换机迁移步骤
 - [**常见问题与排错（FAQ）**](docs/guide/faq.md) — 汽水扫码「没变化」、签名器怎么用、弹窗关不掉、cache/music 区别、容量清理误删歌、cover_cache 挂载、音质实测值、小爱投播、镜像版本对不上等高频踩坑
 
 ---

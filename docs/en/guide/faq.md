@@ -6,16 +6,16 @@
 
 ## Table of Contents
 
-- [1. Soda Music: scanned the QR but LX Music shows "no change"](#1-soda-music-scanned-the-qr-but-lx-music-shows-no-change)
-- [2. What is the Soda signer and why do I need it](#2-what-is-the-soda-signer-and-why-do-i-need-it)
-- [3. The "How to get" popup won't close](#3-the-how-to-get-popup-wont-close)
-- [4. Where do downloaded files go? cache vs music](#4-where-do-downloaded-files-go-cache-vs-music)
-- [5. Why did turning on "capacity cleanup" delete my downloaded songs](#5-why-did-turning-on-capacity-cleanup-delete-my-downloaded-songs)
-- [6. Why must cover_cache be mounted separately](#6-why-must-cover_cache-be-mounted-separately)
-- [7. Quality label doesn't match what I requested](#7-quality-label-doesnt-match-what-i-requested)
-- [8. XiaoAi speaker casting: no sound / not found](#8-xiaoai-speaker-casting-no-sound-not-found)
-- [9. Image version doesn't match the code version](#9-image-version-doesnt-match-the-code-version)
-- [10. Is "Platform Accounts" a separate view](#10-is-platform-accounts-a-separate-view)
+- [1. Soda Music: scanned the QR but LX Music shows "no change"](#_1-soda-music-scanned-the-qr-but-lx-music-shows-no-change)
+- [2. What is the Soda signer and why do I need it](#_2-what-is-the-soda-signer-and-why-do-i-need-it)
+- [3. The "How to get" popup won't close](#_3-the-how-to-get-popup-won-t-close)
+- [4. Where do downloaded files go? cache vs music](#_4-where-do-downloaded-files-go-cache-vs-music)
+- [5. Why did turning on "capacity cleanup" delete my downloaded songs](#_5-why-did-turning-on-capacity-cleanup-delete-my-downloaded-songs)
+- [6. Why must cover_cache be mounted separately](#_6-why-must-cover-cache-be-mounted-separately)
+- [7. Quality label doesn't match what I requested](#_7-quality-label-doesn-t-match-what-i-requested)
+- [8. XiaoAi speaker casting: no sound / not found](#_8-xiaoai-speaker-casting-no-sound-not-found)
+- [9. Image version doesn't match the code version](#_9-image-version-doesn-t-match-the-code-version)
+- [10. Is "Platform Accounts" a separate view](#_10-is-platform-accounts-a-separate-view)
 - [Extended Reading](#extended-reading)
 
 ---

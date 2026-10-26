@@ -45,6 +45,8 @@ export default defineConfig({
             items: [
               { text: '快速开始', link: '/guide/getting-started' },
               { text: '部署、反代与 HTTPS 实战', link: '/guide/deployment' },
+              { text: 'fnOS 部署实战', link: '/guide/deploy-fnOS' },
+              { text: '数据备份与迁移', link: '/guide/backup-migration' },
               { text: '应用设置与配置规则', link: '/guide/app-settings' },
               { text: '快速上手教程', link: '/guide/tutorial' },
               { text: '常见问题与排错', link: '/guide/faq' }
@@ -129,6 +131,8 @@ export default defineConfig({
             items: [
               { text: 'Getting Started', link: '/en/guide/getting-started' },
               { text: 'Deployment, Proxy & HTTPS', link: '/en/guide/deployment' },
+              { text: 'Deploying on fnOS', link: '/en/guide/deploy-fnOS' },
+              { text: 'Data Backup & Migration', link: '/en/guide/backup-migration' },
               { text: 'App Settings & Rules', link: '/en/guide/app-settings' },
               { text: 'Usage Tutorial', link: '/en/guide/tutorial' },
               { text: 'FAQ & Troubleshooting', link: '/en/guide/faq' }
