@@ -34,13 +34,24 @@
 
 ## 二、汽水签名器怎么用 / 为什么需要它
 
-**是什么**：`tools/qishui-signer/`（Windows 侧程序，默认监听 `http://localhost:18080/`）。汽水整曲 / 无损播放需要字节官方安全组件（`bdms.node` + `metasecml.dll`）签名，这个组件只在**装有汽水客户端的 Windows** 上才有（`app.asar.unpacked`），Docker 容器里没有 → 所以签名器必须跑在有汽水客户端的 Windows 上，不在镜像内。
+**作用范围**：**只影响「播整曲 / 无损」**，与登录无关。汽水版权受限曲默认只能听 30 秒试听；签名器给已登录会员账号的歌曲算 `X-Helios` / `X-Medusa` 请求头后，才能拿到整曲 / 无损。想离线听就「缓存到服务器」，签名与登录是两件事。
 
-**作用范围**：**只影响「播整曲 / 无损」**，与登录无关。想离线听就「缓存到服务器」。
+**为什么必须独立部署**：签名依赖字节官方安全组件（`bdms.node` + `metasecml.dll`），这个组件只在**装有汽水客户端的机器**上才有（`app.asar.unpacked`），主镜像 / NAS 容器里默认没有。所以签名器**不进主镜像**，需要单独跑在某个「能拿到这两个二进制」的地方，再把地址填到后台 **平台账号 → 汽水签名器**。
 
-**网页配置页**（v1.5.34+）：浏览器打开 `http://localhost:18080/` 即看到表单，可设端口 / 绑定地址 / LX 服务器列表；保存**热生效**（改端口热重启监听、服务器列表立即重新登记），配置落 `config.json`。
+**两种部署方案（任选其一，效果一样）**
 
-**多服务器安全**：签名器**无状态**（汽水账号态在各 LX 服务器里），同一签名器可同时给多台 LX 登记 / 签名，**互不影响汽水账号** → 后台「汽水签名器」填的是签名器地址，可填多台。
+- **方案 A：Windows 物理端 `tools/qishui-signer/`**（适合手边有装了汽水客户端的 Windows 机器）
+  - 仓库 `tools/qishui-signer/`（默认监听 `http://localhost:18080/`），Windows 上双击 `start-signer.bat` 即起。
+  - **网页配置页**（v1.5.34+）：浏览器打开 `http://localhost:18080/` 即看到表单，可设端口 / 绑定地址 / LX 服务器列表；保存**热生效**（改端口热重启监听、服务器列表立即重新登记），配置落 `config.json`。
+  - 同一签名器**无状态**（汽水账号态在各 LX 服务器里），可同时给多台 LX 登记 / 签名，**互不影响汽水账号** → 后台「汽水签名器」填的是签名器地址，可填多台。
+
+- **方案 B：NAS 上的 Wine 容器 `lxserver-soda-signer`**（适合 NAS / 无 Windows 的场景，120、246 上都已上线）
+  - 独立镜像仓库：[zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer)。在 Linux/amd64 上用 Wine 跑官方客户端的 Windows 原生签名组件，替 NAS 上的 lxserver 生成签名头。
+  - **镜像本身不含** `bdms.node` / `metasecml.dll`：把它们从你自己的汽水客户端 `app.asar.unpacked` 里取出，**只读挂载**进容器（如 `/vol2/1000/Docker/soda-client:/soda-client:ro`）。
+  - 只出 `linux/amd64`（Wine 承载的 Windows 原生模块无法在 arm 上可靠转译）；主镜像零改动，按需拉取。
+  - 部署与排查见该仓库 README（含挂载路径、环境变量、`/health` 自检、stdin 管道导致秒退等坑）。
+
+**两种方案怎么选**：家里有一台常开的 Windows 且装了汽水客户端 → 方案 A 最简；主力是 NAS、不想为签名专门开 Windows → 方案 B。后台「汽水签名器」填的地址，A 是 `http://<Windows 机 IP>:18080`，B 是 `http://<NAS IP>:18080`，其余配置完全一致。
 
 ## 三、后台「如何获取」弹窗关不掉
 
