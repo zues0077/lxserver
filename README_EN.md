@@ -152,6 +152,7 @@ Some platforms declared by a source script are simply broken (tightened anti-abu
 | **Three anti-false-positive safeguards** | Quality follows the script's declaration, multi-track retries, Range GET re-check when HEAD returns 4xx |
 | **Platform-side anomaly protection** | When a platform fails on most sources in one round it is only reported, never acted on |
 | **Xiaoai speaker casting** | QR sign-in, multi-device playback, auto-continue, server-side audio relay |
+| **Platform accounts & Soda signer** | Dedicated account views for NetEase / QQ / WeChat / Kugou / Soda / Bilibili — QR or cookie sign-in, with a per-user allow-list; full / Hi-Res Soda playback is provided by an external signer (Windows `tools/qishui-signer/` or the [Wine container image](https://github.com/zues0077/lxserver-soda-signer) on your NAS), whose reported client version the server follows automatically |
 | **Hot-reload optimisation** | A single changed script reloads only that source instead of the whole space |
 | **Observability** | `/health` exposes guard and probe state, `?probeDetail=1` gives per-platform failure details, and destructive actions are logged to `probe-audit.log` |
 

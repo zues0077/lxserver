@@ -34,13 +34,27 @@
 
 ## 2. What is the Soda signer and why do I need it
 
-**What**: `tools/qishui-signer/` (a Windows-side program, listens on `http://localhost:18080/` by default). Playing full / Hi-Res Soda tracks needs a signature from ByteDance's security component (`bdms.node` + `metasecml.dll`), which only exists on a **Windows machine that has the Soda client installed** (`app.asar.unpacked`). It's not inside the Docker image → the signer must run on Windows with the Soda client, not in the container.
+**Scope**: affects **only "play full / Hi-Res"**. Unrelated to login. Playing a copyright-restricted Soda track normally stops at a 30-second preview; only after the signer computes `X-Helios` / `X-Medusa` headers for a logged-in VIP account can you get the full / Hi-Res stream. To listen offline, use "cache to server".
 
-**Scope**: affects **only "play full / Hi-Res"**. Unrelated to login. To listen offline, use "cache to server".
+**Why it must be deployed separately**: signing needs ByteDance's official security component (`bdms.node` + `metasecml.dll`), which only exists on a **machine with the Soda client installed** (`app.asar.unpacked`). The main image has no such component → the signer is **not** part of the main image; run it somewhere that has these two binaries, then enter its address in the console under **Platform Accounts → Soda signer**.
 
-**Web config page** (v1.5.34+): open `http://localhost:18080/` in a browser to see a form for port / bind address / LX server list; saving is **hot-reloaded** (changing port hot-restarts the listener, server list re-registers immediately), config persists to `config.json`.
+**Two deployment options (pick one, same result)**
 
-**Multi-server safety**: the signer is **stateless** (Soda account state lives in each LX server), so one signer can serve multiple LX servers / sign for them **without affecting each other's Soda accounts** → in the console "Soda signer" field you enter the signer address, and you can list multiple.
+- **Option A: Windows host, `tools/qishui-signer/`** (when you have a Windows machine with the Soda client)
+  - Ships in this repo under `tools/qishui-signer/` (listens on `http://localhost:18080/` by default); double-click `start-signer.bat` on Windows.
+  - **Web config page** (v1.5.34+): open `http://localhost:18080/` for a form with port / bind address / LX server list. Saving is **hot-reloaded** (port change hot-restarts the listener, server list re-registers immediately); config persists to `config.json`.
+  - The signer is **stateless** (Soda account state lives in each LX server), so one signer can register with / sign for multiple LX servers **without affecting each other's Soda accounts** → enter the signer address in the console, multiple entries allowed.
+
+- **Option B: Wine container on your NAS, `lxserver-soda-signer`** (for NAS-only setups, no Windows needed; running on our 120 / 246)
+  - Separate image repo: [zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer). Its image versioning is **independent** (currently **1.0.0**; tags `1.0.0` / `1.0` / `latest`) and unrelated to the lxserver version.
+  - Runs the official client's Windows-native signing component under Wine on linux/amd64 and generates signature headers on behalf of lxserver.
+  - The image **does not contain** `bdms.node` / `metasecml.dll`: extract them from your own Soda client's `app.asar.unpacked` and **mount them read-only** (e.g. `/vol2/1000/Docker/soda-client:/soda-client:ro`).
+  - linux/amd64 only (the Windows native module cannot be reliably translated on arm); the main image is untouched — pull it on demand.
+  - **Same web panel** as Option A: open `http://<NAS IP>:18080/` to set port / bind address / multiple LX servers (URL + console password); saving is hot-reloaded. "Service status" shows the signer version, whether bdms loaded, UA, sign counters, and **whether each LX server currently sees it** (by asking LX's `GET /api/music/prefetch/signer`).
+  - The client version is **auto-detected** (from `manifest.json` / directory name in the mounted path) and reported via `GET /config`; lxserver **1.5.36+** uses the reported UA and version code directly, so a client upgrade needs no server-side code change.
+  - Deployment and troubleshooting live in that repo's README (mount path, env vars, a one-click `app.asar.unpacked` finder script, `/health` self-check, the stdin-pipe instant-exit pitfall, etc.).
+
+**Which one**: a always-on Windows box with the Soda client → Option A is simplest; NAS-centric setup where you don't want to keep a Windows machine running just for signing → Option B. In the console, Option A's address is `http://<Windows IP>:18080`, Option B's is `http://<NAS IP>:18080`; everything else is identical.
 
 ## 3. The "How to get" popup won't close
 

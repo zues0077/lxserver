@@ -46,10 +46,13 @@
   - 同一签名器**无状态**（汽水账号态在各 LX 服务器里），可同时给多台 LX 登记 / 签名，**互不影响汽水账号** → 后台「汽水签名器」填的是签名器地址，可填多台。
 
 - **方案 B：NAS 上的 Wine 容器 `lxserver-soda-signer`**（适合 NAS / 无 Windows 的场景，120、246 上都已上线）
-  - 独立镜像仓库：[zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer)。在 Linux/amd64 上用 Wine 跑官方客户端的 Windows 原生签名组件，替 NAS 上的 lxserver 生成签名头。
+  - 独立镜像仓库：[zues0077/lxserver-soda-signer](https://github.com/zues0077/lxserver-soda-signer)，镜像版本独立编号（当前 **1.0.0**，标签 `1.0.0` / `1.0` / `latest`），与 lxserver 主程序版本互不相干。
+  - 在 Linux/amd64 上用 Wine 跑官方客户端的 Windows 原生签名组件，替 NAS 上的 lxserver 生成签名头。
   - **镜像本身不含** `bdms.node` / `metasecml.dll`：把它们从你自己的汽水客户端 `app.asar.unpacked` 里取出，**只读挂载**进容器（如 `/vol2/1000/Docker/soda-client:/soda-client:ro`）。
   - 只出 `linux/amd64`（Wine 承载的 Windows 原生模块无法在 arm 上可靠转译）；主镜像零改动，按需拉取。
-  - 部署与排查见该仓库 README（含挂载路径、环境变量、`/health` 自检、stdin 管道导致秒退等坑）。
+  - **网页面板**与方案 A 一致：浏览器打开 `http://<NAS IP>:18080/`，可设端口 / 绑定地址 / 多台 LX 服务器（地址+后台密码），保存热生效；「服务状态」会显示签名器版本、bdms 是否加载、UA、签名计数，以及**每台 LX 当前是否已看到它**（直接问 LX 的 `GET /api/music/prefetch/signer`）。
+  - 客户端版本**自动识别**：从挂载目录的 `manifest.json` / 目录名推断，经 `GET /config` 上报；lxserver **1.5.36+** 直接采用签名器上报的 UA 与版本号，客户端升级后服务端无需改代码。
+  - 部署与排查见该仓库 README（含挂载路径、环境变量、一键查找 `app.asar.unpacked` 的脚本、`/health` 自检、stdin 管道导致秒退等坑）。
 
 **两种方案怎么选**：家里有一台常开的 Windows 且装了汽水客户端 → 方案 A 最简；主力是 NAS、不想为签名专门开 Windows → 方案 B。后台「汽水签名器」填的地址，A 是 `http://<Windows 机 IP>:18080`，B 是 `http://<NAS IP>:18080`，其余配置完全一致。
 
