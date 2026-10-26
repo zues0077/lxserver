@@ -34,7 +34,7 @@
 
 ## 2. What is the Soda signer and why do I need it
 
-**Scope**: affects **only "play full / Hi-Res"**. Unrelated to login. Playing a copyright-restricted Soda track normally stops at a 30-second preview; only after the signer computes `X-Helios` / `X-Medusa` headers for a logged-in VIP account can you get the full / Hi-Res stream. To listen offline, use "cache to server".
+**Scope**: affects **only "play full / Hi-Res"**. Unrelated to login. Playing a copyright-restricted Soda track normally stops at a 30-second preview; only after the signer adds the official client's signature headers for a logged-in VIP account can you get the full / Hi-Res stream (the header set follows the client version: `X-Helios` + `X-Medusa` on 3.7.x, **only `X-Neptune` from 3.8.x — a missing header there is normal**). To listen offline, use "cache to server". To listen offline, use "cache to server".
 
 **Why it must be deployed separately**: signing needs ByteDance's official security component (`bdms.node` + `metasecml.dll`), which only exists on a **machine with the Soda client installed** (`app.asar.unpacked`). The main image has no such component → the signer is **not** part of the main image; run it somewhere that has these two binaries, then enter its address in the console under **Platform Accounts → Soda signer**.
 

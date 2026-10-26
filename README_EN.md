@@ -147,7 +147,7 @@ Some platforms declared by a source script are simply broken (tightened anti-abu
 
 **Platform accounts** — a dedicated view in the admin sidebar. NetEase Cloud, QQ Music, WeChat, Kugou, Soda and Bilibili each get their own card; sign in by QR code or paste a cookie and links resolve through the logged-in account. Credentials stay on this server. The **Access** section at the bottom lets you pick which users may use the account channel — **empty list = available to everyone** (default, unchanged); once you tick users, only they use the account channel and everyone else falls back to public sources (custom sources, anonymous Bilibili/Soda streams).
 
-**Soda signer** — Soda's rights-restricted tracks (full length / lossless) require the official client's signature headers `X-Helios` / `X-Medusa`, which cannot be computed server-side. The signer is a small side service that computes them. Two deployment options, identical results:
+**Soda signer** — Soda's rights-restricted tracks (full length / lossless) require the official client's signature headers (`X-Helios` + `X-Medusa` on 3.7.x, `X-Neptune` from 3.8.x), which cannot be computed server-side. The signer is a small side service that computes them. Two deployment options, identical results:
 
 | | Option A: Windows desktop | Option B: Wine container (NAS) |
 | :--- | :--- | :--- |
