@@ -44,8 +44,8 @@ function defaultConfig() {
     host: '0.0.0.0',                   // 监听地址（0.0.0.0 = 允许局域网内 LX 访问）
     clientDir: '',                     // 汽水客户端目录（留空自动探测）
     deviceId: '7300000000000001',      // 设备身份（改了要重启生效）
-    appVersion: '3.7.0',               // 客户端版本号（改了要重启生效）
-    buildId: '30080000',               // 客户端 buildId（改了要重启生效）
+    appVersion: '',                    // 客户端版本号；留空 = 启动时从客户端目录自动识别
+    buildId: '30080000',               // 客户端 buildId（客户端里找不到，只能手填）
     servers: []                        // 关联的 LX 服务器：[{ url, password }]
   }
 }
@@ -123,11 +123,18 @@ function findUnpacked() {
   const local = process.env.LOCALAPPDATA || ''
   const root = local ? path.join(local, 'Programs', 'Soda Music') : ''
   const candidates = []
-  if (config.clientDir) candidates.push(path.join(config.clientDir, 'resources', 'app.asar.unpacked'))
+  if (config.clientDir) {
+    // 用户可能指到：unpacked 目录本身 / 包目录 / 版本目录，三种都认
+    candidates.push(config.clientDir)
+    candidates.push(path.join(config.clientDir, 'app.asar.unpacked'))
+    candidates.push(path.join(config.clientDir, 'resources', 'app.asar.unpacked'))
+  }
   if (root) {
-    candidates.push(path.join(root, config.appVersion, 'resources', 'app.asar.unpacked'))
+    if (config.appVersion) {
+      candidates.push(path.join(root, config.appVersion, 'resources', 'app.asar.unpacked'))
+      candidates.push(path.join(root, 'Packages', config.appVersion, 'app.asar.unpacked'))
+    }
     candidates.push(path.join(root, 'current', 'resources', 'app.asar.unpacked'))
-    candidates.push(path.join(root, 'Packages', config.appVersion, 'app.asar.unpacked'))
   }
   for (const c of candidates) {
     if (fs.existsSync(path.join(c, 'bdms.node'))) return c
@@ -154,15 +161,38 @@ function findUnpacked() {
     }
   }
   if (!found.length) return ''
-  // 优先用 --version 指定的版本（默认 3.7.0，是实测可用的那版），否则取最高版本
-  const prefer = found.find(p => p.includes(`${path.sep}${config.appVersion}${path.sep}`))
-  if (prefer) return prefer
+  // 显式指定了版本就优先用它，否则取最高版本
+  if (config.appVersion) {
+    const prefer = found.find(p => p.includes(`${path.sep}${config.appVersion}${path.sep}`))
+    if (prefer) return prefer
+  }
   const rank = p => {
     const m = p.match(/(\d+)\.(\d+)\.(\d+)/)
     return m ? Number(m[1]) * 1e6 + Number(m[2]) * 1e3 + Number(m[3]) : 0
   }
   found.sort((a, b) => rank(b) - rank(a))
   return found[0]
+}
+
+/** 从 unpacked 目录推断客户端版本（manifest.json → Packages/config.json → 目录名） */
+function detectVersion(unpackedDir) {
+  const tries = [
+    path.join(unpackedDir, 'manifest.json'),
+    path.join(unpackedDir, '..', 'manifest.json'),
+    path.join(unpackedDir, '..', '..', 'config.json'),
+    path.join(unpackedDir, 'version.json'),
+    path.join(unpackedDir, 'package.json')
+  ]
+  for (const p of tries) {
+    try {
+      const j = JSON.parse(fs.readFileSync(p, 'utf8'))
+      const v = String(j.version || j.latestVersion || j.appVersion || '').trim()
+      if (/^\d+\.\d+\.\d+/.test(v)) return { version: v, source: path.basename(p) }
+    } catch {}
+  }
+  const m = String(unpackedDir).match(/(\d+\.\d+\.\d+)/)
+  if (m) return { version: m[1], source: '目录名' }
+  return { version: '', source: '' }
 }
 
 const unpacked = findUnpacked()
@@ -178,6 +208,15 @@ if (!unpacked) {
 }
 // metasecml.dll 与 bdms.node 同目录，切换 cwd 保证能被加载
 process.chdir(unpacked)
+
+// 版本自动识别：配置里显式给了就用配置，否则从客户端目录推断
+const detected = detectVersion(unpacked)
+if (!config.appVersion) {
+  config.appVersion = detected.version || '3.7.0'
+  if (detected.version) console.log(`[signer] 自动识别客户端版本：${detected.version}（来源：${detected.source}）`)
+  else console.log('[signer] 未能自动识别客户端版本，暂用 3.7.0（可在配置页手填）')
+}
+
 const bdms = require(path.join(unpacked, 'bdms.node'))
 bdms.init({ deviceId: config.deviceId })
 console.log(`[signer] 已加载 bdms.node：${unpacked}`)
@@ -263,6 +302,9 @@ function publicConfig() {
     deviceId: config.deviceId,
     appVersion: config.appVersion,
     buildId: config.buildId,
+    detectedVersion: detected.version,
+    detectedSource: detected.source,
+    userAgent: `LunaPC/${config.appVersion}(${config.buildId})`,
     servers: config.servers.map(s => ({ url: s.url, password: s.password ? '********' : '' }))
   }
 }
@@ -286,7 +328,7 @@ async function applyConfig(rawBody) {
   if (patch.host != null) config.host = String(patch.host || '0.0.0.0')
   if (patch.clientDir != null) config.clientDir = String(patch.clientDir || '')
   if (patch.deviceId != null) config.deviceId = String(patch.deviceId || '7300000000000001')
-  if (patch.appVersion != null) config.appVersion = String(patch.appVersion || '3.7.0')
+  if (patch.appVersion != null) config.appVersion = String(patch.appVersion || '') || detected.version || '3.7.0'
   if (patch.buildId != null) config.buildId = String(patch.buildId || '30080000')
   if (Array.isArray(patch.servers)) {
     config.servers = patch.servers
@@ -366,7 +408,13 @@ function requestHandler(req, res) {
     return res.end('ok')
   }
   if (req.method === 'GET' && req.url.startsWith('/config')) {
-    return send(200, { device_id: config.deviceId, user_agent: `LunaPC/${config.appVersion}(${config.buildId})` })
+    return send(200, {
+      device_id: config.deviceId,
+      deviceId: config.deviceId,
+      user_agent: `LunaPC/${config.appVersion}(${config.buildId})`,
+      app_version: config.appVersion,
+      build_id: config.buildId
+    })
   }
   if (req.method === 'POST' && req.url.startsWith('/sign')) {
     let body = ''

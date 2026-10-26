@@ -98,8 +98,22 @@ export async function status(force = false): Promise<SignerStatus> {
   return value
 }
 
-/** 取签名器的设备指纹（可选；拿不到就返回 null，由调用方用默认值） */
-export async function deviceConfig(): Promise<{ deviceId: string; iid: string; fp: string } | null> {
+/**
+ * 取签名器的设备指纹与「它认为自己在用的客户端版本」。
+ * 可选；拿不到就返回 null，由调用方用默认值。
+ *
+ * user_agent / app_version / build_id 是「版本跟随」的关键：签名器（Windows 版或
+ * NAS 的 Wine 版）会从自己挂载的客户端目录识别版本并上报，服务端据此发请求，
+ * 这样客户端大版本升级后，只要签名器更新了上报值，服务端不必改代码/镜像。
+ */
+export async function deviceConfig(): Promise<{
+  deviceId: string
+  iid: string
+  fp: string
+  userAgent: string
+  appVersion: string
+  buildId: string
+} | null> {
   const base = signerUrl()
   if (!base) return null
   try {
@@ -108,8 +122,11 @@ export async function deviceConfig(): Promise<{ deviceId: string; iid: string; f
     const deviceId = String(data.device_id || data.deviceId || '')
     const iid = String(data.iid || data.install_id || '')
     const fp = String(data.fp || '')
-    if (!deviceId && !iid && !fp) return null
-    return { deviceId, iid, fp }
+    const userAgent = String(data.user_agent || data.userAgent || '')
+    const appVersion = String(data.app_version || data.appVersion || '')
+    const buildId = String(data.build_id || data.buildId || '')
+    if (!deviceId && !iid && !fp && !userAgent) return null
+    return { deviceId, iid, fp, userAgent, appVersion, buildId }
   } catch {
     return null
   }

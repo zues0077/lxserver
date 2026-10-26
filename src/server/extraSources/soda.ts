@@ -274,11 +274,40 @@ interface SodaVideoItem {
 }
 
 /**
- * PC 客户端 UA。实测（2026-10-25）必须与官方客户端一致：
- *   UA = LunaPC/3.7.0(30080000)；query 里 app_name=luna_pc、device_platform=windows、version_code=30080000。
+ * PC 客户端 UA 的**回退值**。实测（2026-10-25）3.7.0 这一套是可用的：
+ *   UA = LunaPC/3.7.0(30080000)；query 里 app_name=luna_pc、device_platform=windows、
+ *   version_code=30080000、version_name=3.7.0。
  * 用 Android 的 com.luna.music UA 或 3.3.0 版本号，即使签名正确上游也只回 0 字节。
+ *
+ * 注意：真正发请求时优先用签名器上报的版本（见 resolveAppProfile），
+ * 这里只是「签名器没上报 / 老版本签名器」时的兜底。
  */
-const PC_APP_UA = 'LunaPC/3.7.0(30080000)'
+const DEFAULT_APP_VERSION = '3.7.0'
+const DEFAULT_BUILD_ID = '30080000'
+
+/**
+ * 解析「这次请求该用哪套版本号」。
+ * 优先级：签名器上报的显式字段 → 从签名器上报的 UA 里解析 → 代码内置默认值。
+ * 这样客户端大版本升级后，只需签名器更新上报值，服务端无需改代码或重建镜像。
+ */
+function resolveAppProfile(dev: {
+  userAgent?: string
+  appVersion?: string
+  buildId?: string
+} | null): { appVersion: string; buildId: string; userAgent: string } {
+  let appVersion = String(dev?.appVersion || '').trim()
+  let buildId = String(dev?.buildId || '').trim()
+  const reportedUa = String(dev?.userAgent || '').trim()
+  const m = reportedUa.match(/LunaPC\/([\d.]+)\((\d+)\)/i)
+  if (m) {
+    if (!appVersion) appVersion = m[1]
+    if (!buildId) buildId = m[2]
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(appVersion)) appVersion = DEFAULT_APP_VERSION
+  if (!/^\d+$/.test(buildId)) buildId = DEFAULT_BUILD_ID
+  const userAgent = /^LunaPC\//i.test(reportedUa) ? reportedUa : `LunaPC/${appVersion}(${buildId})`
+  return { appVersion, buildId, userAgent }
+}
 
 /**
  * 走签名器取「受限曲整曲」。
@@ -298,6 +327,7 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
   if (!st.online) return null
 
   const dev = await signer.deviceConfig()
+  const profile = resolveAppProfile(dev)
   const params = new URLSearchParams({
     track_id: trackId,
     media_type: 'track',
@@ -305,8 +335,8 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
     app_name: 'luna_pc',
     device_platform: 'windows',
     channel: 'official',
-    version_code: '30080000',
-    version_name: '3.7.0',
+    version_code: profile.buildId,
+    version_name: profile.appVersion,
   })
   if (dev?.deviceId) {
     params.set('device_id', dev.deviceId)
@@ -319,7 +349,7 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
   if (dev?.fp) params.set('fp', dev.fp)
 
   const url = `https://api.qishui.com/luna/pc/track_v2?${params.toString()}`
-  const baseHeaders: Record<string, string> = { 'User-Agent': PC_APP_UA }
+  const baseHeaders: Record<string, string> = { 'User-Agent': profile.userAgent }
   if (cookie) baseHeaders.Cookie = cookie
 
   let signedHeaders: Record<string, string>
