@@ -19,6 +19,9 @@ hero:
       text: Settings & Tutorials
       link: /en/guide/app-settings
     - theme: alt
+      text: Deployment & Proxy
+      link: /en/guide/deployment
+    - theme: alt
       text: GitHub Repo
       link: https://github.com/zues0077/lxserver
 
@@ -44,6 +47,9 @@ features:
   - icon: ⚙️
     title: Detailed Settings & Tutorials
     details: Two dedicated docs — "Application Settings & Rules" and "Quick Start Tutorial" — walk through user creation, client connection, download/cache, and casting end to end.
+  - icon: 🚀
+    title: Deployment, Proxy & HTTPS
+    details: From Nginx / Caddy reverse proxy with Let's Encrypt auto-cert, to production Compose, upgrade/rollback, NAS practice, and deployment troubleshooting — run it stable and secure.
   - icon: ❓
     title: FAQ & Troubleshooting
     details: Frequent gotchas — Soda scan "no change", signer usage, cache vs music, capacity cleanup deleting songs, cover_cache mount, XiaoAi casting — each explained as Symptom → Cause → Fix.

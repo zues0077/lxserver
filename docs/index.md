@@ -19,6 +19,9 @@ hero:
       text: 设置与教程
       link: /guide/app-settings
     - theme: alt
+      text: 部署与反代
+      link: /guide/deployment
+    - theme: alt
       text: GitHub 仓库
       link: https://github.com/zues0077/lxserver
 
@@ -44,6 +47,9 @@ features:
   - icon: ⚙️
     title: 详细设置与教程
     details: 提供「应用设置与配置规则」与「快速上手教程」两个文档，从创建用户、连接客户端到下载缓存、投播串联全文。
+  - icon: 🚀
+    title: 部署、反代与 HTTPS
+    details: 从 Nginx / Caddy 反代 + Let's Encrypt 自动证书，到生产级 Compose、升级回滚、NAS 实战与部署排错，把服务跑得稳又安全。
   - icon: ❓
     title: 常见问题与排错
     details: 汽水扫码「没变化」、签名器用法、cache/music 区别、容量清理误删歌、cover_cache 挂载、小爱投播等高频踩坑，按「现象 → 原因 → 解决」讲清。
