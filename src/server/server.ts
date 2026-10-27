@@ -745,9 +745,10 @@ const pickMusicUrlBudget = (key: string): number => {
   return retrying ? MUSIC_URL_BUDGET_MS : MUSIC_URL_FIRST_BUDGET_MS
 }
 
-const buildMusicUrlFailKey = (songInfo: any, quality: string): string => {
+const buildMusicUrlFailKey = (songInfo: any, quality: string, username: string): string => {
   const id = String(songInfo?.songmid || songInfo?.id || songInfo?.hash || songInfo?.name || '')
-  return `${String(songInfo?.source || '')}|${id}|${quality || ''}`
+  // 必须带用户名：不同用户的可用音源/平台账号不一样，A 取不到不代表 B 取不到
+  return `${username || ''}|${String(songInfo?.source || '')}|${id}|${quality || ''}`
 }
 
 const readMusicUrlFailure = (key: string) => {
@@ -8039,7 +8040,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const source = songInfo.source
             let result: any
             // 失败短缓存用的键：平台 + 曲目标识 + 音质（换音质/换平台视为新请求）
-            const failKey = buildMusicUrlFailKey(songInfo, quality || '')
+            const failKey = buildMusicUrlFailKey(songInfo, quality || '', verifiedUsername)
             // 首次点播给宽预算（别误杀慢源），进入失败重试态才收紧
             const budgetMs = pickMusicUrlBudget(failKey)
 
@@ -8168,6 +8169,17 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 ? `自定义源与你配置的账号都未能取到链接（账号见 /health 日志里的 [平台账号] 记录）`
                 : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
               const errMsg = customSourceError || fallbackMsg
+              const err: any = new Error(errMsg)
+              err.attempts = attempts
+              rememberMusicUrlFailure(failKey, errMsg, attempts)
+              throw err
+            }
+
+            // 有 result 却没有地址（平台账号通道偶发：上游返回 200 但字段是空的）
+            // 以前会照常返回 200 + url:null，前端只能当成「服务器未返回播放链接」，
+            // 等于白白跑完一次解析、结论还进不了失败缓存。这里按失败处理。
+            if (!String(result?.url || '').trim()) {
+              const errMsg = '音源未返回播放地址（上游返回为空）'
               const err: any = new Error(errMsg)
               err.attempts = attempts
               rememberMusicUrlFailure(failKey, errMsg, attempts)
