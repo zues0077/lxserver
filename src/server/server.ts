@@ -455,6 +455,23 @@ interface ResolvedPlayableAudio {
 }
 
 /**
+ * 这个平台此刻有没有能力取到播放地址。
+ * 两条独立通道：自定义源脚本，或者管理员在「平台账号」里配了自己的 Cookie
+ * （账号通道即使一个自定义源都没装也应当可用，判定与 /api/music/url 主流程保持一致）。
+ */
+const canResolveSource = (source: string, username: string): boolean => {
+  if (isSourceSupported(source, username)) return true
+  try {
+    return musicAccount.isEnabled() &&
+      musicAccount.isSupportedSource(source) &&
+      musicAccount.hasAccount(source) &&
+      isUserAllowed(username)
+  } catch {
+    return false
+  }
+}
+
+/**
  * 解析出「确认真的能出音频」的播放地址。
  *
  * 音源脚本只要拼出一个字符串就算成功，它不会验证对方是否还活着
@@ -480,11 +497,50 @@ const resolvePlayableAudio = async (
   /** 对同一个候选，逐源尝试：探测失败就把该源加入 exclude 再问下一个 */
   const attempt = async (candidate: any, quality: string) => {
     const source = String(candidate?.source || '')
-    if (!source || !isSourceSupported(source, username)) return null
+    if (!source) return null
+
+    // 额外音源（Bilibili / 汽水）自带取流，不经过 musicSdk、也不在任何自定义源表里。
+    // 以前这里只看 isSourceSupported()，导致汽水/B 站的投送在入口就被判「没有可用音源」，
+    // 而且失败原因是空的（一个源都没试过，failures 里什么都没有）。
+    const isExtra = extraSources.isExtraSource(source)
+    if (!isExtra && !canResolveSource(source, username)) {
+      failures.push(`${source}: 没有支持该平台的自定义源，平台账号也不可用`)
+      return null
+    }
+
     const id = String(candidate.songmid || candidate.id || candidate.hash || candidate.name || '')
     const key = `${source}|${id}|${quality}`
     if (tried.has(key)) return null
     tried.add(key)
+
+    // 额外音源：单源直取（自带账号 Cookie），没有「同平台多源轮换」的概念
+    if (isExtra) {
+      if (Date.now() >= deadline || probes >= 8) return null
+      try {
+        const extra = await extraSources.getMusicUrl(source, candidate, quality, username)
+        const extraUrl = String(extra?.url || '').trim()
+        const extraLabel = String(extra?.sourceName || extraSources.displayName(source))
+        if (!extraUrl) {
+          failures.push(`${extraLabel}: 未返回播放地址`)
+          return null
+        }
+        probes++
+        const extraProbe = await probeAudioCached(extraUrl)
+        if (extraProbe.ok) {
+          return {
+            url: extraUrl,
+            sourceName: extraLabel,
+            quality: String(extra?.type || quality),
+            contentType: extraProbe.contentType || '',
+            durationMs: extraProbe.durationMs || 0,
+          }
+        }
+        failures.push(`${extraLabel}: 地址不可播（${extraProbe.detail}）`)
+      } catch (error: any) {
+        failures.push(`${extraSources.displayName(source)}: ${error?.message || error}`)
+      }
+      return null
+    }
 
     const exclude: string[] = []
     for (let round = 0; round < 5; round++) {
@@ -719,6 +775,26 @@ const resolveXiaoAiTrackRaw = async (
   const existingDownload = !!fileCache.cacheProgress.get(
     `${fileCache.normalizeSongId(songInfo)}_${quality}`,
   )
+
+  // 4.5 「播放即缓存」的落盘竞态：前端点播会同时触发 /cache/download，
+  //     投送到这里的缓存检查往往比下载完成早 1 秒左右 → 缓存明明成功，
+  //     推给音箱的却是别的平台换源版本。只有这首歌确实还在下载时才等
+  //     （waitForCachedFile 没有下载任务会立即返回），最多 12 秒。
+  if (existingDownload) {
+    const arrived = await waitForCachedFile(songInfo, quality, verifiedUsername, 12000)
+    if (arrived?.path) {
+      console.log(`[XiaoAi] 等到本地缓存落盘，直接投送：${filename}`)
+      return {
+        path: arrived.path,
+        filename,
+        cached: true,
+        contentType: AUDIO_MIME_BY_EXT[path.extname(arrived.path).toLowerCase()],
+        via: '本地缓存（等待下载完成）',
+        durationMs: probeLocalFileDuration(arrived.path),
+      }
+    }
+    console.warn(`[XiaoAi] 缓存仍在下载中，先按换源投送：${filename}`)
+  }
 
   // 5. 现解析：原源 → 换源 → 音质降级，每个候选都做音频探测
   //    两趟都套硬预算（首轮 15s + 重试 10s），最坏 25s 左右给结论，不再让用户干等两分钟。
