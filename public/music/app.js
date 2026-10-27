@@ -5558,20 +5558,37 @@ function isSingerMatch(sourceSinger, targetSinger) {
     return sourceParts.some(sourcePart => targetParts.some(targetPart => sourcePart.includes(targetPart) || targetPart.includes(sourcePart)));
 }
 
+/**
+ * 直连类音源（不走自定义源、不参与 supportedSources 白名单校验）。
+ * bili：换平台的最后兜底；soda：暂不参与自动换源（正式版权曲为 CENC 加密，切过去也播不了）。
+ */
+const EXTRA_SOURCE_PLATFORMS = new Set(['bili', 'soda']);
+/** 视频音轨的时长容忍度：剪辑版/串烧很常见，放 8 秒会切到「把副歌剪了」的版本 */
+const VIDEO_SOURCE_MAX_DURATION_DIFF = 5;
+
 function getSongMatchScore(item, song) {
     const targetName = normalizeSongMatchText(song.name);
     const itemName = normalizeSongMatchText(item.name);
     if (!targetName || !itemName) return -1;
     if (!itemName.includes(targetName) && !targetName.includes(itemName)) return -1;
 
-    if (!isSingerMatch(item.singer, song.singer)) return -1;
+    const isVideoSource = item.source === 'bili';
+    if (isVideoSource) {
+        // B站搜索结果的 singer 是 UP 主名，演唱者通常只写在标题里（如「Yamy郭颖 - 问爱」）。
+        // 只认 singer 字段会把所有投稿判死，所以标题里出现目标歌手也算通过。
+        const singerOk = isSingerMatch(item.singer, song.singer) || isSingerMatch(item.name, song.singer);
+        if (!singerOk) return -1;
+    } else if (!isSingerMatch(item.singer, song.singer)) {
+        return -1;
+    }
 
     const targetDuration = timeToSeconds(song.interval);
     const itemDuration = timeToSeconds(item.interval);
+    const maxDurationDiff = isVideoSource ? VIDEO_SOURCE_MAX_DURATION_DIFF : 8;
     let durationScore = 0;
     if (targetDuration > 0 && itemDuration > 0) {
         const durationDiff = Math.abs(targetDuration - itemDuration);
-        if (durationDiff > 8) return -1;
+        if (durationDiff > maxDurationDiff) return -1;
         durationScore = 8 - durationDiff;
     }
 
@@ -5617,14 +5634,14 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
             });
         }
 
-        // 2. 切换到和当前不同源，并且根据优先级排列 (网易、QQ、酷我、酷狗、咪咕)
-        const baseOrder = ['wy', 'tx', 'kw', 'kg', 'mg'];
+        // 2. 切换到和当前不同源，并且根据优先级排列 (网易、QQ、酷我、酷狗、咪咕、B站兜底)
+        const baseOrder = ['wy', 'tx', 'kw', 'kg', 'mg', 'bili'];
         const searchSourcesOrdered = baseOrder.filter(s => s !== song.source);
 
-        // 3. 过滤出自定义源支持解析的平台
+        // 3. 过滤出自定义源支持解析的平台；直连音源（B站/汽水）不走 supportedSources 白名单
         let searchSources = searchSourcesOrdered;
         if (supportedPlatforms && !options.ignoreSupportedFilter) {
-            searchSources = searchSourcesOrdered.filter(s => supportedPlatforms.has(s));
+            searchSources = searchSourcesOrdered.filter(s => EXTRA_SOURCE_PLATFORMS.has(s) || supportedPlatforms.has(s));
         }
 
         // 4. 如果发现没有其他支持的平台可供切换
@@ -5640,34 +5657,45 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
 
         if (!isSilent) showInfo('正在自动尝试换源匹配...');
 
-        const searchPromises = searchSources.map(s =>
+        const searchOne = s =>
             fetch(`${API_BASE}/search?name=${encodeURIComponent(query)}&source=${s}&page=1&limit=20`, { headers })
                 .then(res => res.json())
                 .then(data => (data.list || []).map(item => ({ ...item, source: s })))
-                .catch(() => [])
-        );
+                .catch(() => []);
 
-        const allResults = await Promise.all(searchPromises);
-        const flatResults = allResults.flat();
+        const collectMatches = flatResults => {
+            const found = [];
+            for (const item of flatResults) {
+                const score = getSongMatchScore(item, song);
+                if (score < 0) continue;
 
-        if (flatResults.length === 0) return [];
+                const durationDiff = getSongDurationDiff(item, song);
+                console.log(`[AutoSource] 匹配成功: ${item.name} via ${item.source} (score: ${score}, 时长误差: ${durationDiff === null ? '未知' : `${durationDiff}s`})`);
+                found.push({ ...item, _matchScore: score });
+            }
+            return found.sort((a, b) => (b._matchScore || 0) - (a._matchScore || 0));
+        };
 
-        const matches = [];
+        // 常规平台优先；B站（视频音轨）只在常规平台一个匹配都没有时才去搜：
+        // 一是没必要每次换源都多打一次 B站搜索（它有 412 风控），
+        // 二是视频音轨经常带对白/解说，能不用就不用。
+        const primarySources = searchSources.filter(s => !EXTRA_SOURCE_PLATFORMS.has(s));
+        const fallbackSources = searchSources.filter(s => EXTRA_SOURCE_PLATFORMS.has(s));
 
-        // 匹配算法
-        for (const item of flatResults) {
-            const score = getSongMatchScore(item, song);
-            if (score < 0) continue;
+        const primaryResults = (await Promise.all(primarySources.map(searchOne))).flat();
+        let matches = collectMatches(primaryResults);
 
-            const durationDiff = getSongDurationDiff(item, song);
-            console.log(`[AutoSource] 匹配成功: ${item.name} via ${item.source} (score: ${score}, 时长误差: ${durationDiff === null ? '未知' : `${durationDiff}s`})`);
-            matches.push({ ...item, _matchScore: score });
+        if (matches.length === 0 && fallbackSources.length > 0) {
+            console.log(`[AutoSource] 常规平台无匹配，尝试直连音源兜底: ${fallbackSources.join(',')}`);
+            if (!isSilent) showInfo('常规平台未找到，正在尝试 B站...');
+            const fallbackResults = (await Promise.all(fallbackSources.map(searchOne))).flat();
+            matches = collectMatches(fallbackResults);
         }
 
         if (matches.length === 0) {
-            console.log(`[AutoSource] 未找到合适的匹配结果 (Total searched: ${flatResults.length})`);
+            console.log(`[AutoSource] 未找到合适的匹配结果 (常规平台搜到 ${primaryResults.length} 条)`)
         }
-        return matches.sort((a, b) => (b._matchScore || 0) - (a._matchScore || 0));
+        return matches;
     } catch (e) {
         console.warn('[AutoSource] 匹配逻辑执行出错:', e);
         return [];
@@ -6844,7 +6872,9 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
             return;
         }
 
-        const matchedSong = matches.find(song => !state.triedPlatforms.includes(song.source));
+        const available = matches.filter(song => !state.triedPlatforms.includes(song.source));
+        // B站是视频音轨（常带对白/解说），只在其它平台都没有可用匹配时才兜底使用
+        const matchedSong = available.find(s => s.source !== 'bili') || available.find(s => s.source === 'bili');
         if (matchedSong) {
             state.currentSong = matchedSong;
             state.triedPlatforms.push(matchedSong.source);
@@ -6859,7 +6889,8 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
 
             const platformName = getSourceName(matchedSong.source);
             const qualityName = window.QualityManager.getQualityDisplayName(bestNextQuality);
-            RecoveryToast.show(matchedSong, `找到备选源，尝试从 [${platformName}] (${qualityName}) 播放...`, {
+            const videoHint = matchedSong.source === 'bili' ? '｜B站视频音轨，可能含对白或解说' : '';
+            RecoveryToast.show(matchedSong, `找到备选源，尝试从 [${platformName}] (${qualityName}) 播放${videoHint}...`, {
                 triedPlatform: matchedSong.source,
                 quality: bestNextQuality,
                 status: 'trying'
