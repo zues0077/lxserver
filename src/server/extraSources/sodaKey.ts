@@ -49,6 +49,32 @@ function findDeep(obj: any, names: string[], depth = 0): any {
  * 另一个 play_auth 分支」三种情况，表现为「明明是 CENC 加密流却捕获不到密钥」，
  * 于是继续命中旧的 DRM 拦截 —— 新增的解密链路一行都跑不到。246 实测复现过，别再改回去。
  */
+/**
+ * 收集响应里出现过的**全部键名**（扁平去重，只取名字不取值，避免泄露凭证），
+ * 并挑出形似凭证/密钥的候选（auth / key / spade / drm / licen / secret / token）。
+ *
+ * 用途：当 `extractSodaKey` 抓不到密钥时，得能回答「到底是平台没下发，还是字段被改名了、
+ * 而我们还在按旧名找」。246 实测 track_v2 / media-player 都拿不到密钥，靠这个把证据打全。
+ */
+export function describeKeyCandidates(parsed: any): string {
+  const names = new Set<string>()
+  const walk = (obj: any, depth = 0): void => {
+    if (!obj || typeof obj !== 'object' || depth > 10) return
+    if (Array.isArray(obj)) {
+      for (const item of obj) walk(item, depth + 1)
+      return
+    }
+    for (const k of Object.keys(obj)) {
+      names.add(k)
+      walk(obj[k], depth + 1)
+    }
+  }
+  walk(parsed)
+  const all = Array.from(names)
+  const suspicious = all.filter(n => /auth|key|spade|drm|licen|secret|token|pssh|kid/i.test(n))
+  return `字段总数=${all.length}；疑似凭证字段=[${suspicious.slice(0, 20).join(', ')}]；全部字段=[${all.slice(0, 60).join(', ')}]`
+}
+
 export function extractSodaKey(parsed: any): string {
   const auth = findDeep(parsed, ['play_auth', 'playAuth'])
   const candidates: any[] = []
@@ -71,7 +97,8 @@ export function extractSodaKey(parsed: any): string {
   // 否则线上只剩一句「未拿到密钥」，没法继续往下定位。
   const topKeys = parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 12).join(',') : '(非对象)'
   console.warn(
-    `[汽水解密] 未捕获到密钥（play_auth存在=${auth !== undefined}, 找到同名字段=${sawCandidate}, 顶层键=${topKeys}）`
+    `[汽水解密] 未捕获到密钥（play_auth存在=${auth !== undefined}, 找到同名字段=${sawCandidate}, 顶层键=${topKeys}）\n` +
+    `[汽水解密] ${describeKeyCandidates(parsed)}`
   )
   return ''
 }
