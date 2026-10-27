@@ -8176,15 +8176,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             }
 
             // 有 result 却没有可用地址。
-            // 两种情况都实测出现过：① 上游返回 200 但字段为空（url:null）；
-            // ② 酷我账号通道把上游的 Python None 原样当字符串 "None" 返回来，
-            //    以前会被当成「取链成功」返回给前端，前端拿 "None" 当 src，播放必然失败。
+            // 实测出现过三种：① 上游返回 200 但字段为空（url:null）；
+            // ② 酷我账号通道把上游的 Python None 原样当字符串 "None" 返回来；
+            // ③ 自定义源把占位串拼进地址，凑出一个「形似合法」的 http://host/None。
+            // 后两种以前都被当成取链成功，前端拿它当 src 必然播放失败，
+            // 于是触发「播不出来 → 换源 → 再失败」的循环，还查不到原因。
             const resolvedUrl = String(result?.url || '').trim()
-            const urlUsable = !!resolvedUrl && (/^https?:\/\//i.test(resolvedUrl) || resolvedUrl.startsWith('/'))
+            const placeholder = /(?:^|[/=&#?])(?:None|undefined)(?:[/=&#?]|$)/.test(resolvedUrl)
+            const urlUsable = !!resolvedUrl
+              && (/^https?:\/\//i.test(resolvedUrl) || resolvedUrl.startsWith('/'))
+              && !placeholder
             if (!urlUsable) {
-              const errMsg = resolvedUrl
-                ? `音源返回的地址不可用（${resolvedUrl.slice(0, 40)}）`
-                : '音源未返回播放地址（上游返回为空）'
+              const errMsg = !resolvedUrl
+                ? '音源未返回播放地址（上游返回为空）'
+                : `音源返回的地址不可用（${resolvedUrl.slice(0, 60)}）`
               const err: any = new Error(errMsg)
               err.attempts = attempts
               rememberMusicUrlFailure(failKey, errMsg, attempts)
