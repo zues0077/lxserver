@@ -223,18 +223,18 @@
 | 标签 | 说明 |
 | :--- | :--- |
 | `latest` | 最新稳定版，跟随 `main` 分支 |
-| `v1.5.37` / `1.5.37` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
+| `v1.5.38` / `1.5.38` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
 | `v*` | 每个已发布版本都会保留，可随时回滚到历史版本 |
 
 ```bash
 # 固定版本（推荐）
-docker pull ghcr.io/zues0077/lxserver:1.5.37
+docker pull ghcr.io/zues0077/lxserver:1.5.38
 
 # 或跟随最新
 docker pull ghcr.io/zues0077/lxserver:latest
 ```
 
-> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.37`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
+> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.38`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
 > - 如果要另外发布到 Docker Hub，可使用备用工作流 `.github/workflows/docker.yml`（需自行配置 `DOCKER_USERNAME` / `DOCKER_PASSWORD` 密钥并手动触发，默认不参与自动发布）。
 
 ## 🔒 访问控制与安全
@@ -289,7 +289,7 @@ Web 播放器针对移动端做了深度优化，手机浏览器访问也能接�
 镜像地址（GitHub Packages / GHCR）：
 
 - 跟随最新：`ghcr.io/zues0077/lxserver:latest`
-- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.37`
+- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.38`
 - 完整标签说明见上方 [Docker 部署](#-docker-部署)
 
 **Docker Run 示例：**
@@ -303,7 +303,7 @@ docker run -d \
   -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.37
+  ghcr.io/zues0077/lxserver:1.5.38
 ```
 
 > ⚠️ **`--restart` 不要省**：面板里的「重启服务」（`POST /api/restart`）在容器内是通过结束进程实现的，
@@ -336,7 +336,7 @@ docker run -d \
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.37   # 或 :latest
+    image: ghcr.io/zues0077/lxserver:1.5.38   # 或 :latest
     container_name: lx-sync-server
     restart: unless-stopped          # 不要省：面板「重启服务」靠它拉起进程
     ports:
