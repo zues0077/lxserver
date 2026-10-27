@@ -696,6 +696,20 @@ const MUSIC_URL_BUDGET_MS = (() => {
 })()
 
 /**
+ * 首次请求（同一首歌 90 秒内没有失败过）用的宽预算。
+ *
+ * 9 秒总闸对「已经失败过一次、正在被狂重试」的歌是对的，但对首次点播太紧：
+ * 自定义源是串行问的，排在前面的慢源（HYWmusic 这类单源就要 20 秒）可能把
+ * 本来能播的歌误杀。所以首次给 25 秒，只有进入「失败重试态」才收紧到 9 秒。
+ */
+const MUSIC_URL_FIRST_BUDGET_MS = (() => {
+  const raw = Number(process.env.MUSIC_URL_FIRST_BUDGET_MS)
+  return Number.isFinite(raw) && raw >= 5000 ? Math.round(raw) : 25000
+})()
+/** 多久内算「同一首歌处于失败重试态」（用宽预算还是紧预算的判据） */
+const MUSIC_URL_RETRY_WINDOW_MS = 90000
+
+/**
  * 取链失败短缓存：同一首歌在 TTL 内再问，直接复用上一次的失败结论。
  *
  * 失败后前端往往立刻再问同一首（换源失败 → 自动重试），一次真实全网搜索要 9 秒，
@@ -707,6 +721,29 @@ const MUSIC_URL_FAIL_TTL_MS = (() => {
   return Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : 10000
 })()
 const musicUrlFailures = new Map<string, { at: number; message: string; attempts: any[] }>()
+/** key → 最近一次失败时刻：决定这一首用紧预算还是宽预算 */
+const musicUrlRecentFails = new Map<string, number>()
+/** 全站最近的取链失败时刻（熔断用：音源整体挂了就别再让每一首都死等 25 秒） */
+const musicUrlFailStamps: number[] = []
+const MUSIC_URL_STRESS_FAILS = 3
+const MUSIC_URL_STRESS_WINDOW_MS = 60000
+
+const isMusicUrlStressed = (): boolean => {
+  const cutoff = Date.now() - MUSIC_URL_STRESS_WINDOW_MS
+  while (musicUrlFailStamps.length && musicUrlFailStamps[0] < cutoff) musicUrlFailStamps.shift()
+  return musicUrlFailStamps.length >= MUSIC_URL_STRESS_FAILS
+}
+
+/**
+ * 这一首此刻该给多长的取链预算。
+ * 单曲重试态（90 秒内失败过）或整体熔断态（1 分钟内失败 ≥3 次）都收紧到 9 秒；
+ * 其余情况给 25 秒宽预算，避免把「只是排在慢源后面的好歌」误杀。
+ */
+const pickMusicUrlBudget = (key: string): number => {
+  const last = musicUrlRecentFails.get(key) || 0
+  const retrying = Date.now() - last < MUSIC_URL_RETRY_WINDOW_MS || isMusicUrlStressed()
+  return retrying ? MUSIC_URL_BUDGET_MS : MUSIC_URL_FIRST_BUDGET_MS
+}
 
 const buildMusicUrlFailKey = (songInfo: any, quality: string): string => {
   const id = String(songInfo?.songmid || songInfo?.id || songInfo?.hash || songInfo?.name || '')
@@ -733,6 +770,15 @@ const rememberMusicUrlFailure = (key: string, message: string, attempts: any[] =
     if (musicUrlFailures.size >= 200) musicUrlFailures.clear()
   }
   musicUrlFailures.set(key, { at: Date.now(), message, attempts })
+  musicUrlRecentFails.set(key, Date.now())
+  musicUrlFailStamps.push(Date.now())
+  if (musicUrlFailStamps.length > 20) musicUrlFailStamps.splice(0, musicUrlFailStamps.length - 20)
+  // 这个表只用来判「是不是在重试态」，顺手限制一下规模
+  if (musicUrlRecentFails.size > 500) {
+    const cutoff = Date.now() - MUSIC_URL_RETRY_WINDOW_MS
+    for (const [k, at] of musicUrlRecentFails) if (at <= cutoff) musicUrlRecentFails.delete(k)
+    if (musicUrlRecentFails.size > 500) musicUrlRecentFails.clear()
+  }
 }
 
 /**
@@ -7994,6 +8040,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             let result: any
             // 失败短缓存用的键：平台 + 曲目标识 + 音质（换音质/换平台视为新请求）
             const failKey = buildMusicUrlFailKey(songInfo, quality || '')
+            // 首次点播给宽预算（别误杀慢源），进入失败重试态才收紧
+            const budgetMs = pickMusicUrlBudget(failKey)
 
             // 本地缓存优先。
             // 这里原来完全没有缓存判定，已缓存的曲子也要把 30+ 个自定义源串行问一遍
@@ -8048,11 +8096,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               try {
                 const extra = await withHardBudget(
                   extraSources.getMusicUrl(source, songInfo, quality || '128k', verifiedUsername),
-                  MUSIC_URL_BUDGET_MS,
+                  budgetMs,
                   `${extraSources.displayName(source)} 取链`,
                 )
                 if (!extra) {
-                  throw new Error(`${extraSources.displayName(source)} 取链超时（${Math.round(MUSIC_URL_BUDGET_MS / 1000)} 秒）`)
+                  throw new Error(`${extraSources.displayName(source)} 取链超时（${Math.round(budgetMs / 1000)} 秒）`)
                 }
                 result = {
                   url: extra.url,
@@ -8091,12 +8139,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     enableAutoSwitchApiSource !== false,
                     excludeApiSources
                   ),
-                  MUSIC_URL_BUDGET_MS,
+                  budgetMs,
                   '自定义源取链',
                 )
                 if (!userApiResult) {
                   // 预算内没有任何源返回地址：抛出去走统一的「解析失败」分支（会写失败短缓存）
-                  throw new Error(`取链超时：${Math.round(MUSIC_URL_BUDGET_MS / 1000)} 秒内没有任何源返回可用地址`)
+                  throw new Error(`取链超时：${Math.round(budgetMs / 1000)} 秒内没有任何源返回可用地址`)
                 }
                 result = userApiResult
                 attempts = userApiResult.attempts || []
@@ -8127,7 +8175,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             }
 
             // 解析成功：把这首歌的失败记录清掉（上一轮失败可能是临时抖动）
-            if (MUSIC_URL_FAIL_TTL_MS) musicUrlFailures.delete(failKey)
+            if (MUSIC_URL_FAIL_TTL_MS) {
+              musicUrlFailures.delete(failKey)
+              musicUrlRecentFails.delete(failKey)
+            }
 
             // 合并解析尝试记录到响应（前端可用于诊断）
             if (attempts.length > 0) result.attempts = attempts
