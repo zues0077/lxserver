@@ -745,6 +745,43 @@ const pickMusicUrlBudget = (key: string): number => {
   return retrying ? MUSIC_URL_BUDGET_MS : MUSIC_URL_FIRST_BUDGET_MS
 }
 
+/**
+ * 远端直链是否为 CENC 加密流。
+ *
+ * 汽水**正式版权曲**下发的 `main_url` 本身就是加密 MP4（stsd 是 `enca`，带 `senc` 样本加密表），
+ * 元数据明文、能通过时长/码率校验，但浏览器 `<audio>` 必然解码失败。
+ * 不在这里拦住，就会出现「缓存显示成功、点开没声音、一直智能换源」。
+ * 只探头部 256KB；探测失败（网络抖动/不支持 Range）一律按「非加密」处理，不误杀正常曲。
+ */
+const streamEncryptionCache = new Map<string, { at: number; encrypted: boolean }>()
+const STREAM_ENCRYPT_PROBE_BYTES = 256 * 1024
+const STREAM_ENCRYPT_CACHE_MS = 5 * 60 * 1000
+
+const isEncryptedRemoteStream = async (url: string): Promise<boolean> => {
+  const u = String(url || '')
+  if (!/^https?:\/\//i.test(u)) return false
+  const hit = streamEncryptionCache.get(u)
+  if (hit && Date.now() - hit.at < STREAM_ENCRYPT_CACHE_MS) return hit.encrypted
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 6000)
+  try {
+    const resp = await fetch(u, {
+      headers: { Range: `bytes=0-${STREAM_ENCRYPT_PROBE_BYTES - 1}`, 'User-Agent': 'Mozilla/5.0' },
+      signal: controller.signal,
+    })
+    if (!resp.ok && resp.status !== 206) return false
+    const buf = Buffer.from(await resp.arrayBuffer())
+    const encrypted = buf.includes('enca') && (buf.includes('senc') || buf.includes('saiz') || buf.includes('tenc'))
+    streamEncryptionCache.set(u, { at: Date.now(), encrypted })
+    if (encrypted) console.warn(`[加密流] 该直链为 CENC 加密音频（浏览器无法播放）: ${u.slice(0, 80)}`)
+    return encrypted
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 const buildMusicUrlFailKey = (songInfo: any, quality: string, username: string): string => {
   const id = String(songInfo?.songmid || songInfo?.id || songInfo?.hash || songInfo?.name || '')
   // 必须带用户名：不同用户的可用音源/平台账号不一样，A 取不到不代表 B 取不到
@@ -8102,6 +8139,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 )
                 if (!extra) {
                   throw new Error(`${extraSources.displayName(source)} 取链超时（${Math.round(budgetMs / 1000)} 秒）`)
+                }
+                // 加密流拦截：汽水正式版权曲拿到的是 CENC 加密 MP4，
+                // 播放器解不开；不拦就会「缓存成功但没声音 + 一直智能换源」。
+                if (await isEncryptedRemoteStream(extra.url)) {
+                  throw new Error(
+                    `${extraSources.displayName(source)} 该曲返回的是加密流（DRM），浏览器无法播放，请改用它源或其他平台播放`
+                  )
                 }
                 result = {
                   url: extra.url,

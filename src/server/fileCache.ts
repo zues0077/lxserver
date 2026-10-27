@@ -548,6 +548,38 @@ const detectAudioContainer = (filePath: string) => {
     }
 }
 
+/**
+ * 判断本地音频文件是不是 CENC 加密容器。
+ *
+ * 汽水的**正式版权曲**（不是 UGC 翻唱）下发的直链本身就是加密流：MP4 的 stsd 里
+ * 是 `enca` 而不是 `mp4a`，并带 `senc`/`saiz`/`tenc` 样本加密表。
+ * 这种文件浏览器 `<audio>` 一律解码失败，而它又能通过「时长/码率」校验（元数据是明文的），
+ * 于是被当成命中缓存返回 → 播放失败 → 换源 → 又命中同一个文件 → 无限换源循环。
+ * 实测 246 上 7 个汽水缓存里 4 个是这种残骸。
+ */
+const encryptedAudioCache = new Map<string, { key: string; encrypted: boolean }>()
+
+export const isEncryptedAudioFile = (filePath: string, probeBytes = 512 * 1024): boolean => {
+    try {
+        const st = fs.statSync(filePath)
+        const key = `${st.size}:${st.mtimeMs}`
+        const hit = encryptedAudioCache.get(filePath)
+        if (hit && hit.key === key) return hit.encrypted
+        const len = Math.min(probeBytes, Math.max(0, st.size))
+        if (len < 32) return false
+        const buf = Buffer.alloc(len)
+        const fd = fs.openSync(filePath, 'r')
+        let read = 0
+        try { read = fs.readSync(fd, buf, 0, len, 0) } finally { fs.closeSync(fd) }
+        const head = buf.subarray(0, read)
+        const encrypted = head.includes('enca') && (head.includes('senc') || head.includes('saiz') || head.includes('tenc'))
+        encryptedAudioCache.set(filePath, { key, encrypted })
+        return encrypted
+    } catch {
+        return false
+    }
+}
+
 const getMetadataUnsupportedMessage = (container: string) => (
     container === 'encrypted'
         ? '音频为加密或非标准容器，无法写入封面和歌词标签'
@@ -1945,6 +1977,18 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
                             try { fs.unlinkSync(filePath) } catch { }
                             continue
                         }
+                    }
+                    // [加密残骸] CENC 加密流（汽水正式版权曲）浏览器解不开，元数据却是明文的，
+                    // 能骗过上面的时长/码率校验。命中它只会让播放器立刻报错、前端反复换源，
+                    // 所以这里直接判为不可用：改名隔离（保留文件便于人工核对，不进索引、不再被命中）。
+                    if (!isLyricCheck && isEncryptedAudioFile(filePath)) {
+                        const archived = `${filePath}.encrypted`
+                        const line = `[文件缓存] 命中 CENC 加密音频，浏览器无法播放，已隔离: ${cached.filename}`
+                        console.warn(line)
+                        syncLog.warn(line)
+                        indexManager.remove(normalizedUsername, id, folder, cached.quality)
+                        try { if (!fs.existsSync(archived)) fs.renameSync(filePath, archived) } catch { }
+                        continue
                     }
                     // 老条目（1.5.27 之前写入）没有源侧核验标记：命中时挂一个后台核验。
                     // 本地两条判据在这类条目上常常同时失效（标签缺失 + 时长接近），
