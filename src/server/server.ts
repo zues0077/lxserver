@@ -683,6 +683,80 @@ const withResolveBudget = async <T>(p: Promise<T>, ms: number, fallback: T, labe
 }
 
 /**
+ * `/api/music/url` 单次取链的总预算。
+ *
+ * callUserApiGetMusicUrl 内部会「按源轮换重试」，每个自定义源脚本自身还有 10~20 秒超时，
+ * 一首真的查无此歌的曲子实测能把 30 多个源串行问完（45~90 秒）。前端等不到结果就会
+ * 「换源 / 缓冲卡死 / 自动跳歌」反复重来，实测 7 分钟内打出 196 次取链（峰值 22 请求/秒）。
+ * 这里套一层硬预算：到点按失败返回，让前端拿到明确结论而不是一直等。
+ */
+const MUSIC_URL_BUDGET_MS = (() => {
+  const raw = Number(process.env.MUSIC_URL_BUDGET_MS)
+  return Number.isFinite(raw) && raw >= 3000 ? Math.round(raw) : 9000
+})()
+
+/**
+ * 取链失败短缓存：同一首歌在 TTL 内再问，直接复用上一次的失败结论。
+ *
+ * 失败后前端往往立刻再问同一首（换源失败 → 自动重试），一次真实全网搜索要 9 秒，
+ * 缓存 10 秒能把这种风暴从「每次都真搜」降到「一次查表」。成功不写缓存（地址有时效），
+ * 失败结论也只记很短时间，避免音源真的恢复后还被挡住。
+ */
+const MUSIC_URL_FAIL_TTL_MS = (() => {
+  const raw = Number(process.env.MUSIC_URL_FAIL_TTL_MS)
+  return Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : 10000
+})()
+const musicUrlFailures = new Map<string, { at: number; message: string; attempts: any[] }>()
+
+const buildMusicUrlFailKey = (songInfo: any, quality: string): string => {
+  const id = String(songInfo?.songmid || songInfo?.id || songInfo?.hash || songInfo?.name || '')
+  return `${String(songInfo?.source || '')}|${id}|${quality || ''}`
+}
+
+const readMusicUrlFailure = (key: string) => {
+  const hit = musicUrlFailures.get(key)
+  if (!hit) return null
+  const age = Date.now() - hit.at
+  if (age >= MUSIC_URL_FAIL_TTL_MS) {
+    musicUrlFailures.delete(key)
+    return null
+  }
+  return { ...hit, retryAfterMs: MUSIC_URL_FAIL_TTL_MS - age }
+}
+
+const rememberMusicUrlFailure = (key: string, message: string, attempts: any[] = []) => {
+  if (!MUSIC_URL_FAIL_TTL_MS) return
+  // 只留最近的 200 条：长跑之后不让它变成内存泄漏
+  if (musicUrlFailures.size >= 200) {
+    const cutoff = Date.now() - MUSIC_URL_FAIL_TTL_MS
+    for (const [k, v] of musicUrlFailures) if (v.at <= cutoff) musicUrlFailures.delete(k)
+    if (musicUrlFailures.size >= 200) musicUrlFailures.clear()
+  }
+  musicUrlFailures.set(key, { at: Date.now(), message, attempts })
+}
+
+/**
+ * 给一个 Promise 套硬预算：到点返回 null。
+ * 同时给原 Promise 挂一个 catch —— 预算之后它才 reject 的话会变成
+ * unhandledRejection，能直接把 Node 进程干掉。
+ */
+const withHardBudget = async <T>(p: Promise<T>, ms: number, label: string): Promise<T | null> => {
+  p.catch(() => { /* 预算之后迟到的失败直接丢弃 */ })
+  let timer: NodeJS.Timeout | undefined
+  const raced = await Promise.race<T | null>([
+    p,
+    new Promise<null>(resolve => {
+      timer = setTimeout(() => {
+        console.warn(`[歌曲播放] ${label}超出 ${Math.round(ms / 1000)} 秒预算，按失败返回`)
+        resolve(null)
+      }, ms)
+    }),
+  ])
+  if (timer) clearTimeout(timer)
+  return raced
+}
+
+/**
  * 投送前确定音频来源，优先级：
  *   本地缓存 → 客户端直链 → 预解析地址（需探测） → 现解析（换源 + 探测）
  * 开了「先缓存再投送」且缓存未命中时，会先把整首下载到本地再投送。
@@ -7918,6 +7992,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             }
             const source = songInfo.source
             let result: any
+            // 失败短缓存用的键：平台 + 曲目标识 + 音质（换音质/换平台视为新请求）
+            const failKey = buildMusicUrlFailKey(songInfo, quality || '')
 
             // 本地缓存优先。
             // 这里原来完全没有缓存判定，已缓存的曲子也要把 30+ 个自定义源串行问一遍
@@ -7950,12 +8026,34 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
             }
 
+            // 失败短缓存：同一首歌 TTL 内重复请求直接复用上次的失败结论，
+            // 不再把 30 多个自定义源重问一遍（这是「音源整体失效时请求风暴」的主要成本）。
+            if (!result && MUSIC_URL_FAIL_TTL_MS) {
+              const remembered = readMusicUrlFailure(failKey)
+              if (remembered) {
+                const waitSec = Math.max(1, Math.round(remembered.retryAfterMs / 1000))
+                console.warn(`[歌曲播放] 命中失败短缓存（${waitSec}s 后可重试）: ${songInfo.name} — ${remembered.message}`)
+                const err: any = new Error(remembered.message)
+                err.attempts = remembered.attempts
+                err.failureCached = true
+                err.retryAfterMs = remembered.retryAfterMs
+                throw err
+              }
+            }
+
             // 额外音源（Bilibili / 汽水）不依赖 musicSdk、也不依赖自定义源：
             // 搜索由 extraSources 提供，取流同样自带（B站匿名可用，配了 Cookie 才有大会员音质）。
             // 命中本地缓存时跳过（否则会把缓存结果覆盖成一次全新的远端取链）。
             if (!result && extraSources.isExtraSource(source)) {
               try {
-                const extra = await extraSources.getMusicUrl(source, songInfo, quality || '128k', verifiedUsername)
+                const extra = await withHardBudget(
+                  extraSources.getMusicUrl(source, songInfo, quality || '128k', verifiedUsername),
+                  MUSIC_URL_BUDGET_MS,
+                  `${extraSources.displayName(source)} 取链`,
+                )
+                if (!extra) {
+                  throw new Error(`${extraSources.displayName(source)} 取链超时（${Math.round(MUSIC_URL_BUDGET_MS / 1000)} 秒）`)
+                }
                 result = {
                   url: extra.url,
                   type: extra.type,
@@ -7966,6 +8064,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 void pushProgress({ name: extra.sourceName, status: 'success' })
               } catch (e: any) {
                 console.error(`[额外音源] ${source} 取链失败:`, e?.message || e)
+                rememberMusicUrlFailure(failKey, e?.message || String(e))
                 throw e
               }
             }
@@ -7985,12 +8084,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               try {
                 console.log(`[歌曲播放] 使用自定义源解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
 
-                const userApiResult = await callUserApiGetMusicUrl(
-                  source, songInfo, quality || '128k', verifiedUsername,
-                  (attempt) => { void pushProgress(attempt) },
-                  enableAutoSwitchApiSource !== false,
-                  excludeApiSources
+                const userApiResult = await withHardBudget(
+                  callUserApiGetMusicUrl(
+                    source, songInfo, quality || '128k', verifiedUsername,
+                    (attempt) => { void pushProgress(attempt) },
+                    enableAutoSwitchApiSource !== false,
+                    excludeApiSources
+                  ),
+                  MUSIC_URL_BUDGET_MS,
+                  '自定义源取链',
                 )
+                if (!userApiResult) {
+                  // 预算内没有任何源返回地址：抛出去走统一的「解析失败」分支（会写失败短缓存）
+                  throw new Error(`取链超时：${Math.round(MUSIC_URL_BUDGET_MS / 1000)} 秒内没有任何源返回可用地址`)
+                }
                 result = userApiResult
                 attempts = userApiResult.attempts || []
               } catch (userApiError: any) {
@@ -8015,8 +8122,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const errMsg = customSourceError || fallbackMsg
               const err: any = new Error(errMsg)
               err.attempts = attempts
+              rememberMusicUrlFailure(failKey, errMsg, attempts)
               throw err
             }
+
+            // 解析成功：把这首歌的失败记录清掉（上一轮失败可能是临时抖动）
+            if (MUSIC_URL_FAIL_TTL_MS) musicUrlFailures.delete(failKey)
 
             // 合并解析尝试记录到响应（前端可用于诊断）
             if (attempts.length > 0) result.attempts = attempts
@@ -8089,7 +8200,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             console.error('[歌曲播放] 音频地址解析失败:', err.message)
             // [Fix] Return 500 but with specific error JSON to let frontend show detailed toast
             res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: err.message, code: 500, attempts: err.attempts }))
+            res.end(JSON.stringify({
+              error: err.message,
+              code: 500,
+              attempts: err.attempts,
+              // 命中失败短缓存时告诉前端「多久后可重试」，前端据此退避而不是立刻重来
+              failureCached: err.failureCached === true,
+              retryAfterMs: err.retryAfterMs,
+            }))
           }
         })
         return

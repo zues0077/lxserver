@@ -225,6 +225,62 @@
             "'": '&#39;',
         }[ch]));
 
+    // ===== 投送状态角标 =====
+    /**
+     * 播放目标是音箱时，浏览器这边是刻意静音的（playSongViaXiaoAi 会 audio.pause()），
+     * 用户「点了播放但一点声音都没有」，最容易误判成「没播出来 / 缓存坏了」。
+     * 这里常驻一个小角标说明：正在投送给哪台设备、音量多少，点一下就能切回本机。
+     */
+    const routeBadge = { el: null, key: '' };
+
+    const badgeDevices = () => {
+        const devices = state.config?.devices || [];
+        return selectedDevices()
+            .map(id => devices.find(d => String(d.deviceID) === String(id))?.name || id)
+            .join('、');
+    };
+
+    const badgeVolume = () => {
+        const fromConfig = Number(state.config?.volume);
+        if (Number.isFinite(fromConfig)) return Math.round(fromConfig);
+        return Math.round(Number(state.lastVolume) || 0);
+    };
+
+    const renderRouteBadge = () => {
+        if (state.target !== 'xiaoai') {
+            if (routeBadge.el && routeBadge.el.parentNode) routeBadge.el.parentNode.removeChild(routeBadge.el);
+            routeBadge.el = null;
+            routeBadge.key = '';
+            return;
+        }
+        const devices = badgeDevices();
+        const volume = badgeVolume();
+        // 音箱音量 10 基本听不见，很容易被当成「没声音 = 没播」，单独标出来
+        const lowVolume = volume > 0 && volume < 20;
+        const key = `${devices}|${volume}`;
+        if (routeBadge.el && routeBadge.key === key) return;
+
+        if (!routeBadge.el) {
+            routeBadge.el = document.createElement('div');
+            routeBadge.el.id = 'xiaoai-route-badge';
+            document.body.appendChild(routeBadge.el);
+        }
+        routeBadge.key = key;
+        routeBadge.el.className = 'fixed top-[4.5rem] left-1/2 -translate-x-1/2 z-[1004] max-w-[92vw] px-3 py-1.5 rounded-full shadow-lg border flex items-center gap-2 text-xs backdrop-blur-md '
+            + (lowVolume
+                ? 'bg-amber-50/95 dark:bg-amber-950/90 border-amber-400/70 text-amber-800 dark:text-amber-200'
+                : 'bg-emerald-50/95 dark:bg-emerald-950/90 border-emerald-400/70 text-emerald-800 dark:text-emerald-200');
+        routeBadge.el.innerHTML = `
+            <i class="fa-solid fa-tower-broadcast text-[11px]"></i>
+            <span class="font-semibold whitespace-nowrap">正在投送小爱音箱</span>
+            ${devices
+                ? `<span class="opacity-70 truncate max-w-[10rem]" title="${escapeHtml(devices)}">${escapeHtml(devices)}</span>`
+                : '<span class="opacity-70">未选择设备</span>'}
+            <span class="opacity-70 whitespace-nowrap">音量 ${volume}${lowVolume ? '（偏低，可能听不到）' : ''}</span>
+            <button onclick="XiaoAi.toggleTarget()" class="ml-0.5 px-1.5 py-0.5 rounded-full bg-white/70 dark:bg-white/10 hover:bg-white dark:hover:bg-white/20 font-medium whitespace-nowrap">切回本机</button>
+        `;
+    };
+
     const render = () => {
         const cfg = state.config;
         if (!cfg) return;
@@ -269,6 +325,7 @@
         renderTarget();
         renderLoginState();
         renderDevices();
+        renderRouteBadge();
     };
 
     /** 服务端探测到的局域网地址（仅用于「用检测到的地址」按钮） */
@@ -1172,6 +1229,7 @@
         if (state.target === 'xiaoai') {
             state.target = 'local';
             localStorage.setItem(TARGET_KEY, 'local');
+            renderRouteBadge();
             stopWatch();
             setWatchHint('已切回本机播放：音箱把正在播的这首放完就停');
             render();
@@ -1187,6 +1245,7 @@
         if (!selectedDevices().length) return setMessage('请至少选择一台小爱设备', true);
         state.target = 'xiaoai';
         localStorage.setItem(TARGET_KEY, 'xiaoai');
+        renderRouteBadge();
         render();
 
         // 切换目标的同时立即把当前歌曲投过去（有歌才投）
@@ -1235,6 +1294,15 @@
             updatePlayButtonSafe(true);
             const via = pushed && pushed.via ? `（${pushed.via}）` : '';
             if (typeof setPlayerStatus === 'function') setPlayerStatus(`正在小爱音箱播放：${song.name || ''}${via}`, false);
+            // 明确告诉用户声音去了哪：页面是静音的，音箱音量又可能很低，
+            // 不提示的话「点了播放没声音」会被当成播放失败。
+            if (caller === 'manual' && typeof window.showToast === 'function') {
+                const names = badgeDevices();
+                const volume = badgeVolume();
+                const low = volume > 0 && volume < 20;
+                window.showToast('info', `已投送到小爱音箱${names ? `（${names}）` : ''}，音量 ${volume}${low ? '（偏低，建议调到 30 以上）' : ''}`, 4000);
+            }
+            renderRouteBadge();
             // 投送模式下 audio 里没有这首歌，duration 是上一首的甚至 NaN；
             // 拖动进度条换算秒数只能用服务端解析出的真实时长
             state.trackDurationMs = Number(pushed && pushed.audioDurationMs) || 0;
@@ -1247,6 +1315,7 @@
             if (typeof setPlayerStatus === 'function') setPlayerStatus(`小爱投送失败：${e.message}`, false);
             state.target = 'local';
             localStorage.setItem(TARGET_KEY, 'local');
+            renderRouteBadge();
             render();
         }
     };

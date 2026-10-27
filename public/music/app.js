@@ -5766,6 +5766,64 @@ async function applyAutoProxy(url, song) {
     return url;
 }
 
+/**
+ * 取链失败退避表。
+ *
+ * 音源整体不可用（或某首歌所有平台都没有）时，原始行为是「换源失败 → 立刻重试 →
+ * 再失败 → 自动跳歌」，同一首歌能在几十秒内打出十几次取链、几十次封面、
+ * 外加每 0.8 秒一次健康检查，把页面拖到点不动。服务端现在有 10 秒失败短缓存，
+ * 这里再挡一层：同一首歌（同音质）连续失败后按指数退避，退避期间直接返回失败，
+ * 不再发请求；换音质 / 换平台算新键，不会被误挡。
+ */
+const resolveFailureState = new Map(); // key -> { count, until, at }
+const RESOLVE_BACKOFF_BASE_MS = 4000;
+const RESOLVE_BACKOFF_MAX_MS = 20000;
+const RESOLVE_FAILURE_FORGET_MS = 60000;
+
+function resolveFailKey(song, quality) {
+    let id = '';
+    try { id = (typeof cleanSongData === 'function' ? cleanSongData(song)?.id : '') || song?.songmid || song?.id || song?.name || ''; }
+    catch (e) { id = song?.songmid || song?.id || song?.name || ''; }
+    return `${song?.source || ''}|${id}|${quality || ''}`;
+}
+
+function getResolveBackoffMs(key) {
+    const st = resolveFailureState.get(key);
+    if (!st) return 0;
+    const remain = st.until - Date.now();
+    return remain > 0 ? remain : 0;
+}
+
+function markResolveFailure(key) {
+    const now = Date.now();
+    const st = resolveFailureState.get(key) || { count: 0, until: 0, at: now };
+    // 距上次失败超过遗忘窗口就重新计数，避免「几小时前失败过一次」影响现在
+    if (now - st.at > RESOLVE_FAILURE_FORGET_MS) st.count = 0;
+    st.count += 1;
+    st.at = now;
+    const delay = Math.min(RESOLVE_BACKOFF_BASE_MS * Math.pow(2, st.count - 1), RESOLVE_BACKOFF_MAX_MS);
+    st.until = now + delay;
+    resolveFailureState.set(key, st);
+    return delay;
+}
+
+function clearResolveFailure(key) {
+    resolveFailureState.delete(key);
+}
+
+/** 服务端已明确「多久后可重试」时，按它的节奏退避（同样带上限，防止被拖太久） */
+function markResolveFailureFor(key, delayMs) {
+    const now = Date.now();
+    const st = resolveFailureState.get(key) || { count: 0, until: 0, at: now };
+    if (now - st.at > RESOLVE_FAILURE_FORGET_MS) st.count = 0;
+    st.count += 1;
+    st.at = now;
+    const delay = Math.min(Math.max(Number(delayMs) || 0, RESOLVE_BACKOFF_BASE_MS), RESOLVE_BACKOFF_MAX_MS);
+    st.until = now + delay;
+    resolveFailureState.set(key, st);
+    return delay;
+}
+
 async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, options = {}) {
     const cleanedSong = cleanSongData(song);
     const cacheKey = `lx_url_${cleanedSong.id}_${quality}`;
@@ -5802,6 +5860,17 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, op
             cachedUrl = await applyAutoProxy(cachedUrl, song);
             return { url: cachedUrl, sourceType: 'cache', quality };
         }
+    }
+
+    // 退避闸门：刚失败过的同一首歌（同音质）不再发请求，直接给出可读的失败结论。
+    // 下载 / 用户显式重试（options.ignoreBackoff）放行，避免把正常操作也挡掉。
+    const backoffKey = resolveFailKey(cleanedSong, quality);
+    const backoffRemainMs = isRetry === 'download' || options.ignoreBackoff ? 0 : getResolveBackoffMs(backoffKey);
+    if (backoffRemainMs > 0) {
+        const waitSec = Math.max(1, Math.ceil(backoffRemainMs / 1000));
+        console.warn(`[Resolve] 退避中（${waitSec}s 内不重复取链）: ${cleanedSong.name}`);
+        const backoffErr = { message: `该曲刚解析失败，${waitSec} 秒后可重试`, backoff: true, attempts: [] };
+        throw backoffErr;
     }
 
     const reqId = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -5882,7 +5951,13 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, op
                 result = await res.json();
                 if (result.error) errorMsg = result.error;
             } catch (e) { }
-            throw { message: errorMsg, attempts: result.attempts };
+            // 服务端命中失败短缓存时会带 retryAfterMs：把它当本轮退避的起点，
+            // 免得前端「立刻重试」把整条链路（含封面、健康检查）再打一遍。
+            const errObj = { message: errorMsg, attempts: result.attempts, status: res.status };
+            if (result.failureCached && Number(result.retryAfterMs) > 0) {
+                errObj.serverBackoffMs = Number(result.retryAfterMs);
+            }
+            throw errObj;
         }
 
         const result = await res.json();
@@ -5902,6 +5977,7 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, op
                 triggerServerCache(song, result.url, quality);
             }
             console.log(`[Resolve] Online Success: ${song.name} via ${result.sourceName || 'Unknown'}`);
+            clearResolveFailure(backoffKey);
             return {
                 url: finalUrl,
                 sourceType: 'normal',
@@ -5916,6 +5992,16 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, op
             };
         }
         throw new Error('服务器未返回播放链接');
+    } catch (err) {
+        // 失败记录：服务端给了 retryAfterMs 就用它当退避起点（说明服务端刚失败过），
+        // 否则按本地指数退避（4s → 8s → 16s，封顶 20s）。
+        const backoffDelay = Number(err && err.serverBackoffMs) > 0
+            ? markResolveFailureFor(backoffKey, Number(err.serverBackoffMs))
+            : markResolveFailure(backoffKey);
+        if (backoffDelay) {
+            console.warn(`[Resolve] ${song.name} 解析失败，${Math.ceil(backoffDelay / 1000)}s 内不再重试同一音质`);
+        }
+        throw err;
     } finally {
         if (progressEs) { progressEs.close(); progressEs = null; }
     }
@@ -16356,6 +16442,15 @@ const RecoveryToast = {
     },
 
     show(song, message, details = {}) {
+        // 同一条进度文案 + 同一首歌重复调用只是重排一次 DOM，
+        // 换源风暴时一秒能来好几次，界面就是这么被顶死的。
+        const targetSongName = song?.name || this.currentSong?.name || '';
+        if (this.el && this.currentStatus === 'loading'
+            && this._lastMessage === message
+            && (this.currentSong?.name || '') === targetSongName) {
+            return;
+        }
+        this._lastMessage = message;
         this.init();
         this.cleanupConflictingToasts();
         this.currentStatus = 'loading';
@@ -16557,6 +16652,7 @@ const RecoveryToast = {
             this.currentSong = null;
             this.triedHistory = [];
             this.currentStatus = 'loading';
+            this._lastMessage = '';
         }, 300);
     },
 
@@ -16575,6 +16671,16 @@ function showToast(type, message, duration = 3000) {
             return;
         }
     }
+
+    // 同一条提示 2.5 秒内只弹一次：音源整体失效时同一个错误会连弹十几次，
+    // 不只是刷屏，堆叠重排也会让页面明显卡顿。
+    const dedupeKey = `${type}|${message}`;
+    const dedupeNow = Date.now();
+    if (showToast._lastKey === dedupeKey && dedupeNow - (showToast._lastAt || 0) < 2500) {
+        return;
+    }
+    showToast._lastKey = dedupeKey;
+    showToast._lastAt = dedupeNow;
 
     const config = {
         success: { bg: 'bg-emerald-500', icon: 'fa-check-circle' },
