@@ -121,6 +121,7 @@ export async function flush(opts: FlushOptions = {}): Promise<FlushResult> {
           false, // isOnlyDownload
           false, // shouldCacheLyric —— 汽水/B站都没有歌词接口，别让它去白试
           false, // embedLyric
+          { decryptKey: (resolved as any).key }, // 汽水版权曲 CENC 流的解密密钥（B站无，留空）
         )
         pending.remove(item.key)
         ok++

@@ -15,6 +15,7 @@ import { verifyTrackOrigin, canVerifyOrigin } from './sourceVerify'
 import { buildStreamHeaders } from './utils/streamHeaders'
 import { syncLog } from '@/utils/log4js'
 import { getUserSpace } from '../user'
+import { decryptAudioBuffer, isCencEncryptedBuffer, getSodaKey, sodaTrackIdOf, type DecryptResult } from './utils/sodaDecrypt'
 
 /**
  * 匿名用户的目录名必须统一成 `_open`（P-0806）。
@@ -226,6 +227,9 @@ export interface CacheItem {
     // 各平台原生标识（tx 的 mid/strMediaMid、kg 的 hash、wy 的 songId 等），
     // 规范化 ID 无法反推它们，缺了就没法从缓存条目还原出可解析的歌曲对象
     nativeIds?: Record<string, string>
+    // 汽水版权曲 CENC 加密流的解密密钥（32 位十六进制）。落盘时记下，
+    // 这样已缓存的加密文件在容器重启后仍能被就地解密（见 checkCache / downloadAndCache）。
+    decryptKey?: string
 }
 
 export type CacheFolder = 'cache' | 'music'
@@ -239,6 +243,8 @@ export interface DownloadProvenance {
     requestedSource?: string
     downloadSource?: string
     sourceName?: string
+    /** 汽水版权曲 CENC 加密流的解密密钥（32 位十六进制）。取链时拿到、下载时就地解密用。 */
+    decryptKey?: string
 }
 
 class CacheIndexManager {
@@ -1979,17 +1985,37 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
                             continue
                         }
                     }
-                    // [加密残骸] CENC 加密流（汽水正式版权曲）浏览器解不开，元数据却是明文的，
-                    // 能骗过上面的时长/码率校验。命中它只会让播放器立刻报错、前端反复换源，
-                    // 所以这里直接判为不可用：改名隔离（保留文件便于人工核对，不进索引、不再被命中）。
+                    // [汽水解密] CENC 加密流（汽水正式版权曲）浏览器解不开。若缓存条目带解密密钥，
+                    // 就地解密成明文再继续播放；否则维持旧行为：改名隔离，不进索引、不再被命中。
                     if (!isLyricCheck && isEncryptedAudioFile(filePath)) {
-                        const archived = `${filePath}.encrypted`
-                        const line = `[文件缓存] 命中 CENC 加密音频，浏览器无法播放，已隔离: ${cached.filename}`
-                        console.warn(line)
-                        syncLog.warn(line)
-                        indexManager.remove(normalizedUsername, id, folder, cached.quality)
-                        try { if (!fs.existsSync(archived)) fs.renameSync(filePath, archived) } catch { }
-                        continue
+                        const cachedKey = cached?.decryptKey
+                        let decrypted = false
+                        if (cachedKey) {
+                            try {
+                                const buf = fs.readFileSync(filePath)
+                                const dec = decryptAudioBuffer(buf, cachedKey)
+                                fs.writeFileSync(filePath, dec.buffer)
+                                cached.ext = dec.extension.replace(/^\./, '')
+                                cached.audioContainer = dec.codec
+                                cached.size = dec.buffer.length
+                                delete cached.decryptKey
+                                indexManager.update(normalizedUsername, cached, folder)
+                                indexManager.save(normalizedUsername, folder)
+                                decrypted = true
+                                console.log(`[文件缓存] 已就地解密缓存的 CENC 音频: ${cached.filename} (${dec.codec})`)
+                            } catch (e: any) {
+                                console.warn(`[文件缓存] 缓存 CENC 解密失败，回退隔离: ${cached.filename} - ${e?.message || e}`)
+                            }
+                        }
+                        if (!decrypted) {
+                            const archived = `${filePath}.encrypted`
+                            const line = `[文件缓存] 命中 CENC 加密音频，浏览器无法播放，已隔离: ${cached.filename}`
+                            console.warn(line)
+                            syncLog.warn(line)
+                            indexManager.remove(normalizedUsername, id, folder, cached.quality)
+                            try { if (!fs.existsSync(archived)) fs.renameSync(filePath, archived) } catch { }
+                            continue
+                        }
                     }
                     // 老条目（1.5.27 之前写入）没有源侧核验标记：命中时挂一个后台核验。
                     // 本地两条判据在这类条目上常常同时失效（标签缺失 + 时长接近），
@@ -2466,7 +2492,9 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
     const songKey = normalizeSongId(songInfo) + '_' + (quality || 'unknown')
     const requestedSource = provenance.requestedSource || songInfo.requestedSource || songInfo.source || 'unknown'
     const downloadSource = detectDownloadSource(url, provenance.downloadSource || songInfo.downloadSource || songInfo.source)
-    const sourceName = provenance.sourceName || songInfo.sourceName
+    const sourceName = provenance.sourceName
+    // [汽水解密] 取链时登记的密钥（或本次显式传入的）用来在落盘前就地解密 CENC 加密流。
+    const audioDecryptKey = provenance.decryptKey || getSodaKey(sodaTrackIdOf(songInfo)) || songInfo.sourceName
 
     const result = checkCache({ ...songInfo, quality, exactQuality: true }, username, false)
     if (result.exists && !result.isCollision) {
@@ -2553,7 +2581,8 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                 bitDepth: inspection.bitDepth,
                 metadataWritable,
                 metadataError: metadataWritable ? undefined : getMetadataUnsupportedMessage(audioContainer),
-                nativeIds: cachedItem?.nativeIds || extractNativeIds(songInfo)
+                nativeIds: cachedItem?.nativeIds || extractNativeIds(songInfo),
+                decryptKey: cachedItem?.decryptKey || audioDecryptKey || undefined
             }, 'music')
 
             await ensureCachedLyrics(songInfo, actualQuality, username, true, finalPath, 'music', shouldCacheLyric, shouldEmbedLyric)
@@ -2735,6 +2764,23 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                 }
                 cacheProgress.set(songKey, { progress: 100, status: 'tagging', total, received, speed: 0, updatedAt: Date.now() })
 
+                // [汽水解密] 汽水版权曲直链是 CENC 加密流，浏览器解不开会被隔离。
+                // 若取链时拿到了 spade_a 推导的密钥，在落盘前就地解密成明文 m4a/flac，
+                // 这样缓存下来的就是可播文件。无密钥时不解密（沿用下方隔离兜底，不报错）。
+                let decryptResult: DecryptResult | null = null
+                if (audioDecryptKey && fs.existsSync(tempPath)) {
+                    try {
+                        const probe = fs.readFileSync(tempPath)
+                        if (isCencEncryptedBuffer(probe)) {
+                            decryptResult = decryptAudioBuffer(probe, audioDecryptKey)
+                            fs.writeFileSync(tempPath, decryptResult.buffer)
+                            console.log(`[文件缓存] 已解密汽水 CENC 音频 (${decryptResult.codec}, ${(decryptResult.buffer.length / 1024 / 1024).toFixed(1)}MB)`)
+                        }
+                    } catch (e: any) {
+                        console.warn(`[文件缓存] 汽水 CENC 解密失败，按原样落盘（后续由隔离逻辑兜底）: ${e?.message || e}`)
+                    }
+                }
+
                 let ext = headerExt
                 if (fs.existsSync(tempPath)) {
                     try {
@@ -2746,6 +2792,8 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
 
                 const inspection = inspectAudioFile(tempPath, quality)
                 ext = inspection.extension || ext
+                // 解密成功的，强制用解密结果声明的扩展名（.m4a / .flac），避免被识别成 .mp4
+                if (decryptResult) ext = decryptResult.extension
                 const actualQuality = inspection.quality || quality || 'unknown'
 
                 // 试听片段 / 占位音 / 残缺音频防御检查：
@@ -2840,7 +2888,8 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                         bitrate: inspection.bitrate,
                         sampleRate: inspection.sampleRate,
                         bitDepth: inspection.bitDepth,
-                        nativeIds: extractNativeIds(songInfo)
+                        nativeIds: extractNativeIds(songInfo),
+                        decryptKey: audioDecryptKey || undefined
                     }, folderType)
 
                     let tagger: any

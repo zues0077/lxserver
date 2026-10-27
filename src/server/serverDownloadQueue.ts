@@ -203,6 +203,7 @@ const runTask = async (task: ServerDownloadTask) => {
       requestedSource: resolved.requestedSource,
       downloadSource: resolved.downloadSource,
       sourceName: resolved.sourceName,
+      decryptKey: (resolved as any).key, // 汽水版权曲 CENC 流的解密密钥（仅汽水通道有）
     })
 
     if (controller.signal.aborted) return

@@ -11,6 +11,8 @@ export interface AccountResolveResult {
   via?: string
   /** 链接的音频扩展名 */
   ext?: string
+  /** 汽水版权曲 CENC 加密流的解密密钥（32 位十六进制），仅汽水通道有，用于下载时就地解密 */
+  key?: string
   /** 失败原因（会展示给管理员，不要包含 Cookie） */
   error?: string
 }

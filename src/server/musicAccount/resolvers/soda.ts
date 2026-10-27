@@ -19,6 +19,7 @@ export async function resolve(songInfo: any, quality: string, cookie: string): P
       isVip: false,
       via: result.via,
       ext: result.ext,
+      key: result.key,
     }
   } catch (e: any) {
     return { ok: false, error: e?.message || String(e) }

@@ -25,6 +25,7 @@ import { request } from '../musicAccount/http'
 import * as store from '../musicAccount/store'
 import * as pending from './pending'
 import * as signer from './signer'
+import { registerSodaKey, sodaTrackIdOf, resolveAudioKey } from '../utils/sodaDecrypt'
 
 const SEARCH_UA = 'com.luna.music/100198030 (Linux; U; Android 15; zh_CN_#Hans; ABR-AL80; Build/V417IR;tt-ok/3.12.13.19)'
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36'
@@ -321,6 +322,7 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
   quality: string
   via: string
   ext?: string
+  key?: string
 } | null> {
   if (!signer.isConfigured()) return null
   const st = await signer.status()
@@ -381,6 +383,11 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
   const usable = list.filter(v => String(v?.main_url || '').startsWith('http'))
   if (!usable.length) return null
 
+  // [汽水解密] 版权曲直链是 CENC 加密流，密钥随 play_auth.spade_a 下发；扒出来登记，
+  // 下载时就能就地解密成明文，否则浏览器解不开会被隔离（见 fileCache.ts）。
+  const hexKey = extractSodaKey(parsed)
+  if (hexKey) registerSodaKey(trackId, hexKey)
+
   // 签名 ≠ 有版权：受限曲照样只给 30/60 秒，这里必须拦住，否则播放器会播到一半静音
   const trackDur = toNumber(parsed?.track?.duration) / 1000
   const streamDur = toNumber(model?.video_duration)
@@ -397,18 +404,66 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
   if (!ranked.length) return null
   const chosen = ranked.find(x => x.meta!.rank <= wantRank) || ranked[ranked.length - 1]
 
-  console.log(`[汽水签名] ✓ 整曲（${chosen.v.video_meta?.quality} / ${Math.round(toNumber(chosen.v.video_meta?.bitrate) / 1000)}k）`)
+  console.log(`[汽水签名] ✓ 整曲（${chosen.v.video_meta?.quality} / ${Math.round(toNumber(chosen.v.video_meta?.bitrate) / 1000)}k）${hexKey ? ' [已捕获解密密钥]' : ''}`)
   return {
     url: String(chosen.v.main_url || chosen.v.backup_url),
     quality: chosen.meta!.label,
     via: `signer:pc_track_v2:${chosen.v.video_meta?.quality || '?'}`,
     ext: String(chosen.v.video_meta?.vtype || 'm4a'),
+    key: hexKey || undefined,
   }
 }
 
 function toNumber(value: any): number {
   const n = Number(value)
   return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * 从取链响应里取出汽水版权曲的解密密钥。
+ *
+ * 关键事实（`utils/sodaDecrypt.ts` 头部有完整推导）：汽水正式版权曲下发的 CENC 加密流，
+ * 其 AES-128 密钥随响应以 `play_auth` → `spade_a`（Base64）直接下发 —— 我们作为取链客户端
+ * 本来就收得到，只是以前没用它。这里把它从响应里扒出来，推导成 32 位十六进制密钥。
+ * `play_auth`/`spade_a` 的大小写、嵌套层级（可能在对象或数组里）都不固定，做容错遍历。
+ */
+function extractSodaKey(parsed: any): string {
+  let auth: any = null
+  const probe = (obj: any, depth = 0): boolean => {
+    if (!obj || typeof obj !== 'object' || depth > 12) return false
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        if (probe(item, depth + 1)) return true
+      }
+      return false
+    }
+    for (const key of Object.keys(obj)) {
+      const lk = key.toLowerCase()
+      if (lk === 'play_auth' || lk === 'playauth') {
+        auth = obj[key]
+        return true
+      }
+      if (typeof obj[key] === 'object' && probe(obj[key], depth + 1)) return true
+    }
+    return false
+  }
+  probe(parsed)
+  if (!auth || typeof auth !== 'object') return ''
+
+  let spade: string = ''
+  for (const key of Object.keys(auth)) {
+    const lk = key.toLowerCase()
+    if (lk === 'spade_a' || lk === 'spadea') {
+      spade = String(auth[key] || '')
+      break
+    }
+  }
+  if (!spade) return ''
+  try {
+    return resolveAudioKey({ spade_a: spade }).toLowerCase()
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -421,13 +476,12 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   quality: string
   via: string
   ext?: string
+  key?: string
 }> {
   // 从缓存/本地列表点进来的歌，id 会被规范化成 `soda_<纯数字>`（fileCache 索引口径），
   // 而汽水接口只认纯数字。不剥前缀就会稳定报「id 不合法」，表现为
   // 「本地列表里的汽水歌一点就提示搜索音源」。
-  const trackId = String(songInfo?.meta?.trackId || songInfo?.id || songInfo?.songmid || '')
-    .trim()
-    .replace(/^soda_/i, '')
+  const trackId = sodaTrackIdOf(songInfo)
   if (!isSodaId(trackId)) throw new Error(`汽水歌曲 id 不合法（${trackId || '空'}）`)
 
   // ① 配了签名器就走签名通道：它能回到 6 档音质（lossless 852k / hi_res / spatial），
@@ -468,6 +522,11 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   } catch (e: any) {
     throw new Error(`汽水取流请求失败：${e?.message || e}`)
   }
+
+  // [汽水解密] H5 端点对免费可播曲通常下发明文；但万一带 play_auth.spade_a 也一并捕获登记，
+  // 下载时即可就地解密（见 fileCache.ts），避免落到「加密残骸」隔离逻辑。
+  const hexKey = extractSodaKey(parsed)
+  if (hexKey) registerSodaKey(trackId, hexKey)
 
   const track = parsed?.track || {}
   const player = parsed?.track_player || {}
@@ -513,6 +572,7 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
     quality: QUALITY_LABEL[String(chosen.video_meta?.quality || '')] || '320k',
     via: `h5:track_v2:${chosen.video_meta?.quality || '?'}(${Math.round(bitrate / 1000)}k)`,
     ext: String(chosen.video_meta?.vtype || 'm4a'),
+    key: hexKey || undefined,
   }
 }
 
