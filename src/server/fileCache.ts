@@ -12,6 +12,7 @@ import { buildLyrics, parseLyrics } from '../utils/lrcTool'
 import { formatPlayTime } from '../utils/common'
 import { judgeAudioMismatch, judgeMetadataMismatch } from '@/utils/audioGuard'
 import { verifyTrackOrigin, canVerifyOrigin } from './sourceVerify'
+import { buildStreamHeaders } from './utils/streamHeaders'
 import { syncLog } from '@/utils/log4js'
 import { getUserSpace } from '../user'
 
@@ -2649,7 +2650,9 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                 return
             }
             const protocol = currentUrl.startsWith('https') ? https : http
-            req = protocol.get(currentUrl, (res) => {
+            // 必须带 UA/Referer 回源：B站 CDN 没有 bilibili 来源会直接 403（见 utils/streamHeaders）。
+            // 以前这里是裸 get（半个头都不带），所以 B站的歌「取链成功、下载必然 403」。
+            req = protocol.get(currentUrl, { headers: buildStreamHeaders(currentUrl) }, (res) => {
                 const status = res.statusCode || 0
                 // 处理重定向：301/302/303/307/308
                 if ([301, 302, 303, 307, 308].includes(status)) {

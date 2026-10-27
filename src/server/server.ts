@@ -17,6 +17,7 @@ import { getUserSpace, releaseUserSpace, getUserName, getServerId, getUserDirnam
 import { parseDislikeRules, splitSingers } from '@/modules/dislike/match'
 import { encodeAlbumRule } from '@/modules/dislike/utils'
 import { normalizeText } from '@/server/utils/songVersion'
+import { buildStreamHeaders } from './utils/streamHeaders'
 import { invalidateDislikeCache } from '@/server/utils/dislikeCache'
 import { createMsg2call } from 'message2call'
 import { ElFinderConnector, getSystemRoot } from './elfinderConnector'
@@ -6587,10 +6588,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const parsedUrl = new URL(targetUrl)
               const options: any = {
                 method: 'GET',
-                headers: {
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                  'Referer': parsedUrl.origin
-                }
+                // Referer 必须按目标域名分流：B站 CDN 要 bilibili.com 来源，
+                // 抖音系（汽水）反而不能带。见 utils/streamHeaders。
+                headers: buildStreamHeaders(targetUrl),
               }
 
               // 转发 Range 请求头，以支持播放器的快进和拖拽
@@ -8267,10 +8267,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                         read_timeout: 4000,
                         // 解析的是音乐平台链接，归 music 分类
                         agent: await getProxyAgent(u, 'music'),
-                        headers: {
-                          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                          'Referer': new URL(u).origin
-                        }
+                        headers: buildStreamHeaders(u),
                       })
                       if (resp.statusCode && [301, 302, 303, 307, 308].includes(resp.statusCode) && resp.headers.location) {
                         let nextUrl = resp.headers.location

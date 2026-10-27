@@ -6,6 +6,7 @@ import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { getProxyAgent } from '../../modules/utils/proxy.js'
 import { syncLog } from '../../utils/log4js'
+import { buildStreamHeaders } from '../utils/streamHeaders'
 import { audioDurationNeedsTail, detectAudioDurationMs, type AudioFormat } from './audioMeta'
 import type { StreamTokenPayload } from './streamToken'
 import { createMp3Transcoder, isFfmpegAvailable, isMp3File, transcodeFileToMp3 } from './transcode'
@@ -558,18 +559,12 @@ const NON_AUDIO_CONTENT = /^(application\/json|text\/html|text\/plain|applicatio
 const fetchUpstream = async (url: string, range?: string, timeoutMs = 30000) => {
   let current = url
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const headers: Record<string, string> = {
-      // 部分音源按 UA/Referer 防盗链，这里伪装成浏览器取流
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    // 部分音源按 UA/Referer 防盗链，伪装成浏览器取流；
+    // Referer 必须按域名分流（B站要 bilibili.com，抖音系不能带），见 utils/streamHeaders
+    const headers: Record<string, string> = buildStreamHeaders(current, {
       Accept: '*/*',
       'Accept-Encoding': 'identity',
-    }
-    try {
-      headers.Referer = new URL(current).origin
-    } catch {
-      /* 忽略非法 URL */
-    }
+    })
     if (range) headers.Range = range
 
     const agent = await getProxyAgent(current, 'music')
