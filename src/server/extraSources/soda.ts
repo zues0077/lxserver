@@ -422,7 +422,12 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   via: string
   ext?: string
 }> {
-  const trackId = String(songInfo?.meta?.trackId || songInfo?.id || songInfo?.songmid || '').trim()
+  // 从缓存/本地列表点进来的歌，id 会被规范化成 `soda_<纯数字>`（fileCache 索引口径），
+  // 而汽水接口只认纯数字。不剥前缀就会稳定报「id 不合法」，表现为
+  // 「本地列表里的汽水歌一点就提示搜索音源」。
+  const trackId = String(songInfo?.meta?.trackId || songInfo?.id || songInfo?.songmid || '')
+    .trim()
+    .replace(/^soda_/i, '')
   if (!isSodaId(trackId)) throw new Error(`汽水歌曲 id 不合法（${trackId || '空'}）`)
 
   // ① 配了签名器就走签名通道：它能回到 6 档音质（lossless 852k / hi_res / spatial），
