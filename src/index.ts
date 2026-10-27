@@ -317,6 +317,17 @@ const margeConfig = (p: string) => {
     if (config[key] !== undefined) newConfig[key] = config[key]
   }
 
+  // 配置文件里存在、但 defaultConfig 没声明的键也要保留。
+  // 这类键只可能来自后台面板（典型：qishui.signerUrl 汽水签名器地址，它有意不放进 Config 类型），
+  // 以前只按 defaultConfig 的键白名单复制 → 重启后这些值被静默丢弃，
+  // 再发生一次 saveConfig（改任何设置/退出登录都会触发）就永久写没了，
+  // 表现为「重启后汽水只剩 30 秒试听、签名器显示未配置」。
+  for (const key of Object.keys(config)) {
+    if (key in defaultConfig) continue
+    // @ts-expect-error 面板专用键不在 Config 类型里
+    if (config[key] !== undefined) newConfig[key] = config[key]
+  }
+
   console.log('[配置] 加载配置文件: ' + p)
   if (newConfig.users.length) {
     const users: LX.UserConfig[] = []
