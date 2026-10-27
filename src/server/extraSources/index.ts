@@ -92,6 +92,8 @@ export async function getMusicUrl(source: string, songInfo: any, quality: string
   type: string
   sourceName: string
   accountUsed: boolean
+  /** 汽水加密曲随取链下发的 AES 解密密钥（32 位十六进制）；非加密曲为空 */
+  key?: string
 }> {
   const resolver = RESOLVERS[source]
   if (!resolver) throw new Error(`额外音源不支持：${source}`)
@@ -108,6 +110,7 @@ export async function getMusicUrl(source: string, songInfo: any, quality: string
     type: result.quality || quality,
     sourceName: `${displayName(source)}${cookie ? '（账号）' : '（免登录）'}`,
     accountUsed: !!cookie,
+    key: (result as any).key,
   }
 }
 

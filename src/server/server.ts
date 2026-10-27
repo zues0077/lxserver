@@ -8150,21 +8150,53 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 if (!extra) {
                   throw new Error(`${extraSources.displayName(source)} 取链超时（${Math.round(budgetMs / 1000)} 秒）`)
                 }
-                // 加密流拦截：汽水正式版权曲拿到的是 CENC 加密 MP4，
-                // 播放器解不开；不拦就会「缓存成功但没声音 + 一直智能换源」。
-                if (await isEncryptedRemoteStream(extra.url)) {
-                  throw new Error(
-                    `${extraSources.displayName(source)} 该曲返回的是加密流（DRM），浏览器无法播放，请改用它源或其他平台播放`
-                  )
+
+                // 汽水加密流：随取链响应下发的 CENC 加密 MP4，其 AES 密钥（spade_a）已在
+                // getAudioUrl 里捕获并登记（extra.key）。这里不再「判死 DRM」，而是走
+                // 「下载 → 本地解密落缓存 → 返回明文缓存地址」，让首播即可播。
+                // 无密钥（非加密曲 / 没拿到 spade_a）才维持原直链透传逻辑。
+                const sodaKey = source === 'soda' ? (extra as any).key : ''
+                if (source === 'soda' && sodaKey) {
+                  let cached = fileCache.checkCache({ ...songInfo, quality: quality || '' }, verifiedUsername)
+                  if (!(cached && cached.exists && !cached.isCollision && cached.url)) {
+                    // 下载并本地解密（downloadAndCache 内部已支持 decryptKey）
+                    await fileCache.downloadAndCache(
+                      songInfo, extra.url, quality || '128k', verifiedUsername, undefined,
+                      false, false, false,
+                      { requestedSource: source, downloadSource: source, sourceName: extra.sourceName, decryptKey: sodaKey },
+                    )
+                    cached = fileCache.checkCache({ ...songInfo, quality: quality || '' }, verifiedUsername)
+                  }
+                  if (!cached || !cached.exists || !cached.url) {
+                    throw new Error('汽水加密曲下载/解密失败，无法生成可播放地址')
+                  }
+                  console.log(`[汽水解密] 返回已解密缓存地址: ${songInfo.name} (${cached.quality || quality})`)
+                  result = {
+                    url: cached.url,
+                    type: 'local',
+                    sourceName: `${extra.sourceName}（已解密）`,
+                    sourceId: 'extra:soda',
+                    quality: cached.quality || quality || extra.type,
+                    folder: cached.folder,
+                    attempts: [{ name: extra.sourceName, status: 'success' }],
+                  }
+                  void pushProgress({ name: extra.sourceName, status: 'success' })
+                } else {
+                  // B站 / 汽水非加密曲：直链透传（仍保留加密流兜底拦截）
+                  if (await isEncryptedRemoteStream(extra.url)) {
+                    throw new Error(
+                      `${extraSources.displayName(source)} 该曲返回的是加密流（DRM），浏览器无法播放，请改用它源或其他平台播放`
+                    )
+                  }
+                  result = {
+                    url: extra.url,
+                    type: extra.type,
+                    sourceName: extra.sourceName,
+                    sourceId: `extra:${source}`,
+                    attempts: [{ name: extra.sourceName, status: 'success' }],
+                  }
+                  void pushProgress({ name: extra.sourceName, status: 'success' })
                 }
-                result = {
-                  url: extra.url,
-                  type: extra.type,
-                  sourceName: extra.sourceName,
-                  sourceId: `extra:${source}`,
-                  attempts: [{ name: extra.sourceName, status: 'success' }],
-                }
-                void pushProgress({ name: extra.sourceName, status: 'success' })
               } catch (e: any) {
                 console.error(`[额外音源] ${source} 取链失败:`, e?.message || e)
                 rememberMusicUrlFailure(failKey, e?.message || String(e))
