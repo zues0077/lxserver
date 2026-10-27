@@ -312,6 +312,94 @@ function resolveAppProfile(dev: {
 }
 
 /**
+ * [汽水解密] 密钥候选源二：/luna/media-player。
+ *
+ * track_v2 在 246 实测（2026-10-28，6 次请求 / 4 首歌 / 多档音质：highest 260k、
+ * lossless 902k、hi_res 325k）**从不**返回 play_auth/spade_a —— 解析器已用单测证明
+ * 无误报，所以那真是平台行为。而参考实现 qishuiClient.js:900 还留着这个端点，
+ * 它才是真正下发播放地址（player_infos → url_player_info / video_model）的地方，
+ * 密钥逻辑上更可能挂在这，值得一探。
+ *
+ * 这里只取密钥、不取播放地址：地址继续由 track_v2 给（那边能拿到完整音质列表）。
+ * 任何失败都返回空串，绝不影响主流程。
+ */
+async function tryMediaPlayerKey(trackId: string, cookie: string): Promise<string> {
+  if (!signer.isConfigured()) return ''
+  const st = await signer.status()
+  if (!st.online) return ''
+
+  const dev = await signer.deviceConfig()
+  const profile = resolveAppProfile(dev)
+  const params = new URLSearchParams({
+    aid: '386088',
+    app_name: 'luna_pc',
+    device_platform: 'windows',
+    channel: 'official',
+    version_code: profile.buildId,
+    version_name: profile.appVersion,
+  })
+  if (dev?.deviceId) {
+    params.set('device_id', dev.deviceId)
+    params.set('did', dev.deviceId)
+  }
+  if (dev?.iid) {
+    params.set('iid', dev.iid)
+    params.set('install_id', dev.iid)
+  }
+  const url = `https://api.qishui.com/luna/media-player?${params.toString()}`
+  // 入参照参考实现：media_id / media_type / queue_type / enable_refresh_api / enable_dash
+  const payload = JSON.stringify({
+    media_id: trackId,
+    media_type: 'track',
+    queue_type: '',
+    enable_refresh_api: false,
+    enable_dash: true,
+  })
+  const baseHeaders: Record<string, string> = {
+    'User-Agent': profile.userAgent,
+    'Content-Type': 'application/json',
+  }
+  if (cookie) baseHeaders.Cookie = cookie
+
+  let signedHeaders: Record<string, string>
+  try {
+    signedHeaders = await signer.sign({ url, method: 'POST', body: payload, headers: baseHeaders })
+  } catch (e: any) {
+    console.warn(`[汽水解密] media-player 签名失败：${e?.message || e}`)
+    return ''
+  }
+
+  try {
+    const resp = await request<any>(url, {
+      method: 'post',
+      headers: { ...baseHeaders, ...signedHeaders },
+      body: payload,
+      timeout: 15000,
+    })
+    const bodyAny: any = resp.body
+    let parsed: any = null
+    if (bodyAny && typeof bodyAny === 'object' && !Buffer.isBuffer(bodyAny)) parsed = bodyAny
+    else {
+      const raw = Buffer.isBuffer(bodyAny) ? bodyAny.toString('utf-8') : String(bodyAny || '')
+      if (raw.trim().startsWith('{')) {
+        try { parsed = JSON.parse(raw) } catch { parsed = null }
+      }
+    }
+    if (!parsed) {
+      console.warn(`[汽水解密] media-player 返回非对象（HTTP ${String(resp.statusCode)}）`)
+      return ''
+    }
+    const key = extractSodaKey(parsed)
+    const topKeys = Object.keys(parsed).slice(0, 12).join(',')
+    console.log(`[汽水解密] media-player 探测：顶层键=${topKeys}，密钥=${key ? '✓ 捕获成功' : '✗ 无'}`)
+    return key
+  } catch (e: any) {
+    console.warn(`[汽水解密] media-player 请求失败：${e?.message || e}`)
+    return ''
+  }
+}
+
+/**
  * 走签名器取「受限曲整曲」。
  *
  * 这条路只有签名器在线时才会被调用：签名器（Windows 侧官方客户端）负责生成
@@ -386,7 +474,10 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
 
   // [汽水解密] 版权曲直链是 CENC 加密流，密钥随 play_auth.spade_a 下发；扒出来登记，
   // 下载时就能就地解密成明文，否则浏览器解不开会被隔离（见 fileCache.ts）。
-  const hexKey = extractSodaKey(parsed)
+  let hexKey = extractSodaKey(parsed)
+  // track_v2 实测从不下发 play_auth（见 tryMediaPlayerKey 的注释），
+  // 抓不到就换真正下发播放地址的 media-player 端点再试一次。
+  if (!hexKey) hexKey = await tryMediaPlayerKey(trackId, cookie)
   if (hexKey) registerSodaKey(trackId, hexKey)
 
   // 签名 ≠ 有版权：受限曲照样只给 30/60 秒，这里必须拦住，否则播放器会播到一半静音
