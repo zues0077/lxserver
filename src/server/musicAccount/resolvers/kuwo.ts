@@ -128,6 +128,9 @@ async function probe(rid: string, br: string, cookie: string): Promise<{ br: str
     const data = typeof resp?.body === 'object' ? (resp?.body as any)?.data : null
     const url = String(data?.url || '')
     if (!url) return null
+    // mobi 对「查无此歌 / 无权限」有时不返空，而是把 Python 的 None 原样序列化成字符串 "None"。
+    // 不校验的话它会被当成取链成功，前端拿 "None" 当 src，播不出来还查不到原因。
+    if (!/^https?:\/\//i.test(url)) return null
     return { br, url, bitrate: Number(data?.bitrate), format: String(data?.format || '') }
   } catch {
     return null

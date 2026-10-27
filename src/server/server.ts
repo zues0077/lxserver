@@ -8175,11 +8175,16 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               throw err
             }
 
-            // 有 result 却没有地址（平台账号通道偶发：上游返回 200 但字段是空的）
-            // 以前会照常返回 200 + url:null，前端只能当成「服务器未返回播放链接」，
-            // 等于白白跑完一次解析、结论还进不了失败缓存。这里按失败处理。
-            if (!String(result?.url || '').trim()) {
-              const errMsg = '音源未返回播放地址（上游返回为空）'
+            // 有 result 却没有可用地址。
+            // 两种情况都实测出现过：① 上游返回 200 但字段为空（url:null）；
+            // ② 酷我账号通道把上游的 Python None 原样当字符串 "None" 返回来，
+            //    以前会被当成「取链成功」返回给前端，前端拿 "None" 当 src，播放必然失败。
+            const resolvedUrl = String(result?.url || '').trim()
+            const urlUsable = !!resolvedUrl && (/^https?:\/\//i.test(resolvedUrl) || resolvedUrl.startsWith('/'))
+            if (!urlUsable) {
+              const errMsg = resolvedUrl
+                ? `音源返回的地址不可用（${resolvedUrl.slice(0, 40)}）`
+                : '音源未返回播放地址（上游返回为空）'
               const err: any = new Error(errMsg)
               err.attempts = attempts
               rememberMusicUrlFailure(failKey, errMsg, attempts)
