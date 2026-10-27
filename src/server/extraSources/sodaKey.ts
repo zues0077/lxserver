@@ -6,8 +6,18 @@
  * 那些有副作用的网络与配置依赖，没法在测试里用。
  *
  * 背景（完整推导见 `utils/sodaDecrypt.ts` 头部）：
- * 汽水正式版权曲下发的是 CENC 加密 MP4，其 AES-128 密钥随取链响应以
- * `play_auth` → `spade_a`（Base64）下发。我们作为取链客户端本来就收得到，只是以前没用它。
+ * 汽水正式版权曲下发的是 CENC 加密 MP4，其 AES-128 密钥按参考实现应随取链响应以
+ * `play_auth` → `spade_a`（Base64）下发。
+ *
+ * ⚠️ 2026-10-28 在 246 的实测结论（重要，别重复试错）：
+ * 在「汽水账号已登录且 VIP + 签名器在线 + 能取到 lossless 902k 整曲」的条件下，
+ * 把两个候选端点都把**响应里出现过的全部键名**打出来核对过：
+ *   - `/luna/pc/track_v2`：121 个字段，无 play_auth / 无 spade_a / 无任何凭证类字段；
+ *   - `/luna/media-player`：12 个字段（player_infos / url_player_info / video_model /
+ *     video_model_type / audio_effects / intelligent …），同样一个凭证字段都没有。
+ * 即**平台根本不下发密钥**，不是字段改名、也不是我们解析器的问题（解析器有 9 个单测兜底）。
+ * 所以目前 `extractSodaKey` 恒返回空串，解密链路（`fileCache` 里的解密分支）跑不到；
+ * 一旦哪天平台又开始下发，`downloadAndCache`/`checkCache` 那套是现成可用的，别删。
  */
 
 import { resolveAudioKey } from '../utils/sodaDecrypt'
@@ -49,32 +59,6 @@ function findDeep(obj: any, names: string[], depth = 0): any {
  * 另一个 play_auth 分支」三种情况，表现为「明明是 CENC 加密流却捕获不到密钥」，
  * 于是继续命中旧的 DRM 拦截 —— 新增的解密链路一行都跑不到。246 实测复现过，别再改回去。
  */
-/**
- * 收集响应里出现过的**全部键名**（扁平去重，只取名字不取值，避免泄露凭证），
- * 并挑出形似凭证/密钥的候选（auth / key / spade / drm / licen / secret / token）。
- *
- * 用途：当 `extractSodaKey` 抓不到密钥时，得能回答「到底是平台没下发，还是字段被改名了、
- * 而我们还在按旧名找」。246 实测 track_v2 / media-player 都拿不到密钥，靠这个把证据打全。
- */
-export function describeKeyCandidates(parsed: any): string {
-  const names = new Set<string>()
-  const walk = (obj: any, depth = 0): void => {
-    if (!obj || typeof obj !== 'object' || depth > 10) return
-    if (Array.isArray(obj)) {
-      for (const item of obj) walk(item, depth + 1)
-      return
-    }
-    for (const k of Object.keys(obj)) {
-      names.add(k)
-      walk(obj[k], depth + 1)
-    }
-  }
-  walk(parsed)
-  const all = Array.from(names)
-  const suspicious = all.filter(n => /auth|key|spade|drm|licen|secret|token|pssh|kid/i.test(n))
-  return `字段总数=${all.length}；疑似凭证字段=[${suspicious.slice(0, 20).join(', ')}]；全部字段=[${all.slice(0, 60).join(', ')}]`
-}
-
 export function extractSodaKey(parsed: any): string {
   const auth = findDeep(parsed, ['play_auth', 'playAuth'])
   const candidates: any[] = []
@@ -97,8 +81,7 @@ export function extractSodaKey(parsed: any): string {
   // 否则线上只剩一句「未拿到密钥」，没法继续往下定位。
   const topKeys = parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 12).join(',') : '(非对象)'
   console.warn(
-    `[汽水解密] 未捕获到密钥（play_auth存在=${auth !== undefined}, 找到同名字段=${sawCandidate}, 顶层键=${topKeys}）\n` +
-    `[汽水解密] ${describeKeyCandidates(parsed)}`
+    `[汽水解密] 未捕获到密钥（play_auth存在=${auth !== undefined}, 找到同名字段=${sawCandidate}, 顶层键=${topKeys}）`
   )
   return ''
 }
