@@ -6398,13 +6398,24 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           const verified = verifyUserAuth(req)
           if (verified) lyricUsername = verified
         }
-        const localLyricResult = fileCache.checkLyricCache({
+        // [Fix] 汽水本地曲：前端给的 id 带 "soda_" 前缀（如 local + soda_7676..._d119c815），
+        // 而缓存索引里存的是剥掉前缀的原生 ID，直接查必然 miss → 白跑一次网络再报错。
+        const buildLyricSongInfo = (smid: string) => ({
           source,
-          songmid,
-          id: urlObj.searchParams.get('songId') || urlObj.searchParams.get('id') || songmid,
+          songmid: smid,
+          id: urlObj.searchParams.get('songId') || urlObj.searchParams.get('id') || smid,
           name: urlObj.searchParams.get('name') || '',
           singer: urlObj.searchParams.get('singer') || '',
-        }, lyricUsername)
+        })
+        const checkLocalLyric = (smid: string) => {
+          const hit = fileCache.checkLyricCache(buildLyricSongInfo(smid), lyricUsername)
+          if (hit.exists) return hit
+          const stripped = smid.replace(/^soda_/i, '')
+          return stripped !== smid
+            ? fileCache.checkLyricCache(buildLyricSongInfo(stripped), lyricUsername)
+            : hit
+        }
+        const localLyricResult = checkLocalLyric(songmid)
 
         if (localLyricResult.exists && localLyricResult.content) {
           console.log(`[歌词服务] 命中本地 .lrc 缓存: ${source}_${songmid}`)
@@ -6415,7 +6426,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
         try {
           if (!musicSdk[source]) {
-            throw new Error('Source not supported')
+            // [Fix] 本地音乐（local）、B站兜底（bili）、汽水（soda）等来源没有内置在线歌词接口。
+            // 本地 .lrc 已在上面查过，未命中就返回空歌词让前端显示「暂无歌词」——
+            // 这是设计如此，不是故障，不该按 ERROR 打印（旧版会刷 "Source not supported"）。
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            res.end(JSON.stringify({ lyric: '', tlyric: '', rlyric: '', klyric: '', lxlyric: '', _noOnlineLyric: true }))
+            return
           }
 
           // console.log('[歌词服务] 正在从音源获取歌词:', source, songmid)
@@ -6448,13 +6464,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           console.error('[歌词服务] 获取歌词失败:', source, songmid, err.message || err)
 
           // [Fallback] 网络请求失败时，再次尝试本地 .lrc 文件（防止 Step2 miss 但物理文件存在的情况）
-          const fallbackResult = fileCache.checkLyricCache({
-            source,
-            songmid,
-            id: urlObj.searchParams.get('songId') || urlObj.searchParams.get('id') || songmid,
-            name: urlObj.searchParams.get('name') || '',
-            singer: urlObj.searchParams.get('singer') || '',
-          }, lyricUsername)
+          const fallbackResult = checkLocalLyric(songmid)
           if (fallbackResult.exists && fallbackResult.content) {
             console.log(`[歌词服务] 网络获取失败，回退到本地 .lrc: ${source}_${songmid}`)
             res.writeHead(200, { 'Content-Type': 'application/json' })
