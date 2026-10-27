@@ -25,7 +25,8 @@ import { request } from '../musicAccount/http'
 import * as store from '../musicAccount/store'
 import * as pending from './pending'
 import * as signer from './signer'
-import { registerSodaKey, sodaTrackIdOf, resolveAudioKey } from '../utils/sodaDecrypt'
+import { registerSodaKey, sodaTrackIdOf } from '../utils/sodaDecrypt'
+import { extractSodaKey } from './sodaKey'
 
 const SEARCH_UA = 'com.luna.music/100198030 (Linux; U; Android 15; zh_CN_#Hans; ABR-AL80; Build/V417IR;tt-ok/3.12.13.19)'
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36'
@@ -417,71 +418,6 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
 function toNumber(value: any): number {
   const n = Number(value)
   return Number.isFinite(n) ? n : 0
-}
-
-/**
- * 从取链响应里取出汽水版权曲的解密密钥。
- *
- * 关键事实（`utils/sodaDecrypt.ts` 头部有完整推导）：汽水正式版权曲下发的 CENC 加密流，
- * 其 AES-128 密钥随响应以 `play_auth` → `spade_a`（Base64）直接下发 —— 我们作为取链客户端
- * 本来就收得到，只是以前没用它。这里把它从响应里扒出来，推导成 32 位十六进制密钥。
- * `play_auth`/`spade_a` 的大小写、嵌套层级（可能在对象或数组里）都不固定，做容错遍历。
- */
-/**
- * 递归查找第一个「键名匹配（大小写不敏感）」的值。
- * 先扫自身层，再往下钻；数组也遍历。取链响应的嵌套层级不固定，必须这样搜。
- */
-function findDeep(obj: any, names: string[], depth = 0): any {
-  if (!obj || typeof obj !== 'object' || depth > 12) return undefined
-  if (Array.isArray(obj)) {
-    for (const item of obj) {
-      const found = findDeep(item, names, depth + 1)
-      if (found !== undefined) return found
-    }
-    return undefined
-  }
-  for (const name of names) {
-    if (Object.prototype.hasOwnProperty.call(obj, name) && obj[name] !== undefined && obj[name] !== null) return obj[name]
-    for (const k of Object.keys(obj)) {
-      if (k.toLowerCase() === name.toLowerCase() && obj[k] !== undefined && obj[k] !== null) return obj[k]
-    }
-  }
-  for (const k of Object.keys(obj)) {
-    const found = findDeep(obj[k], names, depth + 1)
-    if (found !== undefined) return found
-  }
-  return undefined
-}
-
-function extractSodaKey(parsed: any): string {
-  // 参考实现（qishuiClient.js:339-340）的口径：先在 play_auth 里找，找不到再在**整个响应**里找。
-  // 早期版本只在 play_auth 的直接子键里找 spade_a，漏掉了「spade_a 在响应顶层 / 更深层级 /
-  // 另一个 play_auth 分支」的情况 —— 表现为「明明是 CENC 加密流却捕获不到密钥」，
-  // 于是继续命中旧的 DRM 拦截，解密链路一行都跑不到。这里按参考口径重写。
-  const auth = findDeep(parsed, ['play_auth', 'playAuth'])
-  const candidates: any[] = []
-  if (auth !== undefined) candidates.push(findDeep(auth, ['spade_a', 'spadeA']))
-  candidates.push(findDeep(parsed, ['spade_a', 'spadeA']))
-
-  let sawCandidate = false
-  for (const c of candidates) {
-    const spade = typeof c === 'string' ? c.trim() : ''
-    if (!spade) continue
-    sawCandidate = true
-    try {
-      return resolveAudioKey({ spade_a: spade }).toLowerCase()
-    } catch {
-      // 这个候选推导失败（可能是别处的同名字段），换下一个
-    }
-  }
-
-  // 抓不到就留证据：区分「响应里根本没有 spade_a」和「有但推导失败」，
-  // 否则线上只能看到一句「未拿到密钥」，没法继续往下定位。
-  const topKeys = parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 12).join(',') : '(非对象)'
-  console.warn(
-    `[汽水解密] 未捕获到密钥（play_auth存在=${auth !== undefined}, 找到同名字段=${sawCandidate}, 顶层键=${topKeys}）`
-  )
-  return ''
 }
 
 /**
