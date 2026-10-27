@@ -980,6 +980,41 @@ function getUserAuthHeaders() {
 }
 window.getUserAuthHeaders = getUserAuthHeaders;
 
+/**
+ * 接口返回 401 时的自愈：用本地保存的密码重新登录一次，拿新 token。
+ * 服务端 1.5.38 起会话已落盘（重启不再失效），但旧版本或手动清空 data/sessions.json 时
+ * 仍可能出现「页面看着已登录、其实 token 已死」——那种状态下缓存查不到、缓存文件加载 401、
+ * 取链也 401，前端会一路「智能换源 + 自动跳歌」。这里恢复一次，避免用户只能靠退出重登解决。
+ */
+let authRecoverPromise = null;
+let authRecoverAt = 0;
+async function recoverAuthOn401() {
+    // 10 秒内只尝试一次，避免 401 风暴时把登录接口打爆
+    if (Date.now() - authRecoverAt < 10000) return false;
+    if (authRecoverPromise) return authRecoverPromise;
+    authRecoverAt = Date.now();
+    authRecoverPromise = (async () => {
+        try {
+            if (typeof ensureUserAuthToken !== 'function') return false;
+            const ok = await ensureUserAuthToken({ force: true });
+            if (ok) {
+                console.log('[Auth] 检测到接口 401，已用本地保存的密码重新登录并刷新 token');
+                if (window.showToast) window.showToast('登录状态已过期，已自动重新登录', 'info');
+            } else {
+                console.warn('[Auth] 401 后自动重新登录失败（本地没有可用的用户名/密码）');
+                if (window.showToast) window.showToast('登录状态已失效，请重新登录', 'error');
+            }
+            return ok;
+        } catch (e) {
+            console.warn('[Auth] 401 自愈异常:', e);
+            return false;
+        } finally {
+            authRecoverPromise = null;
+        }
+    })();
+    return authRecoverPromise;
+}
+
 // 页面关闭/刷新时告知服务端「小爱当前这首放完即止」：
 // 没有页面就没有人推下一首，音箱播完重拉同一 URL 会被服务端整首重发、无限单曲循环
 // （2026-10-24 实测坐实，与 stream.ts 的按住期满 410 双保险）。
@@ -5818,16 +5853,27 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, op
             excludeApiSources = currentRecoveryState.triedApiSourcesByPlatform?.[currentPlatform] || [];
         }
 
-        const res = await fetch(`${API_BASE}/url`, {
+        const urlRequestBody = JSON.stringify({
+            songInfo: song,
+            quality,
+            enableAutoSwitchApiSource: settings.enableAutoSwitchApiSource !== false,
+            excludeApiSources: Array.isArray(excludeApiSources) ? excludeApiSources : []
+        });
+        let res = await fetch(`${API_BASE}/url`, {
             method: 'POST',
             headers,
-            body: JSON.stringify({
-                songInfo: song,
-                quality,
-                enableAutoSwitchApiSource: settings.enableAutoSwitchApiSource !== false,
-                excludeApiSources: Array.isArray(excludeApiSources) ? excludeApiSources : []
-            })
+            body: urlRequestBody
         });
+        // 401 = 会话 token 失效（服务端重启发过 token 的旧版本尤其常见）。
+        // 不复用旧头，重新取一次鉴权头再试，避免「换源全部失败→自动跳歌」的连锁反应。
+        if (res.status === 401 && await recoverAuthOn401()) {
+            Object.assign(headers, getUserAuthHeaders());
+            res = await fetch(`${API_BASE}/url`, {
+                method: 'POST',
+                headers,
+                body: urlRequestBody
+            });
+        }
 
         if (!res.ok) {
             let errorMsg = `HTTP ${res.status}`;
@@ -5974,7 +6020,7 @@ async function prefetchNextSong(startFromIndex = null, depth = 0) {
 }
 
 // --- Server Cache Helpers ---
-async function checkServerCache(song, quality, exactQuality = false) {
+async function checkServerCache(song, quality, exactQuality = false, retried = false) {
     try {
         const username = currentListData?.username || '';
         const params = new URLSearchParams({
@@ -5990,6 +6036,10 @@ async function checkServerCache(song, quality, exactQuality = false) {
         Object.assign(headers, getUserAuthHeaders());
 
         const res = await fetch(`/api/music/cache/check?${params}`, { headers });
+        // 401 = token 已失效：不能让调用方误判成「没有缓存」，先自愈再重查一次
+        if (res.status === 401 && !retried) {
+            if (await recoverAuthOn401()) return checkServerCache(song, quality, exactQuality, true);
+        }
         if (res.ok) {
             const data = await res.json();
             return data; // 返回完整数据对象，包含 exists, isCollision, url 等
@@ -6559,6 +6609,14 @@ function playFromView(index) {
 }
 window.playFromView = playFromView;
 
+/**
+ * 连续「整首歌找不到任何可播音源」的计数。
+ * 音源全盘失效时（例如服务端会话失效导致所有接口 401）原来会无限「换源→失败→跳下一首」，
+ * 现改为累计到 MAX_CONSECUTIVE_UNPLAYABLE 就停下，交给用户处理。
+ */
+const MAX_CONSECUTIVE_UNPLAYABLE = 3;
+let consecutiveUnplayableCount = 0;
+
 async function runRecoveryFlow(error, savedResumeTime, state = currentRecoveryState) {
     if (!state) return;
 
@@ -6740,6 +6798,19 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
             error.message.includes('未找到支持') ||
             error.message.includes('not supported')
         );
+        // [护栏] 整盘音源都失效时（例如服务端登录态失效导致全部 401），
+        // 原来会「换源失败 → 自动跳下一首 → 再失败 → …」无限循环，RecoveryToast 刷屏把界面顶死，
+        // 用户连菜单都点不动。这里统计连续失败数，超过阈值就停下并给出可操作的提示。
+        consecutiveUnplayableCount++;
+        if (consecutiveUnplayableCount >= MAX_CONSECUTIVE_UNPLAYABLE) {
+            console.warn(`[Recovery] 连续 ${consecutiveUnplayableCount} 首无可用音源，停止自动跳过`);
+            RecoveryToast.error(`已连续 ${consecutiveUnplayableCount} 首没有可用音源，已停止自动跳过`);
+            showToast('连续多首无法播放，已停止自动跳过。请检查音源是否正常，或重新登录后再试', 'error');
+            setPlayerStatus('已暂停：连续多首没有可用音源', null, true);
+            updatePlayButton(false);
+            consecutiveUnplayableCount = 0;
+            return;
+        }
         RecoveryToast.error(`无法播放${isPlatformNotSupported ? '（不支持该平台）' : ''}，即将自动跳过`);
         setPlayerStatus('播放失败，即将跳过', null, true);
         if (window._autoSkipTimer) clearTimeout(window._autoSkipTimer);
@@ -7831,6 +7902,8 @@ audio.addEventListener('play', () => {
 audio.addEventListener('playing', () => {
     // [Fix] 'playing' 事件表示音频真正开始震动输出，此时同步最准确
     setPlayerStatus('', true); // 恢复正常播放状态
+    // 真的出声了，重置「连续不可播放」计数
+    consecutiveUnplayableCount = 0;
     if ('mediaSession' in navigator) {
         updatePositionState(); // 立即同步
         if (currentPlayingSong) {

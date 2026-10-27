@@ -25,6 +25,7 @@ import formidable from 'formidable'
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
 import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot } from './userApi'
+import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation } from './sourceGuard'
 import { getSourceProbeStatus } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
@@ -1029,6 +1030,29 @@ interface UserTokenConfig {
 const userSessions = new Map<string, { username: string; createdAt: number }>()
 const USER_SESSION_TTL = 7 * 24 * 60 * 60 * 1000 // 7天
 
+/**
+ * 会话落盘（防抖 800ms）。
+ * 以前这里是纯内存 Map，进程/容器一重启就全部失效，而前端手上的旧 token 不会自动换新，
+ * 结果所有鉴权接口 401：缓存查不到、缓存文件加载失败、取链失败 → 前端一路「智能换源」自动跳歌。
+ * 现在落盘到 data/sessions.json，重启后原 token 继续有效。
+ */
+let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null
+const scheduleSessionSave = () => {
+  if (sessionSaveTimer) return
+  sessionSaveTimer = setTimeout(() => {
+    sessionSaveTimer = null
+    persistSessions(userSessions)
+  }, 800)
+  sessionSaveTimer.unref?.()
+}
+const addUserSession = (token: string, username: string) => {
+  userSessions.set(token, { username, createdAt: Date.now() })
+  scheduleSessionSave()
+}
+const removeUserSession = (token: string) => {
+  if (userSessions.delete(token)) scheduleSessionSave()
+}
+
 /** 持久化 Token 快速查找缓存：token → username */
 const persistentTokens = new Map<string, string>()
 
@@ -1233,9 +1257,14 @@ const scheduleCacheAuditOnStartup = () => {
 setInterval(() => {
   const now = Date.now()
   // 清理内存 Session
+  let expiredSessionCount = 0
   for (const [token, session] of userSessions) {
-    if (now - session.createdAt > USER_SESSION_TTL) userSessions.delete(token)
+    if (now - session.createdAt > USER_SESSION_TTL) {
+      userSessions.delete(token)
+      expiredSessionCount++
+    }
   }
+  if (expiredSessionCount > 0) scheduleSessionSave()
   // 清理加载到内存的过期 API Token（直接走内存 meta，不读磁盘）
   for (const [token, meta] of persistentTokenMeta) {
     if (meta.expiresAt && meta.expiresAt <= now) {
@@ -3071,7 +3100,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const user = global.lx.config.users.find((u: any) => u.name === username && u.password === password)
             if (user) {
               const token = generateSessionId()
-              userSessions.set(token, { username, createdAt: Date.now() })
+              addUserSession(token, username)
               loginLog.info(`User token issued: ${username} from ${ip}`)
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ success: true, token, username }))
@@ -3091,7 +3120,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       // [新增] 用户登出 - 注销 Token
       if (pathname === '/api/user/logout' && req.method === 'POST') {
         const token = req.headers['x-user-token'] as string
-        if (token) userSessions.delete(token)
+        if (token) removeUserSession(token)
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true }))
         return
@@ -6889,7 +6918,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               playerSessions.set(sessionId, { createdAt: Date.now(), user: matchedUser.name })
               loginLog.info(`Player login success (${matchedUser.name}) from ${ip}`)
               const userToken = generateSessionId()
-              userSessions.set(userToken, { username: matchedUser.name, createdAt: Date.now() })
+              addUserSession(userToken, matchedUser.name)
               res.writeHead(200, {
                 'Content-Type': 'application/json',
                 'Set-Cookie': buildSessionCookieHeader(req, sessionId, SESSION_TTL / 1000)
@@ -7881,7 +7910,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           }
 
           try {
-            let { songInfo, quality, enableAutoSwitchApiSource, excludeApiSources } = JSON.parse(body)
+            let { songInfo, quality, enableAutoSwitchApiSource, excludeApiSources, noCache } = JSON.parse(body)
             songInfo = normalizeSongInfo(songInfo)
             // console.log('[歌曲播放] 歌曲信息:', JSON.stringify(songInfo, null, 2))
             if (!songInfo || !songInfo.source) {
@@ -7890,9 +7919,41 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const source = songInfo.source
             let result: any
 
+            // 本地缓存优先。
+            // 这里原来完全没有缓存判定，已缓存的曲子也要把 30+ 个自定义源串行问一遍
+            // （实测单曲耗时 45~90 秒，HYWmusic 这类源单个就要 20 秒超时），
+            // 前端一旦没命中缓存就会「已缓存的歌也一直在全网找源」。
+            // 判定口径与前端 checkServerCache 保持一致：允许音质回退，仅跳过命名冲突。
+            if (!noCache) {
+              try {
+                const cached: any = fileCache.checkCache({ ...songInfo, quality: quality || '' }, verifiedUsername)
+                if (cached && cached.exists && !cached.isCollision && cached.url) {
+                  const token = req.headers['x-user-token'] as string | undefined
+                  // <audio>/下载都走不了自定义请求头，鉴权 token 只能挂在 query 上
+                  if (token && !String(cached.url).includes('token=')) {
+                    cached.url += `&token=${encodeURIComponent(token)}`
+                  }
+                  result = {
+                    url: cached.url,
+                    type: 'local',
+                    sourceName: '本地缓存',
+                    sourceId: 'local-cache',
+                    quality: cached.quality || quality,
+                    folder: cached.folder,
+                    attempts: [{ name: '本地缓存', status: 'success' }],
+                  }
+                  void pushProgress({ name: '本地缓存', status: 'success' })
+                  console.log(`[歌曲播放] 命中本地缓存，直接返回: ${songInfo.name} (${cached.quality})`)
+                }
+              } catch (e: any) {
+                console.warn(`[歌曲播放] 缓存查询异常（忽略，继续取链）: ${e?.message || e}`)
+              }
+            }
+
             // 额外音源（Bilibili / 汽水）不依赖 musicSdk、也不依赖自定义源：
             // 搜索由 extraSources 提供，取流同样自带（B站匿名可用，配了 Cookie 才有大会员音质）。
-            if (extraSources.isExtraSource(source)) {
+            // 命中本地缓存时跳过（否则会把缓存结果覆盖成一次全新的远端取链）。
+            if (!result && extraSources.isExtraSource(source)) {
               try {
                 const extra = await extraSources.getMusicUrl(source, songInfo, quality || '128k', verifiedUsername)
                 result = {
@@ -11069,6 +11130,23 @@ export const startServer = async (port: number, ip: string) => {
     }
   } catch (err: any) {
     console.warn('[缓存] 恢复缓存设置失败:', err.message)
+  }
+
+  // 恢复登录会话：容器重启后用户不必重新登录（否则前端会拿着失效 token 一路 401，
+  // 表现为「已缓存的歌也播不了 + 一直在智能换源 + 菜单点不动」）
+  try {
+    const restored = loadPersistedSessions(USER_SESSION_TTL)
+    let count = 0
+    for (const [token, session] of restored) {
+      userSessions.set(token, session)
+      count++
+    }
+    if (count > 0) {
+      console.log(`[会话] 已恢复 ${count} 个登录会话（重启不再踢人下线）`)
+      startupLog.info(`Restored ${count} user session(s) from disk`)
+    }
+  } catch (err: any) {
+    console.warn('[会话] 恢复登录会话失败:', err?.message || err)
   }
 
   serverDownloadQueue.initialize(async task => {
