@@ -9150,6 +9150,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'musicAccount.enabled': global.lx.config['musicAccount.enabled'] ?? false,
             'musicAccount.priority': global.lx.config['musicAccount.priority'] !== false,
             'musicAccount.timeoutMs': global.lx.config['musicAccount.timeoutMs'] ?? 15000,
+            'musicAccount.kglite.autoClaim': global.lx.config['musicAccount.kglite.autoClaim'] !== false,
+            'musicAccount.kglite.startHour': global.lx.config['musicAccount.kglite.startHour'] ?? 6,
+            'musicAccount.kglite.gapSeconds': global.lx.config['musicAccount.kglite.gapSeconds'] ?? 60,
+            'musicAccount.kglite.minRemainHours': global.lx.config['musicAccount.kglite.minRemainHours'] ?? 24,
             subsonicPortConflict: global.lx.subsonicPortConflict || null,
             configFilePath: global.lx.configPath || process.env.CONFIG_PATH || path.join(global.lx.dataPath, 'config.js'),
           }
@@ -9372,6 +9376,27 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 const tm = Number(newConfig['musicAccount.timeoutMs'])
                 global.lx.config['musicAccount.timeoutMs'] = Number.isFinite(tm) ? Math.min(60000, Math.max(3000, Math.floor(tm))) : 15000
               }
+              // 酷狗概念版自动领 VIP：开关 / 开始时间 / 账号间隔 / 补领阈值
+              // 这几个改完要立刻重排定时器，否则用户改了「6 点」还得重启进程才生效
+              let kgliteScheduleDirty = false
+              if (newConfig['musicAccount.kglite.autoClaim'] !== undefined) {
+                global.lx.config['musicAccount.kglite.autoClaim'] = !!newConfig['musicAccount.kglite.autoClaim']
+                kgliteScheduleDirty = true
+              }
+              if (newConfig['musicAccount.kglite.startHour'] !== undefined) {
+                const h = Number(newConfig['musicAccount.kglite.startHour'])
+                global.lx.config['musicAccount.kglite.startHour'] = Number.isFinite(h) ? Math.min(23, Math.max(0, Math.floor(h))) : 6
+                kgliteScheduleDirty = true
+              }
+              if (newConfig['musicAccount.kglite.gapSeconds'] !== undefined) {
+                const g = Number(newConfig['musicAccount.kglite.gapSeconds'])
+                global.lx.config['musicAccount.kglite.gapSeconds'] = Number.isFinite(g) ? Math.min(600, Math.max(0, Math.floor(g))) : 60
+              }
+              if (newConfig['musicAccount.kglite.minRemainHours'] !== undefined) {
+                const m = Number(newConfig['musicAccount.kglite.minRemainHours'])
+                global.lx.config['musicAccount.kglite.minRemainHours'] = Number.isFinite(m) ? Math.min(720, Math.max(1, Math.floor(m))) : 24
+              }
+              if (kgliteScheduleDirty) musicAccount.rescheduleKugouLiteVipAutoClaim()
 
               if (newConfig['configBackup.enable'] !== undefined) global.lx.config['configBackup.enable'] = !!newConfig['configBackup.enable']
               if (newConfig['configBackup.retentionDays'] !== undefined) {
@@ -9831,13 +9856,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
         void readBody(req).then(async body => {
           try {
-            const { platform, cookie } = JSON.parse(body)
+            const parsed = JSON.parse(body)
+            const { platform, cookie, itemId, label, primary, append } = parsed
             // 记一条「请求到达」日志：用户反馈「同步了但后台没有」时，
             // 先看日志区分「插件根本没送到」和「送到了但平台/字段不对」
-            console.log(`[平台账号] 收到保存请求：platform=${platform || '(空)'}，${String(cookie || '').length} 字符`)
+            console.log(`[平台账号] 收到保存请求：platform=${platform || '(空)'}，${String(cookie || '').length} 字符`
+              + `${append ? '，追加新账号' : itemId ? `，更新账号 ${itemId}` : ''}`)
             // 用户粘进来的可能是 Cookie 头 / cURL / Netscape 文件 / JSON，
             // 统一在保存时归一化，避免「填了却播不了」
-            const result = musicAccount.saveAccount(String(platform || ''), String(cookie || ''))
+            const result = musicAccount.saveAccount(String(platform || ''), String(cookie || ''), {
+              itemId: itemId ? String(itemId) : undefined,
+              label: label !== undefined ? String(label) : undefined,
+              primary: primary === undefined ? undefined : !!primary,
+              append: !!append,
+            })
             if (!result.success) {
               console.log(`[平台账号] 保存被拒：${result.error || '未知原因'}`)
             }
@@ -9852,7 +9884,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
-      // 删除某平台账号
+      // 删除某平台账号：带 itemId 只删这一个，不带则清空该平台全部账号
       if (pathname === '/api/music/accounts' && req.method === 'DELETE') {
         const auth = req.headers['x-frontend-auth']
         if (auth !== global.lx.config['admin.password']) {
@@ -9862,8 +9894,34 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
         void readBody(req).then(async body => {
           try {
-            const { platform } = JSON.parse(body || '{}')
-            const result = musicAccount.removeAccount(String(platform || ''))
+            const { platform, itemId } = JSON.parse(body || '{}')
+            const result = itemId
+              ? musicAccount.removeAccountItem(String(platform || ''), String(itemId))
+              : musicAccount.removeAccount(String(platform || ''))
+            console.log(`[平台账号] 删除 ${platform}${itemId ? ` 的账号 ${itemId}` : ' 全部账号'}：${result.success ? '成功' : result.error}`)
+            res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(result))
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // 设为主账号：取链只走主账号，其余账号只参与领 VIP
+      if (pathname === '/api/music/accounts/primary' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { platform, itemId } = JSON.parse(body || '{}')
+            const result = musicAccount.setPrimaryAccount(String(platform || ''), String(itemId || ''))
+            if (result.success) console.log(`[平台账号] ${platform} 主账号已切换为 ${itemId}`)
             res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(result))
           } catch (e: any) {
@@ -9884,8 +9942,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
         void readBody(req).then(async body => {
           try {
-            const { platform } = JSON.parse(body)
-            const info = await musicAccount.verifyAccount(String(platform || ''))
+            const { platform, itemId } = JSON.parse(body)
+            const info = await musicAccount.verifyAccount(String(platform || ''), itemId ? String(itemId) : undefined)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: true, data: info }))
           } catch (e: any) {
@@ -10010,6 +10068,23 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             if (typeof patch.timeoutMs === 'number' && patch.timeoutMs >= 3000) {
               global.lx.config['musicAccount.timeoutMs'] = patch.timeoutMs
             }
+            // 酷狗概念版自动领 VIP：改完立刻重排定时器（否则用户改了开始时间得重启才生效）
+            let kgliteDirty = false
+            if (typeof patch.kgliteAutoClaim === 'boolean') {
+              global.lx.config['musicAccount.kglite.autoClaim'] = patch.kgliteAutoClaim
+              kgliteDirty = true
+            }
+            if (typeof patch.kgliteStartHour === 'number' && Number.isFinite(patch.kgliteStartHour)) {
+              global.lx.config['musicAccount.kglite.startHour'] = Math.min(23, Math.max(0, Math.floor(patch.kgliteStartHour)))
+              kgliteDirty = true
+            }
+            if (typeof patch.kgliteGapSeconds === 'number' && Number.isFinite(patch.kgliteGapSeconds)) {
+              global.lx.config['musicAccount.kglite.gapSeconds'] = Math.min(600, Math.max(0, Math.floor(patch.kgliteGapSeconds)))
+            }
+            if (typeof patch.kgliteMinRemainHours === 'number' && Number.isFinite(patch.kgliteMinRemainHours)) {
+              global.lx.config['musicAccount.kglite.minRemainHours'] = Math.min(720, Math.max(1, Math.floor(patch.kgliteMinRemainHours)))
+            }
+            if (kgliteDirty) musicAccount.rescheduleKugouLiteVipAutoClaim()
             if (typeof global.lx?.saveConfig === 'function') global.lx.saveConfig()
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: true, data: {
@@ -10017,6 +10092,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               priority: musicAccount.isPriority(),
               timeoutMs: global.lx.config['musicAccount.timeoutMs'],
               allowedUsers: getAllowedUsers(),
+              kgliteAutoClaim: global.lx.config['musicAccount.kglite.autoClaim'] !== false,
+              kgliteStartHour: global.lx.config['musicAccount.kglite.startHour'] ?? 6,
+              kgliteGapSeconds: global.lx.config['musicAccount.kglite.gapSeconds'] ?? 60,
+              kgliteMinRemainHours: global.lx.config['musicAccount.kglite.minRemainHours'] ?? 24,
             } }))
           } catch (e: any) {
             res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -10036,10 +10115,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
         void readBody(req).then(async body => {
           try {
-            const { platform, driver } = JSON.parse(body || '{}')
+            const { platform, driver, append } = JSON.parse(body || '{}')
             const payload = await musicAccount.qrLoginStart(
               String(platform || ''),
               driver ? String(driver) : undefined,
+              { append: !!append },
             )
             res.writeHead(payload.ok ? 200 : 400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({
@@ -10108,8 +10188,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
         void readBody(req).then(async body => {
           try {
-            const { platform, mobile } = JSON.parse(body || '{}')
-            const payload = await musicAccount.qrLoginSendSms(String(platform || ''), String(mobile || ''))
+            const { platform, mobile, append } = JSON.parse(body || '{}')
+            const payload = await musicAccount.qrLoginSendSms(String(platform || ''), String(mobile || ''), { append: !!append })
             res.writeHead(payload.ok ? 200 : 400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: payload.ok, data: payload, error: payload.ok ? undefined : payload.message }))
           } catch (e: any) {
@@ -10163,6 +10243,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       }
 
       // 酷狗概念版 VIP：立即领取一次（听歌 + 看广告，通常各 3 小时）
+      // body 三种用法：{itemId} 领指定账号 / {all:true} 给所有账号都领一次（忽略阈值）/ {} 领主账号
       if (pathname === '/api/music/accounts/kglite/claim' && req.method === 'POST') {
         const auth = req.headers['x-frontend-auth']
         if (auth !== global.lx.config['admin.password']) {
@@ -10170,15 +10251,22 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
           return
         }
-        void musicAccount.claimKugouLiteVip()
-          .then(data => {
+        void readBody(req).then(async raw => {
+          let body: any = {}
+          try { body = raw ? JSON.parse(raw) : {} } catch { body = {} }
+          if (body.all) {
+            const round = await musicAccount.runKugouLiteAutoClaim({ force: true })
             res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: true, data }))
-          })
-          .catch((e: any) => {
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
-          })
+            res.end(JSON.stringify({ success: true, data: round }))
+            return
+          }
+          const data = await musicAccount.claimKugouLiteVip(body.itemId ? String(body.itemId) : undefined)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: true, data }))
+        }).catch((e: any) => {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+        })
         return
       }
 

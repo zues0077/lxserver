@@ -272,6 +272,26 @@ declare namespace LX {
     'musicAccount.allowedUsers'?: string[]
 
     /**
+     * 酷狗概念版：是否自动领取每日 VIP（看广告/听歌任务）
+     */
+    'musicAccount.kglite.autoClaim'?: boolean
+
+    /**
+     * 酷狗概念版：自动领取每天的起始小时（0-23，按服务器本地时区）
+     */
+    'musicAccount.kglite.startHour'?: number
+
+    /**
+     * 酷狗概念版：多账号之间领 VIP 的间隔秒数（错峰，降低风控概率）
+     */
+    'musicAccount.kglite.gapSeconds'?: number
+
+    /**
+     * 酷狗概念版：剩余 VIP 低于这个小时数才自动补领（避免把额度攒到几年后）
+     */
+    'musicAccount.kglite.minRemainHours'?: number
+
+    /**
      * 是否启用自定义歌曲目录
      */
     'user.enableCustomMusicDir'?: boolean

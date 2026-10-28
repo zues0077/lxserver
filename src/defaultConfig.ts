@@ -87,6 +87,11 @@ const config: LX.Config = {
   'musicAccount.priority': true, // true=首选自己账号，失败再回落自定义音源；false=自定义音源失败后才试账号
   'musicAccount.timeoutMs': 15000, // 单次账号取链的超时上限(ms)，超时即回落自定义音源
   'musicAccount.allowedUsers': [], // 使用权限名单：允许走账号取链的用户名（游客=_open）；空=所有人可用
+  // 酷狗概念版 VIP 自动领取：多账号轮流做任务，每个账号每天可领 8 次（每次 3 小时）
+  'musicAccount.kglite.autoClaim': true, // 是否开启定时自动领取
+  'musicAccount.kglite.startHour': 6, // 每天从几点开始跑（0-23）；之后每 3 小时一轮，共 8 轮
+  'musicAccount.kglite.gapSeconds': 60, // 同一轮里账号之间的间隔秒数，避免同一时刻打一堆请求
+  'musicAccount.kglite.minRemainHours': 24, // 剩余会员超过这么多小时就跳过该账号（0=总是领，不做跳过判断）
 
   // 访问路径配置
   'admin.path': '/admin', // 后台管理路径

@@ -581,7 +581,11 @@ function claimErrorText(b: any): string {
  * 界面上按钮又很容易被连点，所以在这里统一挡一道。
  */
 const CLAIM_COOLDOWN_MS = 90_000
-let lastClaimAt = 0
+/**
+ * 冷却按账号记（key 用 userid），不能用全局时间戳：
+ * 多账号轮流领时，全局冷却会把第二个号直接挡掉，看起来像「只有主账号能领」。
+ */
+const lastClaimAt = new Map<string, number>()
 
 /**
  * 领概念版 VIP：听歌领一次 + 看广告领一次。
@@ -595,15 +599,16 @@ export async function claimVip(cookie: string): Promise<ClaimVipResult> {
     return { ok: false, gainedHours: 0, steps: [], error: '概念版账号凭据不完整，请先登录' }
   }
 
-  const since = Date.now() - lastClaimAt
-  if (lastClaimAt && since < CLAIM_COOLDOWN_MS) {
+  const claimsKey = extractCreds(cookie).userid || 'default'
+  const since = Date.now() - (lastClaimAt.get(claimsKey) || 0)
+  if (lastClaimAt.has(claimsKey) && since < CLAIM_COOLDOWN_MS) {
     const wait = Math.ceil((CLAIM_COOLDOWN_MS - since) / 1000)
     return {
       ok: false, gainedHours: 0, steps: [],
       error: `刚领过，请等 ${wait} 秒再试（平台对连续领取有频率限制）`,
     }
   }
-  lastClaimAt = Date.now()
+  lastClaimAt.set(claimsKey, Date.now())
 
   const steps: ClaimVipResult['steps'] = []
   let gained = 0

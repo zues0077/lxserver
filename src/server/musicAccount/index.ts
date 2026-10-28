@@ -174,13 +174,17 @@ function probeAccountAfterFailure(id: string): void {
     })
 }
 
-/** 验证某平台账号：先做结构校验，再做（有把握的）在线校验 */
-export async function verifyAccount(id: string): Promise<AccountInfo> {
+/**
+ * 验证某平台账号：先做结构校验，再做（有把握的）在线校验。
+ *
+ * @param itemId 指定具体账号（多账号平台用）；省略时校验主账号
+ */
+export async function verifyAccount(id: string, itemId?: string): Promise<AccountInfo> {
   const resolver = RESOLVERS[id]
   const platform = getPlatform(id)
   if (!resolver || !platform) return { ok: false, message: `不支持的平台：${id}` }
 
-  const cookie = store.getCookie(id)
+  const cookie = itemId ? store.getCookieOf(id, itemId) : store.getCookie(id)
   if (!cookie) return { ok: false, message: '尚未配置 Cookie' }
 
   // 结构校验：Cookie 里必须含该平台的登录字段。
@@ -206,7 +210,8 @@ export async function verifyAccount(id: string): Promise<AccountInfo> {
     info = { ok: false, message: `校验超时或网络异常：${e?.message || e}` }
   }
 
-  if (info.ok && typeof info.isVip === 'boolean') {
+  // 会员缓存只记主账号的：它服务于「取链时判断能不能上无损」，多账号平台的副账号不参与取链
+  if (!itemId && info.ok && typeof info.isVip === 'boolean') {
     vipCache.set(id, { at: Date.now(), isVip: info.isVip })
   }
   store.saveVerifyResult(id, {
@@ -216,7 +221,7 @@ export async function verifyAccount(id: string): Promise<AccountInfo> {
     message: info.message,
     nickname: info.nickname,
     verified: info.verified ?? 'online',
-  })
+  }, itemId)
   return info
 }
 
@@ -253,6 +258,12 @@ export interface SaveAccountResult {
   warnings?: string[]
   /** 被丢弃的条目（多为已过期） */
   dropped?: string[]
+  /** 落库后的账号 id（多账号界面用它定位） */
+  itemId?: string
+  /** 是否新建了账号（false = 覆盖已有账号） */
+  created?: boolean
+  /** 该平台当前账号总数 */
+  total?: number
 }
 
 /**
@@ -261,14 +272,24 @@ export interface SaveAccountResult {
  * 这一步必须放在保存侧而不是取链侧 —— 用户粘错的格式（cURL、Netscape 文件）
  * 也能保存成功，但取链时整串会被当成一个 Cookie，表现为「填了却播不了」，
  * 排查成本极高。保存时就识别并回显，问题当场就能看见。
+ *
+ * 多账号：
+ *   默认行为仍然是「更新主账号」（老界面、浏览器扩展同步都按这个语义走）。
+ *   只有显式传 `append: true`（界面上点「添加账号」）才会追加一个新账号，
+ *   避免用户只是想换个 Cookie，结果列表里多出一堆重复条目。
  */
-export function saveAccount(platform: string, rawCookie: string): SaveAccountResult {
+export function saveAccount(
+  platform: string,
+  rawCookie: string,
+  opts: { itemId?: string; label?: string; primary?: boolean; append?: boolean } = {},
+): SaveAccountResult {
   const p = getPlatform(platform)
   if (!p) return { success: false, error: `不支持的平台：${platform}` }
 
   const text = String(rawCookie ?? '').trim()
   if (!text) {
-    // 空内容视为「清除该平台账号」，保持与原行为一致
+    // 指定了账号 → 只删这一个；否则保持老语义「清空该平台全部账号」
+    if (opts.itemId) return store.removeAccountItem(platform, opts.itemId) as SaveAccountResult
     return store.setCookie(platform, '') as SaveAccountResult
   }
 
@@ -299,7 +320,9 @@ export function saveAccount(platform: string, rawCookie: string): SaveAccountRes
     warnings.push(`已自动丢弃 ${parsed.dropped.length} 个过期 Cookie`)
   }
 
-  const res = store.setCookie(platform, parsed.cookie)
+  const res = opts.append || opts.itemId
+    ? store.addCookie(platform, parsed.cookie, { itemId: opts.itemId, label: opts.label, primary: opts.primary })
+    : store.setCookie(platform, parsed.cookie)
 
   // 留一条可追溯的日志：用户反馈「同步了但后台没有」时，
   // 看日志就能分清「没送到」还是「送到了但平台/字段不对」
@@ -307,6 +330,7 @@ export function saveAccount(platform: string, rawCookie: string): SaveAccountRes
     `[平台账号] 保存 ${platform}：识别为${formatLabel(parsed.format)}，${parsed.count} 个字段`
     + `（${parsed.keys.slice(0, 14).join(', ')}${parsed.keys.length > 14 ? ' …' : ''}），`
     + `${parsed.cookie.length} 字符`
+    + (opts.append || opts.itemId ? `，${(res as any).created === false ? '更新已有账号' : '新增账号'}${opts.label ? `「${opts.label}」` : ''}（共 ${(res as any).total ?? '?'} 个）` : '')
     + (warnings.length ? `；提示：${warnings.join('；')}` : ''),
   )
 
@@ -354,7 +378,7 @@ export function getAccountHealth(): HealthSummary {
 export async function runAccountHealthCheck(opts: { force?: boolean } = {}): Promise<
   HealthSummary & { checkedAt: number; checked: number }
 > {
-  const rows = store.listAccounts().filter(a => a.configured)
+  const rows = store.listAccounts().filter(a => a.configured || a.accounts.some(i => i.configured))
   const checkedAt = Date.now()
 
   if (!rows.length) return { ...getAccountHealth(), checkedAt, checked: 0 }
@@ -363,14 +387,31 @@ export async function runAccountHealthCheck(opts: { force?: boolean } = {}): Pro
     return { ...getAccountHealth(), checkedAt, checked: 0 }
   }
 
+  // 逐账号巡检：多账号平台（酷狗概念版）每个号都要单独确认登录态，
+  // 只查主账号会出现「主号绿着，副号早失效了却没人知道」。
+  let checked = 0
   for (const a of rows) {
-    try {
-      await verifyAccount(a.id)
-    } catch (e: any) {
-      console.log(`[平台账号] 巡检 ${a.name} 出错（忽略）：${e?.message || e}`)
+    const items = (a.accounts || []).filter(i => i.configured)
+    if (!items.length) {
+      try {
+        await verifyAccount(a.id)
+        checked++
+      } catch (e: any) {
+        console.log(`[平台账号] 巡检 ${a.name} 出错（忽略）：${e?.message || e}`)
+      }
+      await new Promise(r => setTimeout(r, 800))
+      continue
     }
-    // 平台之间留点间隔：几个平台连打容易被各自的风控当成扫描
-    await new Promise(r => setTimeout(r, 800))
+    for (const item of items) {
+      try {
+        await verifyAccount(a.id, item.id)
+        checked++
+      } catch (e: any) {
+        console.log(`[平台账号] 巡检 ${a.name}（${item.label}）出错（忽略）：${e?.message || e}`)
+      }
+      // 平台之间留点间隔：几个平台连打容易被各自的风控当成扫描
+      await new Promise(r => setTimeout(r, 800))
+    }
   }
 
   const summary = getAccountHealth()
@@ -379,7 +420,7 @@ export async function runAccountHealthCheck(opts: { force?: boolean } = {}): Pro
     + `，失效 ${summary.expired}${summary.expiredNames.length ? `（${summary.expiredNames.join('、')}）` : ''}`
     + `，待复查 ${summary.stale}，未校验 ${summary.unchecked}，字段待确认 ${summary.structural}`,
   )
-  return { ...summary, checkedAt, checked: rows.length }
+  return { ...summary, checkedAt, checked }
 }
 
 let healthTimer: ReturnType<typeof setInterval> | null = null
@@ -403,6 +444,8 @@ export function startAccountHealthCheck(): void {
 // ---- 供接口层使用的 store 再导出，避免 API 直接依赖内部文件 ----
 export const getAccounts = store.listAccounts
 export const removeAccount = store.removeCookie
+export const removeAccountItem = store.removeAccountItem
+export const setPrimaryAccount = store.setPrimaryAccount
 export const getStoreFilePath = store.getStoreFilePath
 
 // ---- 扫码登录（网易云 / QQ / 微信 / 酷狗 / 酷狗概念版） ----
@@ -414,47 +457,128 @@ export const qrLoginClose = qrLogin.close
 export const qrLoginSendSms = qrLogin.sendSms
 export const qrLoginLoginSms = qrLogin.loginSms
 
-// ---- 酷狗概念版：VIP 领取 ----
+// ---- 酷狗概念版：VIP 领取（多账号） ----
+//
+// 概念版是唯一需要「一个平台挂多个号」的场景：每个号每天看广告能领 8×3 小时会员，
+// 多开几个号能把会员时长叠起来、也更耐得住某个号被风控。所以这里的语义是：
+//   · 取链只走**主账号**（store.getCookie 的定义），避免多号之间来回漂移导致播放失败；
+//   · 领 VIP 走**所有账号**，账号之间错峰，一个号失败不影响其他号。
 
-function requireKugouLiteCookie(): string {
-  return store.getCookie('kglite')
+/** 单个账号的会员状态（前端按账号逐行展示） */
+export interface LiteAccountVip {
+  id: string
+  label: string
+  primary: boolean
+  ok: boolean
+  isVip: boolean
+  expireAt: number
+  remainHours: number
+  error?: string
 }
 
-/** 立即领取一次概念版 VIP（听歌 + 看广告），并刷新账号状态 */
-export async function claimKugouLiteVip(): Promise<kglite.ClaimVipResult> {
-  const cookie = requireKugouLiteCookie()
-  if (!cookie) {
+/** 概念版状态汇总：主账号字段与旧版一致，另附每个账号的明细与自动领取配置 */
+export type KugouLiteVipState = kglite.LiteVipInfo & {
+  configured: boolean
+  accounts: LiteAccountVip[]
+  /** 以下为自动领取配置的生效值，前端表单直接回填 */
+  autoClaim: boolean
+  startHour: number
+  gapSeconds: number
+  minRemainHours: number
+  /** 下一轮自动领取的时间戳（毫秒），没有排程时为 0 */
+  nextRunAt: number
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/** 概念版账号列表，主账号排在最前面（界面与日志都按这个顺序看） */
+function liteAccounts(): Array<{ id: string; label: string; primary: boolean; cookie: string }> {
+  const list = store.getCookies('kglite')
+  return [...list].sort((a, b) => Number(b.primary) - Number(a.primary))
+}
+
+function findLiteAccount(itemId?: string) {
+  const list = liteAccounts()
+  if (!list.length) return undefined
+  if (!itemId) return list[0] // 已按主账号优先排序
+  return list.find(a => a.id === itemId)
+}
+
+const vipInflight = new Set<string>()
+
+/**
+ * 立即给某个账号领一次概念版 VIP（听歌 + 看广告）。
+ * @param itemId 指定账号；省略时用主账号
+ */
+export async function claimKugouLiteVip(itemId?: string): Promise<kglite.ClaimVipResult> {
+  const acct = findLiteAccount(itemId)
+  if (!acct) {
     return { ok: false, gainedHours: 0, steps: [], error: '尚未配置酷狗概念版账号，请先扫码或短信登录' }
   }
-  // 防连点：界面上的按钮很容易被按两下，连发会把当日额度白白吃掉
-  if (claimingVip) return { ok: false, gainedHours: 0, steps: [], error: '上次领取还在进行中，请稍候' }
-  claimingVip = true
+  // 防连点：界面上的按钮很容易被按两下，连发会把当日额度白白吃掉。
+  // 按账号加锁，A 号在领的时候手动去领 B 号不该被挡。
+  if (vipInflight.has(acct.id)) {
+    return { ok: false, gainedHours: 0, steps: [], error: `${acct.label} 的上次领取还在进行中，请稍候` }
+  }
+  vipInflight.add(acct.id)
   try {
-    const res = await kglite.claimVip(cookie)
-    await refreshKugouLiteStatus(cookie)
+    const res = await kglite.claimVip(acct.cookie)
+    await refreshKugouLiteStatus(acct.cookie, acct.primary ? undefined : acct.id)
     return res
   } finally {
-    claimingVip = false
+    vipInflight.delete(acct.id)
   }
 }
 
-let claimingVip = false
-
-/** 查一次概念版会员信息（供接口直接展示剩余时长） */
-export async function getKugouLiteVip(): Promise<kglite.LiteVipInfo & { configured: boolean }> {
-  const cookie = requireKugouLiteCookie()
-  if (!cookie) {
-    return { ok: false, configured: false, isVip: false, expireAt: 0, remainHours: 0, error: '尚未配置账号' }
+/** 查所有账号的会员信息（供接口直接展示剩余时长） */
+export async function getKugouLiteVip(): Promise<KugouLiteVipState> {
+  const cfg = liteAutoClaimConfig()
+  const list = liteAccounts()
+  const base = {
+    configured: list.length > 0,
+    autoClaim: cfg.autoClaim,
+    startHour: cfg.startHour,
+    gapSeconds: cfg.gapSeconds,
+    minRemainHours: cfg.minRemainHours,
+    nextRunAt: vipNextRunAt,
   }
-  const info = await kglite.getVipInfo(cookie)
-  return { ...info, configured: true }
+  if (!list.length) {
+    return { ok: false, isVip: false, expireAt: 0, remainHours: 0, error: '尚未配置账号', ...base, accounts: [] }
+  }
+
+  const accounts: LiteAccountVip[] = []
+  for (const a of list) {
+    const info = await kglite.getVipInfo(a.cookie)
+    accounts.push({
+      id: a.id,
+      label: a.label,
+      primary: a.primary,
+      ok: info.ok,
+      isVip: info.isVip,
+      expireAt: info.expireAt,
+      remainHours: info.remainHours,
+      error: info.error,
+    })
+  }
+  const main = accounts[0]
+  return {
+    ok: main.ok,
+    isVip: main.isVip,
+    expireAt: main.expireAt,
+    remainHours: main.remainHours,
+    error: main.ok ? undefined : main.error,
+    ...base,
+    accounts,
+  }
 }
 
 /** 把最新会员状态写进缓存与校验记录，界面刷新后立刻能看到 */
-async function refreshKugouLiteStatus(cookie: string): Promise<void> {
+async function refreshKugouLiteStatus(cookie: string, itemId?: string): Promise<void> {
   try {
     const info = await kglite.getAccountInfo(cookie)
-    if (info.ok && typeof info.isVip === 'boolean') {
+    if (!itemId && info.ok && typeof info.isVip === 'boolean') {
       vipCache.set('kglite', { at: Date.now(), isVip: info.isVip })
     }
     store.saveVerifyResult('kglite', {
@@ -464,66 +588,194 @@ async function refreshKugouLiteStatus(cookie: string): Promise<void> {
       message: info.message,
       nickname: info.nickname,
       verified: info.verified ?? 'online',
-    })
+    }, itemId)
   } catch (e: any) {
     console.log(`[平台账号] 刷新酷狗概念版状态失败（忽略）：${e?.message || e}`)
   }
 }
 
-// ---- 酷狗概念版：每日自动领取 ----
+// ---- 酷狗概念版：每日自动领取（多账号 · 自定义开始时间 · 错峰） ----
 //
 // 为什么不做「到点就把额度领满」：一次领取给 3 小时，每天 8 次额度刚好覆盖 24 小时，
 // 领满会让到期时间一路累加到几个月后——用户看到「VIP 到 2027 年」只会怀疑是不是出错了，
-// 而且一旦平台调整规则，攒下的天数未必作数。所以按需续期：剩余不足 9 小时才补，
+// 而且一旦平台调整规则，攒下的天数未必作数。所以按需续期：剩余不足一天才补，
 // 既不断档，也把额度留在真正要紧的时候。
+//
+// 排程方式：不是「固定间隔的 setInterval」，而是每轮结束后按「开始时间 + 3 小时 × N」
+// 重算下一次。这样进程重启也不会漂移，用户把开始时间从 6 点改到 22 点就真的 22 点跑。
 
-/** 剩余 VIP 低于这个小时数才自动补领 */
-const AUTO_CLAIM_THRESHOLD_HOURS = 9
-// 首跑放在启动 3 分钟后：这时账号巡检（90 秒首跑）已经结束，不会再抢网络
-const AUTO_CLAIM_FIRST_DELAY_MS = 3 * 60 * 1000
-const AUTO_CLAIM_INTERVAL_MS = 60 * 60 * 1000
+/** 每天从开始时间起跑几轮 */
+const AUTO_CLAIM_ROUNDS = 8
+/** 轮与轮之间隔几小时（8 轮 × 3 小时 = 覆盖全天） */
+const AUTO_CLAIM_ROUND_GAP_HOURS = 3
 
-let vipTimer: ReturnType<typeof setInterval> | null = null
-
-/** 跑一次自动补领判定（导出便于测试与手动触发） */
-export async function runKugouLiteAutoClaim(): Promise<{ skipped: boolean; reason?: string; result?: kglite.ClaimVipResult }> {
-  if (!isEnabled()) return { skipped: true, reason: '账号通道总开关未开启' }
-  const cookie = requireKugouLiteCookie()
-  if (!cookie) return { skipped: true, reason: '未配置酷狗概念版账号' }
-
-  const vip = await kglite.getVipInfo(cookie)
-  if (!vip.ok) {
-    // 查不到会员状态时不动手：盲领可能把额度浪费在已经垫了很多天的情况下
-    console.log(`[平台账号] 酷狗概念版自动补领：会员状态查询失败，本次跳过（${vip.error || '未知原因'}）`)
-    return { skipped: true, reason: `会员信息查询失败：${vip.error || '未知原因'}` }
+/** 读到一份「钳过范围」的自动领取配置，防止手改配置文件把定时器打死 */
+function liteAutoClaimConfig(): { autoClaim: boolean; startHour: number; gapSeconds: number; minRemainHours: number } {
+  const c = config()
+  const num = (key: string, def: number, min: number, max: number) => {
+    const v = Number(c[key])
+    if (!Number.isFinite(v)) return def
+    return Math.min(max, Math.max(min, Math.floor(v)))
   }
-  if (vip.remainHours >= AUTO_CLAIM_THRESHOLD_HOURS) {
-    // 跳过也要留一行：否则定时器到底有没有在跑，只能靠猜
-    console.log(`[平台账号] 酷狗概念版自动补领：剩余 ${vip.remainHours} 小时（≥${AUTO_CLAIM_THRESHOLD_HOURS}），本次跳过`)
-    return { skipped: true, reason: `剩余 ${vip.remainHours} 小时，暂不需要补领` }
+  return {
+    autoClaim: c['musicAccount.kglite.autoClaim'] !== false,
+    startHour: num('musicAccount.kglite.startHour', 6, 0, 23),
+    gapSeconds: num('musicAccount.kglite.gapSeconds', 60, 0, 600),
+    minRemainHours: num('musicAccount.kglite.minRemainHours', 24, 1, 24 * 30),
   }
-
-  const result = await claimKugouLiteVip()
-  console.log(
-    `[平台账号] 酷狗概念版自动领取：${result.ok ? `获得 ${result.gainedHours} 小时` : '未获得'}`
-    + `${result.remainHours !== undefined ? `，剩余 ${result.remainHours} 小时` : ''}`
-    + `${result.ok ? '' : `（${result.error || ''}）`}`,
-  )
-  return { skipped: false, result }
 }
 
-/** 启动概念版 VIP 定时补领。总开关关闭时不发请求，靠 tick 里判断。 */
-export function startKugouLiteVipAutoClaim(): void {
+let vipTimer: ReturnType<typeof setTimeout> | null = null
+let vipNextRunAt = 0
+
+/**
+ * 算出下一次该跑的时间（毫秒时间戳）。
+ *
+ * 每天的轮次是「startHour 起每 3 小时一轮、共 8 轮」，8×3=24 小时正好铺满一天，
+ * 所以跨过 0 点之后还有 00:00 / 03:00 这种「属于上一天周期」的轮次 —— 计算时必须
+ * 把昨天、今天、明天三个周期的刻度一起算进去取最小值，否则进程如果在凌晨重启，
+ * 03:00 那一轮会被整轮跳过，会员就可能断档。
+ *
+ * 单独导出是为了能写单测：时区与跨天边界最容易错，而错了只会表现为「会员莫名其妙到期」。
+ */
+export function nextAutoClaimAt(startHour: number, now = Date.now()): number {
+  const hour = Math.min(23, Math.max(0, Math.floor(Number.isFinite(startHour) ? startHour : 6)))
+  const stepMs = AUTO_CLAIM_ROUND_GAP_HOURS * 3600_000
+  let next = Number.POSITIVE_INFINITY
+  for (let dayOffset = -1; dayOffset <= 1; dayOffset++) {
+    const base = new Date(now)
+    base.setDate(base.getDate() + dayOffset)
+    base.setHours(hour, 0, 0, 0)
+    for (let k = 0; k < AUTO_CLAIM_ROUNDS; k++) {
+      const t = base.getTime() + k * stepMs
+      if (t > now && t < next) next = t
+    }
+  }
+  // 正常不会走到这里（三个周期足以覆盖前后各一天），留个安全值免得定时器变成 0 延迟狂转
+  return Number.isFinite(next) ? next : now + stepMs
+}
+
+export interface LiteAutoClaimAccount {
+  id: string
+  label: string
+  primary: boolean
+  skipped: boolean
+  reason?: string
+  gainedHours?: number
+  remainHours?: number
+  error?: string
+}
+
+export interface LiteAutoClaimRound {
+  startedAt: number
+  /** 整轮没跑的原因（总开关关 / 自动领取关 / 没账号） */
+  halted?: string
+  accounts: LiteAutoClaimAccount[]
+}
+
+/**
+ * 跑一轮自动补领：逐个账号判定剩余时长，够用就跳过，不够就领。
+ *
+ * @param opts.force 忽略「剩余时长阈值」，无条件给每个账号领一次（手动「全部领取」用）
+ */
+export async function runKugouLiteAutoClaim(opts: { force?: boolean } = {}): Promise<LiteAutoClaimRound> {
+  const startedAt = Date.now()
+  // 总开关只管「账号通道要不要参与取链」，不该拦住用户手动点的「全部领取」；
+  // 定时任务（非 force）才需要跟着总开关走。
+  if (!isEnabled() && !opts.force) return { startedAt, halted: '账号通道总开关未开启', accounts: [] }
+  const cfg = liteAutoClaimConfig()
+  if (!cfg.autoClaim && !opts.force) return { startedAt, halted: '自动领取已关闭', accounts: [] }
+
+  const list = liteAccounts()
+  if (!list.length) return { startedAt, halted: '未配置酷狗概念版账号', accounts: [] }
+
+  const accounts: LiteAutoClaimAccount[] = []
+  for (let i = 0; i < list.length; i++) {
+    const acct = list[i]
+    // 账号之间错峰：多个号连着打同一个接口，很容易被平台按设备/网络维度风控
+    if (i > 0 && cfg.gapSeconds > 0) await sleep(cfg.gapSeconds * 1000)
+
+    const vip = await kglite.getVipInfo(acct.cookie)
+    if (!vip.ok) {
+      // 查不到会员状态时不动手：盲领可能把额度浪费在已经垫了很多天的情况下
+      console.log(`[平台账号] 概念版自动补领｜${acct.label}：会员状态查询失败，本轮跳过（${vip.error || '未知原因'}）`)
+      accounts.push({ id: acct.id, label: acct.label, primary: acct.primary, skipped: true, reason: `会员信息查询失败：${vip.error || '未知原因'}` })
+      continue
+    }
+    if (!opts.force && vip.remainHours >= cfg.minRemainHours) {
+      // 跳过也要留一行：否则定时器到底有没有在跑，只能靠猜
+      console.log(`[平台账号] 概念版自动补领｜${acct.label}：剩余 ${vip.remainHours} 小时（≥${cfg.minRemainHours}），本轮跳过`)
+      accounts.push({ id: acct.id, label: acct.label, primary: acct.primary, skipped: true, reason: `剩余 ${vip.remainHours} 小时，暂不需要补领` })
+      continue
+    }
+
+    const res = await claimKugouLiteVip(acct.id)
+    console.log(
+      `[平台账号] 概念版自动补领｜${acct.label}（领取前剩余 ${vip.remainHours} 小时）：`
+      + `${res.ok ? `获得 ${res.gainedHours} 小时` : '未获得'}`
+      + `${res.remainHours !== undefined ? `，现剩余 ${res.remainHours} 小时` : ''}`
+      + `${res.ok ? '' : `（${res.error || ''}）`}`,
+    )
+    accounts.push({
+      id: acct.id,
+      label: acct.label,
+      primary: acct.primary,
+      skipped: false,
+      gainedHours: res.gainedHours,
+      remainHours: res.remainHours,
+      error: res.ok ? undefined : res.error,
+    })
+  }
+
+  const gained = accounts.reduce((sum, a) => sum + (a.gainedHours || 0), 0)
+  console.log(`[平台账号] 概念版自动补领本轮结束：${accounts.filter(a => !a.skipped).length} 个账号执行领取，合计 ${gained} 小时`)
+  return { startedAt, accounts }
+}
+
+/** 按「开始时间 + 3 小时」重算并挂上下一次定时器 */
+function scheduleNextAutoClaim(): void {
   if (vipTimer) return
-  const boot = setTimeout(() => {
-    void runKugouLiteAutoClaim().catch(e => console.log(`[平台账号] 概念版自动领取出错（忽略）：${e?.message || e}`))
-    vipTimer = setInterval(() => {
-      void runKugouLiteAutoClaim().catch(e => console.log(`[平台账号] 概念版自动领取出错（忽略）：${e?.message || e}`))
-    }, AUTO_CLAIM_INTERVAL_MS)
-    if (typeof vipTimer.unref === 'function') vipTimer.unref()
-  }, AUTO_CLAIM_FIRST_DELAY_MS)
-  if (typeof boot.unref === 'function') boot.unref()
-  console.log(`[平台账号] 酷狗概念版 VIP 自动补领已安排：每小时检查一次，剩余不足 ${AUTO_CLAIM_THRESHOLD_HOURS} 小时才领（首次 3 分钟后）`)
+  const cfg = liteAutoClaimConfig()
+  if (!cfg.autoClaim) {
+    vipNextRunAt = 0
+    console.log('[平台账号] 酷狗概念版 VIP 自动领取处于关闭状态（后台开启后会自动排程，无需重启）')
+    return
+  }
+  const at = nextAutoClaimAt(cfg.startHour)
+  vipNextRunAt = at
+  const delay = Math.max(1000, at - Date.now())
+  const timer = setTimeout(() => {
+    vipTimer = null
+    vipNextRunAt = 0
+    void runKugouLiteAutoClaim()
+      .catch(e => console.log(`[平台账号] 概念版自动领取出错（忽略）：${e?.message || e}`))
+      .finally(() => scheduleNextAutoClaim())
+  }, delay)
+  if (typeof timer.unref === 'function') timer.unref()
+  vipTimer = timer
+
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const when = new Date(at)
+  console.log(
+    `[平台账号] 酷狗概念版 VIP 自动领取已排程：每天 ${pad(cfg.startHour)}:00 起，每 ${AUTO_CLAIM_ROUND_GAP_HOURS} 小时一轮（共 ${AUTO_CLAIM_ROUNDS} 轮）；`
+    + `剩余不足 ${cfg.minRemainHours} 小时才领，账号间隔 ${cfg.gapSeconds} 秒；`
+    + `下一轮 ${when.getMonth() + 1}/${when.getDate()} ${pad(when.getHours())}:${pad(when.getMinutes())}`,
+  )
+}
+
+/** 启动概念版 VIP 自动领取（按开始时间排第一轮） */
+export function startKugouLiteVipAutoClaim(): void {
+  scheduleNextAutoClaim()
+}
+
+/** 配置改动（开始时间 / 开关 / 间隔）后重排定时器，不必重启进程 */
+export function rescheduleKugouLiteVipAutoClaim(): void {
+  if (vipTimer) {
+    clearTimeout(vipTimer)
+    vipTimer = null
+  }
+  vipNextRunAt = 0
+  scheduleNextAutoClaim()
 }
 
 // ---- 浏览器扩展包（一键同步 Cookie） ----

@@ -6436,6 +6436,145 @@ input:-webkit-autofill:active {
     border-color: #f59e0b;
 }
 
+/* ---- 酷狗概念版：多账号列表 ---- */
+/* 每个号一行，主账号描边高亮：取链只走主账号，但所有号都跑领 VIP，
+   这个差异光靠文字说明容易忽略，所以用视觉标记强化一次 */
+.music-acc-accounts {
+    margin-top: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.music-acc-accounts-tip {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+.music-acc-acct {
+    border-radius: 9px;
+    border: 1px solid rgba(127, 127, 127, 0.22);
+    background: rgba(127, 127, 127, 0.06);
+    padding: 0.5rem 0.7rem;
+}
+
+.music-acc-acct.is-primary {
+    border-color: rgba(16, 185, 129, 0.5);
+    background: rgba(16, 185, 129, 0.08);
+}
+
+.music-acc-acct-head {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+}
+
+.music-acc-primary-tag,
+.music-acc-sub-tag {
+    font-size: 0.7rem;
+    padding: 0.1rem 0.42rem;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.music-acc-primary-tag {
+    background: rgba(16, 185, 129, 0.18);
+    color: #059669;
+    font-weight: 600;
+}
+
+.music-acc-sub-tag {
+    background: rgba(127, 127, 127, 0.16);
+    color: var(--text-secondary, #8b8b8b);
+}
+
+.music-acc-acct-name {
+    font-size: 0.86rem;
+    font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.music-acc-acct-vip {
+    margin-left: auto;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.music-acc-acct-vip.is-ok {
+    color: #16a34a;
+}
+
+.music-acc-acct-vip.is-warn {
+    color: #d97706;
+}
+
+.music-acc-acct-vip.is-bad {
+    color: #dc2626;
+}
+
+.music-acc-acct-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.4rem;
+}
+
+.music-acc-acct-actions button {
+    font-size: 0.75rem;
+    padding: 0.26rem 0.6rem;
+}
+
+/* ---- 酷狗概念版：自动领 VIP 设置 ---- */
+.music-acc-auto {
+    margin-top: 0.7rem;
+    padding: 0.65rem 0.75rem;
+    border-radius: 9px;
+    border: 1px dashed rgba(127, 127, 127, 0.3);
+    background: rgba(127, 127, 127, 0.05);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.9rem;
+    font-size: 0.8rem;
+}
+
+.music-acc-auto-head {
+    font-weight: 600;
+    font-size: 0.82rem;
+    margin-right: 0.2rem;
+}
+
+.music-acc-auto-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    white-space: nowrap;
+}
+
+.music-acc-auto-line input[type="number"],
+.music-acc-auto-line select {
+    width: 4.6rem;
+    padding: 0.28rem 0.4rem;
+    font-size: 0.8rem;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(127, 127, 127, 0.24);
+    color: inherit;
+}
+
+.music-acc-auto-tip {
+    flex-basis: 100%;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
 .music-acc-guide-steps {
     margin: 0.6rem 0 0.2rem;
     padding-left: 1.25rem;

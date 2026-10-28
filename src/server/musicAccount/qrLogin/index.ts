@@ -41,6 +41,8 @@ interface Session {
   expiresAt: number
   busy: boolean
   done: boolean
+  /** 追加为新账号（多账号平台），false 则覆盖主账号 */
+  append?: boolean
 }
 
 const sessions = new Map<string, Session>()
@@ -73,8 +75,9 @@ export interface QrStartPayload {
  * 开始一次扫码登录。
  * @param platform 平台 id（wy / tx / kg）
  * @param driverId 指定扫码方式，省略时用该平台声明的第一种
+ * @param opts.append 扫码成功后追加为新账号（酷狗概念版多开小号用），默认覆盖主账号
  */
-export async function start(platform: string, driverId?: string): Promise<QrStartPayload> {
+export async function start(platform: string, driverId?: string, opts: { append?: boolean } = {}): Promise<QrStartPayload> {
   sweep()
   const p = getPlatform(platform)
   if (!p) return { ok: false, error: `不支持的平台：${platform}` }
@@ -103,6 +106,7 @@ export async function start(platform: string, driverId?: string): Promise<QrStar
       expiresAt: now + driver.ttlSec * 1000,
       busy: false,
       done: false,
+      append: !!opts.append,
     })
     return {
       ok: true,
@@ -156,14 +160,16 @@ export async function poll(sessionId: string): Promise<QrPollPayload> {
     // 各家驱动拼出来的串格式不完全统一，落库前统一收敛成 k=v; k=v
     const parsed = normalizeCookieInput(rawCookie)
     const cookie = parsed.ok ? parsed.cookie : rawCookie
-    const saved = store.setCookie(s.platform, cookie)
+    const saved = s.append
+      ? store.addCookie(s.platform, cookie)
+      : store.setCookie(s.platform, cookie)
     s.done = true
     sessions.delete(s.id)
     if (!saved.success) {
       return { ok: false, status: 'failed', message: saved.error || 'Cookie 保存失败' }
     }
     const name = getPlatform(s.platform)?.name || s.platform
-    console.log(`[平台账号] ${name} 扫码登录成功，Cookie 已加密保存（${cookie.length} 字符）`)
+    console.log(`[平台账号] ${name} 扫码登录成功，Cookie 已加密保存${s.append ? '（追加为新账号）' : ''}（${cookie.length} 字符）`)
     return { ok: true, status: 'success', message: '登录成功，账号已保存', saved: true }
   } catch (e: any) {
     // 网络抖动不要直接判死，让前端继续轮询。
@@ -198,6 +204,8 @@ interface SmsSession {
   mobile: string
   state: { guid: string; mid: string; device: string }
   createdAt: number
+  /** 登录成功后追加为新账号（多账号平台） */
+  append?: boolean
 }
 const smsSessions = new Map<string, SmsSession>()
 const SMS_KEEP_MS = 10 * 60 * 1000
@@ -219,7 +227,7 @@ export interface SmsSendPayload {
 const SMS_PLATFORMS = new Set(['kglite'])
 
 /** 给指定平台发短信验证码 */
-export async function sendSms(platform: string, mobile: string): Promise<SmsSendPayload> {
+export async function sendSms(platform: string, mobile: string, opts: { append?: boolean } = {}): Promise<SmsSendPayload> {
   sweepSms()
   const p = getPlatform(platform)
   if (!p) return { ok: false, message: `不支持的平台：${platform}` }
@@ -235,7 +243,7 @@ export async function sendSms(platform: string, mobile: string): Promise<SmsSend
   if (!res.ok || !res.state) return { ok: false, message: res.message }
 
   const id = newId()
-  smsSessions.set(id, { platform, mobile: tel, state: res.state, createdAt: Date.now() })
+  smsSessions.set(id, { platform, mobile: tel, state: res.state, createdAt: Date.now(), append: !!opts.append })
   return { ok: true, sessionId: id, message: res.message }
 }
 
@@ -257,11 +265,13 @@ export async function loginSms(sessionId: string, code: string): Promise<SmsLogi
 
   const parsed = normalizeCookieInput(res.cookie)
   const cookie = parsed.ok ? parsed.cookie : res.cookie
-  const saved = store.setCookie(s.platform, cookie)
+  const saved = s.append
+    ? store.addCookie(s.platform, cookie)
+    : store.setCookie(s.platform, cookie)
   if (!saved.success) return { ok: false, message: saved.error || '账号保存失败' }
 
   smsSessions.delete(sessionId)
   const name = getPlatform(s.platform)?.name || s.platform
-  console.log(`[平台账号] ${name} 短信登录成功，凭据已加密保存（${cookie.length} 字符）`)
+  console.log(`[平台账号] ${name} 短信登录成功，凭据已加密保存${s.append ? '（追加为新账号）' : ''}（${cookie.length} 字符）`)
   return { ok: true, message: '登录成功，账号已保存', saved: true }
 }
