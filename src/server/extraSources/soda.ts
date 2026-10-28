@@ -26,6 +26,7 @@ import * as store from '../musicAccount/store'
 import * as pending from './pending'
 import * as signer from './signer'
 import { registerSodaKey, sodaTrackIdOf } from '../utils/sodaDecrypt'
+import { isEncryptedRemoteStream } from '../utils/streamEncryption'
 import { extractSodaKey } from './sodaKey'
 
 const SEARCH_UA = 'com.luna.music/100198030 (Linux; U; Android 15; zh_CN_#Hans; ABR-AL80; Build/V417IR;tt-ok/3.12.13.19)'
@@ -711,11 +712,25 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   const trackId = sodaTrackIdOf(songInfo)
   if (!isSodaId(trackId)) throw new Error(`汽水歌曲 id 不合法（${trackId || '空'}）`)
 
-  // ① 签名器在线 → App 端点：6 档音质（lossless 852k / hi_res / spatial）
+  // ① 签名器在线 → App 端点：6 档音质（lossless 852k / hi_res / spatial）。
+  //
+  // ⚠️ 关键：PC 端点对**版权曲**下发的就是 CENC 加密流，而我们实测平台并不下发
+  // `spade_a`（见 sodaKey.ts 头部），也就是拿到手也解不开。以前的做法是「签名通道
+  // 成功就直接返回」，结果加密流一路走到 `<audio>` 才炸，表现为「缓存显示成功但没声音」。
+  // 现在先探一下：确认加密且无密钥 → **不采纳**，继续走下面的明文通道。
+  // 这一条对 UGC / cover 曲尤其有效——它们在明文通道本来就是完整可播的。
   const signed = await trySignedStream(trackId, cookie, quality).catch(() => null)
-  if (signed) {
+  if (signed?.key) {
     pending.remove(`soda:${trackId}`)
     return signed
+  }
+  if (signed) {
+    const encrypted = await isEncryptedRemoteStream(signed.url).catch(() => false)
+    if (!encrypted) {
+      pending.remove(`soda:${trackId}`)
+      return signed
+    }
+    console.log('[汽水取流] 签名通道返回 CENC 加密流且无密钥 → 退回明文通道')
   }
 
   // ② 免签名明文通道：h5 优先，SEO 兜底
