@@ -261,10 +261,27 @@ test('buildHint：签名通道加密无密钥 → 有效源必须是明文通道
     url: 'https://v26-luna.douyinvod.com/xxx',
     source: 'h5',
     quality: '320k',
-    signerError: 'App 端点返回的是 CENC 加密流且无密钥，浏览器无法播放，已退回明文通道',
+    signerError: '签名器返回的是 CENC 加密流且无密钥，浏览器无法播放，已退回明文通道',
   }))
   assert.match(hint, /整曲/)
   assert.doesNotMatch(hint, /通道 signer/)
   assert.doesNotMatch(hint, /CENC 加密流/)
+})
+
+test('buildHint：VIP 曲 + 签名器在线仍试听 → 不出现「App 端点返回：App 端点返回」重影', () => {
+  // 签名器在线但返回的是加密流（无密钥），diagnoseStream 把 signerError 记为
+  // 「签名器返回的是 CENC 加密流...」，hint 模板不得再叠一个「App 端点返回：」前缀。
+  const hint = buildHint(diagnosis({
+    url: 'https://v26-luna.douyinvod.com/xxx',
+    source: 'h5',
+    isPreview: true,
+    requiresVip: true,
+    hasSigner: true,
+    signerOnline: true,
+    streamDurationSeconds: 60,
+    signerError: '签名器返回的是 CENC 加密流且无密钥，浏览器无法播放，已退回明文通道',
+  }))
+  assert.match(hint, /设备指纹|权益/)
+  assert.doesNotMatch(hint, /App 端点返回：App 端点返回/)
 })
 

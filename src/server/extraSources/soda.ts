@@ -900,7 +900,7 @@ export async function diagnoseStream(songInfo: any, quality = '320k', cookie = '
   } else if (signed) {
     const encrypted = await isEncryptedRemoteStream(signed.url).catch(() => false)
     if (!encrypted) signedUsable = signed
-    else report.signerError = 'App 端点返回的是 CENC 加密流且无密钥，浏览器无法播放，已退回明文通道'
+    else report.signerError = '签名器返回的是 CENC 加密流且无密钥，浏览器无法播放，已退回明文通道'
   }
 
   if (signedUsable) {
@@ -947,7 +947,7 @@ export function buildHint(r: SodaStreamDiagnosis): string {
     return `该曲整曲仅限会员播放：明文通道只有 ${shown} 秒试听，需「设备指纹 + 签名器」后走 App 端点；${r.signerError || '未配置签名器'}`
   }
   if (r.requiresVip && r.signerOnline) {
-    return `签名器在线但仍只拿到 ${shown} 秒试听，通常是签名器与设备指纹不匹配，或该账号对此曲没有整曲权益；App 端点返回：${r.signerError || '（无错误信息）'}`
+    return `签名器在线但仍只拿到 ${shown} 秒试听，通常是签名器与设备指纹不匹配，或该账号对此曲没有整曲权益`
   }
   return `只拿到 ${shown} 秒试听片段（整曲 ${r.trackDurationSeconds} 秒），该曲在汽水侧受版权限制`
 }
