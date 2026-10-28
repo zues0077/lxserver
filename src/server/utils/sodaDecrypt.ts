@@ -347,7 +347,9 @@ function scanForFlacMetadata(stsdData: Uint8Array): Uint8Array | null {
 function decryptCtr(encryptedSample: Uint8Array, keyBytes: Uint8Array, iv: Uint8Array): Buffer {
   const decipher = createDecipheriv(`aes-${keyBytes.length * 8}-ctr`, keyBytes, Buffer.from(iv))
   decipher.setAutoPadding(false)
-  return Buffer.concat([decipher.update(Buffer.from(encryptedSample)), decipher.final()])
+  // CTR 是流模式，`update` 即输出全部明文，不需要 `final`；
+  // 也不再包一层 Buffer.concat —— 单曲 ~7MB，这两次整段拷贝全在解密热点上。
+  return decipher.update(encryptedSample as Uint8Array)
 }
 
 export interface DecryptResult {
@@ -358,19 +360,19 @@ export interface DecryptResult {
   sample_count: number
 }
 
-/**
- * 解密一段 CENC 加密的汽水音频缓冲，返回修复后可直接播放/下载的缓冲。
- *
- * 支持两种原始编码：
- *  - `enca` 内 `frma` 指向 mp4a/alac → 输出 m4a（audio/mp4）
- *  - stsd 内含 `dfLa` FLAC 元数据 → 输出 flac（audio/flac）
- *
- * 解密本身是纯本地 AES-128-CTR（大端计数器），无需任何许可证服务器。
- */
-export function decryptAudioBuffer(input: Uint8Array | Buffer | ArrayBuffer, hexKey: string): DecryptResult {
-  const fileData = asUint8Array(input)
-  const keyBytes = hexToBytes(hexKey)
+/** 解密所需的容器布局；解析一次，同步/异步两条路径共用。 */
+interface DecryptLayout {
+  ftyp: MP4Box | null
+  moov: MP4Box
+  stsd: MP4Box
+  mdat: MP4Box
+  sampleSizes: number[]
+  ivs: Uint8Array[]
+  stscEntries: { firstChunk: number; samplesPerChunk: number; id: number }[]
+  chunkCount: number
+}
 
+function parseDecryptLayout(fileData: Uint8Array): DecryptLayout {
   const ftyp = MP4Box.findBox(fileData, 'ftyp')
   const moov = requireBox(MP4Box.findBox(fileData, 'moov'), 'moov')
   const trak = requireBox(MP4Box.findBox(fileData, 'trak', moov.offset + 8, moov.offset + moov.size), 'trak')
@@ -397,14 +399,23 @@ export function decryptAudioBuffer(input: Uint8Array | Buffer | ArrayBuffer, hex
   const encryptedPayloadSize = sampleSizes.reduce((sum, sampleSize) => sum + sampleSize, 0)
   if (encryptedPayloadSize > mdat.size - 8) throw new Error('样本总大小超过 mdat 数据范围')
 
-  const decryptedSamples: Buffer[] = []
-  let sampleOffset = mdat.offset + 8
-  for (let index = 0; index < sampleSizes.length; index += 1) {
-    const sampleSize = sampleSizes[index]
-    if (sampleOffset + sampleSize > fileData.length) throw new Error('音频样本数据不完整')
-    decryptedSamples.push(decryptCtr(fileData.subarray(sampleOffset, sampleOffset + sampleSize), keyBytes, ivs[index]))
-    sampleOffset += sampleSize
-  }
+  return { ftyp, moov, stsd, mdat, sampleSizes, ivs, stscEntries, chunkCount }
+}
+
+/** 异步路径每解这么多帧让出一次事件循环（约几毫秒，感知不到但足够避免长阻塞） */
+const SAMPLES_PER_YIELD = 256
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>(resolve => setImmediate(resolve))
+}
+
+/** 用已解出的样本拼回可播放容器。 */
+function assembleDecrypted(
+  fileData: Uint8Array,
+  layout: DecryptLayout,
+  decryptedSamples: Buffer[],
+): DecryptResult {
+  const { ftyp, moov, stsd, sampleSizes, stscEntries, chunkCount } = layout
 
   const flacMetadata = scanForFlacMetadata(stsd.data)
   if (flacMetadata) {
@@ -439,6 +450,69 @@ export function decryptAudioBuffer(input: Uint8Array | Buffer | ArrayBuffer, hex
     codec: 'mp4',
     sample_count: sampleSizes.length,
   }
+}
+
+/**
+ * 解密一段 CENC 加密的汽水音频缓冲，返回修复后可直接播放/下载的缓冲（同步版）。
+ *
+ * 支持两种原始编码：
+ *  - `enca` 内 `frma` 指向 mp4a/alac → 输出 m4a（audio/mp4）
+ *  - stsd 内含 `dfLa` FLAC 元数据 → 输出 flac（audio/flac）
+ *
+ * 解密本身是纯本地 AES-128-CTR（大端计数器），无需任何许可证服务器。
+ *
+ * 注意：同步版会独占事件循环数百毫秒（单曲上万帧、每帧一次 `createDecipheriv`），
+ * 服务端调用请改用 {@link decryptAudioBufferAsync}。
+ */
+export function decryptAudioBuffer(input: Uint8Array | Buffer | ArrayBuffer, hexKey: string): DecryptResult {
+  const fileData = asUint8Array(input)
+  const keyBytes = hexToBytes(hexKey)
+  const layout = parseDecryptLayout(fileData)
+  const { sampleSizes, ivs, mdat } = layout
+
+  const decryptedSamples: Buffer[] = []
+  let sampleOffset = mdat.offset + 8
+  for (let index = 0; index < sampleSizes.length; index += 1) {
+    const sampleSize = sampleSizes[index]
+    if (sampleOffset + sampleSize > fileData.length) throw new Error('音频样本数据不完整')
+    decryptedSamples.push(decryptCtr(fileData.subarray(sampleOffset, sampleOffset + sampleSize), keyBytes, ivs[index]))
+    sampleOffset += sampleSize
+  }
+
+  return assembleDecrypted(fileData, layout, decryptedSamples)
+}
+
+/**
+ * 解密的分片异步版：每 {@link SAMPLES_PER_YIELD} 帧让出一次事件循环。
+ *
+ * 同步版在 246 上实测单曲阻塞 544~602ms，期间所有 HTTP 下发与播放都会顿一下；
+ * 分片后单次让出只有几毫秒，播放/其它请求不再被解密卡住。
+ * 算法与同步版完全一致，只是把样本循环切开。
+ */
+export async function decryptAudioBufferAsync(
+  input: Uint8Array | Buffer | ArrayBuffer,
+  hexKey: string,
+): Promise<DecryptResult> {
+  const fileData = asUint8Array(input)
+  const keyBytes = hexToBytes(hexKey)
+  const layout = parseDecryptLayout(fileData)
+  const { sampleSizes, ivs, mdat } = layout
+
+  const decryptedSamples: Buffer[] = new Array(sampleSizes.length)
+  let sampleOffset = mdat.offset + 8
+  let sinceYield = 0
+  for (let index = 0; index < sampleSizes.length; index += 1) {
+    const sampleSize = sampleSizes[index]
+    if (sampleOffset + sampleSize > fileData.length) throw new Error('音频样本数据不完整')
+    decryptedSamples[index] = decryptCtr(fileData.subarray(sampleOffset, sampleOffset + sampleSize), keyBytes, ivs[index])
+    sampleOffset += sampleSize
+    if (++sinceYield >= SAMPLES_PER_YIELD) {
+      sinceYield = 0
+      await yieldToEventLoop()
+    }
+  }
+
+  return assembleDecrypted(fileData, layout, decryptedSamples)
 }
 
 /**

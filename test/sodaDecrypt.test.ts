@@ -20,6 +20,7 @@ import {
   isHexKey,
   resolveAudioKey,
   decryptAudioBuffer,
+  decryptAudioBufferAsync,
   isCencEncryptedBuffer,
 } from '../src/server/utils/sodaDecrypt'
 
@@ -267,4 +268,53 @@ test('isCencEncryptedBuffer 对明文返回 false', () => {
   const plain = box('ftyp', Buffer.from('isom', 'ascii'))
   assert.equal(isCencEncryptedBuffer(plain), false)
   assert.equal(isCencEncryptedBuffer(Buffer.alloc(16)), false)
+})
+
+test('decryptAudioBufferAsync 与同步版输出逐字节一致', async () => {
+  const hexKey = '00112233445566778899aabbccddeeff'
+  // 帧数要跨过让出阈值，否则测不到分片路径
+  const samples = Array.from({ length: 900 }, (_, frame) =>
+    Array.from({ length: 40 }, (_, k) => (frame * 13 + k * 7 + 3) & 0xff),
+  )
+  const encrypted = buildEncryptedSample(hexKey, samples)
+
+  const syncResult = decryptAudioBuffer(encrypted, hexKey)
+  const asyncResult = await decryptAudioBufferAsync(encrypted, hexKey)
+
+  assert.deepEqual(asyncResult.buffer, syncResult.buffer)
+  assert.equal(asyncResult.extension, syncResult.extension)
+  assert.equal(asyncResult.codec, syncResult.codec)
+  assert.equal(asyncResult.sample_count, syncResult.sample_count)
+})
+
+test('decryptAudioBufferAsync 会分片让出事件循环（同步版则独占）', async () => {
+  const hexKey = '00112233445566778899aabbccddeeff'
+  const samples = Array.from({ length: 900 }, (_, frame) =>
+    Array.from({ length: 40 }, (_, k) => (frame * 5 + k) & 0xff),
+  )
+  const encrypted = buildEncryptedSample(hexKey, samples)
+
+  // 统计 setImmediate 调用次数：分片版每 N 帧让出一次，同步版一次都不该有
+  const original = globalThis.setImmediate
+  let yields = 0
+  const patched: typeof setImmediate = ((fn: any, ...args: any[]) => {
+    yields += 1
+    return original(fn as any, ...args as any)
+  }) as any
+  ;(globalThis as any).setImmediate = patched
+  try {
+    const syncYields = (() => {
+      const before = yields
+      decryptAudioBuffer(encrypted, hexKey)
+      return yields - before
+    })()
+    const beforeAsync = yields
+    await decryptAudioBufferAsync(encrypted, hexKey)
+    const asyncYields = yields - beforeAsync
+
+    assert.equal(syncYields, 0, '同步版不应让出事件循环')
+    assert.ok(asyncYields >= 2, `异步版应多次让出，实际 ${asyncYields} 次`)
+  } finally {
+    ;(globalThis as any).setImmediate = original
+  }
 })

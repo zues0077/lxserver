@@ -15,7 +15,7 @@ import { verifyTrackOrigin, canVerifyOrigin } from './sourceVerify'
 import { buildStreamHeaders } from './utils/streamHeaders'
 import { syncLog } from '@/utils/log4js'
 import { getUserSpace } from '../user'
-import { decryptAudioBuffer, isCencEncryptedBuffer, getSodaKey, sodaTrackIdOf, type DecryptResult } from './utils/sodaDecrypt'
+import { decryptAudioBuffer, decryptAudioBufferAsync, isCencEncryptedBuffer, getSodaKey, sodaTrackIdOf, type DecryptResult } from './utils/sodaDecrypt'
 
 /**
  * 匿名用户的目录名必须统一成 `_open`（P-0806）。
@@ -150,6 +150,33 @@ export const cacheProgress: Map<string, { progress: number; status: string; tota
 
 // [New] Active Cache Tasks Tracker: username -> [ { songKey, controller } ]
 export const activeTasks: Map<string, Array<{ songKey: string, controller: AbortController }>> = new Map()
+
+/**
+ * 同一 songKey 正在进行中的下载任务。
+ *
+ * 存在的理由：原来命中「任务已在下载队列中」时直接 `Promise.resolve()`，调用方会
+ * 以为下载已经完成，紧接着 `checkCache` 却查不到文件 → 抛「汽水加密曲下载/解密失败」，
+ * 一秒后同一个任务下完，同一首歌又突然能播。
+ * 现在后来者直接 await 同一个 Promise，拿到的是「真的下完了」。
+ */
+const inFlightDownloads: Map<string, Promise<void>> = new Map()
+
+/** 等待在飞任务的上限，避免原任务卡死时把调用方一起挂住 */
+const WAIT_IN_FLIGHT_TIMEOUT_MS = 10 * 60 * 1000
+
+function waitForInFlightDownload(songKey: string, task: Promise<void>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<void>((_, reject) => {
+        timer = setTimeout(
+            () => reject(new Error(`等待同曲下载超时（${Math.round(WAIT_IN_FLIGHT_TIMEOUT_MS / 60000)} 分钟）: ${songKey}`)),
+            WAIT_IN_FLIGHT_TIMEOUT_MS,
+        )
+        if (typeof timer === 'object' && timer && typeof (timer as any).unref === 'function') (timer as any).unref()
+    })
+    return Promise.race([task, timeout]).finally(() => {
+        if (timer) clearTimeout(timer)
+    })
+}
 
 // [新增] 歌词获取钩子：由 server.ts 在启动时注入，避免 fileCache 直接依赖 musicSdk
 // 调用时会通过 /api/music/lyric 接口逻辑（先查本地 .lrc 缓存，再去源站）获取歌词文本
@@ -1993,6 +2020,9 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
                         if (cachedKey) {
                             try {
                                 const buf = fs.readFileSync(filePath)
+                                // 这条路径在同步的 checkCache 里，且只在「旧版本留下的带密钥缓存条目」
+                                // 上触发一次（解完就删 decryptKey），保持同步版即可。
+                                // 每次播放都会走的热路径（下载完成后解密）用的是异步版。
                                 const dec = decryptAudioBuffer(buf, cachedKey)
                                 fs.writeFileSync(filePath, dec.buffer)
                                 cached.ext = dec.extension.replace(/^\./, '')
@@ -2608,7 +2638,7 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
         return Promise.resolve()
     }
 
-    // [去重] 同一 songKey 正在下载/写标签时直接跳过，避免并发重复下载
+    // [去重] 同一 songKey 正在下载/写标签时，等待同一个任务，而不是假装已完成
     // (如 Subsonic 客户端反复请求 stream、或音流并行触发原生缓存)
     const inFlight = cacheProgress.get(songKey)
     if (inFlight && (inFlight.status === 'downloading' || inFlight.status === 'tagging')) {
@@ -2616,6 +2646,12 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
         // 超过 10 分钟仍无进展视为卡死，允许本次重新下载（避免永久阻塞该歌曲，
         // 尤其 fire-and-forget 的 Subsonic 缓存触发没有 abort 信号）
         if (age < 10 * 60 * 1000) {
+            const running = inFlightDownloads.get(songKey)
+            if (running) {
+                // 关键：调用方要的是「文件真的落地了」，直接 resolve 会让它 checkCache 落空
+                console.log(`[文件缓存] 任务已在下载队列中 (${songKey})，等待其完成`)
+                return waitForInFlightDownload(songKey, running)
+            }
             console.log(`[文件缓存] 任务已在下载队列中 (${songKey})，跳过重复请求`)
             return Promise.resolve()
         }
@@ -2626,7 +2662,7 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
     cacheProgress.set(songKey, { progress: 0, status: 'downloading', total: 0, received: 0, speed: 0, updatedAt: Date.now() })
     console.log(`[文件缓存] 开始下载歌曲: ${baseName}`)
 
-    return new Promise<void>((resolve, reject) => {
+    const task = new Promise<void>((resolve, reject) => {
         let req: http.ClientRequest
         let fileStream: fs.WriteStream | undefined
         let settled = false
@@ -2772,7 +2808,7 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                     try {
                         const probe = fs.readFileSync(tempPath)
                         if (isCencEncryptedBuffer(probe)) {
-                            decryptResult = decryptAudioBuffer(probe, audioDecryptKey)
+                            decryptResult = await decryptAudioBufferAsync(probe, audioDecryptKey)
                             fs.writeFileSync(tempPath, decryptResult.buffer)
                             console.log(`[文件缓存] 已解密汽水 CENC 音频 (${decryptResult.codec}, ${(decryptResult.buffer.length / 1024 / 1024).toFixed(1)}MB)`)
                         }
@@ -2954,6 +2990,16 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
 
         downloadFrom(url)
     })
+
+    // 登记在飞任务：后来者 await 同一个 Promise，拿到"真下完"而不是"以为下完"
+    inFlightDownloads.set(songKey, task)
+    void task
+        .catch(() => { })
+        .then(() => {
+            // 只在仍是自己时清理（10 分钟卡死重下时 map 可能已被新任务覆盖）
+            if (inFlightDownloads.get(songKey) === task) inFlightDownloads.delete(songKey)
+        })
+    return task
 }
 
 const resolveMusicPath = (root: string, relativePath: string) => {
