@@ -83,6 +83,45 @@ export async function getAlbumSongs(source: string, albumId: string) {
   return soda.getAlbumSongs(albumId)
 }
 
+// ---- 歌单 / 排行榜 ----
+// 只有汽水实现了这两个维度（B站是 UP 主投稿语义，没有歌单/榜单实体）。
+// 汽水没有官方的「分类目录」与「榜单」接口（/luna/pc/charts、/luna/pc/discover/mix
+// 实测已 404），因此用关键词搜索歌单 + 歌单详情兜底，内容真实可播。
+
+export function hasSongList(source: string): boolean {
+  return source === 'soda'
+}
+
+export async function getSongListTags(source: string) {
+  requireSoda(source, '歌单分类')
+  return soda.getPlaylistTags()
+}
+
+export async function getSongListList(source: string, tagId: string, page = 1) {
+  requireSoda(source, '歌单列表')
+  return soda.getPlaylistList(tagId, page)
+}
+
+export async function getSongListDetail(source: string, id: string) {
+  requireSoda(source, '歌单详情')
+  return soda.getPlaylistDetail(id)
+}
+
+export async function searchSongList(source: string, text: string, page = 1) {
+  requireSoda(source, '歌单搜索')
+  return soda.searchPlaylists(text, page)
+}
+
+export async function getLeaderboardBoards(source: string) {
+  requireSoda(source, '排行榜')
+  return soda.getBoards()
+}
+
+export async function getLeaderboardList(source: string, bangid: string) {
+  requireSoda(source, '排行榜歌曲')
+  return soda.getBoardSongs(bangid)
+}
+
 /**
  * 搜索界面用：串行翻几页拼成一个列表。
  *

@@ -87,6 +87,19 @@
          * 所以压到 1 秒：留一点余量给轮询间隔即可。
          */
         streamReplayGuardMs: 1000,
+        /**
+         * near-end（设备回报进度接近结尾）判定的「最短已播时长」守卫。
+         *
+         * 这条判定原本没有任何时长守卫，只看设备回报的比例。某些本地文件元数据被污染
+         * （实测案例：bilibili 源 m4a《问爱》，音箱按错误时长算，刚投出去就回报接近 1.0
+         * 的 progressRatio），于是 watchdog 立刻判「临近结尾 → 自动下一首」；列表模式下
+         * 下一首又绕回 index=0 同一首 → 重新投 → 再判 → 每 3 秒重投一次的死循环，
+         * 听感就是「播了个开头又重来」。
+         *
+         * 因此要求：起播后至少播够这个时长才认可 near-end。正常曲目远超此值不受影响；
+         * 坏元数据曲目会被挡住，改由 stream-replayed / wall-clock 兜底切歌。
+         */
+        nearEndMinPlayedMs: 15000,
     };
 
     /**
@@ -204,7 +217,13 @@
                 return done('advance', 'stream-replayed');
             }
 
-            if (hasRatio && ratio >= opts.prerollRatio) return done('advance', 'near-end');
+            // near-end 必须过「最短已播时长」守卫：坏元数据文件会让音箱刚投出去就回报
+            // 接近 1.0 的比例，无守卫则立刻判播完 → 列表模式绕回同一首 → 无限重投。
+            if (hasRatio && ratio >= opts.prerollRatio) {
+                if (now - state.playingSince >= opts.nearEndMinPlayedMs) {
+                    return done('advance', 'near-end');
+                }
+            }
 
             // 有可信时长就按墙钟预判：设备不上报进度时也能准点切歌，不必等 6 秒确认
             if (state.durationMs >= opts.wallClockMinDurationMs) {

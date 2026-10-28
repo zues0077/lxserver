@@ -2113,7 +2113,11 @@ window.LocalMusicManager = {
 
             const result = await res.json();
             if (result.success) {
-                if (typeof showInfo === 'function') showInfo(`目录转移完成。成功 ${result.successCount} 项，失败 ${result.failCount} 项`);
+                if (typeof showInfo === 'function') {
+                    const skipped = Number(result.skipCount) || 0;
+                    const skipText = skipped > 0 ? `，跳过 ${skipped} 项（目标已存在）` : '';
+                    showInfo(`目录转移完成。成功 ${result.successCount} 项，失败 ${result.failCount} 项${skipText}`);
+                }
                 this.deselectAll();
                 this.refresh();
             } else {

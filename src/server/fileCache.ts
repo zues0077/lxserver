@@ -3671,6 +3671,9 @@ export const switchFolder = async (filenames: string[], username: string | undef
     const normalizedUsername = normalizeUsername(username)
     let successCount = 0
     let failCount = 0
+    // 目标已存在属于「无需移动」，不是失败——之前算进 failCount，导致前端弹
+    // 「成功 0 项，失败 1 项」，让用户以为移动出错。单独计数后如实报「跳过」。
+    let skipCount = 0
 
     const cacheIndex = indexManager.load(normalizedUsername, 'cache')
     const musicIndex = indexManager.load(normalizedUsername, 'music')
@@ -3731,7 +3734,7 @@ export const switchFolder = async (filenames: string[], username: string | undef
                 // Check collision in target folder
                 if (fs.existsSync(targetPath)) {
                     console.log(`[文件缓存] 移动冲突: ${filename} 已存在于 ${targetFolder}，跳过`)
-                    failCount++
+                    skipCount++
                     continue
                 }
 
@@ -3787,7 +3790,7 @@ export const switchFolder = async (filenames: string[], username: string | undef
         }
     }
 
-    return { successCount, failCount }
+    return { successCount, failCount, skipCount }
 }
 
 export const switchBaseLocation = async (filenames: string[], username: string | undefined) => {

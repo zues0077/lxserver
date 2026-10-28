@@ -1279,6 +1279,118 @@ function mapTrackNode(track: any): any {
   }
 }
 
+// ---- 歌单 / 排行榜 ----
+//
+// 汽水的这两个维度与 musicSdk 平台不同，没有「按分类浏览」的官方目录接口：
+//   - `/luna/pc/charts`（榜单）与 `/luna/pc/discover/mix`（推荐歌单）**实测已 404 失效**；
+//   - 可用的只有关键词搜索 `/luna/search/playlist` 与歌单详情 `/luna/pc/playlist/detail`。
+// 因此这里的做法是：用「精选关键词」充当分类标签与榜单，内容全部来自真实歌单。
+
+/** 歌单详情回包里的歌曲在 media_resources[].entity.track_wrapper.track */
+function mapMediaResources(body: any): any[] {
+  const raw: any[] = Array.isArray(body?.media_resources) ? body.media_resources : []
+  return raw
+    .map((r: any) => r?.entity?.track_wrapper?.track)
+    .filter(Boolean)
+    .map(mapTrackNode)
+    .filter(Boolean)
+}
+
+function mapPlaylistNode(p: any): any {
+  return {
+    id: String(p.id),
+    name: String(p.title || '').trim(),
+    picUrl: imageOf(p.url_cover),
+    playCount: Number(p.stats?.count_played) || 0,
+    desc: String(p.desc || ''),
+    author: String(p.owner?.nickname || p.owner?.public_name || ''),
+    total: Number(p.count_tracks) || 0,
+    source: 'soda',
+  }
+}
+
+/** 搜歌单（`/luna/search/playlist`，与 searchSongs 同指纹，匿名可用） */
+export async function searchPlaylists(keyword: string, page = 1, pageSize = 20): Promise<{
+  list: any[]
+  total: number
+  allPage: number
+}> {
+  const group = firstGroup(await androidSearch('playlist', keyword, page, pageSize))
+  const items: any[] = (group.data || [])
+    .map((item: any) => item?.entity?.playlist)
+    .filter((p: any) => p?.id)
+  const list = items.map(mapPlaylistNode)
+  const hasMore = !!group.has_more
+  return { list, total: list.length + (hasMore ? pageSize : 0), allPage: hasMore ? page + 1 : page }
+}
+
+/** 歌单详情：元信息 + 歌曲列表 */
+export async function getPlaylistDetail(playlistId: string): Promise<any> {
+  const id = String(playlistId || '').trim()
+  if (!id) throw new Error('缺少歌单 ID')
+  const body = await pcGet('/luna/pc/playlist/detail', { playlist_id: id })
+  const info = body?.playlist
+  if (!info?.id) throw new Error('汽水歌单不存在或为私密歌单')
+  const list = mapMediaResources(body)
+  return {
+    info: {
+      id: String(info.id),
+      name: String(info.title || '').trim(),
+      picUrl: imageOf(info.url_cover),
+      desc: String(info.desc || ''),
+      author: String(info.owner?.nickname || info.owner?.public_name || ''),
+      total: Number(info.count_tracks) || list.length,
+      source: 'soda',
+    },
+    list,
+    total: list.length,
+  }
+}
+
+/** 歌单分类标签：无官方分类接口，用精选关键词充当（前端渲染为一组标签按钮） */
+export const PLAYLIST_TAGS: Array<{ id: string; name: string }> = [
+  { id: '热歌', name: '热歌' },
+  { id: '抖音爆款', name: '抖音爆款' },
+  { id: '华语', name: '华语' },
+  { id: '民谣', name: '民谣' },
+  { id: '说唱', name: '说唱' },
+  { id: '电子', name: '电子' },
+]
+
+export async function getPlaylistTags(): Promise<any> {
+  return { tags: [{ name: '精选关键词', list: PLAYLIST_TAGS }], hotTag: PLAYLIST_TAGS[0] }
+}
+
+/** 按标签（关键词）取歌单列表 */
+export async function getPlaylistList(tagId: string, page = 1, pageSize = 20): Promise<any> {
+  const keyword = String(tagId || '').trim() || '热歌'
+  const res = await searchPlaylists(keyword, page, pageSize)
+  return { list: res.list, total: res.total }
+}
+
+/** 排行榜：官方 charts 接口已失效，用精选关键词歌单充当榜单（内容真实可播） */
+export const SODA_BOARDS: Array<{ id: string; name: string; keyword: string }> = [
+  { id: 'soda-hot', name: '汽水热歌榜', keyword: '热歌' },
+  { id: 'soda-douyin', name: '抖音爆款榜', keyword: '抖音爆款' },
+  { id: 'soda-mandarin', name: '华语精选榜', keyword: '华语' },
+  { id: 'soda-folk', name: '民谣精选榜', keyword: '民谣' },
+  { id: 'soda-rap', name: '说唱精选榜', keyword: '说唱' },
+]
+
+export async function getBoards(): Promise<any> {
+  return { list: SODA_BOARDS.map(b => ({ bangid: b.id, name: b.name })) }
+}
+
+export async function getBoardSongs(boardId: string): Promise<any> {
+  const board = SODA_BOARDS.find(b => b.id === String(boardId || '').trim())
+  const keyword = board?.keyword || String(boardId || '').trim() || '热歌'
+  const found = await searchPlaylists(keyword, 1, 3)
+  const first = found.list[0]
+  if (!first?.id) throw new Error(`汽水榜单「${board?.name || boardId}」暂无可播内容`)
+  const detail = await getPlaylistDetail(first.id)
+  return { list: detail.list, total: detail.list.length, boardName: board?.name || '' }
+}
+
 /** 艺人详情。对齐 extendDetail.getArtistDetail 的返回结构（前端歌手页头部直接渲染）。 */
 export async function getArtistDetail(artistId: string): Promise<any> {
   const body = await pcGet(`/luna/pc/artists/${String(artistId).trim()}`)

@@ -8639,6 +8639,68 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       }
 
       // [新增] 歌单分类标签 API
+      // ---- 歌单 / 排行榜 的前置分发 ----
+      // musicSdk 里没有 kglite（酷狗概念版）和 soda（汽水）这两个来源，直接走
+      // musicSdk[source].songList / .leaderboard 必然抛「does not support」。
+      // 这里在进入各端点前统一处理：
+      //   - kglite：与酷狗共用同一份歌单/榜单数据（概念版只是取链通道不同，取链仍优先
+      //     走 kglite），所以取数据时映射回 kg；
+      //   - soda  ：不在 musicSdk 里，整体转给 extraSources/soda 的实现。
+      {
+        const rawSource = urlObj.searchParams.get('source') || ''
+        const songListPaths = [
+          '/api/music/songList/tags',
+          '/api/music/songList/list',
+          '/api/music/songList/detail',
+          '/api/music/songList/search',
+          '/api/music/songList/userPlaylist',
+          '/api/music/leaderboard/boards',
+          '/api/music/leaderboard/list',
+        ]
+        if (songListPaths.includes(pathname)) {
+          if (rawSource === 'kglite') {
+            urlObj.searchParams.set('source', 'kg')
+          } else if (rawSource === 'soda') {
+            try {
+              let result: any = null
+              if (pathname === '/api/music/songList/tags') {
+                result = await extraSources.getSongListTags('soda')
+              } else if (pathname === '/api/music/songList/list') {
+                result = await extraSources.getSongListList(
+                  'soda',
+                  urlObj.searchParams.get('tagId') || '',
+                  parseInt(urlObj.searchParams.get('page') || '1'),
+                )
+              } else if (pathname === '/api/music/songList/detail') {
+                result = await extraSources.getSongListDetail('soda', urlObj.searchParams.get('id') || '')
+              } else if (pathname === '/api/music/songList/search') {
+                result = await extraSources.searchSongList(
+                  'soda',
+                  urlObj.searchParams.get('text') || '',
+                  parseInt(urlObj.searchParams.get('page') || '1'),
+                )
+              } else if (pathname === '/api/music/leaderboard/boards') {
+                result = await extraSources.getLeaderboardBoards('soda')
+              } else {
+                result = await extraSources.getLeaderboardList('soda', urlObj.searchParams.get('bangid') || '')
+              }
+              // 只有返回歌曲的端点需要归一（歌单列表 / 标签返回的是歌单对象，不是歌曲）
+              if (result && Array.isArray(result.list)
+                && (pathname === '/api/music/songList/detail' || pathname === '/api/music/leaderboard/list')) {
+                result.list = result.list.map(normalizeSongInfo)
+              }
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify(result))
+            } catch (err: any) {
+              console.error(`[汽水歌单/榜单] 请求失败 (${pathname}):`, err)
+              res.writeHead(500, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: err?.message || '汽水歌单/榜单请求失败' }))
+            }
+            return
+          }
+        }
+      }
+
       if (pathname === '/api/music/songList/tags' && req.method === 'GET') {
         const source = urlObj.searchParams.get('source') || 'wy'
         try {

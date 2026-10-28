@@ -500,6 +500,12 @@ const serveTranscodedMp3 = async (
         /* 忽略 */
       }
     }
+    // 响应可能已被掐断：重投时 retireStreams() 会把旧的 res end 掉，而转码 pipe 还在
+    // 吐数据，此时再 write 会抛 ERR_STREAM_WRITE_AFTER_END 并让进程崩溃。先判定再写。
+    if (res.writableEnded || res.destroyed) {
+      transcoder.stream.pause()
+      return
+    }
     if (!res.write(chunk)) transcoder.stream.pause()
   })
   res.on('drain', () => transcoder.stream.resume())
