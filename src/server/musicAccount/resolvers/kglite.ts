@@ -882,17 +882,18 @@ export async function searchSongs(
     throw new Error(`概念版搜索失败（status=${b.status ?? '-'}${code ? `，error_code=${code}` : ''}）`)
   }
 
-  const info: any[] = b?.data?.info || []
+  // complexsearch /v2/search/song 实测返回 data.lists（大驼峰字段），兼容旧 info/小写结构
+  const info: any[] = b?.data?.lists || b?.data?.info || []
   const list: LiteSong[] = info.map((it: any) => {
-    const hash = String(it.hash || '').toLowerCase()
-    const albumId = Number(it.album_id) || Number(it.album_audio_id) || 0
-    const dur = Number(it.duration) || Number(it.timelength) || 0
+    const hash = String(it.FileHash || it.hash || '').toLowerCase()
+    const albumId = Number(it.AlbumID || it.Audioid || it.album_id || it.album_audio_id) || 0
+    const dur = Number(it.Duration || it.duration || it.timelength) || 0
     return {
       id: `kglite_${hash}`,
       source: 'kglite',
-      name: decodeHtmlEntities(it.songname || it.filename || ''),
-      singer: decodeHtmlEntities(it.singername || ''),
-      album: decodeHtmlEntities(it.album_name || ''),
+      name: decodeHtmlEntities(it.SongName || it.songname || it.filename || ''),
+      singer: decodeHtmlEntities(it.SingerName || it.singername || ''),
+      album: decodeHtmlEntities(it.AlbumName || it.album_name || ''),
       albumId,
       hash,
       songmid: hash,
