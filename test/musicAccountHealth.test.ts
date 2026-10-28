@@ -1,9 +1,13 @@
 /**
- * 平台账号健康度：状态分级 + 失效关键词判据。
+ * 平台账号健康度：状态分级 + 汇总提示。
  *
- * 这一层是纯函数，测试重点不是「跑通」，而是**别误报**：
- * 把「该曲无版权」误判成「账号失效」，用户会去重导一个本来完好的 Cookie，
- * 比不提示更糟。
+ * 这里**故意没有**「按报错文案判断是否失效」的测试——那条路已经废弃了。
+ * 原因写在这里，避免以后有人又想加回去：
+ * 各平台 resolver 的兜底文案是含糊的，酷我是「多为版权受限、需要会员或 Cookie 失效」，
+ * QQ 是「多为付费/版权受限曲目（当前账号无绿钻权益拿不到），或 Cookie 已过期」。
+ * 同一句话既可能是歌的问题也可能是账号的问题，按关键词判定等于「唱一首没版权的歌
+ * 就把好账号标成已失效」，比不提示更糟。现在改成取链失败后调平台自己的
+ * getAccountInfo 复核（见 index.ts probeAccountAfterFailure），由接口说话。
  */
 
 import { test } from 'node:test'
@@ -12,7 +16,6 @@ import assert from 'node:assert/strict'
 import {
   STALE_AFTER_DAYS,
   classifyHealth,
-  looksLikeAuthFailure,
   summarize,
 } from '../src/server/musicAccount/health'
 
@@ -50,42 +53,6 @@ test('classifyHealth：只做结构校验通过的平台不冒充「已登录」
   const r = classifyHealth(true, { at: now - HOUR, ok: true, verified: 'structural' }, now)
   assert.equal(r.health, 'ok')
   assert.equal(r.text, '结构校验通过')
-})
-
-test('looksLikeAuthFailure：登录态失效的常见说法都要命中', () => {
-  const yes = [
-    '未登录',
-    '登录态已失效，请重新登录',
-    'Cookie 已失效（/luna/pc/me 没有返回账号信息），请重新登录',
-    'cookie 无效',
-    'token 已过期',
-    '鉴权失败：401',
-    'HTTP 403 Forbidden',
-    'Unauthorized',
-    'not logged in',
-    'login required',
-    'session expired',
-  ]
-  for (const msg of yes) {
-    assert.equal(looksLikeAuthFailure(msg), true, `应判定为登录失败：${msg}`)
-  }
-})
-
-test('looksLikeAuthFailure：正常取链失败不能被误判成账号失效', () => {
-  const no = [
-    '',
-    undefined,
-    '该曲目无版权，平台未返回播放地址',
-    '需要会员权益才能播放',
-    '连接被拒绝',
-    'ETIMEDOUT',
-    '未找到支持 soda 平台的自定义源',
-    '签名器返回的是 CENC 加密流且无密钥',
-    '只拿到 60 秒试听片段',
-  ]
-  for (const msg of no) {
-    assert.equal(looksLikeAuthFailure(msg as any), false, `不应判定为登录失败：${String(msg)}`)
-  }
 })
 
 test('summarize：汇总数出失效平台名，并给出一句话提示', () => {

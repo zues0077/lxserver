@@ -67,37 +67,6 @@ export function classifyHealth(
   return { health: 'ok', text: last.verified === 'structural' ? '结构校验通过' : '正常', ageHours }
 }
 
-/**
- * 取链报错里是否出现了「登录态没了」的信号。
- *
- * 用途：用户不会天天点「校验」，但一定会遇到取链失败。在取链失败的那一刻顺手把账号
- * 标成失效，用户下次打开设置页就能看到红标——这是发现失效最便宜的时机。
- *
- * 判据刻意保守：宁可漏判（等巡检兜底），也不能把「该曲无版权」这类正常失败
- * 误标成「账号失效」，否则用户会去重导一个本来完好的 Cookie。
- */
-const AUTH_FAILURE_PATTERNS: RegExp[] = [
-  /未登录/,
-  /登录(态|状态)?[^，。;；]{0,6}(失效|过期|无效|异常)/,
-  /请?重新登录/,
-  /cookie[^，。;；]{0,10}(失效|过期|无效|缺失|不完整|格式)/i,
-  /(失效|过期|无效)[^，。;；]{0,6}cookie/i,
-  /token[^，。;；]{0,10}(失效|过期|无效)/i,
-  /鉴权失败/,
-  /未授权/,
-  /\bunauthori[sz]ed\b/i,
-  /\bnot\s+log(ged)?\s*in\b/i,
-  /\blogin\s+(is\s+)?(required|expired|invalid)\b/i,
-  /\b(401|403)\b/,
-  /\bsession\s*(expired|invalid)\b/i,
-]
-
-export function looksLikeAuthFailure(message: string | undefined | null): boolean {
-  const msg = String(message ?? '')
-  if (!msg) return false
-  return AUTH_FAILURE_PATTERNS.some(re => re.test(msg))
-}
-
 export interface HealthSummary {
   /** 已配置账号的平台数 */
   configured: number

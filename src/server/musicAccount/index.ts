@@ -21,7 +21,7 @@ import { hasLoginKey, parseCookie } from './http'
 import { normalizeCookieInput, formatLabel } from './cookieParse'
 import * as store from './store'
 import * as qrLogin from './qrLogin'
-import { looksLikeAuthFailure, summarize } from './health'
+import { summarize } from './health'
 import type { HealthSummary } from './health'
 import type { AccountResolveResult, AccountInfo, PlatformResolver } from './types'
 
@@ -99,39 +99,51 @@ export async function tryResolveByAccount(
       return result
     }
     if (result?.error) {
-      const msg = result.error
-      console.log(`[平台账号] ${getPlatform(source)?.name ?? source} 未取到链接：${msg}`)
-      markAuthFailureIfAny(source, msg)
+      console.log(`[平台账号] ${getPlatform(source)?.name ?? source} 未取到链接：${result.error}`)
+      probeAccountAfterFailure(source)
     }
     return null
   } catch (e: any) {
     const msg = e?.message || String(e)
     console.log(`[平台账号] ${getPlatform(source)?.name ?? source} 取链异常：${msg}`)
-    markAuthFailureIfAny(source, msg)
+    probeAccountAfterFailure(source)
     return null
   }
 }
 
 /**
- * 取链报错里带「登录态没了」的信号时，顺手把账号标成失效。
+ * 取链失败后，后台复核一次账号登录态。
  *
- * 用户不会天天点「校验」，但一定会遇到取链失败——这是发现失效最便宜的时机。
- * 只写 lastVerify（不改 Cookie），所以是纯提示、不影响取链，误判也只是多一条红标。
+ * 为什么不用「报错文案里有没有『失效』」来判断：各平台 resolver 的兜底文案是**含糊**的，
+ * 比如酷我是「多为版权受限、需要会员或 Cookie 失效」、QQ 是「多为付费/版权受限曲目…
+ * 或 Cookie 已过期」——同一句话既可能是歌的问题也可能是账号的问题。按关键词标记，
+ * 唱一首没版权的歌就能把好账号标成「已失效」，比不提示更糟。
+ *
+ * 所以改成「让平台自己的接口说话」：调一次 getAccountInfo（需登录态的接口），
+ * 它说没登录才是真失效；说正常就顺手把校验时间刷新成现在。
+ * 加 30 分钟冷却，避免连播几十首失败曲把各家接口打成扫描。
  */
-function markAuthFailureIfAny(id: string, message: string): void {
-  if (!looksLikeAuthFailure(message)) return
-  const name = getPlatform(id)?.name ?? id
-  try {
-    store.saveVerifyResult(id, {
-      at: Date.now(),
-      ok: false,
-      verified: 'online',
-      message: `取链时报错：${message}`,
+const lastAuthProbeAt = new Map<string, number>()
+const AUTH_PROBE_COOLDOWN_MS = 30 * 60 * 1000
+
+function probeAccountAfterFailure(id: string): void {
+  const last = lastAuthProbeAt.get(id) ?? 0
+  if (Date.now() - last < AUTH_PROBE_COOLDOWN_MS) return
+  lastAuthProbeAt.set(id, Date.now())
+
+  void verifyAccount(id)
+    .then(info => {
+      const name = getPlatform(id)?.name ?? id
+      if (info.ok) return
+      if (info.verified === 'structural') {
+        console.log(`[平台账号] ${name} 取链失败，但本平台只能做结构校验，无法判断登录态：${info.message || ''}`)
+        return
+      }
+      console.log(`[平台账号] ⚠ ${name} 登录态复查失败，已标记为失效：${info.message || ''}`)
     })
-    console.log(`[平台账号] ⚠ ${name} 账号疑似失效（取链报错命中登录态关键词），已标记，建议重新导出 Cookie`)
-  } catch (e: any) {
-    console.log(`[平台账号] 标记失效状态失败（忽略）：${e?.message || e}`)
-  }
+    .catch((e: any) => {
+      console.log(`[平台账号] 取链失败后的账号复核出错（忽略）：${e?.message || e}`)
+    })
 }
 
 /** 验证某平台账号：先做结构校验，再做（有把握的）在线校验 */
