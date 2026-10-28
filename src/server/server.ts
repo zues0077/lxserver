@@ -10141,6 +10141,61 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
+      // ===== 额外音源取流诊断（排障用：整曲/试听、走了哪条通道、签名链路缺哪一环） =====
+      if (pathname === '/api/music/extra/diagnose' && (req.method === 'GET' || req.method === 'POST')) {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+
+        const run = async (raw: string) => {
+          let payload: any = {}
+          if (raw) {
+            try {
+              payload = JSON.parse(raw)
+            } catch {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, error: '请求体不是合法 JSON' }))
+              return
+            }
+          }
+          const source = String(payload.source || 'soda').trim()
+          const trackId = String(payload.track_id || payload.id || '').trim()
+          if (!trackId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: '缺少 track_id' }))
+            return
+          }
+          try {
+            const data = await extraSources.diagnoseStream(source, { id: trackId, songmid: trackId, source }, String(payload.quality || '320k'))
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, data }))
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        }
+
+        if (req.method === 'GET') {
+          // GET 走查询串：?track_id=xxx&quality=320k&source=soda
+          const u = new URL(req.url || '/', 'http://localhost')
+          void run(JSON.stringify({
+            source: u.searchParams.get('source') || 'soda',
+            track_id: u.searchParams.get('track_id') || u.searchParams.get('id') || '',
+            quality: u.searchParams.get('quality') || '320k',
+          }))
+          return
+        }
+
+        void readBody(req).then(body => run(body || '{}')).catch((e: any) => {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+        })
+        return
+      }
+
       // ===== 汽水待补清单 / 签名器（L2 骨架） =====
       if (pathname === '/api/music/prefetch/status' && req.method === 'GET') {
         const auth = req.headers['x-frontend-auth']

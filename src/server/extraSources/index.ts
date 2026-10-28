@@ -119,6 +119,12 @@ export * as signer from './signer'
 export * as pending from './pending'
 export * as prefetch from './prefetch'
 
+/** 取流诊断：一次说清「拿到的是整曲还是试听、走的哪条通道、还缺什么」 */
+export async function diagnoseStream(source: string, songInfo: any, quality: string) {
+  if (source === 'soda') return soda.diagnoseStream(songInfo, quality, store.getCookie('soda') || '')
+  throw new Error(`${displayName(source)} 暂不支持取流诊断`)
+}
+
 /** 供 /health 或后台展示用的一行摘要 */
 export function describe(): Array<{ id: string; name: string; playback: boolean }> {
   return [

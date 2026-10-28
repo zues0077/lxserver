@@ -84,6 +84,16 @@ const DEVICE_FINGERPRINT: Record<string, string> = {
 const IMAGE_BASE = 'https://p3-luna.douyinpic.com/img/'
 /** h5 端点：唯一实测能正常下发 video_list 的取流入口（pc 端恒 200+0 字节） */
 const H5_TRACK_API = 'https://api.qishui.com/luna/h5/track_v2'
+/**
+ * SEO / 分享页端点：与 h5 **不同域名**（beta-luna vs api），免签名、明文。
+ *
+ * 参考实现：`jiuhunwl/music_jx` 的 `qsmusic.php`、`libresoda` 的 `fetch_seo_track_data`。
+ * libresoda 的 `fetch_web_track_v2` 就是 track_v2 一挂（HTTP 失败或解析失败）就退到它，
+ * 我们照抄这条兜底链：`api.qishui.com` 抽风/被风控时，这里往往还能取到流。
+ */
+const SEO_TRACK_API = 'https://beta-luna.douyin.com/luna/h5/seo_track'
+/** SEO 端点跟 h5 一样只认「朴素」UA；移动端 UA 实测最稳 */
+const SEO_UA = 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36'
 /** 账号信息（带 Cookie 可读，无需签名） */
 const ME_API = 'https://api.qishui.com/luna/pc/me'
 
@@ -275,6 +285,21 @@ interface SodaVideoItem {
   }
 }
 
+/** 一条取流通道取回来的东西：原始响应 + 候选流 + 时长信息 */
+export interface PlainFetch {
+  tag: string
+  parsed: any
+  items: SodaVideoItem[]
+  /** 实际下发的流时长（秒） */
+  streamDuration: number
+  /** 元数据里的整曲时长（秒） */
+  trackDuration: number
+  /** 元数据里平台声明的试听时长（秒） */
+  previewDuration: number
+  /** 平台若下发了 play_auth.spade_a，这里给出解出的十六进制密钥 */
+  key?: string
+}
+
 /**
  * PC 客户端 UA 的**回退值**。实测（2026-10-25）3.7.0 这一套是可用的：
  *   UA = LunaPC/3.7.0(30080000)；query 里 app_name=luna_pc、device_platform=windows、
@@ -367,21 +392,11 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
     headers: { ...baseHeaders, ...signedHeaders },
     timeout: 15000,
   })
-  const bodyAny: any = resp.body
-  let parsed: any = null
-  if (bodyAny && typeof bodyAny === 'object' && !Buffer.isBuffer(bodyAny)) parsed = bodyAny
-  else {
-    const raw = Buffer.isBuffer(bodyAny) ? bodyAny.toString('utf-8') : String(bodyAny || '')
-    if (!raw.trim().startsWith('{')) return null
-    try { parsed = JSON.parse(raw) } catch { return null }
-  }
+  const parsed = parseJsonBody(resp)
+  if (!parsed) return null
 
-  let model: any = parsed?.track_player?.video_model
-  if (typeof model === 'string') {
-    try { model = model.trim() ? JSON.parse(model) : {} } catch { model = {} }
-  }
-  const list: SodaVideoItem[] = Array.isArray(model?.video_list) ? model.video_list : []
-  const usable = list.filter(v => String(v?.main_url || '').startsWith('http'))
+  const model = parseVideoModel(parsed?.track_player?.video_model)
+  const usable = videoItems(model)
   if (!usable.length) return null
 
   // [汽水解密] 版权曲直链是 CENC 加密流，密钥按参考实现应随 play_auth.spade_a 下发。
@@ -391,9 +406,14 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
   if (hexKey) registerSodaKey(trackId, hexKey)
 
   // 签名 ≠ 有版权：受限曲照样只给 30/60 秒，这里必须拦住，否则播放器会播到一半静音
-  const trackDur = toNumber(parsed?.track?.duration) / 1000
-  const streamDur = toNumber(model?.video_duration)
-  if (trackDur > 0 && streamDur > 0 && streamDur < trackDur * 0.85) return null
+  if (isPreviewStream({
+    tag: 'pc',
+    parsed,
+    items: usable,
+    streamDuration: toNumber(model?.video_duration),
+    trackDuration: normalizeDurationSec(parsed?.track?.duration),
+    previewDuration: normalizeDurationSec(parsed?.track?.preview?.duration),
+  })) return null
 
   const wantRank = REQUEST_RANK[quality] ?? 3
   // 同权重（higher/highest 都映射到 320k）要按真实码率再排一次，
@@ -422,9 +442,261 @@ function toNumber(value: any): number {
 }
 
 /**
- * 取音频直链。
+ * 汽水这几个端点的响应体形态不固定：needle 只在 `content-type: application/json`
+ * 时自动解析，而汽水时灵时不灵，于是拿到的可能是对象 / 字符串 / Buffer 三种之一。
+ * 三种都得兼容，否则会误判成「上游返回非 JSON」。
+ */
+export function parseJsonBody(resp: any): any {
+  const body: any = resp?.body
+  if (body && typeof body === 'object' && !Buffer.isBuffer(body)) return body
+  const raw = Buffer.isBuffer(body) ? body.toString('utf-8') : String(body || '')
+  if (!raw.trim().startsWith('{')) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+/** `video_model` 可能是对象、也可能是 JSON 字符串，还有 `"null"` 这种字面量 */
+export function parseVideoModel(raw: any): any {
+  if (!raw) return {}
+  if (typeof raw === 'object') return raw
+  const text = String(raw).trim()
+  if (!text.startsWith('{')) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    return {}
+  }
+}
+
+/** 汽水的时长字段毫秒 / 秒混着用，>1000 一律按毫秒折算 */
+function normalizeDurationSec(value: any): number {
+  const n = toNumber(value)
+  if (n <= 0) return 0
+  return n > 1000 ? n / 1000 : n
+}
+
+/** 从 video_model 里挑出真正能用的候选流 */
+export function videoItems(model: any): SodaVideoItem[] {
+  const list: SodaVideoItem[] = Array.isArray(model?.video_list) ? model.video_list : []
+  return list.filter(v => String(v?.main_url || '').startsWith('http') || String(v?.backup_url || '').startsWith('http'))
+}
+
+/**
+ * 解析分支②：`url_player_info` 是火山 VOD `GetPlayInfo` 的**已签名地址**，
+ * 要再 GET 一次才能拿到 `Result.Data.PlayInfoList[]`（字段名是 PascalCase，
+ * 与 `video_list` 的 snake_case 完全不同，所以必须单独映射一次）。
+ *
+ * 这条分支是原实现的盲区：上游只给 `url_player_info` 的曲目会被误报成
+ * 「未返回可用音频流」。
+ */
+async function fetchPlayerInfo(player: any, cookie: string): Promise<{ items: SodaVideoItem[]; duration: number }> {
+  const infoUrl = String(player?.url_player_info || '').trim()
+  if (!infoUrl.startsWith('http')) return { items: [], duration: 0 }
+
+  const info = parseJsonBody(await request<any>(infoUrl, {
+    headers: { 'User-Agent': SEO_UA, ...(cookie ? { Cookie: cookie } : {}) },
+    timeout: 15000,
+  }))
+  const list: any[] = info?.Result?.Data?.PlayInfoList ?? info?.result?.data?.play_info_list ?? []
+  const withDuration = list.find((it: any) => toNumber(it?.Duration) > 0)
+  return {
+    items: mapPlayerInfoItems(list),
+    duration: withDuration ? normalizeDurationSec(withDuration.Duration) : 0,
+  }
+}
+
+/**
+ * 映射火山 VOD 的 `PlayInfoList[]` → 统一的 `SodaVideoItem[]`。
+ *
+ * 字段是 **PascalCase**（`MainPlayUrl` / `Quality` / `Bitrate` …），
+ * 与 `video_list` 的 snake_case 完全对不上，所以只能单独映射一次。
+ * 大小写两种写法都认：平台不同版本返回风格不一致，只认一种会随机漏流。
+ */
+export function mapPlayerInfoItems(list: any[]): SodaVideoItem[] {
+  return (Array.isArray(list) ? list : [])
+    .map((it: any) => ({
+      main_url: String(it?.MainPlayUrl ?? it?.main_play_url ?? ''),
+      backup_url: String(it?.BackupPlayUrl ?? it?.backup_play_url ?? ''),
+      video_meta: {
+        quality: String(it?.Quality ?? it?.quality ?? ''),
+        vtype: String(it?.Format ?? it?.format ?? 'm4a'),
+        bitrate: toNumber(it?.Bitrate ?? it?.bitrate),
+        size: toNumber(it?.Size ?? it?.size),
+        codec_type: String(it?.Codec ?? it?.codec ?? ''),
+      },
+    }))
+    .filter(v => String(v.main_url || v.backup_url).startsWith('http'))
+}
+
+/**
+ * 流是否只是试听片段。
+ *
+ * 判据两条（口径同 libresoda 的 `sodaDownloadInfoIsPreview`，再加一条平台声明）：
+ *   - 平台在 `track.preview.duration` 里**明确给了试听时长** → 流时长与它吻合即试听（最准）；
+ *   - 否则退回「流时长明显短于整曲（差 5 秒以上）」。
+ */
+export function isPreviewStream(fetch: PlainFetch): boolean {
+  const { streamDuration, trackDuration, previewDuration } = fetch
+  if (streamDuration <= 0) return false
+  if (previewDuration > 0 && Math.abs(streamDuration - previewDuration) <= 1.5) return true
+  if (trackDuration <= 0) return false
+  return streamDuration + 5 < trackDuration
+}
+
+/** 请求音质 → 明文通道可接受的最高档位权重（原实现恒为 3，等于无视用户选的音质） */
+const PLAIN_REQUEST_RANK: Record<string, number> = {
+  '128k': 1,
+  '320k': 3,
+  atmos: 3,
+  flac: 4,
+  flac24bit: 4,
+}
+
+/** 明文通道：从候选流里挑一条最合适的（按请求音质封顶，再按真实码率排序） */
+export function chooseStream(items: SodaVideoItem[], quality: string): SodaVideoItem | null {
+  if (!items.length) return null
+  const wantRank = PLAIN_REQUEST_RANK[quality] ?? 3
+  const rankOf = (v: SodaVideoItem) => QUALITY_RANK[String(v?.video_meta?.quality || '')] || 1
+  const sorted = [...items].sort((a, b) => toNumber(b?.video_meta?.bitrate) - toNumber(a?.video_meta?.bitrate))
+  return sorted.find(v => rankOf(v) <= wantRank) || sorted[sorted.length - 1]
+}
+
+/** 明文通道①：`api.qishui.com/luna/h5/track_v2`（原主路径） */
+async function fetchH5Track(trackId: string, cookie: string): Promise<PlainFetch | null> {
+  const params = new URLSearchParams({
+    track_id: trackId,
+    media_type: 'track',
+    aid: '386088',
+    device_platform: 'web',
+    channel: 'pc_web',
+  })
+  // 注意：不要带 Referer，douyinvod 见到 qishui 域来源会 403；取流接口本身也不挑 Referer
+  const parsed = parseJsonBody(await request<any>(`${H5_TRACK_API}?${params.toString()}`, {
+    headers: { 'User-Agent': WEB_UA, ...(cookie ? { Cookie: cookie } : {}) },
+    timeout: 15000,
+  }))
+  if (!parsed) return null
+  return completePlainFetch(shapePlainFetch('h5', parsed), cookie, trackId)
+}
+
+/**
+ * 明文通道②：`beta-luna.douyin.com/luna/h5/seo_track`（新增兜底）。
+ *
+ * 价值在两处，缺一不可：
+ *   - **换域名**：`api.qishui.com` 抽风 / 被风控时，这里往往还能取到流；
+ *   - **换解析分支**：SEO 端点除了 `video_model`，还会给 `url_player_info`
+ *     （火山 VOD 的 GetPlayInfo 已签名地址），而 h5 端点基本只给 `video_model`。
+ *
+ * 需要签名器才能播的会员曲，这里拿到的同样是试听片段 —— 所以它解决的是
+ * 「取不到流」，不是「拿不到无损」。
+ */
+async function fetchSeoTrack(trackId: string, cookie: string): Promise<PlainFetch | null> {
+  const url = `${SEO_TRACK_API}?${new URLSearchParams({ track_id: trackId, device_platform: 'web' }).toString()}`
+  const parsed = parseJsonBody(await request<any>(url, {
+    headers: {
+      'User-Agent': SEO_UA,
+      'X-Requested-With': 'XMLHttpRequest',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  }))
+  if (!parsed) return null
+  return completePlainFetch(shapePlainFetch('seo', parsed), cookie, trackId)
+}
+
+/**
+ * 把一条通道的原始响应整理成统一结构（**纯函数，不联网**）。
+ *
+ * 曲目元数据的挂载点两个端点不一样：h5 在 `track` 下，SEO 在 `seo_track.track` 下，
+ * 所以两个都要认 —— 只认一个的话，另一条通道取回来的时长全是 0，
+ * 试听判定就直接失效了。
+ */
+export function shapePlainFetch(tag: string, parsed: any): PlainFetch {
+  const player: any = parsed?.track_player || {}
+  const track: any = parsed?.track?.id ? parsed.track : (parsed?.seo_track?.track || parsed?.track || {})
+  const model = parseVideoModel(player.video_model)
+  const hexKey = extractSodaKey(parsed)
+
+  return {
+    tag,
+    parsed,
+    items: videoItems(model),
+    streamDuration: normalizeDurationSec(model.video_duration),
+    trackDuration: normalizeDurationSec(track?.duration),
+    previewDuration: normalizeDurationSec(track?.preview?.duration),
+    key: hexKey || undefined,
+  }
+}
+
+/** 补齐火山 VOD 分支（需要联网）+ 把密钥登记进进程内登记表 */
+async function completePlainFetch(fetch: PlainFetch, cookie: string, trackId: string): Promise<PlainFetch> {
+  if (!fetch.items.length) {
+    const got = await fetchPlayerInfo(fetch.parsed?.track_player, cookie)
+    fetch.items = got.items
+    if (!fetch.streamDuration) fetch.streamDuration = got.duration
+  }
+  // [汽水解密] 平台一旦重新下发 play_auth.spade_a，这里就登记，
+  // fileCache 的解密分支随即生效（见 sodaKey.ts 头部的实测结论）。
+  if (fetch.key) registerSodaKey(trackId, fetch.key)
+  return fetch
+}
+
+type PlainOutcome =
+  | { ok: true; url: string; quality: string; via: string; ext: string; key?: string }
+  | { ok: false; reason: 'preview'; seconds: number; full: number }
+  | { ok: false; reason: 'no-stream' }
+
+/**
+ * 免签名明文取流：h5 优先，SEO 兜底。
+ *
+ * 两条通道不是「谁更好」的关系，而是**互为备份** —— 域名不同、解析分支互补，
+ * 一条挂了另一条大概率还在。所以 h5 取不到流 / 只拿到试听时，
+ * **必须再试一次 SEO**，而不是直接抛错（原实现就在这里直接报错了）。
+ */
+async function resolvePlainStream(trackId: string, cookie: string, quality: string): Promise<PlainOutcome> {
+  const fetchers: Array<() => Promise<PlainFetch | null>> = [
+    () => fetchH5Track(trackId, cookie),
+    () => fetchSeoTrack(trackId, cookie),
+  ]
+  let preview: { seconds: number; full: number } | null = null
+
+  for (const run of fetchers) {
+    const got = await run().catch(() => null)
+    if (!got) continue
+    const chosen = chooseStream(got.items, quality)
+    if (!chosen) continue
+    if (isPreviewStream(got)) {
+      // 记住第一条通道看到的试听信息：两条都只给试听时，用它给出准确提示
+      if (!preview) preview = { seconds: Math.round(got.streamDuration), full: Math.round(got.trackDuration) }
+      continue
+    }
+    const bitrate = toNumber(chosen.video_meta?.bitrate)
+    return {
+      ok: true,
+      url: String(chosen.main_url || chosen.backup_url),
+      quality: QUALITY_LABEL[String(chosen.video_meta?.quality || '')] || '320k',
+      via: `${got.tag}:${chosen.video_meta?.quality || '?'}(${Math.round(bitrate / 1000)}k)`,
+      ext: String(chosen.video_meta?.vtype || 'm4a'),
+      key: got.key,
+    }
+  }
+
+  if (preview) return { ok: false, reason: 'preview', seconds: preview.seconds, full: preview.full }
+  return { ok: false, reason: 'no-stream' }
+}
+
+/**
+ * 取音频直链（对外入口）。
+ *
+ * 通道优先级：**签名器（App，可达无损）→ h5（明文）→ SEO（明文兜底）**。
+ * 前两级任一拿到**非试听**流即返回；都只给试听时，抛出的错误里带上诊断提示，
+ * 让用户知道「是签名器没配 / 没开」还是「这曲本来就没整曲权益」。
+ *
  * @param cookie 账号 Cookie（可不传）。实测匿名即可拿到可播曲的直链；
- *               带 Cookie 时应能多解锁一部分（会员曲整曲仍需客户端签名，未验证）。
+ *               带 Cookie 时应能多解锁一部分（会员曲整曲仍需客户端签名）。
  */
 export async function getAudioUrl(songInfo: any, quality: string, cookie = '', username = ''): Promise<{
   url: string
@@ -439,98 +711,216 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   const trackId = sodaTrackIdOf(songInfo)
   if (!isSodaId(trackId)) throw new Error(`汽水歌曲 id 不合法（${trackId || '空'}）`)
 
-  // ① 配了签名器就走签名通道：它能回到 6 档音质（lossless 852k / hi_res / spatial），
-  //    h5 端点只给 medium/higher/highest 三档，且拿不到无损。
-  const signedFirst = await trySignedStream(trackId, cookie, quality).catch(() => null)
-  if (signedFirst) {
+  // ① 签名器在线 → App 端点：6 档音质（lossless 852k / hi_res / spatial）
+  const signed = await trySignedStream(trackId, cookie, quality).catch(() => null)
+  if (signed) {
     pending.remove(`soda:${trackId}`)
-    return signedFirst
+    return signed
   }
 
-  const params = new URLSearchParams({
-    track_id: trackId,
-    media_type: 'track',
-    aid: '386088',
-    device_platform: 'web',
-    channel: 'pc_web',
-  })
-
-  let parsed: any = {}
-  try {
-    const resp = await request<any>(`${H5_TRACK_API}?${params.toString()}`, {
-      // 注意：不要带 Referer，douyinvod 见到 qishui 域来源会 403；取流接口本身也不挑 Referer
-      headers: { 'User-Agent': WEB_UA, ...(cookie ? { Cookie: cookie } : {}) },
-      timeout: 15000,
-    })
-    // needle 只在 content-type: application/json 时自动解析；汽水这个端点有时不带该头，
-    // 所以对象 / 字符串 / Buffer 三种形态都要兼容，否则会误判成「非 JSON」。
-    const bodyAny: any = resp.body
-    if (bodyAny && typeof bodyAny === 'object' && !Buffer.isBuffer(bodyAny)) {
-      parsed = bodyAny
-    } else {
-      const raw = Buffer.isBuffer(bodyAny) ? bodyAny.toString('utf-8') : String(bodyAny || '')
-      if (!raw.trim().startsWith('{')) {
-        throw new Error(`上游返回非 JSON（HTTP ${resp.statusCode}）`)
-      }
-      parsed = JSON.parse(raw)
+  // ② 免签名明文通道：h5 优先，SEO 兜底
+  const plain = await resolvePlainStream(trackId, cookie, quality)
+  if (plain.ok) {
+    pending.remove(`soda:${trackId}`)
+    return {
+      url: plain.url,
+      quality: plain.quality,
+      via: plain.via,
+      ext: plain.ext,
+      key: plain.key,
     }
-  } catch (e: any) {
-    throw new Error(`汽水取流请求失败：${e?.message || e}`)
   }
 
-  // [汽水解密] H5 端点对免费可播曲通常下发明文；但万一带 play_auth.spade_a 也一并捕获登记，
-  // 下载时即可就地解密（见 fileCache.ts），避免落到「加密残骸」隔离逻辑。
-  const hexKey = extractSodaKey(parsed)
-  if (hexKey) registerSodaKey(trackId, hexKey)
-
-  const track = parsed?.track || {}
-  const player = parsed?.track_player || {}
-  let model: any = player.video_model
-  if (typeof model === 'string') {
-    try { model = model.trim() ? JSON.parse(model) : {} } catch { model = {} }
-  }
-  model = model || {}
-
-  const list: SodaVideoItem[] = Array.isArray(model.video_list) ? model.video_list : []
-  const usable = list.filter(v => String(v?.main_url || '').startsWith('http'))
-  if (!usable.length) {
-    const signed = await trySignedStream(trackId, cookie).catch(() => null)
-    if (signed) return signed
-    const msg = '汽水未返回可用音频流（该曲可能已下架或仅支持客户端播放）'
-    pending.add(songInfo, 'no-stream', msg, username)
-    throw new Error(msg)
-  }
-
-  // 版权受限曲目会下发 30s / 60s 的试听片段：如实拦下来，别让播放器播到一半静音
-  const trackDuration = toNumber(track.duration) / 1000
-  const streamDuration = toNumber(model.video_duration)
-  const isPreview = trackDuration > 0 && streamDuration > 0 && streamDuration < trackDuration * 0.85
-  if (isPreview) {
-    const signed = await trySignedStream(trackId, cookie).catch(() => null)
-    if (signed) return signed
-    const shown = Math.round(streamDuration)
-    const msg = `汽水该曲仅有 ${shown} 秒试听（版权限制，完整 ${Math.round(trackDuration)} 秒需官方客户端签名），请换源或换平台播放`
-    // 记待补：等签名器在线时自动补，不让用户凭记忆重新找歌
-    pending.add(songInfo, 'preview-only', msg, username)
-    throw new Error(msg)
-  }
-
-  const wantRank = QUALITY_RANK[quality] ?? 3
-  usable.sort((a, b) => toNumber(b.video_meta?.bitrate) - toNumber(a.video_meta?.bitrate))
-  const rankOf = (v: SodaVideoItem) => QUALITY_RANK[String(v.video_meta?.quality || '')] || 1
-  const chosen = usable.find(v => rankOf(v) <= wantRank) || usable[usable.length - 1]
-
-  pending.remove(`soda:${trackId}`)
-  const bitrate = toNumber(chosen.video_meta?.bitrate)
-  return {
-    url: String(chosen.main_url || chosen.backup_url),
-    quality: QUALITY_LABEL[String(chosen.video_meta?.quality || '')] || '320k',
-    via: `h5:track_v2:${chosen.video_meta?.quality || '?'}(${Math.round(bitrate / 1000)}k)`,
-    ext: String(chosen.video_meta?.vtype || 'm4a'),
-    key: hexKey || undefined,
-  }
+  const reason = plain.reason === 'preview' ? 'preview-only' : 'no-stream'
+  const msg = plain.reason === 'preview'
+    ? `汽水该曲仅有 ${plain.seconds} 秒试听（版权限制，完整 ${plain.full} 秒需官方客户端签名），${await hintForMissing(cookie)}`
+    : '汽水未返回可用音频流（该曲可能已下架或仅支持客户端播放）'
+  // 记待补：等签名器在线时自动补，不让用户凭记忆重新找歌
+  pending.add(songInfo, reason, msg, username)
+  throw new Error(msg)
 }
 
 export function hasAccount(): boolean {
   return !!store.getCookie('soda')
+}
+
+/** 曲目在平台侧是否属「仅会员可播」 */
+function trackRequiresVip(track: any): boolean {
+  const info: any = track?.label_info || {}
+  return info.only_vip_playable === true || info.only_vip_download === true
+}
+
+/** 拿不到整曲时，告诉用户「还差什么」—— 签名器缺了就直说缺签名器 */
+async function hintForMissing(cookie: string): Promise<string> {
+  const hasSigner = signer.isConfigured()
+  if (!hasSigner) return '如需整曲请在管理后台「平台账号 → 汽水签名器」填入签名器地址'
+  let online = false
+  let message = ''
+  try {
+    const st = await signer.status(true)
+    online = !!st?.online
+    message = String(st?.message || '')
+  } catch (e: any) {
+    message = e?.message || String(e)
+  }
+  if (online) return '签名器在线但仍只有试听，请确认签名器设备指纹与账号权益'
+  return `签名器已配置但离线（${message || '无法连接'}），请检查 Windows 侧签名器是否启动`
+}
+
+/**
+ * 取流诊断（口径借 libresoda 的 `check_stream_access`）。
+ *
+ * 原实现的失败提示只有一句「未返回可用音频流」，用户和排障的人都看不出
+ * 到底是**没配签名器 / 签名器离线 / 账号没权益 / 曲子下架**。这里把一次取流
+ * 看到的全部信息摊开：拿到的是整曲还是试听、走的是哪条通道、签名链路缺哪一环。
+ */
+export interface SodaStreamDiagnosis {
+  trackId: string
+  /** 元数据里的整曲时长（秒） */
+  trackDurationSeconds: number
+  /** 实际拿到流的时长（秒） */
+  streamDurationSeconds: number
+  /** 选中流来自哪条通道：`signer` / `h5` / `seo`；一条都没有时为 '' */
+  source: string
+  /** LX 音质标签 */
+  quality: string
+  url: string
+  isPreview: boolean
+  isLossless: boolean
+  requiresVip: boolean
+  hasCookie: boolean
+  /** 是否配置了签名器地址 */
+  hasSigner: boolean
+  /** 签名器是否在线 */
+  signerOnline: boolean
+  /** 签名通道不可用时的具体原因 */
+  signerError: string
+  /** 两条明文通道各自的探测结果 */
+  channels: Array<{ tag: string; ok: boolean; items: number; streamDuration: number; error: string }>
+  /** 人话结论，可直接展示给终端用户 */
+  hint: string
+}
+
+export async function diagnoseStream(songInfo: any, quality = '320k', cookie = ''): Promise<SodaStreamDiagnosis> {
+  const trackId = sodaTrackIdOf(songInfo)
+  const report: SodaStreamDiagnosis = {
+    trackId,
+    trackDurationSeconds: 0,
+    streamDurationSeconds: 0,
+    source: '',
+    quality: '',
+    url: '',
+    isPreview: false,
+    isLossless: false,
+    requiresVip: false,
+    hasCookie: !!cookie,
+    hasSigner: false,
+    signerOnline: false,
+    signerError: '',
+    channels: [],
+    hint: '',
+  }
+  if (!isSodaId(trackId)) {
+    report.hint = `汽水歌曲 id 不合法（${trackId || '空'}）`
+    return report
+  }
+
+  // ① 签名链路状态
+  report.hasSigner = signer.isConfigured()
+  if (!report.hasSigner) {
+    report.signerError = '未配置签名器地址（qishui.signerUrl）'
+  } else {
+    try {
+      const st = await signer.status(true)
+      report.signerOnline = !!st?.online
+      if (!report.signerOnline) report.signerError = String(st?.message || '签名器离线')
+    } catch (e: any) {
+      report.signerError = `签名器状态查询失败：${e?.message || e}`
+    }
+  }
+
+  // ② 逐个探明文通道，挑最优（诊断看的是「天花板」，所以不按请求音质封顶）
+  const fetchers: Array<{ tag: string; run: () => Promise<PlainFetch | null> }> = [
+    { tag: 'h5', run: () => fetchH5Track(trackId, cookie) },
+    { tag: 'seo', run: () => fetchSeoTrack(trackId, cookie) },
+  ]
+  let best: { got: PlainFetch; item: SodaVideoItem } | null = null
+
+  for (const { tag, run } of fetchers) {
+    let got: PlainFetch | null = null
+    let error = ''
+    try {
+      got = await run()
+    } catch (e: any) {
+      error = e?.message || String(e)
+    }
+    report.channels.push({
+      tag,
+      ok: !!(got && got.items.length),
+      items: got?.items.length ?? 0,
+      streamDuration: Math.round(got?.streamDuration ?? 0),
+      error: error || (got && got.items.length ? '' : '未解析到候选流'),
+    })
+    if (!got || !got.items.length) continue
+    const item = chooseStream(got.items, 'flac24bit')
+    if (!item) continue
+    // 整曲优先：只要有一条通道不是试听，就用它
+    if (!best || (isPreviewStream(best.got) && !isPreviewStream(got))) best = { got, item }
+  }
+
+  // ③ 签名器在线就再探一次 App 端点，确认整曲是否真的拿得到
+  const signed = report.signerOnline
+    ? await trySignedStream(trackId, cookie, quality).catch((e: any) => {
+        report.signerError = `App 端点取流失败：${e?.message || e}`
+        return null
+      })
+    : null
+
+  if (signed) {
+    report.source = 'signer'
+    report.quality = signed.quality
+    report.url = signed.url
+    report.isPreview = false
+    report.isLossless = String(signed.quality).startsWith('flac') || signed.ext === 'flac'
+    report.trackDurationSeconds = Math.round(best?.got.trackDuration || 0)
+    report.streamDurationSeconds = 0
+  } else if (best) {
+    report.source = best.got.tag
+    report.quality = QUALITY_LABEL[String(best.item.video_meta?.quality || '')] || '320k'
+    report.url = String(best.item.main_url || best.item.backup_url)
+    report.trackDurationSeconds = Math.round(best.got.trackDuration)
+    report.streamDurationSeconds = Math.round(best.got.streamDuration)
+    report.isPreview = isPreviewStream(best.got)
+    report.isLossless = String(best.item.video_meta?.quality) === 'lossless' || String(best.item.video_meta?.vtype) === 'flac'
+  }
+
+  const trackNode = best?.got?.parsed?.track?.id
+    ? best.got.parsed.track
+    : (best?.got?.parsed?.seo_track?.track || {})
+  report.requiresVip = trackRequiresVip(trackNode)
+
+  report.hint = buildHint(report)
+  return report
+}
+
+/** 诊断结论的人话版（口径同 libresoda `build_hint`） */
+export function buildHint(r: SodaStreamDiagnosis): string {
+  if (!r.url) {
+    return r.hasSigner && !r.signerOnline
+      ? `汽水两条免签名通道都没解析到播放流，且签名器离线（${r.signerError || '未知原因'}）`
+      : '汽水两条免签名通道都没解析到播放流，请检查曲目 ID 与网络连通性'
+  }
+  if (!r.isPreview) {
+    if (r.isLossless) return `已拿到整曲无损流（通道 ${r.source}）`
+    return `已拿到整曲流（通道 ${r.source}）`
+  }
+  // 试听片段
+  const shown = r.streamDurationSeconds || 0
+  if (r.requiresVip && !r.signerOnline) {
+    return `该曲整曲仅限会员播放：明文通道只有 ${shown} 秒试听，需「设备指纹 + 签名器」后走 App 端点；${r.signerError || '未配置签名器'}`
+  }
+  if (r.requiresVip && r.signerOnline) {
+    return `签名器在线但仍只拿到 ${shown} 秒试听，通常是签名器与设备指纹不匹配，或该账号对此曲没有整曲权益；App 端点返回：${r.signerError || '（无错误信息）'}`
+  }
+  return `只拿到 ${shown} 秒试听片段（整曲 ${r.trackDurationSeconds} 秒），该曲在汽水侧受版权限制`
 }

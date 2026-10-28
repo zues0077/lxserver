@@ -1,0 +1,226 @@
+{
+ "_note": "汽水 SEO 端点（beta-luna.douyin.com/luna/h5/seo_track）真实抓包的**脱敏**样本：track_id=7501674235158431760「下完这场雨」是 VIP 曲，明文通道只下发 60 秒试听。所有 URL 已替换为合成值（原始响应含火山 VOD 的 X-Amz-Signature，会被密钥扫描拦截）。",
+ "status_info": {
+  "log_id": "000000000000000000000000",
+  "now": 1793148352,
+  "now_ts_ms": 1793148352053
+ },
+ "lyric": {
+  "content": "[17310,2970]<0,230,0>念<230,220,0>旧…"
+ },
+ "seo_track": {
+  "track": {
+   "id": "7501674235158431760",
+   "name": "下完这场雨",
+   "duration": 236620,
+   "album": {
+    "id": "7501674174789290000",
+    "name": "下完这场雨",
+    "release_date": 1746748800,
+    "url_cover": {
+     "uri": "tos-cn-v-2774c002/oAB8ZADTGA0f0A6gb4MZQRUEA1zFEtoGBEgCRe",
+     "urls": [
+      "https://p3-luna.douyinpic.com/img/",
+      "https://p6-luna.douyinpic.com/img/"
+     ],
+     "template_prefix": "tplv-b829550vbb"
+    },
+    "url_player_bg": {
+     "uri": "tos-cn-v-2774c002/oAB8ZADTGA0f0A6gb4MZQRUEA1zFEtoGBEgCRe",
+     "urls": [
+      "https://p3-luna.douyinpic.com/img/",
+      "https://p6-luna.douyinpic.com/img/"
+     ],
+     "template": "background:${width}:${height}:30:90:0",
+     "template_prefix": "tplv-b829550vbb"
+    },
+    "cover_gradient_effect_color": [
+     {
+      "rgb": "8da2ae"
+     },
+     {
+      "rgb": "677c88"
+     }
+    ],
+    "playing_wave_color": null,
+    "paused_wave_color": null
+   },
+   "artists": [
+    {
+     "id": "6766525511368706050",
+     "name": "赵乃吉",
+     "url_avatar": {
+      "uri": "tos-cn-v-2774c002/oweQJdzBacGQfBeIICLujIA6B4A9IACOQbAETF",
+      "urls": [
+       "https://p3-luna.douyinpic.com/img/",
+       "https://p6-luna.douyinpic.com/img/"
+      ],
+      "template_prefix": "tplv-b829550vbb"
+     },
+     "state": {
+      "blocked_by_me": false
+     },
+     "user_info": {
+      "id": "101244693549",
+      "nickname": "Seammy赵乃吉",
+      "medium_avatar_url": {
+       "uri": "aweme-avatar/mosaic-legacy_2eb570003e43a8e00cf3d",
+       "urls": [
+        "https://p3.douyinpic.com/aweme/720x720/aweme-avatar/mosaic-legacy_2eb570003e43a8e00cf3d.jpeg?from=3782654143",
+        "https://p26.douyinpic.com/aweme/720x720/aweme-avatar/mosaic-legacy_2eb570003e43a8e00cf3d.jpeg?from=3782654143",
+        "https://p11.douyinpic.com/aweme/720x720/aweme-avatar/mosaic-legacy_2eb570003e43a8e00cf3d.jpeg?from=3782654143"
+       ],
+       "need_complete_url": true
+      },
+      "thumb_avatar_url": {
+       "uri": "aweme-avatar/mosaic-legacy_2eb570003e43a8e00cf3d",
+       "urls": [
+        "https://p11.douyinpic.com/aweme/100x100/aweme-avatar/mosaic-legacy_2eb570003e43a8e00cf3d.jpeg?from=3782654143",
+        "https://p3.douyinpic.com/aweme/100x100/aweme-avatar/mosaic-legacy_2eb570003e43a8e00cf3d.jpeg?from=3782654143",
+        "https://p26.douyinpic.com/aweme/100x100/aweme-avatar/mosaic-legacy_2eb570003e43a8e00cf3d.jpeg?from=3782654143"
+       ],
+       "need_complete_url": true
+      },
+      "artist_id": "6766525511368706050",
+      "secret": false,
+      "test_tag": 0,
+      "vip_stage": "",
+      "is_vip": false,
+      "is_luna_user": true
+     },
+     "simple_display_name": "赵乃吉",
+     "user_artist_type": 2
+    }
+   ],
+   "preview": {
+    "duration": 60001,
+    "start": 165312,
+    "vid": "v10ad6g50000dbbar77og65v8sfi38og",
+    "bit_rates": [
+     {
+      "br": 68454,
+      "size": 513406,
+      "quality": "medium"
+     },
+     {
+      "br": 132459,
+      "size": 993444,
+      "quality": "higher"
+     },
+     {
+      "br": 260505,
+      "size": 1953789,
+      "quality": "highest"
+     }
+    ]
+   },
+   "label_info": {
+    "only_vip_download": true,
+    "only_vip_playable": true,
+    "quality_only_vip_can_download": [
+     "medium",
+     "higher",
+     "highest",
+     "lossless"
+    ],
+    "quality_only_vip_can_play": [
+     "lossless"
+    ],
+    "quality_map": {
+     "medium": {
+      "play_detail": {
+       "condition": "benefit_play_medium",
+       "need_vip": false,
+       "need_purchase": false
+      },
+      "download_detail": {
+       "condition": "benefit_download_medium",
+       "need_vip": true,
+       "need_purchase": false
+      }
+     },
+     "higher": {
+      "play_detail": {
+       "condition": "benefit_play_higher",
+       "need_vip": false,
+       "need_purchase": false
+      },
+      "download_detail": {
+       "condition": "benefit_download_higher",
+       "need_vip": true,
+       "need_purchase": false
+      }
+     },
+     "highest": {
+      "play_detail": {
+       "condition": "benefit_play_highest",
+       "need_vip": false,
+       "need_purchase": false
+      },
+      "download_detail": {
+       "condition": "benefit_download_highest",
+       "need_vip": true,
+       "need_purchase": false
+      }
+     },
+     "lossless": {
+      "play_detail": {
+       "condition": "benefit_play_lossless",
+       "need_vip": true,
+       "need_purchase": false
+      },
+      "download_detail": {
+       "condition": "benefit_download_lossless",
+       "need_vip": true,
+       "need_purchase": false
+      }
+     },
+     "spatial": {
+      "play_detail": {
+       "condition": "benefit_play_spatial",
+       "need_vip": true,
+       "need_purchase": false
+      },
+      "download_detail": {
+       "condition": "benefit_download_spatial",
+       "need_vip": true,
+       "need_purchase": false
+      }
+     },
+     "hi_res": {
+      "play_detail": {
+       "condition": "benefit_play_hi_res",
+       "need_vip": true,
+       "need_purchase": false
+      },
+      "download_detail": null
+     }
+    }
+   },
+   "bit_rates": [
+    {
+     "br": 66134,
+     "size": 1956083,
+     "quality": "medium"
+    },
+    {
+     "br": 132199,
+     "size": 3910131,
+     "quality": "higher"
+    },
+    {
+     "br": 260234,
+     "size": 7697091,
+     "quality": "highest"
+    }
+   ]
+  }
+ },
+ "track_player": {
+  "expire_at": 1793234751,
+  "media_id": "v10ad6g50000dbbar77og65v8sfi38og",
+  "url_player_info": "https://vod-luna.douyin.com/?Action=GetPlayInfo&Version=2019-03-15&video_id=EXAMPLE&X-Expires=EXAMPLE&Signature=EXAMPLE",
+  "video_model": "{\"status\": 0, \"message\": \"success\", \"version\": \"1.0\", \"video_id\": \"v10ad6g50000dbbar77og65v8sfi38og\", \"enable_ssl\": 1, \"video_duration\": 60.001, \"media_type\": 2, \"url_expire\": 1793152037, \"video_list\": [{\"main_url\": \"https://v26-luna.douyinvod.com/0000000000000000000000000000/highest/video/tos/cn/tos-cn-ve-2774/highest\", \"backup_url\": \"https://v5-luna.douyinvod.com/0000000000000000000000000000/highest/video/tos/cn/tos-cn-ve-2774/highest\", \"video_meta\": {\"quality\": \"highest\", \"vtype\": \"m4a\", \"bitrate\": 257723, \"codec_type\": \"aac\", \"size\": 1932960}}, {\"main_url\": \"https://v26-luna.douyinvod.com/0000000000000000000000000000/medium/video/tos/cn/tos-cn-ve-2774/medium\", \"backup_url\": \"https://v5-luna.douyinvod.com/0000000000000000000000000000/medium/video/tos/cn/tos-cn-ve-2774/medium\", \"video_meta\": {\"quality\": \"medium\", \"vtype\": \"m4a\", \"bitrate\": 65675, \"codec_type\": \"aac\", \"size\": 492577}}, {\"main_url\": \"https://v26-luna.douyinvod.com/0000000000000000000000000000/higher/video/tos/cn/tos-cn-ve-2774/higher\", \"backup_url\": \"https://v5-luna.douyinvod.com/0000000000000000000000000000/higher/video/tos/cn/tos-cn-ve-2774/higher\", \"video_meta\": {\"quality\": \"higher\", \"vtype\": \"m4a\", \"bitrate\": 129679, \"codec_type\": \"aac\", \"size\": 972615}}], \"volume\": {\"Peak\": 0}}",
+  "video_model_type": 2
+ }
+}
