@@ -912,6 +912,17 @@ export interface SodaStreamDiagnosis {
   isLossless: boolean
   requiresVip: boolean
   hasCookie: boolean
+  /**
+   * 账号 Cookie 的在线探测结果：
+   *   null  = 没探测（本次请求没带 Cookie）
+   *   true  = 登录态有效
+   *   false = 已失效
+   * 之所以要单独标出来：整曲解密依赖账号（GetPlayInfo 的 PlayAuth 只对登录态下发），
+   * Cookie 一过期，所有受限曲都会退化成试听，但表现和「该曲受版权限制」一模一样。
+   */
+  accountOk: boolean | null
+  /** 账号探测的说明（昵称/会员/失效原因），可直接展示 */
+  accountMessage: string
   /** 是否配置了签名器地址 */
   hasSigner: boolean
   /** 签名器是否在线 */
@@ -937,6 +948,8 @@ export async function diagnoseStream(songInfo: any, quality = '320k', cookie = '
     isLossless: false,
     requiresVip: false,
     hasCookie: !!cookie,
+    accountOk: null,
+    accountMessage: '',
     hasSigner: false,
     signerOnline: false,
     signerError: '',
@@ -946,6 +959,21 @@ export async function diagnoseStream(songInfo: any, quality = '320k', cookie = '
   if (!isSodaId(trackId)) {
     report.hint = `汽水歌曲 id 不合法（${trackId || '空'}）`
     return report
+  }
+
+  // ⓪ 账号态：`/luna/pc/me` 免签名，一次请求就能判断 Cookie 死活。
+  //    必须放在最前面 —— 打通往解密后，整曲链路完全依赖账号 Cookie，
+  //    「Cookie 过期」已经成了最常见的整曲失败原因，而它的症状（只有试听）
+  //    和「该曲受版权限制」完全一样，不探测就只能给出误导性的结论。
+  if (cookie) {
+    try {
+      const info = await getAccountInfo(cookie)
+      report.accountOk = !!info.ok
+      report.accountMessage = info.message || ''
+    } catch (e: any) {
+      report.accountOk = null
+      report.accountMessage = `账号探测失败：${e?.message || e}`
+    }
   }
 
   // ① 签名链路状态
@@ -1040,7 +1068,13 @@ export async function diagnoseStream(songInfo: any, quality = '320k', cookie = '
 
 /** 诊断结论的人话版（口径同 libresoda `build_hint`） */
 export function buildHint(r: SodaStreamDiagnosis): string {
+  // 账号失效排在最前：它会让**所有**受限曲退化成试听，症状和「版权限制」一模一样。
+  // 若不先判，用户会去折腾签名器/换曲，实际只需重新导一次 Cookie。
+  const accountDead = r.accountOk === false
+  const accountWhy = r.accountMessage || '需要重新登录'
+
   if (!r.url) {
+    if (accountDead) return `账号 Cookie 已失效（${accountWhy}），汽水连明文试听流都没返回；请重新从 PC 客户端导出 Cookie`
     return r.hasSigner && !r.signerOnline
       ? `汽水两条免签名通道都没解析到播放流，且签名器离线（${r.signerError || '未知原因'}）`
       : '汽水两条免签名通道都没解析到播放流，请检查曲目 ID 与网络连通性'
@@ -1051,6 +1085,9 @@ export function buildHint(r: SodaStreamDiagnosis): string {
   }
   // 试听片段
   const shown = r.streamDurationSeconds || 0
+  if (accountDead) {
+    return `账号 Cookie 已失效（${accountWhy}），整曲取不到解密密钥，只剩 ${shown} 秒试听；请重新导出 Cookie 后再试`
+  }
   if (r.requiresVip && !r.signerOnline) {
     return `该曲整曲仅限会员播放：明文通道只有 ${shown} 秒试听，需「设备指纹 + 签名器」后走 App 端点；${r.signerError || '未配置签名器'}`
   }

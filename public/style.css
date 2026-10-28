@@ -6334,6 +6334,23 @@ input:-webkit-autofill:active {
     color: #dc2626;
 }
 
+/* 账号失效 / 待复查的顶部汇总条：只在真有问题时出现，避免常驻占位 */
+.music-acc-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.75rem;
+    padding: 0.6rem 0.85rem;
+    border-radius: 8px;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.12);
+    color: var(--text-primary, inherit);
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+
 .music-acc-meta {
     margin: 0.45rem 0 0.6rem;
     font-size: 0.78rem;

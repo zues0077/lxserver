@@ -21,6 +21,8 @@ import { hasLoginKey, parseCookie } from './http'
 import { normalizeCookieInput, formatLabel } from './cookieParse'
 import * as store from './store'
 import * as qrLogin from './qrLogin'
+import { looksLikeAuthFailure, summarize } from './health'
+import type { HealthSummary } from './health'
 import type { AccountResolveResult, AccountInfo, PlatformResolver } from './types'
 
 export { PLATFORMS, getPlatform, isSupportedSource } from './platforms'
@@ -97,12 +99,38 @@ export async function tryResolveByAccount(
       return result
     }
     if (result?.error) {
-      console.log(`[平台账号] ${getPlatform(source)?.name ?? source} 未取到链接：${result.error}`)
+      const msg = result.error
+      console.log(`[平台账号] ${getPlatform(source)?.name ?? source} 未取到链接：${msg}`)
+      markAuthFailureIfAny(source, msg)
     }
     return null
   } catch (e: any) {
-    console.log(`[平台账号] ${getPlatform(source)?.name ?? source} 取链异常：${e?.message || e}`)
+    const msg = e?.message || String(e)
+    console.log(`[平台账号] ${getPlatform(source)?.name ?? source} 取链异常：${msg}`)
+    markAuthFailureIfAny(source, msg)
     return null
+  }
+}
+
+/**
+ * 取链报错里带「登录态没了」的信号时，顺手把账号标成失效。
+ *
+ * 用户不会天天点「校验」，但一定会遇到取链失败——这是发现失效最便宜的时机。
+ * 只写 lastVerify（不改 Cookie），所以是纯提示、不影响取链，误判也只是多一条红标。
+ */
+function markAuthFailureIfAny(id: string, message: string): void {
+  if (!looksLikeAuthFailure(message)) return
+  const name = getPlatform(id)?.name ?? id
+  try {
+    store.saveVerifyResult(id, {
+      at: Date.now(),
+      ok: false,
+      verified: 'online',
+      message: `取链时报错：${message}`,
+    })
+    console.log(`[平台账号] ⚠ ${name} 账号疑似失效（取链报错命中登录态关键词），已标记，建议重新导出 Cookie`)
+  } catch (e: any) {
+    console.log(`[平台账号] 标记失效状态失败（忽略）：${e?.message || e}`)
   }
 }
 
@@ -252,6 +280,78 @@ export function saveAccount(platform: string, rawCookie: string): SaveAccountRes
     warnings,
     dropped: parsed.dropped,
   }
+}
+
+// ---- 账号健康巡检 ----
+//
+// 为什么要有巡检：Cookie 失效是静默的。用户配置当天看到过一次绿色「已登录」，
+// 之后不会再去点校验；等它过期，表现是「某些歌突然只能试听」——看着像音源坏了。
+// 定时复查能把「过期」这个事实提前摆到界面上，而不是等用户来报「播不了」。
+
+/** 巡检间隔（小时）：默认 12h，可用 MUSIC_ACCOUNT_CHECK_HOURS 覆盖，最小 1 小时 */
+function checkIntervalHours(): number {
+  const n = Number(process.env.MUSIC_ACCOUNT_CHECK_HOURS)
+  if (!Number.isFinite(n) || n <= 0) return 12
+  return Math.max(1, Math.min(24 * 7, Math.round(n)))
+}
+
+/** 当前账号健康度汇总（只读，不发请求） */
+export function getAccountHealth(): HealthSummary {
+  return summarize(store.listAccounts())
+}
+
+/**
+ * 立即巡检所有已配置账号。
+ *
+ * @param opts.force 为 true 时忽略总开关（手动触发用；总开关关掉时定时巡检会跳过）
+ */
+export async function runAccountHealthCheck(opts: { force?: boolean } = {}): Promise<
+  HealthSummary & { checkedAt: number; checked: number }
+> {
+  const rows = store.listAccounts().filter(a => a.configured)
+  const checkedAt = Date.now()
+
+  if (!rows.length) return { ...getAccountHealth(), checkedAt, checked: 0 }
+  if (!opts.force && !isEnabled()) {
+    // 账号通道整体关着时不做无谓请求，但把现状照常报出去
+    return { ...getAccountHealth(), checkedAt, checked: 0 }
+  }
+
+  for (const a of rows) {
+    try {
+      await verifyAccount(a.id)
+    } catch (e: any) {
+      console.log(`[平台账号] 巡检 ${a.name} 出错（忽略）：${e?.message || e}`)
+    }
+    // 平台之间留点间隔：几个平台连打容易被各自的风控当成扫描
+    await new Promise(r => setTimeout(r, 800))
+  }
+
+  const summary = getAccountHealth()
+  console.log(
+    `[平台账号] 巡检完成：已配置 ${summary.configured} 个，正常 ${summary.healthy}`
+    + `，失效 ${summary.expired}${summary.expiredNames.length ? `（${summary.expiredNames.join('、')}）` : ''}`
+    + `，待复查 ${summary.stale}，未校验 ${summary.unchecked}，字段待确认 ${summary.structural}`,
+  )
+  return { ...summary, checkedAt, checked: rows.length }
+}
+
+let healthTimer: ReturnType<typeof setInterval> | null = null
+
+/**
+ * 启动定时巡检。默认启动后等 90 秒再跑第一次：
+ * 启动瞬间音源巡检、会话恢复都在抢网络，别在这时候再加一堆外部请求。
+ */
+export function startAccountHealthCheck(): void {
+  if (healthTimer) return
+  const hours = checkIntervalHours()
+  const boot = setTimeout(() => {
+    void runAccountHealthCheck()
+    healthTimer = setInterval(() => void runAccountHealthCheck(), hours * 3600_000)
+    if (typeof healthTimer.unref === 'function') healthTimer.unref()
+  }, 90_000)
+  if (typeof boot.unref === 'function') boot.unref()
+  console.log(`[平台账号] 账号巡检已安排：每 ${hours} 小时复查一次 Cookie 有效性（首次 90 秒后）`)
 }
 
 // ---- 供接口层使用的 store 再导出，避免 API 直接依赖内部文件 ----

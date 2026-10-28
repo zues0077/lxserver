@@ -15,6 +15,8 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import { PLATFORMS, getPlatform } from './platforms'
+import { classifyHealth } from './health'
+import type { AccountHealth } from './health'
 
 const FILE_VERSION = 1
 const KEY_FILE = '.music-account-key'
@@ -116,6 +118,12 @@ export function listAccounts(): Array<{
   cookiePreview: string
   updatedAt: number | null
   lastVerify: StoredAccount['lastVerify'] | null
+  /** 派生健康状态：none / unchecked / ok / stale / expired / structural */
+  health: AccountHealth
+  /** 健康状态的中文名，前端直接展示 */
+  healthText: string
+  /** 距上次校验多少小时（无记录为 null） */
+  ageHours: number | null
   /** 该平台支持的扫码方式（空数组 = 只能手工填 Cookie） */
   qrLogins: Array<{ driver: string; label: string }>
 }> {
@@ -129,6 +137,7 @@ export function listAccounts(): Array<{
     } catch (e: any) {
       console.error(`[平台账号] ${p.name} 的 Cookie 解密失败：${e.message}`)
     }
+    const hp = classifyHealth(configured, acc?.lastVerify ?? null)
     return {
       id: p.id,
       name: p.name,
@@ -139,6 +148,9 @@ export function listAccounts(): Array<{
       cookiePreview: cookie.length > 8 ? `${cookie.slice(0, 3)}…${cookie.slice(-3)}` : '',
       updatedAt: acc?.updatedAt ?? null,
       lastVerify: acc?.lastVerify ?? null,
+      health: hp.health,
+      healthText: hp.text,
+      ageHours: hp.ageHours,
       qrLogins: p.qrLogins || [],
     }
   })

@@ -9808,6 +9808,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             timeoutMs: global.lx.config['musicAccount.timeoutMs'] ?? 15000,
             allowedUsers: getAllowedUsers(),
             accounts: musicAccount.getAccounts(),
+            health: musicAccount.getAccountHealth(),
             storePath: musicAccount.getStoreFilePath(),
           },
         }))
@@ -9886,6 +9887,39 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
           }
         })
+        return
+      }
+
+      // 账号健康度汇总（只读、不发外部请求）：前端用来在列表顶部挂一条失效提示
+      if (pathname === '/api/music/accounts/health' && req.method === 'GET') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: true, data: musicAccount.getAccountHealth() }))
+        return
+      }
+
+      // 手动触发一次全量巡检（会真的去各家接口确认登录态，耗时约 1~2 秒/平台）
+      if (pathname === '/api/music/accounts/check' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void musicAccount.runAccountHealthCheck({ force: true })
+          .then(data => {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, data }))
+          })
+          .catch((e: any) => {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          })
         return
       }
 
@@ -11217,6 +11251,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       extraSources.prefetch.startAuto()
     } catch (e: any) {
       console.warn('[汽水待补] 自动补传启动失败（不影响服务运行）:', e?.message || e)
+    }
+    // 平台账号巡检：Cookie 过期是静默的，靠定时复查把它摆到界面上
+    try {
+      musicAccount.startAccountHealthCheck()
+    } catch (e: any) {
+      console.warn('[平台账号] 账号巡检启动失败（不影响服务运行）:', e?.message || e)
     }
   })
 

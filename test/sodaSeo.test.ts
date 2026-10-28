@@ -207,6 +207,8 @@ function diagnosis(patch: Partial<SodaStreamDiagnosis>): SodaStreamDiagnosis {
     isLossless: false,
     requiresVip: false,
     hasCookie: false,
+    accountOk: null,
+    accountMessage: '',
     hasSigner: false,
     signerOnline: false,
     signerError: '',
@@ -251,6 +253,45 @@ test('buildHint：什么流都没有 → 区分「通道都没解析到」与「
     buildHint(diagnosis({ hasSigner: true, signerOnline: false, signerError: '连接被拒绝' })),
     /签名器离线/,
   )
+})
+
+test('buildHint：账号 Cookie 失效 → 优先级高于版权/签名器口径', () => {
+  // 这是打通往解密之后新增的失败模式：整曲密钥只对登录态下发，
+  // Cookie 一过期，所有受限曲都退化成试听，症状和「该曲受版权限制」完全一样。
+  // 若 hint 还说「受版权限制」，用户会去折腾签名器/换曲，实际只需重新导一次 Cookie。
+  const expired = buildHint(diagnosis({
+    url: 'https://x/a', source: 'h5', isPreview: true, streamDurationSeconds: 60,
+    hasCookie: true, accountOk: false,
+    accountMessage: 'Cookie 已失效（/luna/pc/me 没有返回账号信息），请重新登录',
+    requiresVip: true, hasSigner: true, signerOnline: true,
+  }))
+  assert.match(expired, /已失效/)
+  assert.match(expired, /重新/)
+  assert.doesNotMatch(expired, /受版权限制/)
+  assert.doesNotMatch(expired, /设备指纹/)
+
+  // 连明文流都拿不到时也要先说是账号问题
+  const noStream = buildHint(diagnosis({ hasCookie: true, accountOk: false }))
+  assert.match(noStream, /已失效/)
+})
+
+test('buildHint：匿名请求（没带 Cookie）不要抢走「配签名器」这条更可操作的建议', () => {
+  // 曾经加过一条「本次请求没带账号 Cookie」的分支，但它排在签名器判断之前，
+  // 把「去配签名器」这条能直接解决问题的建议盖掉了。宁可少说一句，也要给可执行的下一步。
+  const hint = buildHint(diagnosis({
+    url: 'https://x/a', source: 'h5', isPreview: true, streamDurationSeconds: 60,
+    hasCookie: false, requiresVip: true, signerError: '未配置签名器地址（qishui.signerUrl）',
+  }))
+  assert.match(hint, /签名器/)
+  assert.doesNotMatch(hint, /匿名/)
+})
+
+test('buildHint：账号正常时不误报失效', () => {
+  const hint = buildHint(diagnosis({
+    url: 'https://x/a', source: 'h5', isPreview: true, streamDurationSeconds: 60,
+    hasCookie: true, accountOk: true, requiresVip: true, signerOnline: true, hasSigner: true,
+  }))
+  assert.doesNotMatch(hint, /已失效|匿名/)
 })
 
 test('buildHint：签名通道加密无密钥 → 有效源必须是明文通道（h5/seo），绝不谎报 signer', () => {

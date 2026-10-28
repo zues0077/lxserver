@@ -4985,7 +4985,7 @@ class App {
                 pathEl.textContent = `账号以加密形式存于：${data.storePath}（不写入 config.js，不会随配置备份或 WebDAV 上云）`;
             }
 
-            this.renderMusicAccounts(data.accounts || []);
+            this.renderMusicAccounts(data.accounts || [], data.health || null);
             void this.renderMusicAccountPerms(data.allowedUsers || []);
             void this.loadQishuiSignerStatus();
         } catch (e) {
@@ -5079,7 +5079,7 @@ class App {
         }
     }
 
-    renderMusicAccounts(accounts) {
+    renderMusicAccounts(accounts, health) {
         const listEl = document.getElementById('music-accounts-list');
         if (!listEl) return;
         if (!accounts.length) {
@@ -5087,13 +5087,37 @@ class App {
             return;
         }
 
-        listEl.innerHTML = accounts.map(a => {
+        // 顶部汇总条：只在真有需要处理的问题时出现，没问题时不留白占位
+        const banner = (health && health.message)
+            ? `<div class="music-acc-banner">
+                   <span>${this.escapeHtml(health.message)}</span>
+                   <button type="button" class="btn-secondary" onclick="app.checkAllMusicAccounts()">立即复查</button>
+               </div>`
+            : '';
+
+        listEl.innerHTML = banner + accounts.map(a => {
             const v = a.lastVerify || {};
+            // 状态口径统一由服务端 health 决定（配置状态 + 校验结果 + 时间三合一）。
+            // 前端不再自己拼判据，否则「超过 7 天待复查」这类规则会两处打架。
             let statusClass = '';
             let statusText = '未配置';
             if (a.configured) {
                 statusText = '已配置';
-                if (v.ok) {
+                const h = a.health;
+                if (h === 'expired') {
+                    statusClass = 'bad';
+                    statusText = '已失效';
+                } else if (h === 'stale') {
+                    // 用过但太久没复查：不标红（可能还好着），只提醒去看一眼
+                    statusClass = '';
+                    statusText = '待复查';
+                } else if (h === 'unchecked') {
+                    statusClass = '';
+                    statusText = '未校验';
+                } else if (h === 'structural') {
+                    statusClass = '';
+                    statusText = a.healthText || '待确认';
+                } else if (h === 'ok') {
                     if (v.verified === 'structural') {
                         // 只做了结构校验的平台不标「已登录/会员」，避免给出没根据的绿色
                         statusClass = 'ok';
@@ -5102,9 +5126,10 @@ class App {
                         statusClass = v.isVip ? 'vip' : 'ok';
                         statusText = v.isVip ? '会员' : '已登录';
                     }
+                } else if (v.ok) {
+                    statusClass = v.verified === 'structural' ? 'ok' : (v.isVip ? 'vip' : 'ok');
+                    statusText = v.verified === 'structural' ? '结构校验通过' : (v.isVip ? '会员' : '已登录');
                 } else if (v.at) {
-                    // 结构校验失败不等于「Cookie 无效」——多半是平台换了字段名或压根没登录。
-                    // 标成中性的「待确认」，别用红色吓人，具体原因在下面的提示里
                     if (v.verified === 'structural') {
                         statusClass = '';
                         statusText = '待确认';
@@ -5115,8 +5140,17 @@ class App {
                 }
             }
 
+            // 把「多久之前校验的」写出来：失效提示最容易失效的地方就是
+            // 挂着一个三个月前的绿色「已登录」，用户以为一切正常
+            let ageText = '';
+            if (typeof a.ageHours === 'number') {
+                ageText = a.ageHours < 1
+                    ? '刚刚校验'
+                    : (a.ageHours < 24 ? `${a.ageHours} 小时前校验` : `${Math.round(a.ageHours / 24)} 天前校验`);
+            }
+
             const meta = a.configured
-                ? `已保存 ${a.cookieLength} 字符（${this.escapeHtml(a.cookiePreview)}）`
+                ? `已保存 ${a.cookieLength} 字符（${this.escapeHtml(a.cookiePreview)}）${ageText ? ` · ${ageText}` : ''}`
                 : '尚未填写 Cookie';
             const verifyMsg = v.message ? `<br><span style="opacity:.85">${this.escapeHtml(v.message)}</span>` : '';
 
@@ -5299,6 +5333,29 @@ class App {
             await this.refreshMusicAccounts();
         } catch (e) {
             if (!silent) showError(`验证失败：${e.message}`);
+        }
+    }
+
+    /**
+     * 一键复查全部平台账号。
+     * 服务端会依次请求各家「需要登录态」的接口，每个平台约 1~2 秒，所以这里要给进度提示，
+     * 否则用户会以为按钮没反应。
+     */
+    async checkAllMusicAccounts() {
+        showInfo('正在复查全部账号，每个平台约 1~2 秒…');
+        try {
+            const res = await this.request('/api/music/accounts/check', { method: 'POST' });
+            const d = (res && res.data) || {};
+            if (d.expired) {
+                showError(`有 ${d.expired} 个账号已失效${d.expiredNames && d.expiredNames.length ? '：' + d.expiredNames.join('、') : ''}，请重新导出 Cookie`);
+            } else if (d.message) {
+                showInfo(d.message);
+            } else {
+                showSuccess(`复查完成：${d.configured || 0} 个账号均正常`);
+            }
+            await this.refreshMusicAccounts();
+        } catch (e) {
+            showError(`复查失败：${e.message || e}`);
         }
     }
 
