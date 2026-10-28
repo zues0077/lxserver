@@ -5159,6 +5159,36 @@ class App {
                 `<button type="button" class="btn-secondary music-acc-qr-btn" onclick="app.startMusicAccountQR('${a.id}','${q.driver}')">${this.escapeHtml(q.label)}</button>`
             ).join('');
 
+            // 酷狗概念版专属：手机号登录 + 免费领 VIP。
+            // 这两个是概念版的核心价值，其他平台没有，所以只在它这张卡片上出现。
+            const isKglite = a.id === 'kglite';
+            const smsBtn = isKglite
+                ? `<button type="button" class="btn-secondary" onclick="app.editMusicAccountSms('kglite')">手机号登录</button>`
+                : '';
+            const claimBtn = (isKglite && a.configured)
+                ? `<button type="button" class="btn-primary" onclick="app.claimKugouLiteVip(this)">领取 VIP</button>`
+                : '';
+            const vipLine = isKglite
+                ? `<div class="music-acc-vip" id="music-acc-vip-kglite">${a.configured ? '正在读取会员状态…' : '登录后可查看概念版会员'}</div>`
+                : '';
+            const smsPanel = isKglite
+                ? `<div class="music-acc-editor" id="music-acc-sms-kglite" style="display:none;">
+                       <div class="music-acc-editor-tip">
+                           输入酷狗账号绑定的手机号，短信验证码登录后凭据自动保存（与扫码等价）。
+                           概念版的会员是「看广告免费领」，登录后点「领取 VIP」即可。
+                       </div>
+                       <div class="music-acc-sms-row">
+                           <input type="tel" id="music-acc-sms-mobile-kglite" maxlength="11" placeholder="11 位手机号" inputmode="numeric">
+                           <button type="button" class="btn-secondary" onclick="app.sendMusicAccountSms('kglite')">发送验证码</button>
+                       </div>
+                       <div class="music-acc-sms-row">
+                           <input type="text" id="music-acc-sms-code-kglite" maxlength="8" placeholder="短信验证码" inputmode="numeric">
+                           <button type="button" class="btn-primary" onclick="app.submitMusicAccountSms('kglite')">登录</button>
+                           <button type="button" class="btn-secondary" onclick="app.editMusicAccountSms('kglite')">取消</button>
+                       </div>
+                   </div>`
+                : '';
+
             return `
             <div class="music-acc-item ${a.configured ? 'is-configured' : ''}" data-platform="${a.id}">
                 <div class="music-acc-item-head">
@@ -5167,13 +5197,17 @@ class App {
                     <span class="music-acc-status ${statusClass}">${statusText}</span>
                 </div>
                 <div class="music-acc-meta">${meta}${verifyMsg}</div>
+                ${vipLine}
                 <div class="music-acc-actions">
                     ${qrBtns}
+                    ${smsBtn}
+                    ${claimBtn}
                     <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">填写 Cookie</button>
                     <button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('${a.id}')">验证</button>
                     ${a.configured ? `<button type="button" class="btn-secondary" onclick="app.clearMusicAccount('${a.id}')">清除</button>` : ''}
                     <button type="button" class="btn-secondary" onclick="app.openMusicAccountGuide('${a.id}')">如何获取</button>
                 </div>
+                ${smsPanel}
                 <div class="music-acc-editor" id="music-acc-editor-${a.id}" style="display:none;">
                     <div class="music-acc-editor-tip">
                         这几种内容都能直接粘进来，服务器会自动识别：<code>Cookie:</code> 请求头整行、cURL 命令、
@@ -5192,6 +5226,131 @@ class App {
                 </div>
             </div>`;
         }).join('');
+
+        // 概念版会员状态要额外打一次接口才知道，渲染后补上（不阻塞列表出现）
+        void this.loadKugouLiteVip();
+    }
+
+    /** 读取酷狗概念版会员状态并填进卡片（失败只影响这一行文字） */
+    async loadKugouLiteVip() {
+        const el = document.getElementById('music-acc-vip-kglite');
+        if (!el) return;
+        try {
+            const res = await this.request('/api/music/accounts/kglite/vip');
+            const d = res?.data || {};
+            if (!d.configured) {
+                el.className = 'music-acc-vip';
+                el.textContent = '登录后可查看概念版会员';
+                return;
+            }
+            if (!d.ok) {
+                el.className = 'music-acc-vip is-bad';
+                el.textContent = `会员状态读取失败：${d.error || '未知原因'}`;
+                return;
+            }
+            const end = d.expireAt
+                ? new Date(d.expireAt).toLocaleString('zh-CN', { hour12: false })
+                : '';
+            if (d.isVip) {
+                const h = Number(d.remainHours) || 0;
+                const human = h >= 48 ? `约 ${Math.floor(h / 24)} 天` : `${h} 小时`;
+                el.className = 'music-acc-vip is-ok';
+                el.textContent = `概念版 VIP 生效中：剩余 ${human}${end ? `（至 ${end}）` : ''}`;
+            } else {
+                el.className = 'music-acc-vip is-warn';
+                el.textContent = '概念版 VIP 未生效，可点「领取 VIP」看广告免费领（每次 3 小时）';
+            }
+        } catch (e) {
+            el.className = 'music-acc-vip is-bad';
+            el.textContent = `会员状态读取失败：${e.message}`;
+        }
+    }
+
+    /** 立即领取一次概念版 VIP（听歌 + 看广告） */
+    async claimKugouLiteVip(btn) {
+        if (btn && btn.disabled) return;
+        const label = btn ? btn.textContent : '';
+        if (btn) { btn.disabled = true; btn.textContent = '领取中…'; }
+        try {
+            const res = await this.request('/api/music/accounts/kglite/claim', { method: 'POST' });
+            const d = res?.data || {};
+            const detail = (d.steps || [])
+                .map(s => `${s.name}：${s.ok ? '成功' : '未成功'}（${s.message}）`)
+                .join('；');
+            if (d.ok) {
+                showSuccess(`领取成功，本次 +${d.gainedHours} 小时${typeof d.remainHours === 'number' ? `，剩余 ${d.remainHours} 小时` : ''}`);
+                if (detail) showInfo(detail);
+            } else {
+                showInfo(`${d.error || '本次没有领到 VIP'}${detail ? `（${detail}）` : ''}`);
+            }
+            await this.loadKugouLiteVip();
+            await this.refreshMusicAccounts();
+        } catch (e) {
+            showError(`领取失败：${e.message}`);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = label || '领取 VIP'; }
+        }
+    }
+
+    /** 展开/收起手机号登录面板 */
+    editMusicAccountSms(platform) {
+        const box = document.getElementById(`music-acc-sms-${platform}`);
+        if (!box) return;
+        const willShow = box.style.display === 'none';
+        document.querySelectorAll('.music-acc-editor').forEach(el => { el.style.display = 'none'; });
+        document.querySelectorAll('.music-acc-item').forEach(el => el.classList.remove('is-editing'));
+        box.style.display = willShow ? 'block' : 'none';
+        if (willShow) {
+            box.closest('.music-acc-item')?.classList.add('is-editing');
+            box.querySelector('input')?.focus();
+        }
+    }
+
+    /** 发短信验证码 */
+    async sendMusicAccountSms(platform) {
+        const mobileEl = document.getElementById(`music-acc-sms-mobile-${platform}`);
+        const mobile = String(mobileEl?.value || '').replace(/\D/g, '');
+        if (!/^1\d{10}$/.test(mobile)) {
+            showError('请输入 11 位手机号');
+            return;
+        }
+        try {
+            const res = await this.request('/api/music/accounts/sms/send', {
+                method: 'POST',
+                body: JSON.stringify({ platform, mobile })
+            });
+            const d = res?.data || {};
+            if (!d.ok) throw new Error(d.message || '发送失败');
+            // 会话 id 挂到面板上，提交验证码时带回去（服务端靠它复用同一套设备标识）
+            const box = document.getElementById(`music-acc-sms-${platform}`);
+            if (box) box.dataset.session = d.sessionId || '';
+            showSuccess('验证码已发送，请查看手机短信');
+        } catch (e) {
+            showError(`发送失败：${e.message}`);
+        }
+    }
+
+    /** 提交验证码完成登录 */
+    async submitMusicAccountSms(platform) {
+        const box = document.getElementById(`music-acc-sms-${platform}`);
+        const session = box?.dataset.session || '';
+        const code = String(document.getElementById(`music-acc-sms-code-${platform}`)?.value || '').replace(/\D/g, '');
+        if (!session) { showError('请先点「发送验证码」'); return; }
+        if (code.length < 4) { showError('请输入短信里的验证码'); return; }
+        try {
+            const res = await this.request('/api/music/accounts/sms/login', {
+                method: 'POST',
+                body: JSON.stringify({ session, code })
+            });
+            const d = res?.data || {};
+            if (!d.ok) throw new Error(d.message || '登录失败');
+            showSuccess('登录成功，凭据已加密保存');
+            if (box) { box.style.display = 'none'; box.dataset.session = ''; }
+            await this.refreshMusicAccounts();
+            await this.verifyMusicAccount(platform, true);
+        } catch (e) {
+            showError(`登录失败：${e.message}`);
+        }
     }
 
     editMusicAccount(platform) {

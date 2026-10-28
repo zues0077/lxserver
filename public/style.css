@@ -6392,6 +6392,50 @@ input:-webkit-autofill:active {
     border-color: #f59e0b;
 }
 
+/* 酷狗概念版：会员状态行（只有这张卡片有，其他平台不显示） */
+.music-acc-vip {
+    margin-top: 0.35rem;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: var(--text-muted);
+}
+
+.music-acc-vip.is-ok {
+    color: #16a34a;
+}
+
+.music-acc-vip.is-warn {
+    color: #d97706;
+}
+
+.music-acc-vip.is-bad {
+    color: #dc2626;
+}
+
+/* 手机号登录面板：手机号 / 验证码各一行，窄屏自动换行 */
+.music-acc-sms-row {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.5rem;
+}
+
+.music-acc-sms-row input {
+    flex: 1 1 160px;
+    min-width: 120px;
+    padding: 0.45rem 0.7rem;
+    font-size: 0.85rem;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(127, 127, 127, 0.24);
+    color: inherit;
+}
+
+.music-acc-sms-row input:focus {
+    outline: none;
+    border-color: #f59e0b;
+}
+
 .music-acc-guide-steps {
     margin: 0.6rem 0 0.2rem;
     padding-left: 1.25rem;

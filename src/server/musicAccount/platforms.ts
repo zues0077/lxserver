@@ -128,6 +128,26 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     qrLogins: [{ driver: 'kg', label: '扫码登录' }],
   },
   {
+    id: 'kglite',
+    name: '酷狗概念版',
+    short: '酷狗概念',
+    // 取链全走 gateway.kugou.com，抓包/排查都在这个域下
+    cookieDomain: 'gateway.kugou.com',
+    // 概念版登录态是 App token，与网页 Cookie（t / KugooID）是两套东西
+    loginKeys: ['token', 'userid'],
+    essentialKey: 'mid',
+    essentialHint: '缺少 mid（设备标识）会导致请求签名失败，取链必然报错，请用扫码或短信登录重新获取',
+    guide: [
+      '推荐直接用下面的「扫码登录」或「手机号登录」——概念版登录态必须由 App 侧签发，网页 Cookie 用不了',
+      '扫码：打开酷狗概念版 App → 我的 → 扫一扫',
+      '手动填也行：登录后保存的 Cookie 只需 token / userid / mid / dfid 四个字段',
+      '⚠️ 必须用概念版 App 登录：酷狗音乐的网页 Cookie 打概念版接口会返回 35005 token invalid',
+    ],
+    benefit: '可看广告免费领 VIP（每天 8 次、每次 3 小时）；VIP 生效后能取 320k OGG 与 16bit / 24bit 无损',
+    color: '#00C3FF',
+    qrLogins: [{ driver: 'kglite', label: '扫码登录' }],
+  },
+  {
     id: 'mg',
     name: '咪咕音乐',
     short: '咪咕',

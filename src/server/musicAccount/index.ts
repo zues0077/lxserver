@@ -16,6 +16,7 @@ import * as kugou from './resolvers/kugou'
 import * as migu from './resolvers/migu'
 import * as bilibili from './resolvers/bilibili'
 import * as soda from './resolvers/soda'
+import * as kglite from './resolvers/kglite'
 import { isSupportedSource, getPlatform } from './platforms'
 import { hasLoginKey, parseCookie } from './http'
 import { normalizeCookieInput, formatLabel } from './cookieParse'
@@ -34,9 +35,28 @@ const RESOLVERS: Record<string, PlatformResolver> = {
   tx: qq,
   kw: kuwo,
   kg: kugou,
+  kglite: kglite,
   mg: migu,
   bili: bilibili,
   soda: soda,
+}
+
+/**
+ * 一个 source 可以走多个账号通道，按顺序尝试。
+ *
+ * 酷狗特例：概念版（kglite）与标准版（kg）是同一套曲库、两套登录态与两套取链协议。
+ * 概念版能拿 OGG 320k 与 16/24bit 无损（标准版自定义源最高只有 320k 有损），
+ * 所以放在前面优先尝试；失败再退回标准版账号，最后才交给自定义源。
+ * 两个通道各自独立配置，互不影响。
+ */
+const CHANNEL_CHAIN: Record<string, string[]> = {
+  kg: ['kglite', 'kg'],
+}
+
+/** 该 source 的账号通道尝试顺序 */
+export function channelIdsFor(source: string): string[] {
+  const chain = CHANNEL_CHAIN[source]
+  return chain && chain.length ? chain : [source]
 }
 
 /** 会员状态缓存：避免每首歌都去探一次会员接口 */
@@ -55,9 +75,12 @@ export function isEnabled(): boolean {
 /**
  * 该 source 当前能否走账号通道（开关开 + 平台受支持 + 已配置账号）。
  * 供上层路由判断「没有自定义源时还要不要试账号」。
+ *
+ * 按通道链判断：酷狗配了概念版账号也算「有账号」，
+ * 否则会出现「明明配了概念版却提示没账号」的误判。
  */
 export function hasAccount(source: string): boolean {
-  return store.hasAccount(source)
+  return channelIdsFor(source).some(id => store.hasAccount(id))
 }
 
 /** 是否「首选自己账号」；关闭则退化为「自定义源失败后才尝试账号」 */
@@ -85,30 +108,34 @@ export async function tryResolveByAccount(
   if (!isEnabled()) return null
   if (!isSupportedSource(source)) return null
 
-  const resolver = RESOLVERS[source]
-  if (!resolver) return null
+  const ids = channelIdsFor(source).filter(id => RESOLVERS[id] && store.getCookie(id))
+  if (!ids.length) return null
 
-  const cookie = store.getCookie(source)
-  if (!cookie) return null
+  // 通道链上可能有多个平台，各分一份预算，避免第一个卡住把整首歌的取链预算吃干
+  const total = timeoutMs()
+  const perChannel = ids.length > 1 ? Math.max(5000, Math.floor(total / ids.length)) : total
 
-  try {
-    const result = await withDeadline(resolver.resolve(songInfo, quality, cookie), timeoutMs())
-    if (result?.ok && result.url) {
-      const p = getPlatform(source)
-      console.log(`[平台账号] ✓ ${p?.name ?? source} 取链成功（通道 ${result.via ?? '-'}，音质 ${result.quality ?? quality}${result.isVip ? '，会员' : ''}）`)
-      return result
+  for (const id of ids) {
+    const resolver = RESOLVERS[id]
+    const cookie = store.getCookie(id)
+    const name = getPlatform(id)?.name ?? id
+    try {
+      const result = await withDeadline(resolver.resolve(songInfo, quality, cookie), perChannel)
+      if (result?.ok && result.url) {
+        console.log(`[平台账号] ✓ ${name} 取链成功（通道 ${result.via ?? '-'}，音质 ${result.quality ?? quality}${result.isVip ? '，会员' : ''}）`)
+        return result
+      }
+      if (result?.error) {
+        console.log(`[平台账号] ${name} 未取到链接：${result.error}`)
+        probeAccountAfterFailure(id)
+      }
+    } catch (e: any) {
+      const msg = e?.message || String(e)
+      console.log(`[平台账号] ${name} 取链异常：${msg}`)
+      probeAccountAfterFailure(id)
     }
-    if (result?.error) {
-      console.log(`[平台账号] ${getPlatform(source)?.name ?? source} 未取到链接：${result.error}`)
-      probeAccountAfterFailure(source)
-    }
-    return null
-  } catch (e: any) {
-    const msg = e?.message || String(e)
-    console.log(`[平台账号] ${getPlatform(source)?.name ?? source} 取链异常：${msg}`)
-    probeAccountAfterFailure(source)
-    return null
   }
+  return null
 }
 
 /**
@@ -377,10 +404,119 @@ export const getAccounts = store.listAccounts
 export const removeAccount = store.removeCookie
 export const getStoreFilePath = store.getStoreFilePath
 
-// ---- 扫码登录（网易云 / QQ / 微信 / 酷狗） ----
+// ---- 扫码登录（网易云 / QQ / 微信 / 酷狗 / 酷狗概念版） ----
 export const qrLoginStart = qrLogin.start
 export const qrLoginPoll = qrLogin.poll
 export const qrLoginClose = qrLogin.close
+
+// ---- 手机验证码登录（酷狗概念版） ----
+export const qrLoginSendSms = qrLogin.sendSms
+export const qrLoginLoginSms = qrLogin.loginSms
+
+// ---- 酷狗概念版：VIP 领取 ----
+
+function requireKugouLiteCookie(): string {
+  return store.getCookie('kglite')
+}
+
+/** 立即领取一次概念版 VIP（听歌 + 看广告），并刷新账号状态 */
+export async function claimKugouLiteVip(): Promise<kglite.ClaimVipResult> {
+  const cookie = requireKugouLiteCookie()
+  if (!cookie) {
+    return { ok: false, gainedHours: 0, steps: [], error: '尚未配置酷狗概念版账号，请先扫码或短信登录' }
+  }
+  // 防连点：界面上的按钮很容易被按两下，连发会把当日额度白白吃掉
+  if (claimingVip) return { ok: false, gainedHours: 0, steps: [], error: '上次领取还在进行中，请稍候' }
+  claimingVip = true
+  try {
+    const res = await kglite.claimVip(cookie)
+    await refreshKugouLiteStatus(cookie)
+    return res
+  } finally {
+    claimingVip = false
+  }
+}
+
+let claimingVip = false
+
+/** 查一次概念版会员信息（供接口直接展示剩余时长） */
+export async function getKugouLiteVip(): Promise<kglite.LiteVipInfo & { configured: boolean }> {
+  const cookie = requireKugouLiteCookie()
+  if (!cookie) {
+    return { ok: false, configured: false, isVip: false, expireAt: 0, remainHours: 0, error: '尚未配置账号' }
+  }
+  const info = await kglite.getVipInfo(cookie)
+  return { ...info, configured: true }
+}
+
+/** 把最新会员状态写进缓存与校验记录，界面刷新后立刻能看到 */
+async function refreshKugouLiteStatus(cookie: string): Promise<void> {
+  try {
+    const info = await kglite.getAccountInfo(cookie)
+    if (info.ok && typeof info.isVip === 'boolean') {
+      vipCache.set('kglite', { at: Date.now(), isVip: info.isVip })
+    }
+    store.saveVerifyResult('kglite', {
+      at: Date.now(),
+      ok: info.ok,
+      isVip: info.isVip,
+      message: info.message,
+      nickname: info.nickname,
+      verified: info.verified ?? 'online',
+    })
+  } catch (e: any) {
+    console.log(`[平台账号] 刷新酷狗概念版状态失败（忽略）：${e?.message || e}`)
+  }
+}
+
+// ---- 酷狗概念版：每日自动领取 ----
+//
+// 为什么不做「到点就把额度领满」：一次领取给 3 小时，每天 8 次额度刚好覆盖 24 小时，
+// 领满会让到期时间一路累加到几个月后——用户看到「VIP 到 2027 年」只会怀疑是不是出错了，
+// 而且一旦平台调整规则，攒下的天数未必作数。所以按需续期：剩余不足 9 小时才补，
+// 既不断档，也把额度留在真正要紧的时候。
+
+/** 剩余 VIP 低于这个小时数才自动补领 */
+const AUTO_CLAIM_THRESHOLD_HOURS = 9
+const AUTO_CLAIM_FIRST_DELAY_MS = 10 * 60 * 1000
+const AUTO_CLAIM_INTERVAL_MS = 60 * 60 * 1000
+
+let vipTimer: ReturnType<typeof setInterval> | null = null
+
+/** 跑一次自动补领判定（导出便于测试与手动触发） */
+export async function runKugouLiteAutoClaim(): Promise<{ skipped: boolean; reason?: string; result?: kglite.ClaimVipResult }> {
+  if (!isEnabled()) return { skipped: true, reason: '账号通道总开关未开启' }
+  const cookie = requireKugouLiteCookie()
+  if (!cookie) return { skipped: true, reason: '未配置酷狗概念版账号' }
+
+  const vip = await kglite.getVipInfo(cookie)
+  if (!vip.ok) return { skipped: true, reason: `会员信息查询失败：${vip.error || '未知原因'}` }
+  if (vip.remainHours >= AUTO_CLAIM_THRESHOLD_HOURS) {
+    return { skipped: true, reason: `剩余 ${vip.remainHours} 小时，暂不需要补领` }
+  }
+
+  const result = await claimKugouLiteVip()
+  console.log(
+    `[平台账号] 酷狗概念版自动领取：${result.ok ? `获得 ${result.gainedHours} 小时` : '未获得'}`
+    + `${result.remainHours !== undefined ? `，剩余 ${result.remainHours} 小时` : ''}`
+    + `${result.ok ? '' : `（${result.error || ''}）`}`,
+  )
+  return { skipped: false, result }
+}
+
+/** 启动概念版 VIP 定时补领。总开关关闭时不发请求，靠 tick 里判断。 */
+export function startKugouLiteVipAutoClaim(): void {
+  if (vipTimer) return
+  const boot = setTimeout(() => {
+    void runKugouLiteAutoClaim().catch(e => console.log(`[平台账号] 概念版自动领取出错（忽略）：${e?.message || e}`))
+    vipTimer = setInterval(() => {
+      void runKugouLiteAutoClaim().catch(e => console.log(`[平台账号] 概念版自动领取出错（忽略）：${e?.message || e}`))
+    }, AUTO_CLAIM_INTERVAL_MS)
+    if (typeof vipTimer.unref === 'function') vipTimer.unref()
+  }, AUTO_CLAIM_FIRST_DELAY_MS)
+  if (typeof boot.unref === 'function') boot.unref()
+  console.log(`[平台账号] 酷狗概念版 VIP 自动补领已安排：每小时检查一次，剩余不足 ${AUTO_CLAIM_THRESHOLD_HOURS} 小时才领（首次 10 分钟后）`)
+}
 
 // ---- 浏览器扩展包（一键同步 Cookie） ----
 export { buildExtensionZip } from './extensionZip'

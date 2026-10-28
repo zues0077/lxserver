@@ -10098,6 +10098,90 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
+      // 手机验证码登录：发码（目前仅酷狗概念版）
+      if (pathname === '/api/music/accounts/sms/send' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { platform, mobile } = JSON.parse(body || '{}')
+            const payload = await musicAccount.qrLoginSendSms(String(platform || ''), String(mobile || ''))
+            res.writeHead(payload.ok ? 200 : 400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: payload.ok, data: payload, error: payload.ok ? undefined : payload.message }))
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // 手机验证码登录：提交验证码（成功后服务端直接保存凭据）
+      if (pathname === '/api/music/accounts/sms/login' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { session, code } = JSON.parse(body || '{}')
+            const payload = await musicAccount.qrLoginLoginSms(String(session || ''), String(code || ''))
+            res.writeHead(payload.ok ? 200 : 400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: payload.ok, data: payload, error: payload.ok ? undefined : payload.message }))
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // 酷狗概念版 VIP：查询剩余时长与今日额度（GET 只读，不发领取请求）
+      if (pathname === '/api/music/accounts/kglite/vip' && req.method === 'GET') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void musicAccount.getKugouLiteVip()
+          .then(data => {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, data }))
+          })
+          .catch((e: any) => {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          })
+        return
+      }
+
+      // 酷狗概念版 VIP：立即领取一次（听歌 + 看广告，通常各 3 小时）
+      if (pathname === '/api/music/accounts/kglite/claim' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void musicAccount.claimKugouLiteVip()
+          .then(data => {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, data }))
+          })
+          .catch((e: any) => {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          })
+        return
+      }
+
       // ===== 汽水签名器地址（傻瓜化：后台填一次即可，不用改环境变量） =====
       if (pathname === '/api/music/prefetch/signer' && (req.method === 'GET' || req.method === 'POST')) {
         const auth = req.headers['x-frontend-auth']
@@ -11263,6 +11347,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       musicAccount.startAccountHealthCheck()
     } catch (e: any) {
       console.warn('[平台账号] 账号巡检启动失败（不影响服务运行）:', e?.message || e)
+    }
+    // 酷狗概念版 VIP 自动补领：剩余不足阈值才领，避免把每日额度攒成「会员到 2027 年」
+    try {
+      musicAccount.startKugouLiteVipAutoClaim()
+    } catch (e: any) {
+      console.warn('[平台账号] 概念版自动补领启动失败（不影响服务运行）:', e?.message || e)
     }
   })
 

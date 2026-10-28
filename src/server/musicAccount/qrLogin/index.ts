@@ -13,6 +13,7 @@ import * as netease from './netease'
 import * as kugou from './kugou'
 import * as bilibili from './bilibili'
 import { qqDriver, wxDriver } from './qq'
+import * as kgliteSolver from '../resolvers/kglite'
 import { getPlatform } from '../platforms'
 import { normalizeCookieInput } from '../cookieParse'
 import * as store from '../store'
@@ -22,6 +23,9 @@ import type { QrDriver, QrStatus } from './types'
 const DRIVERS: Record<string, QrDriver> = {
   wy: { ttlSec: netease.TTL_SEC, pollIntervalMs: netease.POLL_INTERVAL_MS, create: netease.create, check: netease.check },
   kg: { ttlSec: kugou.TTL_SEC, pollIntervalMs: kugou.POLL_INTERVAL_MS, create: kugou.create, check: kugou.check },
+  // 概念版与标准版共用同一套扫码协议（二维码里本来就嵌的是 lite appid 3116），
+  // 拿到的 Cookie 同时含 token/KugooID/mid，正好满足概念版取链需要的四个字段
+  kglite: { ttlSec: kugou.TTL_SEC, pollIntervalMs: kugou.POLL_INTERVAL_MS, create: kugou.create, check: kugou.check },
   tx: qqDriver,
   txwx: wxDriver,
   bili: { ttlSec: bilibili.TTL_SEC, pollIntervalMs: bilibili.POLL_INTERVAL_MS, create: bilibili.create, check: bilibili.check },
@@ -180,4 +184,76 @@ export function close(sessionId: string): void {
 export function supports(platform: string): boolean {
   const p = getPlatform(platform)
   return !!p?.qrLogins?.length
+}
+
+// ---- 手机验证码登录（目前只有酷狗概念版） ----
+//
+// 为什么不把 mid / guid 直接下发前端再回传：
+// 它们既是设备标识也是取链签名的输入，来回传容易在复制粘贴、刷新、多标签页之间错位，
+// 一旦和发码时用的不是同一套，服务端会当成「换了台设备」，表现为收得到码却登录失败。
+// 所以只在服务端内存里存一份，前端拿到的是一个不透明 sessionId。
+
+interface SmsSession {
+  platform: string
+  mobile: string
+  state: { guid: string; mid: string; device: string }
+  createdAt: number
+}
+const smsSessions = new Map<string, SmsSession>()
+const SMS_KEEP_MS = 10 * 60 * 1000
+
+function sweepSms(): void {
+  const now = Date.now()
+  for (const [id, s] of smsSessions) {
+    if (now - s.createdAt > SMS_KEEP_MS) smsSessions.delete(id)
+  }
+}
+
+export interface SmsSendPayload {
+  ok: boolean
+  sessionId?: string
+  message: string
+}
+
+/** 给指定平台发短信验证码 */
+export async function sendSms(platform: string, mobile: string): Promise<SmsSendPayload> {
+  sweepSms()
+  const p = getPlatform(platform)
+  if (!p) return { ok: false, message: `不支持的平台：${platform}` }
+  const tel = String(mobile || '').replace(/[^\d]/g, '')
+  if (!/^1\d{10}$/.test(tel)) return { ok: false, message: '请输入 11 位手机号' }
+
+  const res = await kgliteSolver.sendSmsCode(tel)
+  if (!res.ok || !res.state) return { ok: false, message: res.message }
+
+  const id = newId()
+  smsSessions.set(id, { platform, mobile: tel, state: res.state, createdAt: Date.now() })
+  return { ok: true, sessionId: id, message: res.message }
+}
+
+export interface SmsLoginPayload {
+  ok: boolean
+  message: string
+  saved?: boolean
+}
+
+/** 用验证码完成登录并落库 */
+export async function loginSms(sessionId: string, code: string): Promise<SmsLoginPayload> {
+  const s = smsSessions.get(String(sessionId || ''))
+  if (!s) return { ok: false, message: '验证码会话已过期，请重新获取' }
+  const c = String(code || '').replace(/[^\d]/g, '')
+  if (c.length < 4) return { ok: false, message: '请输入短信里的验证码' }
+
+  const res = await kgliteSolver.loginBySmsCode(s.mobile, c, s.state)
+  if (!res.ok || !res.cookie) return { ok: false, message: res.message }
+
+  const parsed = normalizeCookieInput(res.cookie)
+  const cookie = parsed.ok ? parsed.cookie : res.cookie
+  const saved = store.setCookie(s.platform, cookie)
+  if (!saved.success) return { ok: false, message: saved.error || '账号保存失败' }
+
+  smsSessions.delete(sessionId)
+  const name = getPlatform(s.platform)?.name || s.platform
+  console.log(`[平台账号] ${name} 短信登录成功，凭据已加密保存（${cookie.length} 字符）`)
+  return { ok: true, message: '登录成功，账号已保存', saved: true }
 }
