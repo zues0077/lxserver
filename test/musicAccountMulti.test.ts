@@ -177,3 +177,22 @@ test('nextAutoClaimAt：结果一定晚于当前时刻', () => {
     }
   }
 })
+
+test('旧版本回写 cookie 时，以旧字段为准（降级一致性）', () => {
+  reset()
+  // 存 A，记下 items 里主账号的密文（模拟「多账号结构里的副本」）
+  store.addCookie('kglite', COOKIE_A)
+  const file = store.getStoreFilePath()
+  const cipherA = JSON.parse(fs.readFileSync(file, 'utf-8')).accounts.kglite.items[0].cookie
+
+  // 换成 B 之后，把 items 里的密文改回 A 的 —— 等价于「旧版本只在 cookie 字段里写了 B」
+  reset()
+  store.addCookie('kglite', COOKIE_B)
+  const raw = JSON.parse(fs.readFileSync(file, 'utf-8'))
+  raw.accounts.kglite.items[0].cookie = cipherA
+  fs.writeFileSync(file, JSON.stringify(raw), 'utf-8')
+
+  assert.equal(store.getCookie('kglite'), COOKIE_B, '旧字段更新过，主账号必须跟着换')
+  assert.equal(store.listAccountItems('kglite').length, 1)
+  reset()
+})

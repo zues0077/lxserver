@@ -123,6 +123,34 @@ function newItemId(): string {
   return `a${crypto.randomBytes(4).toString('hex')}`
 }
 
+function tryDecrypt(payload: string): string {
+  try {
+    return decrypt(payload)
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 旧字段与主账号打架时，以旧字段为准。
+ *
+ * 为什么会打架：升级到多账号版本后 `cookie` 是「主账号的镜像」，正常情况两者恒等。
+ * 但如果中途把镜像回退成旧版本（旧版只认 `cookie` 字段、不认 items），
+ * 用户在旧版里换了 Cookie，新结构里的主账号就成了一份过期副本。
+ * 这里发现两者不一致就采纳旧字段 —— 旧版写完不会动 items，所以「不一致」只可能是它写的。
+ */
+function adoptLegacyCookie(acc: StoredAccount): void {
+  if (!acc.cookie || !acc.items?.length) return
+  const primary = acc.items.find(i => i.primary) || acc.items[0]
+  if (!primary || acc.cookie === primary.cookie) return
+  const legacy = tryDecrypt(acc.cookie)
+  if (!legacy) return
+  if (tryDecrypt(primary.cookie) === legacy) return
+  primary.cookie = acc.cookie
+  primary.addedAt = acc.updatedAt || Date.now()
+  primary.lastVerify = acc.lastVerify ?? primary.lastVerify
+}
+
 /**
  * 把旧结构（单个 cookie）补成 items 结构。
  * 就地修改传入对象：读出来的数据只在本次操作里用，不会造成副作用扩散。
@@ -134,6 +162,7 @@ function normalize(acc: StoredAccount | undefined): StoredAccount | undefined {
     const primaries = acc.items.filter(i => i.primary)
     if (!primaries.length) acc.items[0].primary = true
     else if (primaries.length > 1) primaries.slice(1).forEach(i => { i.primary = false })
+    adoptLegacyCookie(acc)
     return acc
   }
   if (!acc.cookie) return acc
