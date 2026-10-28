@@ -175,6 +175,31 @@
         }
     };
 
+    /**
+     * 同步播放栏（底部播放条）里的小爱投送切换按钮状态。
+     *
+     * 之前切投送只能去设置面板点，用户每次都要进设置；现在播放栏常驻一个按钮，
+     * 状态随 toggleTarget / 加载配置一起刷新：本地态显示「小爱」（点击投送），
+     * 投送态显示「本机」（点击切回），与设置面板按钮同义。
+     */
+    const renderPlayerBarTarget = () => {
+        const active = state.target === 'xiaoai';
+        const sync = el => {
+            if (!el) return;
+            el.classList.toggle('text-emerald-600', active);
+            el.classList.toggle('border-emerald-500', active);
+            el.classList.toggle('text-gray-500', !active);
+            el.classList.toggle('border-gray-300', !active);
+            el.title = active ? '正在投送小爱音箱，点击切回本机' : '投送到小爱音箱';
+        };
+        sync($('player-xiaoai-btn'));
+        sync($('player-xiaoai-btn-mobile'));
+        const icon = $('player-xiaoai-icon');
+        if (icon) icon.className = active ? 'fa-solid fa-circle-stop text-sm' : 'fa-solid fa-tower-broadcast text-sm';
+        const text = $('player-xiaoai-text');
+        if (text) text.textContent = active ? '本机' : '小爱';
+    };
+
     const renderLoginState = () => {
         const el = $('xiaoai-login-state');
         if (!el) return;
@@ -277,7 +302,6 @@
                 ? `<span class="opacity-70 truncate max-w-[10rem]" title="${escapeHtml(devices)}">${escapeHtml(devices)}</span>`
                 : '<span class="opacity-70">未选择设备</span>'}
             <span class="opacity-70 whitespace-nowrap">音量 ${volume}${lowVolume ? '（偏低，可能听不到）' : ''}</span>
-            <button onclick="XiaoAi.toggleTarget()" class="ml-0.5 px-1.5 py-0.5 rounded-full bg-white/70 dark:bg-white/10 hover:bg-white dark:hover:bg-white/20 font-medium whitespace-nowrap">切回本机</button>
         `;
     };
 
@@ -323,6 +347,7 @@
         renderSleepTimer();
         renderSuggestedBase();
         renderTarget();
+        renderPlayerBarTarget();
         renderLoginState();
         renderDevices();
         renderRouteBadge();
@@ -793,6 +818,7 @@
             clearInterval(watch.timer);
             watch.timer = null;
         }
+        stopProgressTicker();
         if (watch.tailTimer) {
             clearTimeout(watch.tailTimer);
             watch.tailTimer = null;
@@ -803,6 +829,26 @@
             } catch (e) {
                 /* 忽略 */
             }
+        }
+    };
+
+    /**
+     * 投送模式进度条：音箱独立播放，<audio> 被 pause，timeupdate 不触发，
+     * 进度条会一直停在 00:00。这里起一个独立 ticker，按「seek 偏移 + 本地已播时长」
+     * 平滑刷新进度条（与 3s 一次的设备轮询解耦，避免一跳一跳）。只在投送且守望活跃时画。
+     */
+    let progressTicker = null;
+    const startProgressTicker = () => {
+        if (progressTicker) return;
+        progressTicker = setInterval(() => {
+            if (state.target !== 'xiaoai' || !watch.active) return;
+            paintProgress((Number(state.seekOffsetMs) || 0) / 1000 + watchElapsedMs() / 1000);
+        }, 500);
+    };
+    const stopProgressTicker = () => {
+        if (progressTicker) {
+            clearInterval(progressTicker);
+            progressTicker = null;
         }
     };
 
@@ -823,6 +869,7 @@
         watch.prefetchedKey = '';
         watch.polling = false;
         startHeartbeat();
+        startProgressTicker();
         setWatchHint('自动续播监听中…');
     };
 
@@ -1369,6 +1416,7 @@
     const init = async () => {
         if (!$('settings-panel-xiaoai')) return;
         await loadConfig();
+        renderPlayerBarTarget();
         const range = $('xiaoai-volume-range');
         const valueEl = $('xiaoai-volume-value');
         if (range && valueEl) {

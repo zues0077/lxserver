@@ -98,11 +98,26 @@ const SEO_UA = 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36'
 /** 账号信息（带 Cookie 可读，无需签名） */
 const ME_API = 'https://api.qishui.com/luna/pc/me'
 
+/**
+ * 把汽水/抖音的图片节点拼成可直接访问的封面 URL。
+ *
+ * 关键点：抖音图片 CDN（p3-luna.douyinpic.com）的裸路径（`urls[0]+uri`）会返回
+ * 400（{"code":2004,"error":"fail to handle request"}），必须再拼上模板后缀
+ * `~{template_prefix}-image.jpeg` 才能出图。否则：
+ *   - 浏览器里汽水封面同样加载不出；
+ *   - 服务端抓封面失败（fileCache 用裸 https.get 抓取），下载文件既不内嵌封面也不缓存封面。
+ * 这是汽水专属问题：其他平台（kw/kg/wy/mg）的封面 CDN 不需要这层转换。
+ *
+ * 兼容两种节点形态：有 `template_prefix`（封面/头像多为这种）就拼后缀；否则退回裸路径。
+ */
 function pickImage(node: any): string {
+  if (!node) return ''
   const urls: string[] = Array.isArray(node?.urls) ? node.urls : []
   const uri = String(node?.uri || '')
   if (!urls.length || !uri) return ''
-  return `${urls[0]}${uri}`
+  const url = `${urls[0]}${uri}`
+  const prefix = String(node?.template_prefix || '').trim()
+  return /^tplv-/.test(prefix) ? `${url}~${prefix}-image.jpeg` : url
 }
 
 function pickArtists(track: any): string {
@@ -1184,11 +1199,7 @@ function firstGroup(body: any): any {
 }
 
 function imageOf(node: any): string {
-  if (!node) return ''
-  const urls: string[] = Array.isArray(node?.urls) ? node.urls : []
-  const uri = String(node?.uri || '')
-  if (urls.length && uri) return `${urls[0]}${uri}`
-  return uri
+  return pickImage(node)
 }
 
 /** 歌手搜索。同名艺人按 count_tracks（真身优先）+ count_collected 加权排序。 */

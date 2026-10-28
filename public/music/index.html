@@ -4334,6 +4334,12 @@
                     onclick="toggleQueueDrawer()" title="播放队列">
                     <i class="fas fa-list text-[10px]"></i>
                 </button>
+                <!-- XiaoAi 投送切换（手机端播放栏） -->
+                <button id="player-xiaoai-btn-mobile"
+                    class="md:hidden text-gray-500 hover:text-emerald-600 text-[10px] font-bold border border-gray-300 rounded px-1 py-0"
+                    onclick="xiaoAiToggleTarget()" title="投送小爱 / 切回本机">
+                    <i class="fa-solid fa-tower-broadcast text-[10px]"></i>
+                </button>
             </div>
         </div>
 
@@ -4468,6 +4474,13 @@
                 class="text-gray-500 hover:text-emerald-600 text-sm font-bold border border-gray-300 rounded px-2 py-0.5 transition-colors"
                 onclick="window.lyricCard && window.lyricCard.open()" title="分享歌词卡片">
                 <i class="fas fa-image text-sm"></i>
+            </button>
+            <!-- XiaoAi 投送切换（桌面端播放栏） -->
+            <button id="player-xiaoai-btn" onclick="xiaoAiToggleTarget()"
+                title="投送到小爱音箱"
+                class="text-gray-500 hover:text-emerald-600 text-sm font-bold border border-gray-300 rounded px-2 py-0.5 transition-colors flex items-center gap-1">
+                <i id="player-xiaoai-icon" class="fa-solid fa-tower-broadcast text-sm"></i>
+                <span id="player-xiaoai-text" class="hidden lg:inline">小爱</span>
             </button>
             <button
                 class="text-gray-500 hover:text-emerald-600 text-sm font-bold border border-gray-300 rounded px-2 py-0.5"
