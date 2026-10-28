@@ -6530,37 +6530,66 @@ input:-webkit-autofill:active {
     padding: 0.26rem 0.6rem;
 }
 
-/* ---- 酷狗概念版：自动领 VIP 设置 ---- */
-.music-acc-auto {
+/* ---- 概念版小节容器：账号列表 / 自动领会员 各自成块，和卡片其余内容拉开层次 ---- */
+.music-acc-section {
     margin-top: 0.7rem;
-    padding: 0.65rem 0.75rem;
-    border-radius: 9px;
-    border: 1px dashed rgba(127, 127, 127, 0.3);
-    background: rgba(127, 127, 127, 0.05);
+    padding-top: 0.7rem;
+    border-top: 1px solid rgba(127, 127, 127, 0.14);
+}
+
+.music-acc-section-title {
     display: flex;
+    align-items: baseline;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem 0.9rem;
-    font-size: 0.8rem;
-}
-
-.music-acc-auto-head {
-    font-weight: 600;
+    gap: 0.5rem;
     font-size: 0.82rem;
-    margin-right: 0.2rem;
+    font-weight: 600;
+    color: var(--text-primary, #e5e7eb);
+    margin-bottom: 0.5rem;
 }
 
-.music-acc-auto-line {
-    display: inline-flex;
+.music-acc-section-sub {
+    font-size: 0.72rem;
+    font-weight: 400;
+    color: var(--text-muted, #9ca3af);
+}
+
+.music-acc-section-foot {
+    margin-top: 0.5rem;
+}
+
+.music-acc-section-foot .btn-secondary {
+    font-size: 0.78rem;
+    padding: 0.3rem 0.7rem;
+}
+
+/* 自动领会员：表单改为纵向对齐的网格，比原来的横排 label+控件更整齐 */
+.music-acc-auto-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 0.5rem 0.9rem;
+    align-items: end;
+}
+
+.music-acc-auto-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary, #8b8b8b);
+}
+
+.music-acc-auto-field--switch {
+    flex-direction: row;
     align-items: center;
-    gap: 0.35rem;
-    white-space: nowrap;
+    gap: 0.4rem;
+    align-self: end;
 }
 
-.music-acc-auto-line input[type="number"],
-.music-acc-auto-line select {
-    width: 4.6rem;
-    padding: 0.28rem 0.4rem;
+.music-acc-auto-field input[type="number"],
+.music-acc-auto-field select {
+    width: 100%;
+    padding: 0.32rem 0.45rem;
     font-size: 0.8rem;
     border-radius: 6px;
     background: rgba(0, 0, 0, 0.18);
@@ -6568,11 +6597,31 @@ input:-webkit-autofill:active {
     color: inherit;
 }
 
+.music-acc-auto-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+}
+
+.music-acc-auto-actions .btn-primary,
+.music-acc-auto-actions .btn-secondary {
+    font-size: 0.8rem;
+    padding: 0.32rem 0.8rem;
+}
+
 .music-acc-auto-tip {
-    flex-basis: 100%;
+    margin-top: 0.5rem;
     font-size: 0.74rem;
-    color: var(--text-muted);
+    color: var(--text-muted, #9ca3af);
     line-height: 1.5;
+}
+
+/* 登录入口（扫码 / 手机号）与管理操作分开，避免一整排按钮分不清主次 */
+.music-acc-actions--login {
+    margin-top: 0.65rem;
+    padding-top: 0.65rem;
+    border-top: 1px dashed rgba(127, 127, 127, 0.2);
 }
 
 .music-acc-guide-steps {

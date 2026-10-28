@@ -5164,71 +5164,81 @@ class App {
             // 这几个是概念版的核心价值，其他平台没有，所以只在它这张卡片上出现。
             const isKglite = a.id === 'kglite';
             const kgItems = Array.isArray(a.accounts) ? a.accounts : [];
-            const smsBtn = isKglite
-                ? `<button type="button" class="btn-secondary" onclick="app.editMusicAccountSms('kglite')">手机号登录</button>`
-                : '';
-            // 多账号列表：每行一个号。主账号带「主」标记 —— 取链只走主账号，
-            // 其余账号照样参与领 VIP，这个区别必须在界面上说清楚，否则用户会以为副号没生效
-            const accountsBlock = (isKglite && kgItems.length)
-                ? `<div class="music-acc-accounts">
-                       <div class="music-acc-accounts-tip">共 ${kgItems.length} 个账号 · 取链只走「主账号」，领 VIP 所有账号都会跑</div>
-                       ${kgItems.map(it => {
-                           const h = it.health;
-                           let cls = '';
-                           let text = it.configured ? '已配置' : '未配置';
-                           if (h === 'expired') { cls = 'bad'; text = '已失效'; }
-                           else if (h === 'stale') { cls = ''; text = '待复查'; }
-                           else if (h === 'unchecked') { cls = ''; text = '未校验'; }
-                           else if (h === 'ok') {
-                               const v = it.lastVerify || {};
-                               cls = v.isVip ? 'vip' : 'ok';
-                               text = v.isVip ? '会员' : '已登录';
-                           }
-                           return `<div class="music-acc-acct${it.primary ? ' is-primary' : ''}">
-                               <div class="music-acc-acct-head">
-                                   ${it.primary ? '<span class="music-acc-primary-tag">主账号</span>' : '<span class="music-acc-sub-tag">小号</span>'}
-                                   <span class="music-acc-acct-name">${this.escapeHtml(it.label)}</span>
-                                   <span class="music-acc-status ${cls}">${text}</span>
-                                   <span class="music-acc-acct-vip" id="music-acc-vip-${it.id}">读取中…</span>
-                               </div>
-                               <div class="music-acc-acct-actions">
-                                   <button type="button" class="btn-secondary" onclick="app.claimKugouLiteVip(this,'${it.id}')">领取 VIP</button>
-                                   ${it.primary ? '' : `<button type="button" class="btn-secondary" onclick="app.setPrimaryMusicAccount('kglite','${it.id}')">设为主账号</button>`}
-                                   <button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('kglite', false, '${it.id}')">验证</button>
-                                   <button type="button" class="btn-secondary" onclick="app.removeMusicAccountItem('kglite','${it.id}')">删除</button>
-                               </div>
-                           </div>`;
-                       }).join('')}
+            // 多账号列表：独立「账号」小节，主账号描边高亮；取链只走主账号、领 VIP 所有号都跑
+            const accountsSection = (isKglite && kgItems.length)
+                ? `<div class="music-acc-section">
+                       <div class="music-acc-section-title">账号（${kgItems.length}）<span class="music-acc-section-sub">取链只走「主账号」，领 VIP 所有账号都会跑</span></div>
+                       <div class="music-acc-accounts">
+                           ${kgItems.map(it => {
+                               const h = it.health;
+                               let cls = '';
+                               let text = it.configured ? '已配置' : '未配置';
+                               if (h === 'expired') { cls = 'bad'; text = '已失效'; }
+                               else if (h === 'stale') { cls = ''; text = '待复查'; }
+                               else if (h === 'unchecked') { cls = ''; text = '未校验'; }
+                               else if (h === 'ok') {
+                                   const v = it.lastVerify || {};
+                                   cls = v.isVip ? 'vip' : 'ok';
+                                   text = v.isVip ? '会员' : '已登录';
+                               }
+                               return `<div class="music-acc-acct${it.primary ? ' is-primary' : ''}">
+                                   <div class="music-acc-acct-head">
+                                       ${it.primary ? '<span class="music-acc-primary-tag">主账号</span>' : '<span class="music-acc-sub-tag">小号</span>'}
+                                       <span class="music-acc-acct-name">${this.escapeHtml(it.label)}</span>
+                                       <span class="music-acc-status ${cls}">${text}</span>
+                                       <span class="music-acc-acct-vip" id="music-acc-vip-${it.id}">读取中…</span>
+                                   </div>
+                                   <div class="music-acc-acct-actions">
+                                       <button type="button" class="btn-secondary" onclick="app.claimKugouLiteVip(this,'${it.id}')">领取 VIP</button>
+                                       ${it.primary ? '' : `<button type="button" class="btn-secondary" onclick="app.setPrimaryMusicAccount('kglite','${it.id}')">设为主账号</button>`}
+                                       <button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('kglite', false, '${it.id}')">验证</button>
+                                       <button type="button" class="btn-secondary" onclick="app.removeMusicAccountItem('kglite','${it.id}')">删除</button>
+                                   </div>
+                               </div>`;
+                           }).join('')}
+                       </div>
+                       <div class="music-acc-section-foot">
+                           <button type="button" class="btn-secondary" onclick="app.editMusicAccount('kglite', 'append')">＋ 添加账号</button>
+                       </div>
                    </div>`
                 : '';
-            // 自动领取设置：开始时间可自定义，账号之间错峰
-            const autoBlock = isKglite
-                ? `<div class="music-acc-auto">
-                       <div class="music-acc-auto-head">自动领 VIP</div>
-                       <label class="music-acc-auto-line">
-                           <input type="checkbox" id="kglite-auto-claim"> 每天自动领取
-                       </label>
-                       <label class="music-acc-auto-line">开始时间
-                           <select id="kglite-start-hour">
-                               ${Array.from({ length: 24 }, (_, h) => `<option value="${h}">${String(h).padStart(2, '0')}:00</option>`).join('')}
-                           </select>
-                       </label>
-                       <label class="music-acc-auto-line">账号间隔
-                           <input type="number" id="kglite-gap" min="0" max="600" step="10"> 秒
-                       </label>
-                       <label class="music-acc-auto-line">剩余不足
-                           <input type="number" id="kglite-min-remain" min="1" max="720"> 小时才补
-                       </label>
-                       <button type="button" class="btn-primary" onclick="app.saveKugouLiteAutoClaim(this)">保存设置</button>
+
+            // 自动领会员：独立小节，表单纵向对齐更整齐；「立即全部领取」与它同组，语义更清晰
+            const autoSection = isKglite
+                ? `<div class="music-acc-section">
+                       <div class="music-acc-section-title">自动领会员</div>
+                       <div class="music-acc-auto-grid">
+                           <label class="music-acc-auto-field music-acc-auto-field--switch">
+                               <input type="checkbox" id="kglite-auto-claim"> 每天自动领取
+                           </label>
+                           <label class="music-acc-auto-field">开始时间
+                               <select id="kglite-start-hour">
+                                   ${Array.from({ length: 24 }, (_, h) => `<option value="${h}">${String(h).padStart(2, '0')}:00</option>`).join('')}
+                               </select>
+                           </label>
+                           <label class="music-acc-auto-field">账号间隔（秒）
+                               <input type="number" id="kglite-gap" min="0" max="600" step="10">
+                           </label>
+                           <label class="music-acc-auto-field">剩余不足（小时才补）
+                               <input type="number" id="kglite-min-remain" min="1" max="720">
+                           </label>
+                       </div>
+                       <div class="music-acc-auto-actions">
+                           <button type="button" class="btn-primary" onclick="app.saveKugouLiteAutoClaim(this)">保存设置</button>
+                           <button type="button" class="btn-secondary" onclick="app.claimKugouLiteVip(this,'__all__')">立即全部领取</button>
+                       </div>
                        <div class="music-acc-auto-tip" id="kglite-next-run"></div>
                    </div>`
                 : '';
-            const claimBtn = (isKglite && a.configured)
-                ? `<button type="button" class="btn-primary" onclick="app.claimKugouLiteVip(this,'__all__')">全部领取</button>`
+
+            // 登录入口：概念版扫码 / 手机号是主要登录方式，单独成组，与「填写 Cookie」等管理操作拉开层次
+            const loginActions = isKglite
+                ? `<div class="music-acc-actions music-acc-actions--login">
+                       ${qrBtns}
+                       <button type="button" class="btn-secondary" onclick="app.editMusicAccountSms('kglite')">手机号登录</button>
+                   </div>`
                 : '';
-            const addBtn = isKglite
-                ? `<button type="button" class="btn-secondary" onclick="app.editMusicAccount('kglite', 'append')">＋ 添加账号</button>`
-                : '';
+
             const vipLine = (isKglite && !kgItems.length)
                 ? `<div class="music-acc-vip" id="music-acc-vip-kglite">登录后可查看概念版会员</div>`
                 : '';
@@ -5258,19 +5268,17 @@ class App {
                     <span class="music-acc-status ${statusClass}">${statusText}</span>
                 </div>
                 <div class="music-acc-meta">${meta}${verifyMsg}</div>
-                ${accountsBlock}
-                ${vipLine}
-                ${autoBlock}
+                ${accountsSection}
+                ${loginActions}
+                ${autoSection}
                 <div class="music-acc-actions">
-                    ${qrBtns}
-                    ${smsBtn}
-                    ${addBtn}
-                    ${claimBtn}
+                    ${isKglite ? '' : qrBtns}
                     <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">填写 Cookie</button>
                     <button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('${a.id}')">验证</button>
                     ${a.configured ? `<button type="button" class="btn-secondary" onclick="app.clearMusicAccount('${a.id}')">清除</button>` : ''}
                     <button type="button" class="btn-secondary" onclick="app.openMusicAccountGuide('${a.id}')">如何获取</button>
                 </div>
+                ${vipLine}
                 ${smsPanel}
                 <div class="music-acc-editor" id="music-acc-editor-${a.id}" style="display:none;" data-append="">
                     <div class="music-acc-editor-tip">
