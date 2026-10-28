@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.43 (2026-10-28)
+
+### 🔎 歌手 / 专辑维度搜索与详情（扩平台）
+
+- **汽水（soda）新增歌手 / 专辑搜索与详情**：`/api/music/search?source=soda&type=singer|album` 走 Android 通道（aid 覆盖 386088），同名艺人按曲库规模加权排序取真身；艺人/专辑详情走 PC 端点（`/luna/pc/artists/{id}`、`/luna/pc/albums/{id}`），免签名免 Cookie。
+- **酷我（kw）歌手详情打通 Secret 通道**：匿名 `www.kuwo.cn/api/www/*` 必报 illegal，改用首页下发的 `Hm_Iuvt` token 做 `Secret` 流式异或签名（1 小时缓存 + 失败重试）；艺人详情 + 歌曲（实测 1708 首全量翻页）+ 专辑（45 张）全部可用。
+- **咪咕（mg）歌手详情免签名**：`singer_songs.do` 一请求两用（歌手信息 + 歌曲列表，带 copyrightId 可直接取链）；咪咕无免签名专辑端点，歌手页专辑 tab 暂为空。
+- **酷狗概念版（kglite）歌手/专辑/详情零成本转调**：与酷狗（kg）同 ID 体系，直接复用 kg 的 extendDetail。
+- **前端聚合搜索按 type 分派**：`source=all` 的 singer/album 维度分别走各源 extendSearch / 汽水 / 概念版转调，歌曲维度保持原逻辑；聚合 SOURCES 补 `soda` / `bili`，singer/album 能力表加 soda（bili 暂不支持）。
+
 ## v1.5.42 (2026-10-28)
 
 ### 🔍 概念版可搜索 + 聚合搜索
