@@ -479,7 +479,8 @@ async function refreshKugouLiteStatus(cookie: string): Promise<void> {
 
 /** 剩余 VIP 低于这个小时数才自动补领 */
 const AUTO_CLAIM_THRESHOLD_HOURS = 9
-const AUTO_CLAIM_FIRST_DELAY_MS = 10 * 60 * 1000
+// 首跑放在启动 3 分钟后：这时账号巡检（90 秒首跑）已经结束，不会再抢网络
+const AUTO_CLAIM_FIRST_DELAY_MS = 3 * 60 * 1000
 const AUTO_CLAIM_INTERVAL_MS = 60 * 60 * 1000
 
 let vipTimer: ReturnType<typeof setInterval> | null = null
@@ -491,8 +492,14 @@ export async function runKugouLiteAutoClaim(): Promise<{ skipped: boolean; reaso
   if (!cookie) return { skipped: true, reason: '未配置酷狗概念版账号' }
 
   const vip = await kglite.getVipInfo(cookie)
-  if (!vip.ok) return { skipped: true, reason: `会员信息查询失败：${vip.error || '未知原因'}` }
+  if (!vip.ok) {
+    // 查不到会员状态时不动手：盲领可能把额度浪费在已经垫了很多天的情况下
+    console.log(`[平台账号] 酷狗概念版自动补领：会员状态查询失败，本次跳过（${vip.error || '未知原因'}）`)
+    return { skipped: true, reason: `会员信息查询失败：${vip.error || '未知原因'}` }
+  }
   if (vip.remainHours >= AUTO_CLAIM_THRESHOLD_HOURS) {
+    // 跳过也要留一行：否则定时器到底有没有在跑，只能靠猜
+    console.log(`[平台账号] 酷狗概念版自动补领：剩余 ${vip.remainHours} 小时（≥${AUTO_CLAIM_THRESHOLD_HOURS}），本次跳过`)
     return { skipped: true, reason: `剩余 ${vip.remainHours} 小时，暂不需要补领` }
   }
 
@@ -516,7 +523,7 @@ export function startKugouLiteVipAutoClaim(): void {
     if (typeof vipTimer.unref === 'function') vipTimer.unref()
   }, AUTO_CLAIM_FIRST_DELAY_MS)
   if (typeof boot.unref === 'function') boot.unref()
-  console.log(`[平台账号] 酷狗概念版 VIP 自动补领已安排：每小时检查一次，剩余不足 ${AUTO_CLAIM_THRESHOLD_HOURS} 小时才领（首次 10 分钟后）`)
+  console.log(`[平台账号] 酷狗概念版 VIP 自动补领已安排：每小时检查一次，剩余不足 ${AUTO_CLAIM_THRESHOLD_HOURS} 小时才领（首次 3 分钟后）`)
 }
 
 // ---- 浏览器扩展包（一键同步 Cookie） ----
