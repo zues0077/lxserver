@@ -538,6 +538,23 @@ async function grabKeyFromPlayerInfo(player: any, cookie: string, trackId: strin
     if (key) {
       registerSodaKey(trackId, key)
       console.log(`[汽水解密] 从 GetPlayInfo 捕获到密钥 trackId=${trackId}`)
+    } else {
+      // [DEBUG-临时] GetPlayInfo 带 play_auth 但没解出密钥时，打出结构定位 key 到底在哪。
+      // 确认解析姿势后会删掉这段。
+      try {
+        const pl = info?.Result?.Data?.PlayInfoList
+        const first = Array.isArray(pl) && pl[0] ? pl[0] : null
+        const pv = (v: any) =>
+          typeof v === 'string'
+            ? (v.length > 80 ? `${v.slice(0, 80)}…(${v.length})` : v)
+            : v && typeof v === 'object'
+              ? `{${Object.keys(v).join(',')}${Object.keys(v).length ? '' : ''}}`
+              : String(v)
+        console.warn(`[汽水解密][DEBUG] GetPlayInfo 顶层键=${Object.keys(info || {}).join(',')}`)
+        if (first) {
+          console.warn(`[汽水解密][DEBUG] PlayInfoList[0] 键=${Object.keys(first).join(',')} | play_auth=${pv(first.play_auth ?? first.PlayAuth)}`)
+        }
+      } catch { /* ignore */ }
     }
   } catch (e: any) {
     console.warn(`[汽水解密] GetPlayInfo 取钥失败（忽略）：${e?.message || e}`)

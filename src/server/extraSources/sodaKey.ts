@@ -57,6 +57,33 @@ function findDeep(obj: any, names: string[], depth = 0): any {
 }
 
 /**
+ * 模糊递归查找：返回第一个「键名包含任一子串（如 spade）」的**字符串**值。
+ * 兜底用——覆盖 `play_auth` 里把 spade 藏在怪异键名下的情形（精确匹配 ['spade_a','spadeA'] 会漏）。
+ * 只认字符串值，避免把巨大对象塞进候选。
+ */
+function findDeepContains(obj: any, subs: string[], depth = 0): string | undefined {
+  if (!obj || typeof obj !== 'object' || depth > 14) return undefined
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const found = findDeepContains(item, subs, depth + 1)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  for (const name of Object.keys(obj)) {
+    if (subs.some(s => name.toLowerCase().includes(s))) {
+      const v = obj[name]
+      if (typeof v === 'string' && v.trim()) return v.trim()
+    }
+  }
+  for (const name of Object.keys(obj)) {
+    const found = findDeepContains(obj[name], subs, depth + 1)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+/**
  * 从取链响应里取出汽水版权曲的解密密钥（32 位小写十六进制）；抓不到返回空串。
  *
  * 按参考实现（qishuiClient.js:339-340）的口径：`findFirstByKeys({playAuth, raw}, ['spade_a'])`，
@@ -65,12 +92,21 @@ function findDeep(obj: any, names: string[], depth = 0): any {
  * 早期版本找到 play_auth 后只扫描它的直接子键，漏掉了「spade_a 在响应顶层 / 更深层级 /
  * 另一个 play_auth 分支」三种情况，表现为「明明是 CENC 加密流却捕获不到密钥」，
  * 于是继续命中旧的 DRM 拦截 —— 新增的解密链路一行都跑不到。246 实测复现过，别再改回去。
+ *
+ * 2026-10-28 实测补充：火山 GetPlayInfo 响应里 `play_auth` 确实存在，但**不一定是
+ * `{spade_a: ...}` 对象**——可能是直接承载密钥的字符串，或 spade 藏在别处。所以这里
+ * ① 允许 `play_auth` 本身就是密钥字符串；② 整棵响应兜底搜任何含 `spade` 的键名。
  */
 export function extractSodaKey(parsed: any): string {
   const auth = findDeep(parsed, ['play_auth', 'playAuth'])
   const candidates: any[] = []
-  if (auth !== undefined) candidates.push(findDeep(auth, ['spade_a', 'spadeA']))
+  // ① play_auth 可能本身就是 spade_a（base64 字符串），直接当候选
+  if (typeof auth === 'string') candidates.push(auth)
+  else if (auth !== undefined) candidates.push(findDeep(auth, ['spade_a', 'spadeA']))
   candidates.push(findDeep(parsed, ['spade_a', 'spadeA']))
+  // ② 兜底：整棵响应里任何键名包含 'spade' 的字符串值都当候选
+  const spadeAny = findDeepContains(parsed, ['spade'])
+  if (spadeAny !== undefined) candidates.push(spadeAny)
 
   let sawCandidate = false
   for (const c of candidates) {
