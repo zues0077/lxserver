@@ -215,11 +215,19 @@ export interface SmsSendPayload {
   message: string
 }
 
+/** 支持短信验证码登录的平台（目前只有酷狗概念版） */
+const SMS_PLATFORMS = new Set(['kglite'])
+
 /** 给指定平台发短信验证码 */
 export async function sendSms(platform: string, mobile: string): Promise<SmsSendPayload> {
   sweepSms()
   const p = getPlatform(platform)
   if (!p) return { ok: false, message: `不支持的平台：${platform}` }
+  // 白名单必须在发请求之前拦：否则会把别家平台的手机号拿去调酷狗的取码接口，
+  // 既没用（对方不认），也可能真给用户发出一条莫名其妙的短信
+  if (!SMS_PLATFORMS.has(platform)) {
+    return { ok: false, message: `${p.name} 暂不支持短信验证码登录，请用扫码或填写 Cookie` }
+  }
   const tel = String(mobile || '').replace(/[^\d]/g, '')
   if (!/^1\d{10}$/.test(tel)) return { ok: false, message: '请输入 11 位手机号' }
 
