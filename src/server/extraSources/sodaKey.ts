@@ -15,9 +15,16 @@
  *   - `/luna/pc/track_v2`：121 个字段，无 play_auth / 无 spade_a / 无任何凭证类字段；
  *   - `/luna/media-player`：12 个字段（player_infos / url_player_info / video_model /
  *     video_model_type / audio_effects / intelligent …），同样一个凭证字段都没有。
- * 即**平台根本不下发密钥**，不是字段改名、也不是我们解析器的问题（解析器有 9 个单测兜底）。
- * 所以目前 `extractSodaKey` 恒返回空串，解密链路（`fileCache` 里的解密分支）跑不到；
- * 一旦哪天平台又开始下发，`downloadAndCache`/`checkCache` 那套是现成可用的，别删。
+ * 即**这两个端点本身不下发密钥**。2026-10-28 又专门把签名器切回 3.7.0（出 X-Helios/X-Medusa）
+ * 复测 track_v2，**依旧 0 密钥**——所以「签名器版本」也不是根因。
+ *
+ * 还剩参考实现 libresoda 提到的第二处来源：火山 `GetPlayInfo`（`url_player_info`）
+ * 响应里的 `Result.Data.PlayInfoList[].play_auth`。这是原实现的盲区，已于 2026-10-28
+ * 在 `soda.ts` 的 `grabKeyFromPlayerInfo` 里补齐（对整个 GetPlayInfo 响应跑一次
+ * `extractSodaKey`）。目前（本仓库版本）仍未实锤平台是否在该通道下发，需部署后复测。
+ *
+ * 一旦任何通道拿到密钥，`extractSodaKey` 返回非空，`registerSodaKey` 登记，
+ * `fileCache` 的解密分支随即生效；那套链路是现成可用的，别删。
  */
 
 import { resolveAudioKey } from '../utils/sodaDecrypt'

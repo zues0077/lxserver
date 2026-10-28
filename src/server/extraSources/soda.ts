@@ -284,6 +284,8 @@ interface SodaVideoItem {
     size?: number
     codec_type?: string
   }
+  /** 火山 GetPlayInfo 每个码率项可能随带的 CENC 解密密钥（play_auth）；先带出，真正取钥见 grabKeyFromPlayerInfo */
+  play_auth?: string
 }
 
 /** 一条取流通道取回来的东西：原始响应 + 候选流 + 时长信息 */
@@ -405,6 +407,9 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
   // 这里保留抓取：一旦平台重新下发，下面这套登记 + fileCache 解密分支就直接可用。
   const hexKey = extractSodaKey(parsed)
   if (hexKey) registerSodaKey(trackId, hexKey)
+  // [汽水解密] 第二处盲区：签名通道的 track_player 里可能也有 url_player_info（GetPlayInfo），
+  // 其 PlayInfoList[].play_auth 可能带密钥——track_v2 本身不带时从这里兜底。
+  await grabKeyFromPlayerInfo(parsed?.track_player, cookie, trackId)
 
   // 签名 ≠ 有版权：受限曲照样只给 30/60 秒，这里必须拦住，否则播放器会播到一半静音
   if (isPreviewStream({
@@ -427,7 +432,7 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
   if (!ranked.length) return null
   const chosen = ranked.find(x => x.meta!.rank <= wantRank) || ranked[ranked.length - 1]
 
-  console.log(`[汽水签名] ✓ 整曲（${chosen.v.video_meta?.quality} / ${Math.round(toNumber(chosen.v.video_meta?.bitrate) / 1000)}k）${hexKey ? ' [已捕获解密密钥]' : ''}`)
+  console.log(`[汽水签名] ✓ 签名通道取流（${chosen.v.video_meta?.quality} / ${Math.round(toNumber(chosen.v.video_meta?.bitrate) / 1000)}k）${hexKey ? ' [已捕获解密密钥]' : ' [加密流·无密钥→将退回明文]'}`)
   return {
     url: String(chosen.v.main_url || chosen.v.backup_url),
     quality: chosen.meta!.label,
@@ -510,6 +515,36 @@ async function fetchPlayerInfo(player: any, cookie: string): Promise<{ items: So
 }
 
 /**
+ * [汽水解密] 从「火山 VOD `GetPlayInfo`」响应里抠解密密钥（第二处盲区）。
+ *
+ * 实测（2026-10-28，246）`/luna/pc/track_v2` 与 `/luna/h5/track_v2` 都不下发 `play_auth`，
+ * 但参考实现 libresoda 的密钥还可能藏在 `url_player_info`（即 GetPlayInfo）的
+ * `Result.Data.PlayInfoList[].play_auth` 里——原 `fetchPlayerInfo` 只取了直链、把 play_auth 整个丢了。
+ *
+ * 这里补齐：解析 GetPlayInfo 后对整个响应跑一次 `extractSodaKey`（深度递归能命中
+ * `PlayInfoList[].play_auth → spade_a`），抓到就 `registerSodaKey` 登记，
+ * 下载时 `fileCache` 的解密分支随即生效。
+ */
+async function grabKeyFromPlayerInfo(player: any, cookie: string, trackId: string): Promise<void> {
+  const infoUrl = String(player?.url_player_info || '').trim()
+  if (!infoUrl.startsWith('http')) return
+  try {
+    const info = parseJsonBody(await request<any>(infoUrl, {
+      headers: { 'User-Agent': SEO_UA, ...(cookie ? { Cookie: cookie } : {}) },
+      timeout: 15000,
+    }))
+    if (!info) return
+    const key = extractSodaKey(info)
+    if (key) {
+      registerSodaKey(trackId, key)
+      console.log(`[汽水解密] 从 GetPlayInfo 捕获到密钥 trackId=${trackId}`)
+    }
+  } catch (e: any) {
+    console.warn(`[汽水解密] GetPlayInfo 取钥失败（忽略）：${e?.message || e}`)
+  }
+}
+
+/**
  * 映射火山 VOD 的 `PlayInfoList[]` → 统一的 `SodaVideoItem[]`。
  *
  * 字段是 **PascalCase**（`MainPlayUrl` / `Quality` / `Bitrate` …），
@@ -528,6 +563,9 @@ export function mapPlayerInfoItems(list: any[]): SodaVideoItem[] {
         size: toNumber(it?.Size ?? it?.size),
         codec_type: String(it?.Codec ?? it?.codec ?? ''),
       },
+      // [汽水解密] 火山 GetPlayInfo 每个码率项可能随带 play_auth（内含 spade_a 密钥）；
+      // 先带出，真正取钥在 grabKeyFromPlayerInfo 里对整个响应跑 extractSodaKey。
+      play_auth: String(it?.PlayAuth ?? it?.play_auth ?? '').trim(),
     }))
     .filter(v => String(v.main_url || v.backup_url).startsWith('http'))
 }
@@ -642,6 +680,10 @@ async function completePlainFetch(fetch: PlainFetch, cookie: string, trackId: st
   // [汽水解密] 平台一旦重新下发 play_auth.spade_a，这里就登记，
   // fileCache 的解密分支随即生效（见 sodaKey.ts 头部的实测结论）。
   if (fetch.key) registerSodaKey(trackId, fetch.key)
+  // 第二处盲区：track_v2 / media-player 都不带 play_auth，但火山 GetPlayInfo
+  // （url_player_info）的 `PlayInfoList[].play_auth` 可能带。即便 video_list 已经取到直链，
+  // 也照样探一次 GetPlayInfo 取钥（密钥和直链可以来自不同地方）。
+  await grabKeyFromPlayerInfo(fetch.parsed?.track_player, cookie, trackId)
   return fetch
 }
 

@@ -127,3 +127,31 @@ test('extractSodaKey: 畸形输入不抛异常', () => {
     assert.equal(got, '')
   }
 })
+
+test('extractSodaKey: 火山 GetPlayInfo 形状（Result.Data.PlayInfoList[].play_auth.spade_a）能解出密钥', () => {
+  // 这是 2026-10-28 补齐的第二处盲区：原 fetchPlayerInfo 只取直链、把 play_auth 丢了。
+  const getPlayInfo = {
+    Result: {
+      Data: {
+        PlayInfoList: [
+          { MainPlayUrl: 'https://vod/320.m4a', Quality: 'medium', play_auth: { spade_a: SPADE } },
+          { MainPlayUrl: 'https://vod/flac.m4a', Quality: 'lossless', play_auth: { spade_a: SPADE } },
+        ],
+      },
+    },
+  }
+  assert.equal(extractSodaKey(getPlayInfo), KEY)
+})
+
+test('extractSodaKey: GetPlayInfo 大小写变体（playAuth / spadeA）能识别', () => {
+  const getPlayInfo = {
+    result: {
+      data: {
+        play_info_list: [
+          { MainPlayUrl: 'https://vod/x.m4a', PlayAuth: { SpadeA: SPADE } },
+        ],
+      },
+    },
+  }
+  assert.equal(extractSodaKey(getPlayInfo), KEY)
+})

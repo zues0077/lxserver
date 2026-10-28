@@ -285,3 +285,13 @@ test('buildHint：VIP 曲 + 签名器在线仍试听 → 不出现「App 端点�
   assert.doesNotMatch(hint, /App 端点返回：App 端点返回/)
 })
 
+test('mapPlayerInfoItems: 带出每个码率项的 play_auth（GetPlayInfo 取钥通道需要）', () => {
+  const items = mapPlayerInfoItems([
+    { MainPlayUrl: 'https://vod/320.m4a', Quality: 'medium', PlayAuth: 'ENC_AAA' },
+    { MainPlayUrl: 'https://vod/flac.m4a', Quality: 'lossless', play_auth: 'ENC_BBB' },
+  ])
+  assert.equal(items.length, 2)
+  assert.equal(items[0].play_auth, 'ENC_AAA')
+  assert.equal(items[1].play_auth, 'ENC_BBB')
+})
+
