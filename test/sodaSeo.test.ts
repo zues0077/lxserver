@@ -253,3 +253,18 @@ test('buildHint：什么流都没有 → 区分「通道都没解析到」与「
   )
 })
 
+test('buildHint：签名通道加密无密钥 → 有效源必须是明文通道（h5/seo），绝不谎报 signer', () => {
+  // 真实复现：版权曲在 App 端点拿到 CENC 加密流、平台不下发 spade_a，
+  // getAudioUrl / diagnoseStream 都会退回明文通道。诊断口径必须和取链一致，
+  // 否则 hint 写「已拿到整曲流（通道 signer）」会把用户骗去等一个播不了的链接。
+  const hint = buildHint(diagnosis({
+    url: 'https://v26-luna.douyinvod.com/xxx',
+    source: 'h5',
+    quality: '320k',
+    signerError: 'App 端点返回的是 CENC 加密流且无密钥，浏览器无法播放，已退回明文通道',
+  }))
+  assert.match(hint, /整曲/)
+  assert.doesNotMatch(hint, /通道 signer/)
+  assert.doesNotMatch(hint, /CENC 加密流/)
+})
+

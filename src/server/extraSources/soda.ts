@@ -883,7 +883,10 @@ export async function diagnoseStream(songInfo: any, quality = '320k', cookie = '
     if (!best || (isPreviewStream(best.got) && !isPreviewStream(got))) best = { got, item }
   }
 
-  // ③ 签名器在线就再探一次 App 端点，确认整曲是否真的拿得到
+  // ③ 签名器在线就再探一次 App 端点，确认整曲是否真的拿得到。
+  //    但 App 端点对版权曲下发的是 CENC 加密流、且平台不下发密钥（见 sodaKey.ts），
+  //    这种「拿到也播不了」。诊断口径必须和 getAudioUrl 一致：判成无效、退回明文通道，
+  //    否则 hint 会写「已拿到整曲流（通道 signer）」把用户骗了。
   const signed = report.signerOnline
     ? await trySignedStream(trackId, cookie, quality).catch((e: any) => {
         report.signerError = `App 端点取流失败：${e?.message || e}`
@@ -891,12 +894,21 @@ export async function diagnoseStream(songInfo: any, quality = '320k', cookie = '
       })
     : null
 
-  if (signed) {
+  let signedUsable: typeof signed = null
+  if (signed?.key) {
+    signedUsable = signed
+  } else if (signed) {
+    const encrypted = await isEncryptedRemoteStream(signed.url).catch(() => false)
+    if (!encrypted) signedUsable = signed
+    else report.signerError = 'App 端点返回的是 CENC 加密流且无密钥，浏览器无法播放，已退回明文通道'
+  }
+
+  if (signedUsable) {
     report.source = 'signer'
-    report.quality = signed.quality
-    report.url = signed.url
+    report.quality = signedUsable.quality
+    report.url = signedUsable.url
     report.isPreview = false
-    report.isLossless = String(signed.quality).startsWith('flac') || signed.ext === 'flac'
+    report.isLossless = String(signedUsable.quality).startsWith('flac') || signedUsable.ext === 'flac'
     report.trackDurationSeconds = Math.round(best?.got.trackDuration || 0)
     report.streamDurationSeconds = 0
   } else if (best) {
