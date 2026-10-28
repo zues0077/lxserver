@@ -8,6 +8,7 @@
 
 import album from './album'
 import { httpFetch } from '../../request'
+import { decodeName } from '../../index'
 import { formatSinger, formatPic } from './util'
 
 const KW_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
@@ -109,8 +110,8 @@ export default {
     return {
       source: 'kw',
       id: d.id || id,
-      name: d.name || '未知歌手',
-      desc: d.info || '',
+      name: decodeName(d.name || '未知歌手'),
+      desc: decodeName(d.info || ''),
       avatar: d.pic300 || d.pic || '',
       musicSize: Number(d.musicNum) || 0,
       albumSize: Number(d.albumNum) || 0,
@@ -125,13 +126,13 @@ export default {
       const types = [{ type: '128k' }, { type: '320k' }]
       if (item.hasLossless) types.push({ type: 'flac' })
       return {
-        name: item.name || '',
-        singer: formatSinger(String(item.artist || '')),
+        name: decodeName(item.name || ''),
+        singer: formatSinger(decodeName(String(item.artist || ''))),
         source: 'kw',
         songmid,
         albumId: String(item.albumid || ''),
         interval: item.songTimeMinutes || '',
-        albumName: item.album || '',
+        albumName: decodeName(item.album || ''),
         lrc: null,
         img: formatPic(item.albumpic || item.pic || null),
         otherSource: null,
@@ -148,9 +149,9 @@ export default {
     const rawList = d.albumList || []
     const list = rawList.map(item => ({
       id: String(item.albumid || ''),
-      name: item.album || item.name || '',
+      name: decodeName(item.album || item.name || ''),
       img: formatPic(item.pic || null),
-      singer: item.artist || '',
+      singer: decodeName(item.artist || ''),
       publishTime: item.releaseDate || undefined,
       total: 0,
       source: 'kw',
