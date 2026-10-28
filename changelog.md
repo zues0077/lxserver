@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.5.40 (2026-10-28)
+
+### 🔑 平台账号失效提示
+
+> 以前 Cookie 过期只能靠「怎么一直试听 / 一直失败」去猜，7 个平台各查一遍很费劲。
+
+- **健康度分级**（新增 `src/server/musicAccount/health.ts`，纯函数）：把「配置状态 + 上次校验结果 + 时间」
+  合成 `none / unchecked / ok / stale / expired / structural`；在线绿灯超过 7 天降级为「待复查」。
+- **定时巡检**：启动 90 秒后首跑，默认每 **72 小时**一轮（`MUSIC_ACCOUNT_CHECK_HOURS` 可调 1h~7d）。
+  间隔放长是因为每轮都要拿 Cookie 去打各平台需要登录态的接口，打太勤容易被风控；
+  Cookie 失效不是分钟级事件，3 天一次足够在用户察觉之前把红标摆出来。`musicAccount.enabled=false` 时定时任务跳过。
+- **失效判定不靠猜文案**：各平台登录态接口的报错文案很含糊（酷我「多为版权受限、需要会员或 Cookie 失效」），
+  按关键词判会把「点了首没版权的歌」误标成账号失效。改为取链失败后调该平台 `getAccountInfo` 复核（30 分钟冷却）。
+- **接口**：`GET /api/music/accounts` 增加 `health` 汇总；新增 `GET /api/music/accounts/health`、
+  `POST /api/music/accounts/check`（手动全量复查）。
+- **前端**：账号列表由健康度驱动（失效红标 / 待复查中性标），补「X 小时前校验」，有问题时顶部出汇总条 + 「立即复查」。
+- **汽水诊断**：`diagnoseStream` 增加账号态探测（`accountOk` / `accountMessage`），
+  「Cookie 失效」优先于版权/签名器口径，不再把账号问题说成「该曲受版权限制」。
+
+### 🐛 汽水：并发取链失败
+
+- 同一首正在下载时，第二个请求命中「任务已在下载队列中」后直接返回「成功」，
+  调用方紧接着查缓存却查不到 → 抛「汽水加密曲下载/解密失败」；一秒后原任务下完，同曲又突然能播。
+- 改为登记在飞 Promise，后来者等待**同一个任务**（最多 10 分钟），拿到的是「文件真的落地了」。
+
+### ⚡ 汽水：解密不再卡顿
+
+- CENC 解密逐帧 `createDecipheriv`（单曲上万帧）原本同步执行，实测阻塞事件循环 **544~602ms**，
+  期间所有 HTTP 下发与播放都会顿一下。
+- 新增 `decryptAudioBufferAsync`：算法不变，每 256 帧让出一次事件循环；去掉两处整段拷贝。
+  下载完成后的热路径改用它，旧缓存就地解密（只触发一次）仍用同步版。
+
+### 🐛 修复：汽水解密出的 m4a 容器被写坏
+
+- `sodaDecrypt.replaceEnca4cc()` 读 `frma` 的 `data_format` 时偏移错了 4 字节，
+  导致解密文件的样本项 4cc 变成后面那个 box 的 size（实测 `00 00 00 10` 而非 `mp4a`）。
+  后果：taglib 报 `MP4 Atom: Expected sample entry atom in stsd atom`，元数据/封面写不进去，部分播放器拒播。
+- 已修正偏移并对 4cc 做可打印校验；单测补精确断言（原来只断言 `includes('mp4a')`，被 `frma` 里的 mp4a 掩盖成假通过）。
+
+### ⚡ 网页打开不再转圈
+
+- `public/music/index.html` 里 pako 走 cdnjs 外链，且是**同步脚本**、排在 33 个本地脚本之前。
+  国内网络下该请求经常挂到超时（实测 TTFB 2.3s、20s 下不完），后面的 `app.js` 全部排队 → 页面一直转。
+- 改为本地 `js/pako.min.js`，加入 service worker 预缓存（`CACHE_NAME` 升到 v27）。
+
 ## v1.5.39 (2026-10-28)
 
 ### 🔓 汽水 VIP 版权曲：整曲可播（CENC 加密流本地解密打通）
