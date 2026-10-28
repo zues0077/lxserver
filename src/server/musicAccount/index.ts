@@ -300,10 +300,16 @@ export function saveAccount(platform: string, rawCookie: string): SaveAccountRes
 // 之后不会再去点校验；等它过期，表现是「某些歌突然只能试听」——看着像音源坏了。
 // 定时复查能把「过期」这个事实提前摆到界面上，而不是等用户来报「播不了」。
 
-/** 巡检间隔（小时）：默认 12h，可用 MUSIC_ACCOUNT_CHECK_HOURS 覆盖，最小 1 小时 */
+/**
+ * 巡检间隔（小时）：默认 72h，可用 MUSIC_ACCOUNT_CHECK_HOURS 覆盖，范围 1 小时 ~ 7 天。
+ *
+ * 默认值取 72 而不是更短，是因为每轮巡检都要拿 Cookie 去打各平台「需要登录态」的接口，
+ * 打得太勤容易被平台风控盯上（反而把正常账号搞成异常）。Cookie 失效本身不是分钟级事件，
+ * 三天一次足够在用户察觉「怎么只能试听了」之前把红标摆到界面上。
+ */
 function checkIntervalHours(): number {
   const n = Number(process.env.MUSIC_ACCOUNT_CHECK_HOURS)
-  if (!Number.isFinite(n) || n <= 0) return 12
+  if (!Number.isFinite(n) || n <= 0) return 72
   return Math.max(1, Math.min(24 * 7, Math.round(n)))
 }
 
