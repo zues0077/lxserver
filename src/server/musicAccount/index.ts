@@ -27,6 +27,10 @@ import type { HealthSummary } from './health'
 import type { AccountResolveResult, AccountInfo, PlatformResolver } from './types'
 
 export { PLATFORMS, getPlatform, isSupportedSource } from './platforms'
+/** 概念版搜索直接复用 resolver 的实现（与取链同签名体系） */
+export { kglite }
+/** 取主账号 Cookie（搜索用，与取链同凭据） */
+export const getCookie = store.getCookie
 export type { AccountResolveResult, AccountInfo } from './types'
 
 /** 平台 id → 解析器。新增平台时在这里补一行即可。 */

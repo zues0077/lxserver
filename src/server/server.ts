@@ -7160,6 +7160,78 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             return
           }
 
+          // 酷狗概念版：自带搜索实现（与取链同签名体系），不进 musicSdk
+          if (source === 'kglite') {
+            if (type !== 'song') {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({
+                success: false,
+                error: `酷狗概念版暂不支持${type === 'singer' ? '歌手' : type === 'album' ? '专辑' : '歌单'}搜索，请切换到歌曲`,
+              }))
+              return
+            }
+            const cookie = musicAccount.getCookie('kglite') || ''
+            const pageSize = requestedLimit > 0 ? Math.min(requestedLimit, 50) : 20
+            const pageNo = requestedLimit > 0 ? Math.max(1, page) : 1
+            const data = requestedLimit > 0
+              ? await musicAccount.kglite.searchSongs(name, pageNo, pageSize, cookie)
+              : await musicAccount.kglite.searchKgliteAll(name, cookie)
+            const list = requestedLimit > 0 ? data.list.slice(0, requestedLimit) : data.list
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              list,
+              total: data.total,
+              allPage: data.allPage,
+              pageSize,
+              fetchedPages: data.fetchedPages || pageNo,
+              stopReason: 'kglite',
+              hasMore: requestedLimit > 0 ? pageNo < data.allPage : false,
+              source,
+            }))
+            return
+          }
+
+          // 聚合搜索：并行查多个源，合并列表并给每个条目打上来源标记
+          if (source === 'all') {
+            const pageSize = requestedLimit > 0 ? Math.min(requestedLimit, 50) : 20
+            const pageNo = requestedLimit > 0 ? Math.max(1, page) : 1
+            const cookie = musicAccount.getCookie('kglite') || ''
+            const sources = ['wy', 'tx', 'kw', 'kg', 'mg', 'bili', 'soda', 'kglite']
+            const settled = await Promise.allSettled(sources.map(async (src) => {
+              if (extraSources.isExtraSource(src)) {
+                const d = await extraSources.searchSongs(src, name, pageNo, pageSize)
+                return (d.list || []).map((it: any) => ({ ...it, source: src }))
+              }
+              if (src === 'kglite') {
+                const d = await musicAccount.kglite.searchSongs(name, pageNo, pageSize, cookie)
+                return d.list
+              }
+              const api = musicSdk[src]?.musicSearch
+              if (!api || typeof api.search !== 'function') return []
+              const d = await api.search(name, pageNo, pageSize)
+              return (d.list || []).map((it: any) => ({ ...it, source: src }))
+            }))
+            const merged: any[] = []
+            let failed = 0
+            for (const r of settled) {
+              if (r.status === 'fulfilled') merged.push(...r.value)
+              else failed++
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              list: merged,
+              total: merged.length,
+              allPage: 1,
+              pageSize: merged.length,
+              fetchedPages: 1,
+              stopReason: 'aggregate',
+              hasMore: false,
+              source,
+              failedSources: failed,
+            }))
+            return
+          }
+
           if (!musicSdk[source]) {
             throw new Error(`Source ${source} is not supported`)
           }

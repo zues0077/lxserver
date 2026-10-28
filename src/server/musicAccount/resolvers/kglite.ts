@@ -797,3 +797,139 @@ export async function loginBySmsCode(
     return { ok: false, message: e?.message || String(e) }
   }
 }
+
+// —— 搜索 ——
+
+/** 把 kugou 搜索结果里常带的 HTML 转义字符还原（歌名/歌手偶发 &#39; &amp; 等） */
+function decodeHtmlEntities(s: string): string {
+  if (!s) return ''
+  return String(s)
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+}
+
+export interface LiteSong {
+  id: string
+  source: string
+  name: string
+  singer: string
+  album: string
+  albumId: number
+  hash: string
+  songmid: string
+  interval: number
+  img: string
+  quality: string
+}
+
+export interface LiteSearchResult {
+  list: LiteSong[]
+  total: number
+  allPage: number
+  fetchedPages?: number
+}
+
+/**
+ * 概念版歌曲搜索。
+ *
+ * 复用取链那套安卓签名（liteCall），只是换路由头 `complexsearch.kugou.com` + `clientver=201`
+ * （概念版/Young 的 versionCode，区别于 App 级的 11440）。
+ *
+ * 不需要登录 token 也能出结果（平台对匿名搜索放行），但传入已配置的账号 Cookie 会带上真实
+ * mid/dfid，与取链同口径、曲库更完整。若没传凭据则造一个最小设备标识，避免签名缺 mid 被拒。
+ *
+ * 返回的 hash / album_id 与取链同源，直接喂给 resolve 即可。
+ */
+export async function searchSongs(
+  keyword: string,
+  page = 1,
+  pageSize = 20,
+  cookie = '',
+): Promise<LiteSearchResult> {
+  const useCookie = (cookie && hasLiteCreds(cookie))
+    ? cookie
+    : (() => {
+        const mid = crypto.randomUUID().replace(/-/g, '').slice(0, 16)
+        return `mid=${mid}; dfid=-`
+      })()
+
+  const resp = await liteCall('/v2/search/song', useCookie, {
+    method: 'GET',
+    router: 'complexsearch.kugou.com',
+    params: {
+      keyword: keyword,
+      page: Math.max(1, page),
+      pagesize: Math.min(50, Math.max(1, pageSize)),
+      clientver: 201, // 概念版(Young) versionCode
+      platform: 'AndroidFilter',
+      iscorrection: 1,
+      area_code: 1,
+      dopicfull: 1,
+    },
+    timeout: 12000,
+  })
+
+  const b: any = resp.body || {}
+  if (Number(b.status) !== 1) {
+    const code = b.error_code ?? b.errcode
+    throw new Error(`概念版搜索失败（status=${b.status ?? '-'}${code ? `，error_code=${code}` : ''}）`)
+  }
+
+  const info: any[] = b?.data?.info || []
+  const list: LiteSong[] = info.map((it: any) => {
+    const hash = String(it.hash || '').toLowerCase()
+    const albumId = Number(it.album_id) || Number(it.album_audio_id) || 0
+    const dur = Number(it.duration) || Number(it.timelength) || 0
+    return {
+      id: `kglite_${hash}`,
+      source: 'kglite',
+      name: decodeHtmlEntities(it.songname || it.filename || ''),
+      singer: decodeHtmlEntities(it.singername || ''),
+      album: decodeHtmlEntities(it.album_name || ''),
+      albumId,
+      hash,
+      songmid: hash,
+      interval: dur,
+      img: '',
+      quality: '128k',
+    }
+  })
+
+  const total = Number(b?.data?.total) || Number(b?.data?.songcount) || list.length
+  const allPage = Number(b?.data?.all_page) || (pageSize ? Math.ceil(total / pageSize) : 1)
+  return { list, total, allPage }
+}
+
+/**
+ * 搜索界面用：串行翻几页拼成一个较全的列表（与 extraSources.searchAll 同思路，
+ * 平台对快速连发会返回重复页，故串行）。
+ */
+export async function searchKgliteAll(keyword: string, cookie = ''): Promise<LiteSearchResult> {
+  const seen = new Set<string>()
+  const list: LiteSong[] = []
+  let total = 0
+  let allPage = 1
+  const maxPages = 3
+  for (let p = 1; p <= maxPages; p++) {
+    const d = await searchSongs(keyword, p, 20, cookie)
+    total = Math.max(total, d.total)
+    allPage = d.allPage || p
+    let fresh = 0
+    for (const it of d.list) {
+      if (seen.has(it.id)) continue
+      seen.add(it.id)
+      list.push(it)
+      fresh++
+    }
+    if (fresh === 0) break
+    if (p >= allPage) break
+  }
+  return { list, total: total || list.length, allPage, fetchedPages: list.length ? Math.min(maxPages, allPage) : 0 }
+}
