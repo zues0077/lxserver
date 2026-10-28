@@ -47,6 +47,42 @@ export async function searchSongs(source: string, keyword: string, page = 1, pag
   return searcher(keyword, page, pageSize)
 }
 
+// ---- 歌手 / 专辑维度（目前只有汽水有；B站没有歌手/专辑实体，直接明确报不支持） ----
+
+function requireSoda(source: string, what: string) {
+  if (source !== 'soda') throw new Error(`${displayName(source)} 暂不支持${what}`)
+}
+
+export async function searchSingers(source: string, keyword: string, page = 1, pageSize = 20) {
+  requireSoda(source, '歌手搜索')
+  return soda.searchSingers(keyword, page, pageSize)
+}
+
+export async function searchAlbums(source: string, keyword: string, page = 1, pageSize = 20) {
+  requireSoda(source, '专辑搜索')
+  return soda.searchAlbums(keyword, page, pageSize)
+}
+
+export async function getArtistDetail(source: string, artistId: string) {
+  requireSoda(source, '歌手详情')
+  return soda.getArtistDetail(artistId)
+}
+
+export async function getArtistSongs(source: string, artistId: string, page = 1, pageSize = 50) {
+  requireSoda(source, '歌手歌曲列表')
+  return soda.getArtistSongs(artistId, page, pageSize)
+}
+
+export async function getArtistAlbums(source: string, artistId: string, page = 1, pageSize = 30) {
+  requireSoda(source, '歌手专辑列表')
+  return soda.getArtistAlbums(artistId, page, pageSize)
+}
+
+export async function getAlbumSongs(source: string, albumId: string) {
+  requireSoda(source, '专辑歌曲列表')
+  return soda.getAlbumSongs(albumId)
+}
+
 /**
  * 搜索界面用：串行翻几页拼成一个列表。
  *

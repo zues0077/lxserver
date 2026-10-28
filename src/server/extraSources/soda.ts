@@ -1100,3 +1100,239 @@ export function buildHint(r: SodaStreamDiagnosis): string {
   }
   return `只拿到 ${shown} 秒试听片段（整曲 ${r.trackDurationSeconds} 秒），该曲在汽水侧受版权限制`
 }
+
+// ===========================================================================
+// 歌手 / 专辑搜索与详情（2026-10-28 实测，全部免签名，不需要 Cookie）
+//
+// 端点清单（参考 libresoda `src/soda/{artist,album,search,mod}.rs` + 实测修正）：
+//   搜索  GET /luna/search/artist | /luna/search/album   （Android 指纹，aid 必须覆盖成 386088）
+//   详情  GET /luna/pc/artists/{id}[/tracks|/albums]      （PC 公共参数 + LunaPC UA + 三个 x-luna-* 头）
+//   专辑  GET /luna/pc/albums/{id}                        （顶层 tracks[] 是曲目）
+//
+// 坑：
+//   - PC 端点 device_id/iid/fp 用同一毫秒时间戳即可（libresoda 的 fallback 做法），不用签名器；
+//   - count 不严格生效（要 20 给 50）；翻页用 next_cursor（艺人搜索的是 (page-1)*size，实测可行）；
+//   - 同名艺人极多（周杰伦搜出 7 个同名），真身按 count_tracks + count_collected 加权排序；
+//   - 汽水曲库比真实小很多（周杰伦真身 count_tracks 只有 9），属平台特性不是 bug。
+// ===========================================================================
+
+const PC_ARTIST_UA = 'LunaPC/3.3.0(359450208)'
+
+/** PC 端点公共参数（免签名，device_id/iid/fp 用同一毫秒时间戳） */
+function pcCommonParams(): Record<string, string> {
+  const now = String(Date.now())
+  return {
+    aid: '386088',
+    app_name: 'luna_pc',
+    region: 'cn',
+    geo_region: 'cn',
+    os_region: 'cn',
+    sim_region: '',
+    device_id: now,
+    cdid: '',
+    iid: now,
+    version_name: '3.3.0',
+    version_code: '30030000',
+    channel: 'official',
+    build_mode: 'master',
+    network_carrier: '',
+    ac: 'wifi',
+    tz_name: 'Asia/Shanghai',
+    resolution: '',
+    device_platform: 'windows',
+    device_type: 'Windows',
+    os_version: 'Windows 11',
+    fp: now,
+  }
+}
+
+/** PC 端点 GET（免签名）：LunaPC UA + 三个 x-luna-* 头 */
+async function pcGet(path: string, extra: Record<string, string> = {}): Promise<any> {
+  const params = new URLSearchParams({ ...pcCommonParams(), ...extra })
+  const resp = await request<any>(`https://api.qishui.com${path}?${params.toString()}`, {
+    headers: {
+      'User-Agent': PC_ARTIST_UA,
+      'x-luna-background-type': 'foreground',
+      'x-luna-is-background-req': '0',
+      'x-luna-is-local-user': '1',
+    },
+    timeout: 15000,
+  })
+  return resp.body ?? null
+}
+
+/** Android 搜索通道（与 searchSongs 同指纹），type = artist | album */
+async function androidSearch(searchType: string, keyword: string, page: number, pageSize: number): Promise<any> {
+  const params = new URLSearchParams({
+    ...DEVICE_FINGERPRINT,
+    q: keyword,
+    cursor: String(Math.max(0, (page - 1) * pageSize)),
+    count: String(pageSize),
+    _rticket: String(Date.now()),
+    aid: '386088',
+  })
+  const resp = await request<any>(`https://api.qishui.com/luna/search/${searchType}?${params.toString()}`, {
+    headers: { 'User-Agent': SEARCH_UA, 'content-type': 'application/json; charset=UTF-8' },
+    timeout: 15000,
+  })
+  return resp.body || {}
+}
+
+function firstGroup(body: any): any {
+  const groups: any[] = Array.isArray(body?.result_groups) ? body.result_groups : []
+  return groups[0] || {}
+}
+
+function imageOf(node: any): string {
+  if (!node) return ''
+  const urls: string[] = Array.isArray(node?.urls) ? node.urls : []
+  const uri = String(node?.uri || '')
+  if (urls.length && uri) return `${urls[0]}${uri}`
+  return uri
+}
+
+/** 歌手搜索。同名艺人按 count_tracks（真身优先）+ count_collected 加权排序。 */
+export async function searchSingers(keyword: string, page = 1, pageSize = 20): Promise<{
+  list: any[]
+  total: number
+  allPage: number
+}> {
+  const group = firstGroup(await androidSearch('artist', keyword, page, pageSize))
+  const artists: any[] = (group.data || [])
+    .map((item: any) => item?.entity?.artist)
+    .filter((a: any) => a?.id)
+  // 官方排序里同名 UGC 号经常压过真身，这里按「曲目数优先、收藏数次之」重排
+  artists.sort((a: any, b: any) =>
+    ((Number(b.count_tracks) || 0) * 1_000_000 + Math.min(Number(b.stats?.count_collected) || 0, 999_999))
+    - ((Number(a.count_tracks) || 0) * 1_000_000 + Math.min(Number(a.stats?.count_collected) || 0, 999_999)))
+  const list = artists.map((a: any) => ({
+    id: String(a.id),
+    name: String(a.name || '').trim(),
+    picUrl: imageOf(a.url_avatar),
+    alias: [],
+    albumSize: Number(a.count_albums) || 0,
+    musicSize: Number(a.count_tracks) || 0,
+    source: 'soda',
+  }))
+  const hasMore = !!group.has_more
+  return { list, total: list.length + (hasMore ? pageSize : 0), allPage: hasMore ? page + 1 : page }
+}
+
+/** 专辑搜索 */
+export async function searchAlbums(keyword: string, page = 1, pageSize = 20): Promise<{
+  list: any[]
+  total: number
+  allPage: number
+}> {
+  const group = firstGroup(await androidSearch('album', keyword, page, pageSize))
+  const albums: any[] = (group.data || [])
+    .map((item: any) => item?.entity?.album)
+    .filter((a: any) => a?.id)
+  const list = albums.map((a: any) => ({
+    id: String(a.id),
+    name: String(a.name || '').trim(),
+    picUrl: imageOf(a.url_cover),
+    artistName: (Array.isArray(a.artists) ? a.artists : []).map((x: any) => String(x?.name || '').trim()).filter(Boolean).join(' / '),
+    artistId: a.artists?.[0]?.id ? String(a.artists[0].id) : '',
+    size: Number(a.count_tracks) || 0,
+    publishTime: a.release_date ? new Date(Number(a.release_date)).toISOString().slice(0, 10) : '',
+    source: 'soda',
+  }))
+  const hasMore = !!group.has_more
+  return { list, total: list.length + (hasMore ? pageSize : 0), allPage: hasMore ? page + 1 : page }
+}
+
+/** 把 PC 端点返回的 track 节点转成与 searchSongs 一致的歌曲条目 */
+function mapTrackNode(track: any): any {
+  if (!track?.id) return null
+  const id = String(track.id)
+  return {
+    source: 'soda',
+    id,
+    songmid: id,
+    name: String(track.name || id).trim(),
+    singer: pickArtists(track),
+    albumName: String(track.album?.name || ''),
+    albumId: String(track.album?.id || ''),
+    interval: secToInterval(track.duration),
+    img: pickImage(track.album?.url_cover),
+    types: [
+      { type: '128k' },
+      { type: '320k' },
+      { type: 'flac' },
+      { type: 'flac24bit' },
+    ],
+    _types: {},
+    typeUrl: {},
+    meta: { trackId: id },
+  }
+}
+
+/** 艺人详情。对齐 extendDetail.getArtistDetail 的返回结构（前端歌手页头部直接渲染）。 */
+export async function getArtistDetail(artistId: string): Promise<any> {
+  const body = await pcGet(`/luna/pc/artists/${String(artistId).trim()}`)
+  const info = body?.artist_info
+  if (!info?.id) throw new Error('汽水艺人不存在或已下架')
+  return {
+    source: 'soda',
+    id: String(info.id),
+    name: String(info.name || '').trim(),
+    desc: String(info.artist_profile?.intro || '').trim(),
+    avatar: imageOf(info.url_avatar),
+    musicSize: Number(info.count_tracks) || 0,
+    albumSize: Number(info.count_albums) || 0,
+  }
+}
+
+/** 艺人单曲。平台固定按 50 条/页下发（count 不严格生效），cursor=(page-1)*size 实测可行。 */
+export async function getArtistSongs(artistId: string, page = 1, pageSize = 50): Promise<{ source: string; list: any[]; total: number }> {
+  const body = await pcGet(`/luna/pc/artists/${String(artistId).trim()}/tracks`, {
+    cursor: String(Math.max(0, (page - 1) * pageSize)),
+    count: String(Math.min(100, Math.max(1, pageSize))),
+  })
+  const list = (Array.isArray(body?.tracks) ? body.tracks : [])
+    .map(mapTrackNode)
+    .filter(Boolean)
+  return { source: 'soda', list, total: list.length + (body?.has_more ? pageSize : 0) }
+}
+
+/** 艺人专辑列表 */
+export async function getArtistAlbums(artistId: string, page = 1, pageSize = 30): Promise<{ source: string; list: any[]; total: number }> {
+  const body = await pcGet(`/luna/pc/artists/${String(artistId).trim()}/albums`, {
+    cursor: String(Math.max(0, (page - 1) * pageSize)),
+    count: String(Math.min(100, Math.max(1, pageSize))),
+  })
+  const list = (Array.isArray(body?.albums) ? body.albums : [])
+    .filter((a: any) => a?.id)
+    .map((a: any) => ({
+      id: String(a.id),
+      name: String(a.name || '').trim(),
+      img: imageOf(a.url_cover),
+      singer: (Array.isArray(a.artists) ? a.artists : []).map((x: any) => String(x?.name || '').trim()).filter(Boolean).join(' / '),
+      publishTime: a.release_date ? new Date(Number(a.release_date)).toISOString().slice(0, 10) : '',
+      total: Number(a.count_tracks) || 0,
+      source: 'soda',
+    }))
+  return { source: 'soda', list, total: list.length + (body?.has_more ? pageSize : 0) }
+}
+
+/** 专辑详情 + 曲目列表（顶层 tracks[]） */
+export async function getAlbumSongs(albumId: string): Promise<any> {
+  const body = await pcGet(`/luna/pc/albums/${String(albumId).trim()}`)
+  const info = body?.album_info
+  if (!info?.id) throw new Error('汽水专辑不存在或已下架')
+  const list = (Array.isArray(body?.tracks) ? body.tracks : [])
+    .map(mapTrackNode)
+    .filter(Boolean)
+  return {
+    source: 'soda',
+    list,
+    total: Number(info.count_tracks) || list.length,
+    name: String(info.name || '').trim(),
+    artistName: (Array.isArray(info.artists) ? info.artists : []).map((x: any) => String(x?.name || '').trim()).filter(Boolean).join(' / '),
+    desc: String(info.company || '').trim(),
+    img: imageOf(info.url_cover),
+    picUrl: imageOf(info.url_cover),
+    source_id: String(info.id),
+  }
+}

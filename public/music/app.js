@@ -2388,9 +2388,9 @@ function handleSearchTypeChange() {
     if (!typeSelect || !sourceSelect) return;
 
     if (typeSelect.value === 'singer' || typeSelect.value === 'album') {
-        // 能力表：wy/tx/kg/kw/mg/kglite 支持歌手/专辑搜索（后端 extendSearch 或 kglite 通道）
-        // bili/soda/all 不支持（B站无歌手维度、汽水走 extraSources 未接、all 聚合仅歌曲）
-        const supported = ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite'];
+        // 能力表：wy/tx/kg/kw/mg/kglite/soda 支持歌手/专辑搜索（后端 extendSearch / kglite / 汽水 extraSources 通道）
+        // bili/all 不支持（B站无歌手/专辑实体；all 聚合按 type 分派后其实也支持，但聚合入口保持歌曲语义更直观）
+        const supported = ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda'];
         if (!supported.includes(sourceSelect.value)) {
             sourceSelect.value = 'wy';
         }
@@ -2405,7 +2405,8 @@ function handleSearchTypeChange() {
 }
 window.handleSearchTypeChange = handleSearchTypeChange;
 
-const SOURCES = ['kw', 'kg', 'tx', 'wy', 'mg', 'kglite'];
+// 聚合搜索的源列表：歌曲全支持；歌手/专辑维度 B站为空结果（无此实体）、其余各源按 type 分派
+const SOURCES = ['kw', 'kg', 'tx', 'wy', 'mg', 'kglite', 'soda', 'bili'];
 
 
 //搜索歌曲

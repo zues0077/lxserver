@@ -7131,11 +7131,35 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         try {
           // 额外音源（Bilibili / 汽水）自带搜索实现，不经过 musicSdk（那个目录会被上游覆盖）
           if (extraSources.isExtraSource(source)) {
+            // 歌手/专辑维度目前只有汽水有（B站没有歌手/专辑实体）
+            if (type === 'singer' || type === 'album') {
+              if (source !== 'soda') {
+                res.writeHead(400, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({
+                  success: false,
+                  error: `${extraSources.displayName(source)} 暂不支持${type === 'singer' ? '歌手' : '专辑'}搜索，请切换到歌曲`,
+                }))
+                return
+              }
+              const data = type === 'singer'
+                ? await extraSources.searchSingers(source, name, Math.max(1, page), Math.min(Math.max(requestedLimit || 20, 1), 50))
+                : await extraSources.searchAlbums(source, name, Math.max(1, page), Math.min(Math.max(requestedLimit || 20, 1), 50))
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({
+                list: data.list,
+                total: data.total,
+                allPage: data.allPage,
+                pageSize: requestedLimit || 20,
+                fetchedPages: page,
+                source,
+              }))
+              return
+            }
             if (type !== 'song') {
               res.writeHead(400, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({
                 success: false,
-                error: `${extraSources.displayName(source)} 暂不支持${type === 'singer' ? '歌手' : type === 'album' ? '专辑' : '歌单'}搜索，请切换到歌曲`,
+                error: `${extraSources.displayName(source)} 暂不支持${type === 'playlist' ? '歌单' : type}搜索，请切换到歌曲`,
               }))
               return
             }
@@ -7207,6 +7231,27 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const cookie = musicAccount.getCookie('kglite') || ''
             const sources = ['wy', 'tx', 'kw', 'kg', 'mg', 'bili', 'soda', 'kglite']
             const settled = await Promise.allSettled(sources.map(async (src) => {
+              // 歌手/专辑维度：musicSdk 源走 extendSearch，kglite 走专用实现，soda 走 extraSources；bili 无此维度
+              if (type === 'singer' || type === 'album') {
+                if (extraSources.isExtraSource(src)) {
+                  if (src !== 'soda') return []
+                  const d = type === 'singer'
+                    ? await extraSources.searchSingers(src, name, pageNo, pageSize)
+                    : await extraSources.searchAlbums(src, name, pageNo, pageSize)
+                  return (d.list || []).map((it: any) => ({ ...it, source: src }))
+                }
+                if (src === 'kglite') {
+                  const d = type === 'singer'
+                    ? await musicAccount.kglite.searchSinger(name, pageNo, pageSize, cookie)
+                    : await musicAccount.kglite.searchAlbum(name, pageNo, pageSize, cookie)
+                  return d.list
+                }
+                const ext = musicSdk[src]?.extendSearch
+                const fn = type === 'singer' ? ext?.searchSinger : ext?.searchAlbum
+                if (typeof fn !== 'function') return []
+                const d = await fn.call(ext, name, pageNo, pageSize)
+                return (d.list || []).map((it: any) => ({ ...it, source: src }))
+              }
               if (extraSources.isExtraSource(src)) {
                 const d = await extraSources.searchSongs(src, name, pageNo, pageSize)
                 return (d.list || []).map((it: any) => ({ ...it, source: src }))
@@ -7392,13 +7437,30 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
-        if (typeof musicSdk[source]?.extendDetail?.getArtistDetail !== 'function') {
+        // 额外音源（目前只有汽水支持歌手详情）；kglite 与酷狗同 ID 体系，转调 kg 的实现
+        if (extraSources.isExtraSource(source)) {
+          if (source !== 'soda') {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: `${extraSources.displayName(source)} 暂不支持歌手详情` }))
+            return
+          }
+          try {
+            const data = await extraSources.getArtistDetail(source, id)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(data))
+          } catch (err: any) {
+            res.writeHead(500); res.end(err.message)
+          }
+          return
+        }
+        const detailSource = source === 'kglite' ? 'kg' : source
+        if (typeof musicSdk[detailSource]?.extendDetail?.getArtistDetail !== 'function') {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持歌手详情` }))
           return
         }
         try {
-          const data = await musicSdk[source].extendDetail.getArtistDetail(id)
+          const data = await musicSdk[detailSource].extendDetail.getArtistDetail(id)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
@@ -7415,13 +7477,29 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
-        if (typeof musicSdk[source]?.extendDetail?.getArtistAlbums !== 'function') {
+        if (extraSources.isExtraSource(source)) {
+          if (source !== 'soda') {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: `${extraSources.displayName(source)} 暂不支持歌手专辑列表` }))
+            return
+          }
+          try {
+            const data = await extraSources.getArtistAlbums(source, id, Math.max(1, page))
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(data))
+          } catch (err: any) {
+            res.writeHead(500); res.end(err.message)
+          }
+          return
+        }
+        const albumsSource = source === 'kglite' ? 'kg' : source
+        if (typeof musicSdk[albumsSource]?.extendDetail?.getArtistAlbums !== 'function') {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持歌手专辑列表` }))
           return
         }
         try {
-          const data = await musicSdk[source].extendDetail.getArtistAlbums(id, page)
+          const data = await musicSdk[albumsSource].extendDetail.getArtistAlbums(id, page)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
@@ -7445,20 +7523,42 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             ? Math.min(Math.floor(configuredMaxPages), 100)
             : 20
         if (typeof musicSdk[source]?.extendDetail?.getArtistSongs !== 'function') {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持歌手歌曲列表` }))
+          // 额外音源（目前只有汽水支持）；kglite 与酷狗同 ID 体系，转调 kg 的实现
+          const detailSource = source === 'kglite' ? 'kg' : source
+          const useExtra = extraSources.isExtraSource(source) && source === 'soda'
+          if (!useExtra && typeof musicSdk[detailSource]?.extendDetail?.getArtistSongs !== 'function') {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持歌手歌曲列表` }))
+            return
+          }
+          try {
+            let allSongs: any[] = []
+            for (let p = 1; p <= MAX_PAGES; p++) {
+              const data = useExtra
+                ? await extraSources.getArtistSongs(source, id, p, PAGE_SIZE)
+                : await musicSdk[detailSource].extendDetail.getArtistSongs(id, p, PAGE_SIZE, order)
+              const pageList: any[] = data.list || []
+              allSongs = allSongs.concat(pageList)
+              const total = Number(data.total) || 0
+              if (pageList.length < PAGE_SIZE || (total > 0 && allSongs.length >= total)) break
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(allSongs))
+          } catch (err: any) {
+            res.writeHead(500); res.end(err.message)
+          }
           return
         }
-          let allSongs: any[] = []
-          for (let p = 1; p <= MAX_PAGES; p++) {
-            const data = await musicSdk[source].extendDetail.getArtistSongs(id, p, PAGE_SIZE, order)
-            const pageList: any[] = data.list || []
-            allSongs = allSongs.concat(pageList)
-            const total = Number(data.total) || 0
-            if (pageList.length < PAGE_SIZE || (total > 0 && allSongs.length >= total)) break
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(allSongs))
+        let allSongs: any[] = []
+        for (let p = 1; p <= MAX_PAGES; p++) {
+          const data = await musicSdk[source].extendDetail.getArtistSongs(id, p, PAGE_SIZE, order)
+          const pageList: any[] = data.list || []
+          allSongs = allSongs.concat(pageList)
+          const total = Number(data.total) || 0
+          if (pageList.length < PAGE_SIZE || (total > 0 && allSongs.length >= total)) break
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(allSongs))
         } catch (err: any) {
           res.writeHead(500); res.end(err.message)
         }
@@ -7472,13 +7572,30 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
-        if (typeof musicSdk[source]?.extendDetail?.getAlbumSongs !== 'function') {
+        // 额外音源（目前只有汽水支持）；kglite 与酷狗同 ID 体系，转调 kg 的实现
+        if (extraSources.isExtraSource(source)) {
+          if (source !== 'soda') {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: `${extraSources.displayName(source)} 暂不支持专辑歌曲列表` }))
+            return
+          }
+          try {
+            const data = await extraSources.getAlbumSongs(source, id)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(data))
+          } catch (err: any) {
+            res.writeHead(500); res.end(err.message)
+          }
+          return
+        }
+        const albumSongsSource = source === 'kglite' ? 'kg' : source
+        if (typeof musicSdk[albumSongsSource]?.extendDetail?.getAlbumSongs !== 'function') {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持专辑歌曲列表` }))
           return
         }
         try {
-          const data = await musicSdk[source].extendDetail.getAlbumSongs(id)
+          const data = await musicSdk[albumSongsSource].extendDetail.getAlbumSongs(id)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
