@@ -1,4 +1,4 @@
-const CACHE_NAME = 'lx-music-web-v26';
+const CACHE_NAME = 'lx-music-web-v27';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
@@ -34,6 +34,7 @@ const ASSETS_TO_CACHE = [
     './js/NoSleep.min.js',
     './js/Sortable.min.js',
     './js/marked.min.js',
+    './js/pako.min.js',
     // 音频效果
     './js/sound-effects.js',
     './js/visualizer.js',

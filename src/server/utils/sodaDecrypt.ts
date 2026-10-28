@@ -454,8 +454,14 @@ function replaceEnca4cc(moovData: Uint8Array): Uint8Array {
   const buf = Buffer.from(moovData)
   let original = Buffer.from('mp4a')
   const frmaIdx = buf.indexOf(Buffer.from('frma'))
-  if (frmaIdx >= 0 && frmaIdx + 12 <= buf.length) {
-    original = buf.subarray(frmaIdx + 8, frmaIdx + 12)
+  // frma 布局：[size(4)]['frma'(4)][data_format(4)]，indexOf 命中的是 'frma' 的首字节，
+  // 所以原始编码在 +4..+8。早期写成 +8..+12 会读到 frma 后面的下一个 box 的 size，
+  // 把样本项 4cc 改成一串二进制（如 00 00 00 10）——taglib(lofty) 直接报
+  // "Expected sample entry atom in stsd atom"，元数据写不进去。
+  if (frmaIdx >= 0 && frmaIdx + 8 <= buf.length) {
+    const candidate = buf.subarray(frmaIdx + 4, frmaIdx + 8)
+    // 只接受可打印 4cc，避免把 box size 之类的二进制写进 4cc
+    if (/^[A-Za-z0-9]{4}$/.test(candidate.toString('latin1'))) original = Buffer.from(candidate)
   }
   let idx = buf.indexOf(Buffer.from('enca'))
   while (idx !== -1) {

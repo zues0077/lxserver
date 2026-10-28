@@ -6360,7 +6360,9 @@
     <audio id="audio-player" playsinline webkit-playsinline x-webkit-airplay="allow" crossorigin="anonymous"></audio>
 
     <!-- External Scripts Section (Placed at the end for performance) -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <!-- pako 必须本地托管：原先是 cdnjs.cloudflare.com，国内网络下这个请求常常挂到超时，
+         而它是同步脚本，会阻塞后面 30 多个本地脚本执行 → 打开页面长时间转圈 -->
+    <script src="js/pako.min.js"></script>
     <script src="js/NoSleep.min.js"></script>
     <script src="js/log_viewer.js"></script>
     <script src="js/lyric-utils.js"></script>

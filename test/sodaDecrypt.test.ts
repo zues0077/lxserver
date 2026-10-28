@@ -170,6 +170,20 @@ test('decryptAudioBuffer 还原 enca CENC 为可播 m4a', () => {
   assert.ok(head.includes('mp4a'), 'moov 应包含 mp4a')
   assert.ok(!head.includes('enca'), 'moov 不应再包含 enca')
 
+  // 关键断言：stsd 里样本项的 4cc 必须正好是 'mp4a'。
+  // 曾经这里写偏 4 字节（读 frma 的 data_format 时用了 +8 而不是 +4），把样本项类型改成了
+  // 后面那个 box 的 size（如 00 00 00 10），taglib/lofty 会报
+  // "MP4 Atom: Expected sample entry atom in `stsd` atom"，元数据写不进、部分播放器也拒播。
+  // 只断言 includes('mp4a') 抓不到这个问题（frma 里的 'mp4a' 也在 moov 里）。
+  // 布局：indexOf('stsd') 命中 type 字段；+4 verflags、+8 entry_count、+12 entry size、+16 entry 4cc
+  const stsdIdx = out.buffer.indexOf('stsd')
+  assert.ok(stsdIdx > 0, '输出应包含 stsd')
+  assert.equal(
+    out.buffer.subarray(stsdIdx + 16, stsdIdx + 20).toString('latin1'),
+    'mp4a',
+    'stsd 样本项 4cc 必须是 mp4a',
+  )
+
   // mdat 载荷应等于各明文样本拼接
   // box 结构为 [size(4)][type(4)][payload]，'mdat' 4cc 位于 box 内偏移 4，故 payload 从 idx+4 起
   const idx = out.buffer.indexOf('mdat')
