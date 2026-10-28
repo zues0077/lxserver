@@ -25,7 +25,7 @@ import { request } from '../musicAccount/http'
 import * as store from '../musicAccount/store'
 import * as pending from './pending'
 import * as signer from './signer'
-import { registerSodaKey, sodaTrackIdOf } from '../utils/sodaDecrypt'
+import { registerSodaKey, getSodaKey, resolveAudioKey, isHexKey, sodaTrackIdOf } from '../utils/sodaDecrypt'
 import { isEncryptedRemoteStream } from '../utils/streamEncryption'
 import { extractSodaKey } from './sodaKey'
 
@@ -288,7 +288,37 @@ interface SodaVideoItem {
   play_auth?: string
 }
 
+/**
+ * [汽水解密] GetPlayInfo 是**逐码率项**各带一把钥匙（`PlayInfoList[].PlayAuth`），
+ * 所以要按「直链 / 码率」把钥匙归属记下来，选流时按本次选中的那条回查，
+ * 避免拿 A 档的钥匙去解 B 档的流（libresoda issue #7 讨论的就是这个对应关系）。
+ * 上限保护：只缓存最近若干条，避免长期运行时无界增长。
+ */
+const streamKeyByUrl = new Map<string, string>()
+const streamKeyByBitrate = new Map<string, string>()
+const MAX_STREAM_KEY_ENTRIES = 600
+
+function rememberStreamKey(url: string, bitrateKbps: number, key: string): void {
+  if (streamKeyByUrl.size >= MAX_STREAM_KEY_ENTRIES) {
+    streamKeyByUrl.clear()
+    streamKeyByBitrate.clear()
+  }
+  if (url) streamKeyByUrl.set(url, key)
+  if (bitrateKbps > 0) streamKeyByBitrate.set(String(bitrateKbps), key)
+}
+
+/** 按直链优先、码率次之查出该条流的密钥；查不到返回空串（调用方再走全局兜底）。 */
+function sodaKeyForStream(url: string, bitrate?: number): string {
+  if (url) {
+    const direct = streamKeyByUrl.get(url)
+    if (direct) return direct
+  }
+  const kbps = Math.round(toNumber(bitrate) / 1000)
+  return kbps > 0 ? streamKeyByBitrate.get(String(kbps)) || '' : ''
+}
+
 /** 一条取流通道取回来的东西：原始响应 + 候选流 + 时长信息 */
+
 export interface PlainFetch {
   tag: string
   parsed: any
@@ -432,13 +462,20 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
   if (!ranked.length) return null
   const chosen = ranked.find(x => x.meta!.rank <= wantRank) || ranked[ranked.length - 1]
 
-  console.log(`[汽水签名] ✓ 签名通道取流（${chosen.v.video_meta?.quality} / ${Math.round(toNumber(chosen.v.video_meta?.bitrate) / 1000)}k）${hexKey ? ' [已捕获解密密钥]' : ' [加密流·无密钥→将退回明文]'}`)
+  // [汽水解密] 关键回读：track_v2 本身不带密钥，但 GetPlayInfo（火山 VOD）那条通道带，
+  // 且是**逐码率项**各带一把（PlayInfoList[].PlayAuth），所以要按 URL/码率回查本次选中的那条，
+  // 不能拿别档的钥匙去解这一档（libresoda issue #7 就是这个「哪把钥匙配哪个文件」）。
+  // 最后两级兜底：track_v2 顶层（历史路径）与全局登记表。
+  const chosenUrl = String(chosen.v.main_url || chosen.v.backup_url)
+  const key = sodaKeyForStream(chosenUrl, chosen.v.video_meta?.bitrate) || hexKey || getSodaKey(trackId) || ''
+
+  console.log(`[汽水签名] ✓ 签名通道取流（${chosen.v.video_meta?.quality} / ${Math.round(toNumber(chosen.v.video_meta?.bitrate) / 1000)}k）${key ? ` [已捕获解密密钥 ${key.slice(0, 6)}…]` : ' [加密流·无密钥→将退回明文]'}`)
   return {
-    url: String(chosen.v.main_url || chosen.v.backup_url),
+    url: chosenUrl,
     quality: chosen.meta!.label,
     via: `signer:pc_track_v2:${chosen.v.video_meta?.quality || '?'}`,
     ext: String(chosen.v.video_meta?.vtype || 'm4a'),
-    key: hexKey || undefined,
+    key: key || undefined,
   }
 }
 
@@ -521,9 +558,12 @@ async function fetchPlayerInfo(player: any, cookie: string): Promise<{ items: So
  * 但参考实现 libresoda 的密钥还可能藏在 `url_player_info`（即 GetPlayInfo）的
  * `Result.Data.PlayInfoList[].play_auth` 里——原 `fetchPlayerInfo` 只取了直链、把 play_auth 整个丢了。
  *
- * 这里补齐：解析 GetPlayInfo 后对整个响应跑一次 `extractSodaKey`（深度递归能命中
- * `PlayInfoList[].play_auth → spade_a`），抓到就 `registerSodaKey` 登记，
- * 下载时 `fileCache` 的解密分支随即生效。
+ * 这里补齐：解析 GetPlayInfo 后**逐项**读 `PlayInfoList[].PlayAuth`（base64 spade），
+ * 每项各自推导密钥并按「直链 / 码率」登记，再 `registerSodaKey` 记一份兜底。
+ *
+ * ⚠️ 实测（2026-10-28 12:31，246）：GetPlayInfo 的第一项 `PlayAuth` 常常是空串，
+ * 密钥可能只在某一档（其余为空）——所以不能只读 `[0]`，必须遍历全部项。
+ * 而且不同档可能各带一把钥匙，选流时得按码率回查（见 `sodaKeyForStream`）。
  */
 async function grabKeyFromPlayerInfo(player: any, cookie: string, trackId: string): Promise<void> {
   const infoUrl = String(player?.url_player_info || '').trim()
@@ -534,27 +574,36 @@ async function grabKeyFromPlayerInfo(player: any, cookie: string, trackId: strin
       timeout: 15000,
     }))
     if (!info) return
-    const key = extractSodaKey(info)
-    if (key) {
-      registerSodaKey(trackId, key)
-      console.log(`[汽水解密] 从 GetPlayInfo 捕获到密钥 trackId=${trackId}`)
-    } else {
-      // [DEBUG-临时] GetPlayInfo 带 play_auth 但没解出密钥时，打出结构定位 key 到底在哪。
-      // 确认解析姿势后会删掉这段。
+    const list: any[] = info?.Result?.Data?.PlayInfoList ?? info?.result?.data?.play_info_list ?? []
+    let firstKey = ''
+    let filled = 0
+    for (const it of list) {
+      const raw = String(it?.PlayAuth ?? it?.play_auth ?? it?.PlayAuthID ?? '').trim()
+      if (!raw) continue
+      let candidate = ''
       try {
-        const pl = info?.Result?.Data?.PlayInfoList
-        const first = Array.isArray(pl) && pl[0] ? pl[0] : null
-        const pv = (v: any) =>
-          typeof v === 'string'
-            ? (v.length > 80 ? `${v.slice(0, 80)}…(${v.length})` : v)
-            : v && typeof v === 'object'
-              ? `{${Object.keys(v).join(',')}${Object.keys(v).length ? '' : ''}}`
-              : String(v)
-        console.warn(`[汽水解密][DEBUG] GetPlayInfo 顶层键=${Object.keys(info || {}).join(',')}`)
-        if (first) {
-          console.warn(`[汽水解密][DEBUG] PlayInfoList[0] 键=${Object.keys(first).join(',')} | play_auth=${pv(first.play_auth ?? first.PlayAuth)}`)
-        }
-      } catch { /* ignore */ }
+        candidate = resolveAudioKey({ spade_a: raw }).toLowerCase()
+      } catch {
+        continue
+      }
+      if (!isHexKey(candidate)) continue
+      rememberStreamKey(
+        String(it?.MainPlayUrl ?? it?.main_play_url ?? ''),
+        Math.round(toNumber(it?.Bitrate ?? it?.bitrate) / 1000),
+        candidate,
+      )
+      if (!firstKey) firstKey = candidate
+      filled += 1
+    }
+    if (firstKey) {
+      registerSodaKey(trackId, firstKey)
+      console.log(
+        `[汽水解密] 从 GetPlayInfo 捕获到密钥 trackId=${trackId}（${filled}/${list.length} 档，指纹 ${firstKey.slice(0, 6)}…）`,
+      )
+    } else {
+      // 极少数结构（spade_a 嵌在对象里）走旧的深度递归路径，保持兼容
+      const legacy = extractSodaKey(info)
+      if (legacy) registerSodaKey(trackId, legacy)
     }
   } catch (e: any) {
     console.warn(`[汽水解密] GetPlayInfo 取钥失败（忽略）：${e?.message || e}`)
