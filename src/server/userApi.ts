@@ -936,7 +936,11 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                     } else {
                         console.error(`[自定义源-${fullApiInfo.name}] 调用请求异常:`, describeError(e))
                     }
-                    throw e
+                    // 自定义源脚本可能 `throw undefined` / 抛纯字符串 / 抛跨 vm 丢了 message 的对象。
+                    // 原样透传会让上层读 `e.message` 时二次抛 TypeError，把「取链失败」变成
+                    // 「Cannot read properties of undefined」的 500，前端连提示都拿不到。
+                    // 这里统一归一成 Error，保证调用方永远能安全读 message。
+                    throw e instanceof Error ? e : new Error(describeError(e))
                 }
             }
         }
@@ -1527,11 +1531,11 @@ export async function callUserApiGetMusicUrl(
                 if (onProgress) await onProgress(att)
                 return { url, type: quality, sourceName: api.info.name, sourceId: api.info.id, attempts, hasMoreSources: false }
             } catch (error: any) {
-                console.error(`[自定义源] ${api.info.name} 失败 (第 ${i + 1}/${maxRetries} 次):`, `音源日志：${error.message}`)
+                console.error(`[自定义源] ${api.info.name} 失败 (第 ${i + 1}/${maxRetries} 次):`, `音源日志：${describeError(error)}`)
                 lastError = error
                 notePlayFailure(api, source)
-                roundFailures.push({ api, message: String(error?.message || error) })
-                const att = { name: api.info.name, status: 'fail', message: `第 ${i + 1} 次尝试失败,音源日志：${error.message}` }
+                roundFailures.push({ api, message: describeError(error) })
+                const att = { name: api.info.name, status: 'fail', message: `第 ${i + 1} 次尝试失败,音源日志：${describeError(error)}` }
                 attempts.push(att)
                 if (onProgress) await onProgress(att)
                 // 如果不是最后一次尝试，等待一小会儿
@@ -1578,11 +1582,11 @@ export async function callUserApiGetMusicUrl(
                     hasMoreSources: candidateIndex < candidates.length - 1
                 }
             } catch (error: any) {
-                console.error(`[自定义源] ${api.info.name} 失败:`, `音源日志：${error.message}`)
+                console.error(`[自定义源] ${api.info.name} 失败:`, `音源日志：${describeError(error)}`)
                 lastError = error
                 notePlayFailure(api, source)
-                roundFailures.push({ api, message: String(error?.message || error) })
-                const att = { name: api.info.name, status: 'fail', message: `音源日志：${error.message}` }
+                roundFailures.push({ api, message: describeError(error) })
+                const att = { name: api.info.name, status: 'fail', message: `音源日志：${describeError(error)}` }
                 attempts.push(att)
                 if (onProgress) await onProgress(att)
                 continue
@@ -1621,7 +1625,7 @@ export async function callUserApiGetMusicUrl(
         ? `自定义源 [${candidates[0].info.name}] 解析失败`
         : `已尝试了 ${supportedCount} 个支持 ${source} 平台的源，但全部解析失败`
 
-    const finalError: any = new Error(`${detailMsg} (音源日志: ${lastError?.message})`)
+    const finalError: any = new Error(`${detailMsg} (音源日志: ${describeError(lastError)})`)
     finalError.attempts = attempts
     throw finalError
 }

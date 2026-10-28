@@ -26,7 +26,7 @@ import formidable from 'formidable'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
-import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot } from './userApi'
+import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, describeError } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation } from './sourceGuard'
 import { getSourceProbeStatus } from './sourceProbe'
@@ -8201,9 +8201,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 result = userApiResult
                 attempts = userApiResult.attempts || []
               } catch (userApiError: any) {
-                console.error(`[歌曲播放] 自定义源解析失败:`, userApiError.message)
-                customSourceError = userApiError.message
-                attempts = userApiError.attempts || []
+                // 兜底：userApi 层已把 undefined / 非 Error 抛出品归一化，这里再防一次，
+                // 避免任何意外抛出品把「取链失败」放大成无提示的 500
+                const message = describeError(userApiError)
+                console.error(`[歌曲播放] 自定义源解析失败:`, message)
+                customSourceError = message
+                attempts = (userApiError && userApiError.attempts) || []
                 // 不抛出错误，继续尝试内置源
               }
             } else if (!result) {
@@ -8318,16 +8321,19 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(result))
           } catch (err: any) {
-            console.error('[歌曲播放] 音频地址解析失败:', err.message)
+            // err 可能是 undefined / 字符串（自定义源透传），统一经 describeError 归一，
+            // 保证响应体里 error 一定是有内容的字符串，前端能直接弹提示
+            const errText = describeError(err)
+            console.error('[歌曲播放] 音频地址解析失败:', errText)
             // [Fix] Return 500 but with specific error JSON to let frontend show detailed toast
             res.writeHead(500, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({
-              error: err.message,
+              error: errText,
               code: 500,
-              attempts: err.attempts,
+              attempts: err && err.attempts,
               // 命中失败短缓存时告诉前端「多久后可重试」，前端据此退避而不是立刻重来
-              failureCached: err.failureCached === true,
-              retryAfterMs: err.retryAfterMs,
+              failureCached: err && err.failureCached === true,
+              retryAfterMs: err && err.retryAfterMs,
             }))
           }
         })

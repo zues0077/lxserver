@@ -39,6 +39,16 @@
   后果：taglib 报 `MP4 Atom: Expected sample entry atom in stsd atom`，元数据/封面写不进去，部分播放器拒播。
 - 已修正偏移并对 4cc 做可打印校验；单测补精确断言（原来只断言 `includes('mp4a')`，被 `frma` 里的 mp4a 掩盖成假通过）。
 
+### 🐛 修复：自定义源全部失败时取链直接报 500 且无提示
+
+- 现场：酷狗某付费曲，账号通道与 20 多个自定义源全部失败，前端只弹「Internal Server Error」。
+- 根因：某个源 `throw undefined`，`callUserApiGetMusicUrl` 的 catch 里拼 `音源日志：${error.message}`
+  二次抛 `TypeError: Cannot read properties of undefined`，整个源轮询被中断，
+  本该返回的「已尝试 N 个源全部失败」变成了裸 500。
+- 修复：抛出品统一归一为 `Error`（`describeError` 兜底 message / msg / code / JSON / 类型标签），
+  轮询与最终报错的文案拼接也改走它；`/api/music/url` 的外层 catch 同样兜底，
+  保证响应体 `error` 永远是有内容的字符串。
+
 ### ⚡ 网页打开不再转圈
 
 - `public/music/index.html` 里 pako 走 cdnjs 外链，且是**同步脚本**、排在 33 个本地脚本之前。
