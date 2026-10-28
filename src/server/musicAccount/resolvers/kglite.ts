@@ -934,3 +934,117 @@ export async function searchKgliteAll(keyword: string, cookie = ''): Promise<Lit
   }
   return { list, total: total || list.length, allPage, fetchedPages: list.length ? Math.min(maxPages, allPage) : 0 }
 }
+
+/* ---------- 歌手 / 专辑搜索（complexsearch，与歌曲搜索同签名体系） ---------- */
+
+export interface LiteSinger {
+  id: number
+  name: string
+  picUrl: string
+  alias: string[]
+  albumSize: number
+  musicSize: number
+  source: string
+}
+
+export interface LiteAlbum {
+  id: number
+  name: string
+  picUrl: string
+  artistName: string
+  size: number
+  publishTime: string
+  source: string
+}
+
+async function liteMetaSearch(
+  path: '/v1/search/author' | '/v1/search/album',
+  params: Record<string, string | number>,
+  cookie: string,
+): Promise<{ lists: any[]; total: number }> {
+  const useCookie = (cookie && hasLiteCreds(cookie))
+    ? cookie
+    : (() => {
+        const mid = crypto.randomUUID().replace(/-/g, '').slice(0, 16)
+        return `mid=${mid}; dfid=-`
+      })()
+  const resp = await liteCall(path, useCookie, {
+    method: 'GET',
+    router: 'complexsearch.kugou.com',
+    params,
+    timeout: 12000,
+  })
+  const b: any = resp.body || {}
+  if (Number(b.status) !== 1) {
+    const code = b.error_code ?? b.errcode
+    throw new Error(`概念版搜索失败（status=${b.status ?? '-'}${code ? `，error_code=${code}` : ''}）`)
+  }
+  const lists: any[] = b?.data?.lists || b?.data?.info || []
+  return { lists, total: Number(b?.data?.total) || lists.length }
+}
+
+/**
+ * 概念版歌手搜索。实测响应字段为大驼峰：AuthorId/AuthorName/Avatar/AlbumCount/AudioCount。
+ * 注意 author 端点不带 clientver=201（带了大反而 error_code=20028），参数集与歌曲搜索不同。
+ */
+export async function searchSinger(
+  keyword: string,
+  page = 1,
+  pageSize = 20,
+  cookie = '',
+): Promise<{ list: LiteSinger[]; total: number; allPage: number }> {
+  const { lists, total } = await liteMetaSearch('/v1/search/author', {
+    keyword,
+    page: Math.max(1, page),
+    pagesize: Math.min(50, Math.max(1, pageSize)),
+    platform: 'AndroidFilter',
+    iscorrection: 1,
+    albumhide: 0,
+    nocollect: 0,
+  }, cookie)
+  const list: LiteSinger[] = lists.map((it: any) => ({
+    id: Number(it.AuthorId) || 0,
+    name: decodeHtmlEntities(it.AuthorName || ''),
+    picUrl: String(it.Avatar || '').replace('/{size}/', '/240/'),
+    alias: it.Auxiliary ? [String(it.Auxiliary)] : [],
+    albumSize: Number(it.AlbumCount) || 0,
+    musicSize: Number(it.AudioCount) || 0,
+    source: 'kglite',
+  }))
+  const size = Math.min(50, Math.max(1, pageSize))
+  return { list, total, allPage: Math.ceil(total / size) || 1 }
+}
+
+/**
+ * 概念版专辑搜索。实测响应字段为小驼峰：albumid/albumname/singer/img/songcount/publish_time。
+ * 该端点不能带 area_code/privilegefilter（会 error_code=20028）；clientver=201 可带可不带。
+ */
+export async function searchAlbum(
+  keyword: string,
+  page = 1,
+  pageSize = 20,
+  cookie = '',
+): Promise<{ list: LiteAlbum[]; total: number; allPage: number }> {
+  const { lists, total } = await liteMetaSearch('/v1/search/album', {
+    keyword,
+    page: Math.max(1, page),
+    pagesize: Math.min(50, Math.max(1, pageSize)),
+    platform: 'AndroidFilter',
+    iscorrection: 1,
+    category: '1',
+    sorttype: 0,
+    searchsong: 0,
+    clientver: 201,
+  }, cookie)
+  const list: LiteAlbum[] = lists.map((it: any) => ({
+    id: Number(it.albumid) || 0,
+    name: decodeHtmlEntities(it.albumname || ''),
+    picUrl: String(it.img || ''),
+    artistName: decodeHtmlEntities(it.singer || ''),
+    size: Number(it.songcount) || 0,
+    publishTime: String(it.publish_time || ''),
+    source: 'kglite',
+  }))
+  const size = Math.min(50, Math.max(1, pageSize))
+  return { list, total, allPage: Math.ceil(total / size) || 1 }
+}

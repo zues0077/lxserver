@@ -2388,13 +2388,15 @@ function handleSearchTypeChange() {
     if (!typeSelect || !sourceSelect) return;
 
     if (typeSelect.value === 'singer' || typeSelect.value === 'album') {
-        // 只有 wy 和 tx 支持歌手/专辑搜索
-        if (sourceSelect.value !== 'wy' && sourceSelect.value !== 'tx') {
+        // 能力表：wy/tx/kg/kw/mg/kglite 支持歌手/专辑搜索（后端 extendSearch 或 kglite 通道）
+        // bili/soda/all 不支持（B站无歌手维度、汽水走 extraSources 未接、all 聚合仅歌曲）
+        const supported = ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite'];
+        if (!supported.includes(sourceSelect.value)) {
             sourceSelect.value = 'wy';
         }
         // 禁用不支持的选项
         Array.from(sourceSelect.options).forEach(opt => {
-            opt.disabled = (opt.value !== 'wy' && opt.value !== 'tx');
+            opt.disabled = !supported.includes(opt.value);
         });
     } else {
         Array.from(sourceSelect.options).forEach(opt => { opt.disabled = false; });
@@ -2403,7 +2405,7 @@ function handleSearchTypeChange() {
 }
 window.handleSearchTypeChange = handleSearchTypeChange;
 
-const SOURCES = ['kw', 'kg', 'tx', 'wy', 'mg'];
+const SOURCES = ['kw', 'kg', 'tx', 'wy', 'mg', 'kglite'];
 
 
 //搜索歌曲
@@ -2900,9 +2902,10 @@ function getSourceTag(source) {
         wy: 't-badge-red border-red-200 dark:border-red-500/30',
         mg: 't-badge-pink border-pink-200 dark:border-pink-500/30',
         bili: 't-badge-pink border-pink-200 dark:border-pink-500/30',
-        soda: 't-badge-green border-green-200 dark:border-emerald-500/30'
+        soda: 't-badge-green border-green-200 dark:border-emerald-500/30',
+        kglite: 't-badge-blue border-blue-200 dark:border-blue-500/30'
     };
-    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', bili: 'B站', soda: '汽水' };
+    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', bili: 'B站', soda: '汽水', kglite: '概念版' };
     const color = colors[source] || 't-bg-main t-text-muted t-border-main';
     const name = names[source] || (source ? source.toUpperCase() : '未知');
     return `<span class="song-tag ${color}">${name}</span>`;
@@ -2998,7 +3001,7 @@ function renderAlbumResults(list) {
 
     container.innerHTML = '<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3.5 md:gap-5 p-3 md:p-6"></div>';
     const grid = container.querySelector('div');
-    const sourceNames = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', bili: 'B站', soda: '汽水' };
+    const sourceNames = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', bili: 'B站', soda: '汽水', kglite: '概念版' };
 
     list.forEach((item) => {
         const div = document.createElement('div');

@@ -7162,17 +7162,26 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
           // 酷狗概念版：自带搜索实现（与取链同签名体系），不进 musicSdk
           if (source === 'kglite') {
-            if (type !== 'song') {
+            if (type === 'playlist') {
               res.writeHead(400, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({
-                success: false,
-                error: `酷狗概念版暂不支持${type === 'singer' ? '歌手' : type === 'album' ? '专辑' : '歌单'}搜索，请切换到歌曲`,
-              }))
+              res.end(JSON.stringify({ success: false, error: '酷狗概念版暂不支持歌单搜索，请切换到歌曲' }))
               return
             }
             const cookie = musicAccount.getCookie('kglite') || ''
             const pageSize = requestedLimit > 0 ? Math.min(requestedLimit, 50) : 20
             const pageNo = requestedLimit > 0 ? Math.max(1, page) : 1
+            if (type === 'singer') {
+              const data = await musicAccount.kglite.searchSinger(name, pageNo, pageSize, cookie)
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ list: data.list, total: data.total, allPage: data.allPage, pageSize, fetchedPages: pageNo, source }))
+              return
+            }
+            if (type === 'album') {
+              const data = await musicAccount.kglite.searchAlbum(name, pageNo, pageSize, cookie)
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ list: data.list, total: data.total, allPage: data.allPage, pageSize, fetchedPages: pageNo, source }))
+              return
+            }
             const data = requestedLimit > 0
               ? await musicAccount.kglite.searchSongs(name, pageNo, pageSize, cookie)
               : await musicAccount.kglite.searchKgliteAll(name, cookie)

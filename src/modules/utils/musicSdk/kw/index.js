@@ -9,12 +9,16 @@ import { apis } from '../api-source'
 import songList from './songList'
 import hotSearch from './hotSearch'
 import comment from './comment'
+import extendSearch from './extendSearch'
+import extendDetail from './extendDetail'
 
 const kw = {
   _musicInfoRequestObj: null,
   _musicInfoPromiseCancelFn: null,
   _musicPicRequestObj: null,
   _musicPicPromiseCancelFn: null,
+  extendSearch,
+  extendDetail,
   // context: null,
 
 

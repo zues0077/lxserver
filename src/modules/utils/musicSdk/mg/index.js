@@ -7,6 +7,8 @@ import lyric from './lyric'
 import hotSearch from './hotSearch'
 import comment from './comment'
 import tipSearch from './tipSearch'
+import extendSearch from './extendSearch'
+import extendDetail from './extendDetail'
 
 const mg = {
   tipSearch,
@@ -15,6 +17,8 @@ const mg = {
   leaderboard,
   hotSearch,
   comment,
+  extendSearch,
+  extendDetail,
   getMusicUrl(songInfo, type) {
     // 使用 api-source 获取 API（优先自定义源）
     return apis('mg').getMusicUrl(songInfo, type)
