@@ -1285,7 +1285,7 @@ export async function callUserApiGetMusicUrl(
     if (isEnabled() && isPriority() && accountAllowed) {
         const acct = await tryResolveByAccount(source, normalizedSongInfo, quality)
         if (acct?.url) {
-            const platformName = getPlatform(source)?.name || source
+            const platformName = acct.accountName || getPlatform(source)?.name || source
             const attempt = {
                 name: `我的${platformName}账号`,
                 status: 'success',
@@ -1455,7 +1455,7 @@ export async function callUserApiGetMusicUrl(
         if (isEnabled() && accountAllowed) {
             const acct = await tryResolveByAccount(source, normalizedSongInfo, quality)
             if (acct?.url) {
-                const platformName = getPlatform(source)?.name || source
+                const platformName = acct.accountName || getPlatform(source)?.name || source
                 const attempt = {
                     name: `我的${platformName}账号`,
                     status: 'success',
@@ -1600,7 +1600,7 @@ export async function callUserApiGetMusicUrl(
     if (isEnabled() && !isPriority() && accountAllowed) {
         const acct = await tryResolveByAccount(source, normalizedSongInfo, quality)
         if (acct?.url) {
-            const platformName = getPlatform(source)?.name || source
+            const platformName = acct.accountName || getPlatform(source)?.name || source
             const attempt = {
                 name: `我的${platformName}账号`,
                 status: 'success',

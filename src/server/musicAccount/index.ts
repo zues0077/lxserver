@@ -123,7 +123,8 @@ export async function tryResolveByAccount(
       const result = await withDeadline(resolver.resolve(songInfo, quality, cookie), perChannel)
       if (result?.ok && result.url) {
         console.log(`[平台账号] ✓ ${name} 取链成功（通道 ${result.via ?? '-'}，音质 ${result.quality ?? quality}${result.isVip ? '，会员' : ''}）`)
-        return result
+        // 让上层显示实际命中的平台（概念版 vs 标准版），而不是拿 source 反查
+        return { ...result, accountName: name }
       }
       if (result?.error) {
         console.log(`[平台账号] ${name} 未取到链接：${result.error}`)

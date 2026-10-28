@@ -95,6 +95,8 @@ interface LiteCallOpts {
   router?: string
   /** 目标网关，默认 gateway.kugou.com；会员查询在 kugouvip 域下 */
   host?: string
+  /** 覆盖 UA：听歌上报那类接口按客户端版本校验 UA，认错了会静默返回 status=0 */
+  ua?: string
   /** GET 时把参数拼进查询串；POST 时仍然拼（酷狗习惯参数与 body 并存） */
   timeout?: number
 }
@@ -106,7 +108,7 @@ interface LiteCallOpts {
 async function liteCall(
   path: string,
   cookie: string,
-  { method = 'GET', params = {}, data = null, router = '', host = GATEWAY, timeout = 12000 }: LiteCallOpts = {},
+  { method = 'GET', params = {}, data = null, router = '', host = GATEWAY, ua = '', timeout = 12000 }: LiteCallOpts = {},
 ): Promise<{ http: number; body: any }> {
   const c = extractCreds(cookie)
   const clienttime = Math.floor(Date.now() / 1000)
@@ -128,7 +130,7 @@ async function liteCall(
   full.signature = md5(`${SIGN_SALT}${digest}${bodyStr}${SIGN_SALT}`)
 
   const headers: Record<string, string> = {
-    'User-Agent': ANDROID_UA,
+    'User-Agent': ua || ANDROID_UA,
     dfid: c.dfid,
     clienttime: String(clienttime),
     mid: c.mid,
@@ -522,16 +524,19 @@ export interface ClaimVipResult {
   gainedHours: number
   /** 每一步的明细，便于界面展示 */
   steps: Array<{ name: string; ok: boolean; message: string; hours?: number }>
-  /** 今日已领次数 / 上限 */
-  doneToday?: number
-  remainToday?: number
+  /**
+   * 今天是否已领到过 VIP。
+   * 不用「今日已领 N/8」——平台 month_vip_record 的 receive_vip 只是粗粒度标记（实测只增到 1），
+   * 拿它算次数会显示成「1/8」，与实际额度（看广告接口返回的 done/total）对不上。
+   */
+  claimedToday?: boolean
   /** 领取后剩余 VIP 小时 */
   remainHours?: number
   error?: string
 }
 
-/** 今日领取进度（month_vip_record 里当天那条的累计值） */
-export async function getTodayClaimCount(cookie: string): Promise<{ done: number; remain: number } | null> {
+/** 今天是否已领过 VIP（month_vip_record 里是否有今天这条） */
+export async function getTodayClaimCount(cookie: string): Promise<{ claimed: boolean } | null> {
   try {
     const resp = await liteCall('/youth/v1/activity/get_month_vip_record', cookie, {
       params: { latest_limit: 100 },
@@ -542,57 +547,91 @@ export async function getTodayClaimCount(cookie: string): Promise<{ done: number
     // 接口按天聚合，取今天这条；字段名各版本略有差异，都兼容一下
     const today = new Date()
     const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-    let done = 0
+    if (!list.length) return { claimed: false }
+    let claimed = false
     for (const item of list) {
       const day = String(item?.day || item?.date || '')
       if (!day || !day.startsWith(key)) continue
-      done += Number(item?.receive_vip ?? item?.count ?? 0) || 0
+      if (Number(item?.receive_vip ?? item?.count ?? 0) > 0) claimed = true
     }
-    if (!list.length) return null
-    return { done, remain: Math.max(0, DAILY_CLAIM_LIMIT - done) }
+    return { claimed }
   } catch {
     return null
   }
 }
 
 /**
- * 领概念版 VIP：听歌领一次 + 看广告领一次，各自独立计数。
- * 平台每日上限 8 次、每次 3 小时，合计刚好 24 小时。
+ * 领 VIP 的错误码 → 人话。
+ *
+ * 实测两个码必须单独翻译，否则用户只会看到 status=0 一头雾水：
+ *   30000  = 操作频繁（连着领会被风控挡住，隔一两分钟即可）
+ *   130012 = 听歌任务当前不可用（平台侧限制，看广告那条不受影响）
+ */
+function claimErrorText(b: any): string {
+  const code = Number(b?.error_code ?? b?.errcode) || 0
+  const raw = String(b?.error_msg || b?.error || b?.msg || b?.message || '').trim()
+  if (code === 30000) return '操作过于频繁，请等一两分钟再试（平台风控）'
+  if (code === 130012) return '听歌任务当前不可用（平台侧限制），用「看广告」那条即可'
+  if (raw) return raw
+  return `status=${b?.status ?? '-'}${code ? `，error_code=${code}` : ''}`
+}
+
+/**
+ * 两次领取之间的最小间隔。平台对连续领取有风控（实测隔几十秒就返回 30000 操作频繁），
+ * 界面上按钮又很容易被连点，所以在这里统一挡一道。
+ */
+const CLAIM_COOLDOWN_MS = 90_000
+let lastClaimAt = 0
+
+/**
+ * 领概念版 VIP：听歌领一次 + 看广告领一次。
+ *
+ * 实测口径：看广告每次 +3 小时、每天 8 次额度，合计覆盖 24 小时；
+ * 听歌那条经常返回 130012（平台侧不可用），所以它是**加分项**，
+ * 失败不影响整体判定（只要有一条领到就算成功）。
  */
 export async function claimVip(cookie: string): Promise<ClaimVipResult> {
   if (!hasLiteCreds(cookie)) {
     return { ok: false, gainedHours: 0, steps: [], error: '概念版账号凭据不完整，请先登录' }
   }
 
+  const since = Date.now() - lastClaimAt
+  if (lastClaimAt && since < CLAIM_COOLDOWN_MS) {
+    const wait = Math.ceil((CLAIM_COOLDOWN_MS - since) / 1000)
+    return {
+      ok: false, gainedHours: 0, steps: [],
+      error: `刚领过，请等 ${wait} 秒再试（平台对连续领取有频率限制）`,
+    }
+  }
+  lastClaimAt = Date.now()
+
   const steps: ClaimVipResult['steps'] = []
   let gained = 0
 
-  // 1) 听歌领
+  // 1) 听歌领（加分项，失败不阻断）
   try {
     const r = await liteCall('/youth/v2/report/listen_song', cookie, {
       method: 'POST',
       params: { clientver: LISTEN_CLIENT_VER },
       data: { mixsongid: LISTEN_MIXSONGID },
+      ua: LISTEN_UA,
       timeout: 15000,
     })
     const b: any = r.body || {}
-    // 该接口已在今日领过时也返回 status=1，用 message 里的文案区分
-    const msg = String(b?.error || b?.msg || b?.message || '')
-    const already = /已(经)?领|重复|上限|次数/.test(msg)
-    const ok = Number(b.status) === 1 && !already
+    const ok = Number(b.status) === 1
     const hours = Number(b?.data?.award_vip_hour) || (ok ? HOURS_PER_CLAIM : 0)
     if (ok) gained += hours
     steps.push({
       name: '听歌领 VIP',
       ok,
       hours: ok ? hours : 0,
-      message: ok ? `+${hours} 小时` : (msg || `status=${b.status ?? '-'}，今日可能已领过`),
+      message: ok ? `+${hours} 小时` : claimErrorText(b),
     })
   } catch (e: any) {
     steps.push({ name: '听歌领 VIP', ok: false, message: e?.message || String(e) })
   }
 
-  // 2) 看广告领
+  // 2) 看广告领（主通道）
   try {
     const now = Date.now()
     const r = await liteCall('/youth/v1/ad/play_report', cookie, {
@@ -605,23 +644,15 @@ export async function claimVip(cookie: string): Promise<ClaimVipResult> {
     const hours = Number(b?.data?.award_vip_hour) || (ok ? HOURS_PER_CLAIM : 0)
     if (ok) gained += hours
     const quota = b?.data
-    if (quota && Number.isFinite(Number(quota.done))) {
-      steps.push({
-        name: '看广告领 VIP',
-        ok,
-        hours: ok ? hours : 0,
-        message: ok
-          ? `+${hours} 小时（今日 ${quota.done}/${quota.total ?? DAILY_CLAIM_LIMIT}）`
-          : (String(b?.error || b?.msg || `status=${b.status ?? '-'}`)),
-      })
-    } else {
-      steps.push({
-        name: '看广告领 VIP',
-        ok,
-        hours: ok ? hours : 0,
-        message: ok ? `+${hours} 小时` : String(b?.error || b?.msg || `status=${b.status ?? '-'}`),
-      })
-    }
+    const quotaText = (quota && Number.isFinite(Number(quota.done)))
+      ? `（今日 ${quota.done}/${quota.total ?? DAILY_CLAIM_LIMIT}）`
+      : ''
+    steps.push({
+      name: '看广告领 VIP',
+      ok,
+      hours: ok ? hours : 0,
+      message: ok ? `+${hours} 小时${quotaText}` : claimErrorText(b),
+    })
   } catch (e: any) {
     steps.push({ name: '看广告领 VIP', ok: false, message: e?.message || String(e) })
   }
@@ -633,10 +664,9 @@ export async function claimVip(cookie: string): Promise<ClaimVipResult> {
     ok: gained > 0,
     gainedHours: gained,
     steps,
-    doneToday: today?.done,
-    remainToday: today?.remain,
+    claimedToday: today?.claimed,
     remainHours: vip.ok ? vip.remainHours : undefined,
-    error: gained > 0 ? undefined : '本次没有领到 VIP（可能今日额度已用完）',
+    error: gained > 0 ? undefined : '本次没有领到 VIP（多为今日额度已用完或触发频率限制）',
   }
 }
 

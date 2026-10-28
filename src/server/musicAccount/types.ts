@@ -9,6 +9,12 @@ export interface AccountResolveResult {
   isVip?: boolean
   /** 命中的通道名，用于日志与界面排查 */
   via?: string
+  /**
+   * 实际命中的账号平台名（如「酷狗概念版」）。
+   * 同一个 source 可能挂多个账号通道（kg 就有概念版与标准版），
+   * 用 source 反查平台名会显示成「酷狗音乐账号」，与实际通道不符。
+   */
+  accountName?: string
   /** 链接的音频扩展名 */
   ext?: string
   /** 汽水版权曲 CENC 加密流的解密密钥（32 位十六进制），仅汽水通道有，用于下载时就地解密 */
