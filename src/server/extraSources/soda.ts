@@ -1071,10 +1071,14 @@ export function buildHint(r: SodaStreamDiagnosis): string {
   // 账号失效排在最前：它会让**所有**受限曲退化成试听，症状和「版权限制」一模一样。
   // 若不先判，用户会去折腾签名器/换曲，实际只需重新导一次 Cookie。
   const accountDead = r.accountOk === false
-  const accountWhy = r.accountMessage || '需要重新登录'
+  // accountMessage 本身常常就是「Cookie 已失效（原因）」，直接塞进模板会重复一遍
+  // （曾经出过「账号 Cookie 已失效（Cookie 已失效（…））」这种重影，别改回去）
+  const accountDetail = r.accountMessage && !/已?失效/.test(r.accountMessage)
+    ? `（${r.accountMessage}）`
+    : ''
 
   if (!r.url) {
-    if (accountDead) return `账号 Cookie 已失效（${accountWhy}），汽水连明文试听流都没返回；请重新从 PC 客户端导出 Cookie`
+    if (accountDead) return `账号 Cookie 已失效${accountDetail}，汽水连明文试听流都没返回；请重新从 PC 客户端导出 Cookie`
     return r.hasSigner && !r.signerOnline
       ? `汽水两条免签名通道都没解析到播放流，且签名器离线（${r.signerError || '未知原因'}）`
       : '汽水两条免签名通道都没解析到播放流，请检查曲目 ID 与网络连通性'
@@ -1086,7 +1090,7 @@ export function buildHint(r: SodaStreamDiagnosis): string {
   // 试听片段
   const shown = r.streamDurationSeconds || 0
   if (accountDead) {
-    return `账号 Cookie 已失效（${accountWhy}），整曲取不到解密密钥，只剩 ${shown} 秒试听；请重新导出 Cookie 后再试`
+    return `账号 Cookie 已失效${accountDetail}，整曲取不到解密密钥，只剩 ${shown} 秒试听；请重新导出 Cookie 后再试`
   }
   if (r.requiresVip && !r.signerOnline) {
     return `该曲整曲仅限会员播放：明文通道只有 ${shown} 秒试听，需「设备指纹 + 签名器」后走 App 端点；${r.signerError || '未配置签名器'}`

@@ -269,6 +269,16 @@ test('buildHint：账号 Cookie 失效 → 优先级高于版权/签名器口径
   assert.match(expired, /重新/)
   assert.doesNotMatch(expired, /受版权限制/)
   assert.doesNotMatch(expired, /设备指纹/)
+  // 不能出现「账号 Cookie 已失效（Cookie 已失效（…）」这种重影：
+  // accountMessage 本身就带「已失效」时不该再塞进模板
+  assert.doesNotMatch(expired, /已失效（Cookie 已失效/)
+
+  // accountMessage 是别的说法时，才把原因补进括号
+  const withDetail = buildHint(diagnosis({
+    url: 'https://x/a', source: 'h5', isPreview: true, streamDurationSeconds: 60,
+    hasCookie: true, accountOk: false, accountMessage: '账号信息为空，需重新登录',
+  }))
+  assert.match(withDetail, /账号信息为空/)
 
   // 连明文流都拿不到时也要先说是账号问题
   const noStream = buildHint(diagnosis({ hasCookie: true, accountOk: false }))
