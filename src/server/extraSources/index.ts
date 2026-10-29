@@ -167,6 +167,12 @@ export async function getMusicUrl(source: string, songInfo: any, quality: string
   type: string
   sourceName: string
   accountUsed: boolean
+  /**
+   * 实际命中的取链通道（如 `signer:pc_track_v2:320k` / `h5:320k(...)` / `seo:...`）。
+   * 汽水要靠它区分「真的用上了账号签名器」还是「匿名明文通道」——
+   * 后者说明账号没起作用（歌本来免费，或账号已过期），需要顺手复核登录态。
+   */
+  via?: string
   /** 汽水加密曲随取链下发的 AES 解密密钥（32 位十六进制）；非加密曲为空 */
   key?: string
 }> {
@@ -185,6 +191,7 @@ export async function getMusicUrl(source: string, songInfo: any, quality: string
     type: result.quality || quality,
     sourceName: `${displayName(source)}${cookie ? '（账号）' : '（免登录）'}`,
     accountUsed: !!cookie,
+    via: (result as any).via,
     key: (result as any).key,
   }
 }

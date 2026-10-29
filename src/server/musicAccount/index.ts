@@ -130,11 +130,8 @@ export async function tryResolveByAccount(
       if (result?.ok && result.url) {
         // 汽水特有：签名器通道（signer:*）才是「真的用上了账号」。
         // 命中 h5/seo 明文通道说明账号没起作用 —— 要么这首歌本来就免费，
-        // 要么账号已经过期。按 30 分钟冷却顺手复核一次登录态，
-        // 这样「账号过期但歌还能匿名播」也能当场标红，不必等下一轮巡检（默认 72 小时）。
-        if (id === 'soda' && result.via && !String(result.via).startsWith('signer')) {
-          probeAccountAfterFailure(id)
-        }
+        // 要么账号已经过期。交给 noteSodaAnonymousLink 统一判断并复核（30 分钟冷却）。
+        if (id === 'soda') noteSodaAnonymousLink(result.via)
         console.log(`[平台账号] ✓ ${name} 取链成功（通道 ${result.via ?? '-'}，音质 ${result.quality ?? quality}${result.isVip ? '，会员' : ''}）`)
         // 让上层显示实际命中的平台（概念版 vs 标准版），而不是拿 source 反查
         return { ...result, accountName: name }
@@ -238,6 +235,25 @@ export async function autoPromotePrimary(id: string): Promise<PromoteResult> {
  */
 const lastAuthProbeAt = new Map<string, number>()
 const AUTH_PROBE_COOLDOWN_MS = 30 * 60 * 1000
+
+/**
+ * 记录一次「汽水这次没走账号签名器」的取链结果，并按需复核登录态。
+ *
+ * 为什么需要由外部（server.ts）回调进来：汽水的实际取链走的是 extraSources 分支 ——
+ * `/api/music/url` 里 `extraSources.isExtraSource('soda')` 会先命中并直接返回，
+ * **根本不会进入 tryResolveByAccount**。所以把复核写在那里等于死代码（v1.5.46 就是这样，
+ * 实测停掉签名器走匿名通道时，日志里连一条 [平台账号] 汽水 记录都没有）。
+ *
+ * 现在改为：extraSources 把 `via` 透出 → server.ts 取链成功后调本函数。
+ */
+export function noteSodaAnonymousLink(via?: string): void {
+  if (!isEnabled()) return
+  const channel = String(via || '').trim()
+  // 没有 via 说明不是汽水的通道信息（或老版本 resolver），不做判断
+  if (!channel || channel.startsWith('signer')) return
+  console.log(`[平台账号] 汽水本次命中匿名通道（${channel}），未用上账号签名器；已触发登录态复核（30 分钟内不重复）`)
+  probeAccountAfterFailure('soda')
+}
 
 function probeAccountAfterFailure(id: string): void {
   const last = lastAuthProbeAt.get(id) ?? 0

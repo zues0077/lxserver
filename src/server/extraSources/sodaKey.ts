@@ -122,9 +122,14 @@ export function extractSodaKey(parsed: any): string {
 
   // 抓不到就留证据：区分「响应里根本没有 spade_a」和「有但推导失败」，
   // 否则线上只剩一句「未拿到密钥」，没法继续往下定位。
+  //
+  // 级别刻意用 log 而不是 warn：这个函数会对取链过程中的**每一个**响应逐个试，
+  // 其中 track_v2 / media-player 之类的探路响应本来就不带 play_auth（最终能拿到密钥的
+  // 是 GetPlayInfo）。以前打成 warn，导致每次正常取链都在日志里留一条像故障的记录，
+  // 排查时反而要花时间确认「这条到底是不是真坏了」。
   const topKeys = parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 12).join(',') : '(非对象)'
-  console.warn(
-    `[汽水解密] 未捕获到密钥（play_auth存在=${auth !== undefined}, 找到同名字段=${sawCandidate}, 顶层键=${topKeys}）`
+  console.log(
+    `[汽水解密] 该响应未携带密钥，继续尝试其它通道（play_auth存在=${auth !== undefined}, 找到同名字段=${sawCandidate}, 顶层键=${topKeys}）`
   )
   return ''
 }

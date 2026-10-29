@@ -1378,19 +1378,83 @@ export async function getPlaylistList(tagId: string, page = 1, pageSize = 20): P
 /** 排行榜：官方 charts 接口已失效，用精选关键词歌单充当榜单（内容真实可播） */
 export const SODA_BOARDS: Array<{ id: string; name: string; keyword: string }> = [
   { id: 'soda-hot', name: '汽水热歌榜', keyword: '热歌' },
-  { id: 'soda-douyin', name: '抖音爆款榜', keyword: '抖音爆款' },
+  { id: 'soda-douyin', name: '抖音爆款榜', keyword: '抖音热门' },
   { id: 'soda-mandarin', name: '华语精选榜', keyword: '华语' },
   { id: 'soda-folk', name: '民谣精选榜', keyword: '民谣' },
   { id: 'soda-rap', name: '说唱精选榜', keyword: '说唱' },
 ]
+
+/**
+ * 榜单 → 歌单 ID 的解析缓存。
+ *
+ * 为什么需要它：不同关键词在汽水搜出来的**第一个歌单经常是同一个**（最典型的是
+ * 「热歌」和「抖音爆款」都命中「2026抖音爆款热歌丨好听到可以单曲循环」），
+ * 于是两个榜点进去内容完全一样，用户会以为榜单是坏的。
+ *
+ * 现在按 SODA_BOARDS 的声明顺序依次解析，并跳过已经被前面榜单占用的歌单 ID，
+ * 保证 5 个榜各自指向不同歌单；即使将来某个关键词再次撞车也会自动顺延到下一个。
+ * 解析要发 5 次搜索，故缓存 30 分钟。
+ */
+let boardResolveCache: { at: number; map: Record<string, string> } | null = null
+const BOARD_RESOLVE_TTL = 30 * 60 * 1000
+
+/**
+ * 从「每个榜搜索到的候选歌单」里挑出互不重复的 ID。
+ *
+ * 纯函数（无 IO），导出是为了能用固定用例验证「关键词撞车时会不会顺延」。
+ */
+export function pickDistinctBoards(
+  candidates: Array<{ id: string; list: any[] }>,
+): Record<string, string> {
+  const used = new Set<string>()
+  const map: Record<string, string> = {}
+  for (const candidate of candidates) {
+    const pick = (Array.isArray(candidate.list) ? candidate.list : [])
+      .find((item: any) => item?.id && !used.has(String(item.id)))
+    if (!pick?.id) continue
+    map[candidate.id] = String(pick.id)
+    used.add(String(pick.id))
+  }
+  return map
+}
+
+async function resolveBoardPlaylists(force = false): Promise<Record<string, string>> {
+  const now = Date.now()
+  if (!force && boardResolveCache && now - boardResolveCache.at < BOARD_RESOLVE_TTL) {
+    return boardResolveCache.map
+  }
+  const candidates: Array<{ id: string; list: any[] }> = []
+  for (const board of SODA_BOARDS) {
+    try {
+      const found = await searchPlaylists(board.keyword, 1, 5)
+      candidates.push({ id: board.id, list: Array.isArray(found?.list) ? found.list : [] })
+    } catch (e: any) {
+      // 单个榜解析失败不影响其它榜，getBoardSongs 会退回按关键词兜底
+      console.log(`[汽水榜单] 解析「${board.name}」失败: ${e?.message || e}`)
+    }
+  }
+  const map = pickDistinctBoards(candidates)
+  boardResolveCache = { at: now, map }
+  return map
+}
 
 export async function getBoards(): Promise<any> {
   return { list: SODA_BOARDS.map(b => ({ bangid: b.id, name: b.name })) }
 }
 
 export async function getBoardSongs(boardId: string): Promise<any> {
-  const board = SODA_BOARDS.find(b => b.id === String(boardId || '').trim())
-  const keyword = board?.keyword || String(boardId || '').trim() || '热歌'
+  const wanted = String(boardId || '').trim()
+  const board = SODA_BOARDS.find(b => b.id === wanted)
+  if (board) {
+    const map = await resolveBoardPlaylists()
+    const playlistId = map[board.id]
+    if (playlistId) {
+      const detail = await getPlaylistDetail(playlistId)
+      return { list: detail.list, total: detail.list.length, boardName: board.name }
+    }
+  }
+  // 未知 bangid（或该榜解析失败）：退回按关键词取第一个歌单
+  const keyword = board?.keyword || wanted || '热歌'
   const found = await searchPlaylists(keyword, 1, 3)
   const first = found.list[0]
   if (!first?.id) throw new Error(`汽水榜单「${board?.name || boardId}」暂无可播内容`)

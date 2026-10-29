@@ -8314,6 +8314,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   throw new Error(`${extraSources.displayName(source)} 取链超时（${Math.round(budgetMs / 1000)} 秒）`)
                 }
 
+                // 汽水：判断这次到底有没有用上账号签名器。
+                // 走 extraSources 分支就不会进 tryResolveByAccount，复核必须在这里补上，
+                // 否则「账号过期但歌还能匿名播」永远不会被当场标红（要等 72 小时巡检）。
+                if (source === 'soda') musicAccount.noteSodaAnonymousLink(extra.via)
+
                 // 汽水加密流：随取链响应下发的 CENC 加密 MP4，其 AES 密钥（spade_a）已在
                 // getAudioUrl 里捕获并登记（extra.key）。这里不再「判死 DRM」，而是走
                 // 「下载 → 本地解密落缓存 → 返回明文缓存地址」，让首播即可播。
@@ -8376,6 +8381,17 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               musicAccount.hasAccount(source) &&
               isUserAllowed(verifiedUsername)
 
+            // 账号配了、总开关也开着，只是**这个用户在名单外**。
+            // 必须单独识别：否则报错会退化成「未找到支持 X 平台的自定义源，请添加源」，
+            // 而像 kglite（酷狗概念版）这种纯账号源根本不存在对应的自定义源，
+            // 用户照着提示去装源只会白折腾，真正该做的是让管理员加白名单。
+            const accountBlockedByPermission = !accountUsable &&
+              musicAccount.isEnabled() &&
+              musicAccount.isSupportedSource(source) &&
+              musicAccount.hasAccount(source)
+
+            const sourceName = musicAccount.getPlatform(source)?.name || source
+
             let customSourceError: string | null = null
             let attempts: any[] = []
             if (!result && (isSourceSupported(source, verifiedUsername) || accountUsable)) {
@@ -8409,9 +8425,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
             } else if (!result) {
               // isSourceSupported = false: 无任何自定义源支持此平台，立即通知前端
-              const why = musicAccount.isSupportedSource(source)
-                ? `未找到支持 ${source} 平台的自定义源；如已在「平台账号」里填写 Cookie，请确认总开关已打开`
-                : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
+              const why = accountBlockedByPermission
+                ? `${sourceName} 只能通过平台账号取链，但当前用户「${verifiedUsername}」不在使用权限名单内`
+                : musicAccount.isSupportedSource(source)
+                  ? `未找到支持 ${source} 平台的自定义源；如已在「平台账号」里填写 Cookie，请确认总开关已打开`
+                  : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
               void pushProgress({ name: '系统', status: 'fail', message: why })
             }
 
@@ -8419,7 +8437,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             if (!result) {
               const fallbackMsg = accountUsable
                 ? `自定义源与你配置的账号都未能取到链接（账号见 /health 日志里的 [平台账号] 记录）`
-                : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
+                : accountBlockedByPermission
+                  ? `${sourceName} 只能通过平台账号取链，但当前用户「${verifiedUsername}」不在使用权限名单内；请联系管理员在「平台账号 → 使用权限」里加入该用户`
+                  : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
               const errMsg = customSourceError || fallbackMsg
               const err: any = new Error(errMsg)
               err.attempts = attempts
@@ -8855,9 +8875,23 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err: any) {
-          console.error(`[排行榜] 获取排行榜歌曲失败:`, err)
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err.message || '获取排行榜歌曲失败' }))
+          const message = err?.message || '获取排行榜歌曲失败'
+          // 上游 SDK 拿到不认识的 bangid 时会直接读 undefined.total，抛 TypeError。
+          // 这是**调用参数**问题（例如把榜单的 id 当成 bangid 传，kg 的 id 是 `kg__8888`
+          // 而 bangid 是 `8888`），不是服务故障，没必要报 500 并打整段堆栈。
+          const badParams = err instanceof TypeError || /undefined \(reading '[^']+'\)/.test(message)
+          if (badParams) {
+            console.warn(`[排行榜] 榜单参数无效: source=${source} bangid=${bangid}（${message}）`)
+          } else {
+            console.error(`[排行榜] 获取排行榜歌曲失败:`, message)
+          }
+          res.writeHead(badParams ? 400 : 500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            error: badParams ? '榜单参数无效，请用 /api/music/leaderboard/boards 返回的 bangid' : message,
+            paramInvalid: badParams,
+            list: [],
+            total: 0,
+          }))
         }
         return
       }
