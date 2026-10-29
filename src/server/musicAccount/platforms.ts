@@ -60,7 +60,7 @@ export interface MusicAccountPlatform {
    * 支持的扫码登录方式。
    * 有值前端就显示「扫码登录」按钮；没有就只能手工填 Cookie。
    * 酷我官方没有可用的扫码换 token 接口，硬做只会给出假按钮；
-   * 咪咕的通行证 qrcWeb 接口是通的，但「扫码后换 pacmtoken」这段还在按实扫响应补齐（标实验）。
+   * 咪咕的通行证能出码，但 App 扫一扫只认 TV 端码（实测报「TV扫码登录失败」），同样不给按钮。
    */
   qrLogins?: MusicAccountQrOption[]
 }
@@ -178,8 +178,9 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     ],
     benefit: '登录后可解锁 HQ(320k)、SQ 无损音质',
     color: '#FF6A00',
-    // 网页登录弹窗没给扫码 tab，但通行证 qrcWeb 接口是通的，先以「实验」身份放出来
-    qrLogins: [{ driver: 'migu', label: '扫码登录（实验）' }],
+    // 不做扫码入口：咪咕音乐 App 的扫一扫只认 TV 端码，扫通行证的网页码必然提示
+    // 「TV扫码登录失败」，服务端也收不到任何扫码上报（2026-10-29 实测）。
+    // 咪咕只能走 Cookie（手工 / 浏览器插件推送）。
   },
   {
     id: 'bili',
