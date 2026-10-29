@@ -35,7 +35,6 @@ import type { AccountResolveResult, AccountInfo } from '../types'
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 const MOBI_API = 'https://mobi.kuwo.cn/mobi.s'
 const SOURCE = 'kwplayercar_ar_6.0.0.9_B_jiakong_vh.apk'
-const WWW = 'https://www.kuwo.cn'
 
 /**
  * 会员信息候选路径。
@@ -45,83 +44,74 @@ const WWW = 'https://www.kuwo.cn'
  * 注意这个 illegal 是**风控层**的回包：连不存在的路径也回它，所以不能拿它判断
  * 接口是否存在（wapi.kuwo.cn 才会给真 404）。这里按优先级排，逐个试到有数据为止。
  */
-const VIP_PATHS = [
-  '/api/v1/www/user/getVipInfo',
-  '/api/v1/www/user/getUserInfo',
-  '/api/v1/www/vip/getVipInfo',
-  '/api/www/user/getVipInfo',
-  '/api/www/user/getUserInfo',
-]
+/**
+ * 酷我会员信息接口（2026-10-30 从 GitHub 上的酷我签到脚本找到，不是猜的）：
+ *   GET https://vip1.kuwo.cn/vip/v2/user/vip?op=ui
+ * 响应：{ data: {...}, meta: { code: 200, desc: "成功" } }
+ *   data 里的会员到期字段：vipExpire / vipmExpire / vip3Expire / vipLuxuryExpire /
+ *   svipExpire / vipOverSeasExpire，毫秒时间戳字符串，"0" 表示没开。
+ *
+ * ⚠️ 踩过的坑（别再走一遍）：
+ *   - www.kuwo.cn 的 /api/** 要 Cookie 里的 kw_token + 同名 csrf 头 + reqId，
+ *     缺任一是风控层的 "The request is illegal!"（连不存在的路径也回这句，
+ *     所以不能拿它判断接口是否存在）。会员中心复制的 Cookie 根本没有 kw_token，
+ *     那条路对登录态 Cookie 是死的。
+ *   - wapi.kuwo.cn /api/pc/** 下没有用户信息路径（全 404）；
+ *     mobileinterfaces er.s（回 {"result":"error"}）、mobi.s（回空）也试不出 type。
+ *   - vip1.kuwo.cn 才是会员中心自己的域，认 userid/websid/sid，不需要 kw_token。
+ *   - 匿名调它也回 code=200，只是 data 是空对象 —— 所以**不能只看 code**，
+ *     要用 data 里有没有身份字段来确认这次请求确实带上了登录态。
+ */
+const VIP1_API = 'https://vip1.kuwo.cn/vip/v2/user/vip?op=ui'
 
-/** csrf 头必须与 Cookie 里某个凭证字段同值，按平台各处实际下发的字段名排优先级 */
-const TOKEN_KEYS = ['kw_token', 'token', 'sid', 'websid', 'user_id', 'userid']
+/** 会员到期时间字段，任一 > 当前时间即视为有会员 */
+const VIP_EXPIRE_FIELDS = ['vipExpire', 'vipmExpire', 'vip3Expire', 'vipLuxuryExpire', 'svipExpire', 'vipOverSeasExpire']
 
-/** 平台返回体里"是不是会员"的字段名五花八门，宽松取一个真值即可 */
-const VIP_FIELDS = ['isVip', 'vip', 'vipFlag', 'isVipFlag', 'vipType', 'vipLevel', 'isVipUser', 'vipStatus']
-
-function pickVipFlag(data: any): boolean | null {
-  if (!data || typeof data !== 'object') return null
-  let saw = false
-  let vip = false
-  for (const k of VIP_FIELDS) {
-    const raw = (data as any)[k]
-    if (raw === undefined || raw === null || raw === '') continue
-    const n = Number(raw)
-    if (!Number.isFinite(n)) {
-      // 字符串型（如 "1" / "true" / "vip"）也认
-      const s = String(raw).trim().toLowerCase()
-      if (s === 'true' || s === 'vip' || s === 'yes') { saw = true; vip = true }
-      continue
-    }
-    saw = true
-    if (n > 0) vip = true
-  }
-  return saw ? vip : null
-}
+/** 用来确认「这次请求真的是登录态」的字段；匿名时 data 为空对象 */
+const VIP_ID_FIELDS = ['uid', 'userid', 'userId', 'uname', 'nickname', 'username', 'userName', 'loginId']
 
 /**
- * 在线查酷我会员。拿不到就返回 null，由调用方退化为结构校验。
- * 命中的原始响应会记进日志，便于平台改字段后快速定位。
+ * 在线查酷我会员。返回 null 表示没拿到可信结果，由调用方退化为结构校验，不猜不报。
  */
-async function probeVip(cookie: string): Promise<{ isVip: boolean; nickname?: string; raw?: string } | null> {
-  const map = parseCookie(cookie)
-  console.warn(`[KW-VIP] cookie keys = ${Object.keys(map).join(',') || '(空)'}`)
-  const tokens = TOKEN_KEYS.filter(k => map[k]).slice(0, 2)
-  if (!tokens.length) {
-    console.warn('[KW-VIP] Cookie 里没有任何可用凭证字段（kw_token / sid / websid），跳过在线会员查询')
+async function probeVip(cookie: string): Promise<{ isVip: boolean; nickname?: string; tier?: string } | null> {
+  try {
+    const resp = await withTimeout(request(VIP1_API, {
+      headers: {
+        'User-Agent': UA,
+        Referer: 'https://vip1.kuwo.cn/',
+        Cookie: cookie,
+      },
+      timeout: 12000,
+    }), 13000, '酷我会员查询')
+    const body: any = resp?.body
+    const code = Number(body?.meta?.code)
+    const data: any = body?.data || {}
+    const keys = Object.keys(data || {})
+    console.warn(`[KW-VIP] code=${code} dataKeys=[${keys.join(',')}]`)
+    if (code !== 200) return null
+
+    // data 为空 = 这次请求没带上有效登录态（Cookie 失效或压根没登录），
+    // 不能当成「非会员」报出去，否则失效账号会被显示成正常非会员。
+    const hasIdentity = VIP_ID_FIELDS.some(k => data[k] !== undefined && String(data[k]) !== '')
+    if (!hasIdentity && !keys.length) {
+      console.warn('[KW-VIP] 响应 data 为空，无法确认登录态，退化为结构校验')
+      return null
+    }
+
+    const now = Date.now()
+    let isVip = false
+    for (const k of VIP_EXPIRE_FIELDS) {
+      const v = Number(data[k])
+      if (Number.isFinite(v) && v > now) { isVip = true; break }
+    }
+    const nickname = [data.uname, data.nickname, data.username, data.userName].find(v => !!v)
+    const tier = data.vipTag || (isVip ? 'VIP' : undefined)
+    console.warn(`[KW-VIP] 判定 → isVip=${isVip} tier=${tier || '-'} nickname=${nickname || '-'}`)
+    return { isVip, nickname: nickname ? String(nickname) : undefined, tier: tier ? String(tier) : undefined }
+  } catch (e: any) {
+    console.warn('[KW-VIP] 会员查询异常:', e?.message || e)
     return null
   }
-  const reqId = `${Date.now().toString(16)}-${Math.floor(Math.random() * 1e9).toString(16)}`
-  for (const tk of tokens) {
-   const csrf = map[tk]
-   for (const path of VIP_PATHS) {
-    try {
-      const resp = await withTimeout(request(`${WWW}${path}?reqId=${reqId}`, {
-        headers: {
-          'User-Agent': UA,
-          Referer: 'https://www.kuwo.cn/',
-          csrf,
-          Cookie: cookie,
-        },
-        timeout: 12000,
-      }), 13000, '酷我会员查询')
-      const body: any = resp?.body
-      const brief = typeof body === 'string' ? body.slice(0, 200) : JSON.stringify(body).slice(0, 220)
-      if (body && body.success === true && body.data) {
-        const isVip = pickVipFlag(body.data)
-        const nickname = (body.data.nickname || body.data.name || body.data.uname || body.data.userName || body.data.username) as string | undefined
-        console.warn(`[KW-VIP] ${path} 命中(csrf=${tk}) → isVip=${isVip} nickname=${nickname || '-'}`)
-        if (typeof isVip === 'boolean') return { isVip, nickname, raw: brief }
-        console.warn(`[KW-VIP] ${path} 返回成功但认不出会员字段 → ${brief}`)
-      } else {
-        console.warn(`[KW-VIP] ${path}(csrf=${tk}) → ${brief}`)
-      }
-    } catch (e: any) {
-      console.warn(`[KW-VIP] ${path} 请求异常: ${e?.message || e}`)
-    }
-   }
-  }
-  return null
 }
 
 /**
@@ -199,19 +189,17 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   const map = parseCookie(cookie)
   const nickname = decodeName(map['username']) || (map['userid'] ? `酷我账号 ${map['userid']}` : '')
 
-  // 先在线查会员：www 接口 + csrf 头能拿到权益字段就如实标注，
-  // 拿不到再退回结构校验（不猜、不谎报）。
+  // 先在线查会员：会员中心 vip1.kuwo.cn 认 userid/websid/sid，拿到到期时间就如实标注。
   try {
     const vip = await probeVip(cookie)
     if (vip) {
-      const uid = parseCookie(cookie)['userid'] || parseCookie(cookie)['user_id'] || ''
       return {
         ok: true,
         verified: 'online',
         isVip: vip.isVip,
-        nickname: vip.nickname || (uid ? `酷我账号 ${uid}` : '酷我账号'),
+        nickname: vip.nickname || nickname || '酷我账号',
         message: vip.isVip
-          ? '已登录，会员身份有效（酷我取链暂不校验账号，音质仍取决于曲目本身）'
+          ? `已登录，${vip.tier ? `会员（${vip.tier}）` : '会员'}有效（酷我取链暂不校验账号，音质仍取决于曲目本身）`
           : '已登录，当前非会员（普通账号）',
       }
     }
@@ -223,7 +211,7 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
     ok: true,
     verified: 'structural',
     nickname: nickname || undefined,
-    message: '已登录（结构校验）；会员在线查询未成功，多为 Cookie 缺 kw_token。请打开 www.kuwo.cn 登录后重新复制完整 Cookie（需含 kw_token），才能判定会员身份',
+    message: '已登录（结构校验）；会员在线查询未拿到可信结果（多为 Cookie 已失效），请重新复制酷我 Cookie 后再校验',
   }
 }
 
