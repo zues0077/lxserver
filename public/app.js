@@ -5347,6 +5347,22 @@ class App {
                    </div>`
                 : '';
 
+            // 零账号时卡片里没有任何「添加」入口 —— 「＋ 账号 ▾」这个按钮长在账号列表的
+            // section-foot 里，items 为空就整块不渲染。结果咪咕这类「必须先登录、再谈 Cookie」
+            // 的平台在全新状态下根本点不到「手机号登录」（2026-10-29 实测踩到）。
+            // 所以零账号时把登录入口直接铺在动作栏里：扫码（若有）+ 手机号（若有）。
+            const emptyLoginBtns = items.length
+                ? ''
+                : [
+                      ...(a.qrLogins || []).map(q =>
+                          `<button type="button" class="btn-secondary music-acc-qr-btn" onclick="app.startMusicAccountQR('${a.id}','${q.driver}')">${this.escapeHtml(q.label)}</button>`
+                      ),
+                      smsOpt
+                          ? `<button type="button" class="btn-secondary music-acc-sms-btn" onclick="app.editMusicAccountSms('${a.id}')">${this.escapeHtml(smsOpt.label || '手机号登录')}</button>`
+                          : '',
+                  ].join('')
+            const loginBtns = items.length ? (isKglite ? '' : qrBtns) : emptyLoginBtns
+
             return `
             <div class="music-acc-item ${a.configured ? 'is-configured' : ''}" data-platform="${a.id}">
                 <div class="music-acc-item-head">
@@ -5360,7 +5376,7 @@ class App {
                 ${accountsSection}
                 ${autoSwitchRow}
                 <div class="music-acc-actions music-acc-actions--main">
-                    ${isKglite ? '' : qrBtns}
+                    ${loginBtns}
                     <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">填写 Cookie</button>
                     ${isKglite ? '' : `<button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('${a.id}')">验证</button>`}
                     ${a.configured ? `<button type="button" class="btn-secondary" onclick="app.clearMusicAccount('${a.id}')">清除</button>` : ''}
