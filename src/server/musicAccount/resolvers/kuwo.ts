@@ -53,6 +53,9 @@ const VIP_PATHS = [
   '/api/www/user/getUserInfo',
 ]
 
+/** csrf 头必须与 Cookie 里某个凭证字段同值，按平台各处实际下发的字段名排优先级 */
+const TOKEN_KEYS = ['kw_token', 'token', 'sid', 'websid', 'user_id', 'userid']
+
 /** 平台返回体里"是不是会员"的字段名五花八门，宽松取一个真值即可 */
 const VIP_FIELDS = ['isVip', 'vip', 'vipFlag', 'isVipFlag', 'vipType', 'vipLevel', 'isVipUser', 'vipStatus']
 
@@ -82,13 +85,16 @@ function pickVipFlag(data: any): boolean | null {
  */
 async function probeVip(cookie: string): Promise<{ isVip: boolean; nickname?: string; raw?: string } | null> {
   const map = parseCookie(cookie)
-  const csrf = map['kw_token'] || ''
-  if (!csrf) {
-    console.warn('[KW-VIP] Cookie 里没有 kw_token，无法构造 csrf 头，跳过在线会员查询')
+  console.warn(`[KW-VIP] cookie keys = ${Object.keys(map).join(',') || '(空)'}`)
+  const tokens = TOKEN_KEYS.filter(k => map[k]).slice(0, 2)
+  if (!tokens.length) {
+    console.warn('[KW-VIP] Cookie 里没有任何可用凭证字段（kw_token / sid / websid），跳过在线会员查询')
     return null
   }
   const reqId = `${Date.now().toString(16)}-${Math.floor(Math.random() * 1e9).toString(16)}`
-  for (const path of VIP_PATHS) {
+  for (const tk of tokens) {
+   const csrf = map[tk]
+   for (const path of VIP_PATHS) {
     try {
       const resp = await withTimeout(request(`${WWW}${path}?reqId=${reqId}`, {
         headers: {
@@ -104,15 +110,16 @@ async function probeVip(cookie: string): Promise<{ isVip: boolean; nickname?: st
       if (body && body.success === true && body.data) {
         const isVip = pickVipFlag(body.data)
         const nickname = (body.data.nickname || body.data.name || body.data.uname || body.data.userName || body.data.username) as string | undefined
-        console.warn(`[KW-VIP] ${path} 命中 → isVip=${isVip} nickname=${nickname || '-'}`)
+        console.warn(`[KW-VIP] ${path} 命中(csrf=${tk}) → isVip=${isVip} nickname=${nickname || '-'}`)
         if (typeof isVip === 'boolean') return { isVip, nickname, raw: brief }
         console.warn(`[KW-VIP] ${path} 返回成功但认不出会员字段 → ${brief}`)
       } else {
-        console.warn(`[KW-VIP] ${path} → ${brief}`)
+        console.warn(`[KW-VIP] ${path}(csrf=${tk}) → ${brief}`)
       }
     } catch (e: any) {
       console.warn(`[KW-VIP] ${path} 请求异常: ${e?.message || e}`)
     }
+   }
   }
   return null
 }
@@ -203,7 +210,7 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   return {
     ok: true,
     verified: 'structural',
-    message: '已完成结构校验；酷我会员信息接口不可用（网关拦截或字段变更），且取链接口目前不校验账号，音质取决于曲目本身',
+    message: '已完成结构校验；会员在线查询未成功（多为 Cookie 缺 kw_token）。请打开 www.kuwo.cn 登录并播放一首歌后重新复制完整 Cookie（需含 kw_token），才能判定会员身份',
   }
 }
 
