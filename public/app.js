@@ -5255,8 +5255,8 @@ class App {
             const autoSummary = autoCfg.autoClaim === false
                 ? '已关闭'
                 : `${String(typeof autoCfg.startHour === 'number' ? autoCfg.startHour : 6).padStart(2, '0')}:00 起`
-                  + ` · 间隔 ${typeof autoCfg.gapSeconds === 'number' ? autoCfg.gapSeconds : 500}s`
-                  + ` · 剩余不足 ${typeof autoCfg.minRemainHours === 'number' ? autoCfg.minRemainHours : 24}h 才领`;
+                  + ` · 间隔 ${this._gapText(autoCfg.gapMinSeconds, autoCfg.gapMaxSeconds)}`
+                  + ` · 剩余 <${typeof autoCfg.minRemainHours === 'number' ? autoCfg.minRemainHours : 24}h 才补`;
             const autoSection = isKglite
                 ? `<div class="music-acc-section">
                        <div class="music-acc-section-title">
@@ -5275,10 +5275,16 @@ class App {
                                        ${Array.from({ length: 24 }, (_, h) => `<option value="${h}">${String(h).padStart(2, '0')}:00</option>`).join('')}
                                    </select>
                                </label>
-                               <label class="music-acc-auto-field">账号间隔（秒）
-                                   <input type="number" id="kglite-gap" min="0" max="600" step="10">
+                               <label class="music-acc-auto-field" title="账号之间的错峰等待，每次在区间里随机取一个值，避免固定节奏被风控认成脚本">
+                                   账号间隔最短（秒）
+                                   <input type="number" id="kglite-gap-min" min="5" max="3600" step="5">
                                </label>
-                               <label class="music-acc-auto-field">剩余不足（小时才补）
+                               <label class="music-acc-auto-field" title="账号之间的错峰等待，每次在区间里随机取一个值，避免固定节奏被风控认成脚本">
+                                   账号间隔最长（秒）
+                                   <input type="number" id="kglite-gap-max" min="5" max="3600" step="5">
+                               </label>
+                               <label class="music-acc-auto-field" title="只在会员快到期时才补领：剩余时长少于这个值才动手，够用就跳过。这样不会把每天 8 次额度全用掉、把到期时间一路攒到几个月后">
+                                   VIP 剩余少于（小时才补）
                                    <input type="number" id="kglite-min-remain" min="1" max="720">
                                </label>
                            </div>
@@ -5370,6 +5376,15 @@ class App {
         } else {
             void this.refreshMusicAccounts();
         }
+    }
+
+    /** 间隔区间的人话展示：整分钟就给「1~10 分钟」，否则给「10~100 秒」 */
+    _gapText(min, max) {
+        const lo = Number.isFinite(min) ? Math.max(0, Math.floor(min)) : 60;
+        const hi = Number.isFinite(max) ? Math.max(lo, Math.floor(max)) : Math.max(lo, 600);
+        const asMin = (n) => n >= 60 && n % 60 === 0;
+        if (lo === hi) return asMin(lo) ? `${lo / 60} 分钟` : `${lo} 秒`;
+        return asMin(lo) && asMin(hi) ? `${lo / 60}~${hi / 60} 分钟` : `${lo}~${hi} 秒`;
     }
 
     /** 概念版「自动领会员」设置区的展开 / 收起（表单常驻 DOM，只切 display） */
@@ -5580,15 +5595,17 @@ class App {
                 summaryEl.textContent = d.autoClaim === false
                     ? '已关闭'
                     : `${String(typeof d.startHour === 'number' ? d.startHour : 6).padStart(2, '0')}:00 起`
-                      + ` · 间隔 ${typeof d.gapSeconds === 'number' ? d.gapSeconds : 500}s`
-                      + ` · 剩余不足 ${typeof d.minRemainHours === 'number' ? d.minRemainHours : 24}h 才领`;
+                      + ` · 间隔 ${this._gapText(d.gapMinSeconds, d.gapMaxSeconds)}`
+                      + ` · 剩余 <${typeof d.minRemainHours === 'number' ? d.minRemainHours : 24}h 才补`;
             }
             const autoEl = document.getElementById('kglite-auto-claim');
             if (autoEl) autoEl.checked = d.autoClaim !== false;
             const hourEl = document.getElementById('kglite-start-hour');
             if (hourEl) hourEl.value = String(typeof d.startHour === 'number' ? d.startHour : 6);
-            const gapEl = document.getElementById('kglite-gap');
-            if (gapEl) gapEl.value = typeof d.gapSeconds === 'number' ? d.gapSeconds : 60;
+            const gapMinEl = document.getElementById('kglite-gap-min');
+            if (gapMinEl) gapMinEl.value = typeof d.gapMinSeconds === 'number' ? d.gapMinSeconds : 60;
+            const gapMaxEl = document.getElementById('kglite-gap-max');
+            if (gapMaxEl) gapMaxEl.value = typeof d.gapMaxSeconds === 'number' ? d.gapMaxSeconds : 600;
             const minEl = document.getElementById('kglite-min-remain');
             if (minEl) minEl.value = typeof d.minRemainHours === 'number' ? d.minRemainHours : 24;
             const nextEl = document.getElementById('kglite-next-run');
@@ -5599,7 +5616,7 @@ class App {
                     const t = new Date(d.nextRunAt).toLocaleString('zh-CN', {
                         hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
                     });
-                    nextEl.textContent = `下一轮：${t}（白天每 3 小时一轮，剩余不足 ${d.minRemainHours} 小时才领）`;
+                    nextEl.textContent = `下一轮：${t}（白天每 3 小时一轮；VIP 剩余少于 ${d.minRemainHours} 小时才补，够用就跳过）`;
                 } else {
                     nextEl.textContent = '';
                 }
@@ -5731,12 +5748,27 @@ class App {
         }
     }
 
-    /** 保存概念版自动领取设置（开始时间 / 账号间隔 / 补领阈值 / 开关） */
+    /** 保存概念版自动领取设置（开始时间 / 账号间隔区间 / 补领阈值 / 开关） */
     async saveKugouLiteAutoClaim(btn) {
         const autoEl = document.getElementById('kglite-auto-claim');
         const hourEl = document.getElementById('kglite-start-hour');
-        const gapEl = document.getElementById('kglite-gap');
+        const gapMinEl = document.getElementById('kglite-gap-min');
+        const gapMaxEl = document.getElementById('kglite-gap-max');
         const minEl = document.getElementById('kglite-min-remain');
+        // 空输入不要当成 0（Number('') === 0），否则清空一下就把间隔拉成 5 秒
+        const numOf = (el) => {
+            if (!el || String(el.value).trim() === '') return undefined;
+            const n = Number(el.value);
+            return Number.isFinite(n) ? n : undefined;
+        };
+        let gapMin = numOf(gapMinEl);
+        let gapMax = numOf(gapMaxEl);
+        // 最短填得比最长还大，多半是填反了：直接对调比弹错误提示友好
+        if (gapMin !== undefined && gapMax !== undefined && gapMin > gapMax) {
+            [gapMin, gapMax] = [gapMax, gapMin];
+            if (gapMinEl) gapMinEl.value = gapMin;
+            if (gapMaxEl) gapMaxEl.value = gapMax;
+        }
         if (btn) btn.disabled = true;
         try {
             await this.request('/api/music/accounts/config', {
@@ -5744,7 +5776,8 @@ class App {
                 body: JSON.stringify({
                     kgliteAutoClaim: autoEl ? autoEl.checked : undefined,
                     kgliteStartHour: hourEl ? Number(hourEl.value) : undefined,
-                    kgliteGapSeconds: gapEl ? Number(gapEl.value) : undefined,
+                    kgliteGapMinSeconds: gapMin,
+                    kgliteGapMaxSeconds: gapMax,
                     kgliteMinRemainHours: minEl ? Number(minEl.value) : undefined
                 })
             });

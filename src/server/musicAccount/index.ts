@@ -798,7 +798,9 @@ export type KugouLiteVipState = kglite.LiteVipInfo & {
   /** 以下为自动领取配置的生效值，前端表单直接回填 */
   autoClaim: boolean
   startHour: number
-  gapSeconds: number
+  /** 账号之间的错峰间隔（秒），每次随机落在 [gapMinSeconds, gapMaxSeconds] 内 */
+  gapMinSeconds: number
+  gapMaxSeconds: number
   minRemainHours: number
   /** 下一轮自动领取的时间戳（毫秒），没有排程时为 0 */
   nextRunAt: number
@@ -849,13 +851,14 @@ export async function claimKugouLiteVip(itemId?: string): Promise<kglite.ClaimVi
 
 /** 查所有账号的会员信息（供接口直接展示剩余时长） */
 export async function getKugouLiteVip(): Promise<KugouLiteVipState> {
-  const cfg = liteAutoClaimConfig()
+  const cfg = getKugouLiteAutoClaimConfig()
   const list = liteAccounts()
   const base = {
     configured: list.length > 0,
     autoClaim: cfg.autoClaim,
     startHour: cfg.startHour,
-    gapSeconds: cfg.gapSeconds,
+    gapMinSeconds: cfg.gapMinSeconds,
+    gapMaxSeconds: cfg.gapMaxSeconds,
     minRemainHours: cfg.minRemainHours,
     nextRunAt: vipNextRunAt,
   }
@@ -925,19 +928,68 @@ const AUTO_CLAIM_ROUNDS = 8
 const AUTO_CLAIM_ROUND_GAP_HOURS = 3
 
 /** 读到一份「钳过范围」的自动领取配置，防止手改配置文件把定时器打死 */
-function liteAutoClaimConfig(): { autoClaim: boolean; startHour: number; gapSeconds: number; minRemainHours: number } {
+export function getKugouLiteAutoClaimConfig(): {
+  autoClaim: boolean
+  startHour: number
+  gapMinSeconds: number
+  gapMaxSeconds: number
+  minRemainHours: number
+} {
   const c = config()
   const num = (key: string, def: number, min: number, max: number) => {
     const v = Number(c[key])
     if (!Number.isFinite(v)) return def
     return Math.min(max, Math.max(min, Math.floor(v)))
   }
+  const gap = liteGapRange(c)
   return {
     autoClaim: c['musicAccount.kglite.autoClaim'] !== false,
     startHour: num('musicAccount.kglite.startHour', 6, 0, 23),
-    gapSeconds: num('musicAccount.kglite.gapSeconds', 60, 0, 600),
+    gapMinSeconds: gap.min,
+    gapMaxSeconds: gap.max,
     minRemainHours: num('musicAccount.kglite.minRemainHours', 24, 1, 24 * 30),
   }
+}
+
+/** 间隔允许的范围：下限 5 秒（再短就等于连打），上限 1 小时 */
+const GAP_LIMIT = { min: 5, max: 3600 }
+
+/**
+ * 账号间的错峰间隔，从「固定值」改成「区间内随机」。
+ *
+ * 固定 N 秒意味着 4 个号在 N、2N、3N 秒的整点依次请求，时间戳摆出来是一条等差数列，
+ * 比人工操作更像脚本。区间随机就好得多。
+ *
+ * 旧键 `musicAccount.kglite.gapSeconds`（v1.5.48 及以前）已由这一对键取代：
+ * defaultConfig 会给新键兜底，所以即使老配置文件里还留着旧键，读到的是新默认值（60~600 秒），
+ * 不需要写盘迁移。
+ */
+function liteGapRange(c: Record<string, any>): { min: number; max: number } {
+  const read = (key: string): number | null => {
+    const v = Number(c[key])
+    if (!Number.isFinite(v)) return null
+    return Math.min(GAP_LIMIT.max, Math.max(GAP_LIMIT.min, Math.floor(v)))
+  }
+
+  let lo = read('musicAccount.kglite.gapMinSeconds')
+  let hi = read('musicAccount.kglite.gapMaxSeconds')
+
+  if (lo === null && hi === null) return { min: 60, max: 600 }
+  if (lo === null) lo = Math.max(GAP_LIMIT.min, Math.floor((hi as number) / 2))
+  if (hi === null) hi = Math.max(lo, 600)
+  if (lo > hi) [lo, hi] = [hi, lo]
+  return { min: lo, max: hi }
+}
+
+/**
+ * 在 [min, max] 闭区间里取一个整数秒。min === max 时退化成固定值。
+ * 单独导出是为了能写单测：区间取值的边界最容易写错（差一、倒序、负数）。
+ */
+export function pickGapSeconds(min: number, max: number, rand: () => number = Math.random): number {
+  const lo = Math.max(0, Math.floor(Number.isFinite(min) ? min : 0))
+  const hi = Math.max(lo, Math.floor(Number.isFinite(max) ? max : lo))
+  if (hi === lo) return lo
+  return lo + Math.floor(rand() * (hi - lo + 1))
 }
 
 let vipTimer: ReturnType<typeof setTimeout> | null = null
@@ -998,7 +1050,7 @@ export async function runKugouLiteAutoClaim(opts: { force?: boolean } = {}): Pro
   // 总开关只管「账号通道要不要参与取链」，不该拦住用户手动点的「全部领取」；
   // 定时任务（非 force）才需要跟着总开关走。
   if (!isEnabled() && !opts.force) return { startedAt, halted: '账号通道总开关未开启', accounts: [] }
-  const cfg = liteAutoClaimConfig()
+  const cfg = getKugouLiteAutoClaimConfig()
   if (!cfg.autoClaim && !opts.force) return { startedAt, halted: '自动领取已关闭', accounts: [] }
 
   const list = liteAccounts()
@@ -1007,8 +1059,15 @@ export async function runKugouLiteAutoClaim(opts: { force?: boolean } = {}): Pro
   const accounts: LiteAutoClaimAccount[] = []
   for (let i = 0; i < list.length; i++) {
     const acct = list[i]
-    // 账号之间错峰：多个号连着打同一个接口，很容易被平台按设备/网络维度风控
-    if (i > 0 && cfg.gapSeconds > 0) await sleep(cfg.gapSeconds * 1000)
+    // 账号之间错峰：多个号连着打同一个接口，很容易被平台按设备/网络维度风控。
+    // 间隔在配置的区间里随机取，不要固定值（等间隔的请求序列更像脚本）。
+    if (i > 0 && cfg.gapMaxSeconds > 0) {
+      const gap = pickGapSeconds(cfg.gapMinSeconds, cfg.gapMaxSeconds)
+      if (gap > 0) {
+        console.log(`[平台账号] 概念版自动补领｜下一个账号等 ${gap} 秒（区间 ${cfg.gapMinSeconds}~${cfg.gapMaxSeconds} 秒随机）`)
+        await sleep(gap * 1000)
+      }
+    }
 
     const vip = await kglite.getVipInfo(acct.cookie)
     if (!vip.ok) {
@@ -1050,7 +1109,7 @@ export async function runKugouLiteAutoClaim(opts: { force?: boolean } = {}): Pro
 /** 按「开始时间 + 3 小时」重算并挂上下一次定时器 */
 function scheduleNextAutoClaim(): void {
   if (vipTimer) return
-  const cfg = liteAutoClaimConfig()
+  const cfg = getKugouLiteAutoClaimConfig()
   if (!cfg.autoClaim) {
     vipNextRunAt = 0
     console.log('[平台账号] 酷狗概念版 VIP 自动领取处于关闭状态（后台开启后会自动排程，无需重启）')
@@ -1073,7 +1132,7 @@ function scheduleNextAutoClaim(): void {
   const when = new Date(at)
   console.log(
     `[平台账号] 酷狗概念版 VIP 自动领取已排程：每天 ${pad(cfg.startHour)}:00 起，每 ${AUTO_CLAIM_ROUND_GAP_HOURS} 小时一轮（共 ${AUTO_CLAIM_ROUNDS} 轮）；`
-    + `剩余不足 ${cfg.minRemainHours} 小时才领，账号间隔 ${cfg.gapSeconds} 秒；`
+    + `剩余不足 ${cfg.minRemainHours} 小时才领，账号间隔 ${cfg.gapMinSeconds}~${cfg.gapMaxSeconds} 秒随机；`
     + `下一轮 ${when.getMonth() + 1}/${when.getDate()} ${pad(when.getHours())}:${pad(when.getMinutes())}`,
   )
 }

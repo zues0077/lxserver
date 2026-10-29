@@ -300,9 +300,15 @@ declare namespace LX {
     'musicAccount.kglite.startHour'?: number
 
     /**
-     * 酷狗概念版：多账号之间领 VIP 的间隔秒数（错峰，降低风控概率）
+     * 酷狗概念版：多账号之间领 VIP 的错峰间隔（秒）下限。
+     * 每两个账号之间在 [下限, 上限] 里随机取一个值，固定间隔会形成等差时间序列，更像脚本。
      */
-    'musicAccount.kglite.gapSeconds'?: number
+    'musicAccount.kglite.gapMinSeconds'?: number
+
+    /**
+     * 酷狗概念版：多账号之间领 VIP 的错峰间隔（秒）上限
+     */
+    'musicAccount.kglite.gapMaxSeconds'?: number
 
     /**
      * 酷狗概念版：剩余 VIP 低于这个小时数才自动补领（避免把额度攒到几年后）
