@@ -6495,56 +6495,57 @@ input:-webkit-autofill:active {
     line-height: 1.5;
 }
 
+/* 一行一个账号：单字标签 + 名字 + 状态 + VIP 剩余 + [验证][⋯]。
+   以前每个号是「标题行 + 4 个按钮」，4 个号就能把卡片顶到 900px 高。 */
 .music-acc-acct {
-    border-radius: 9px;
-    border: 1px solid rgba(127, 127, 127, 0.22);
-    background: rgba(127, 127, 127, 0.06);
-    padding: 0.5rem 0.7rem;
+    display: flex;
+    align-items: center;
+    gap: 0.42rem;
+    min-width: 0;
+    border-radius: 8px;
+    border: 1px solid rgba(127, 127, 127, 0.18);
+    background: rgba(127, 127, 127, 0.05);
+    padding: 0.3rem 0.5rem;
 }
 
 .music-acc-acct.is-primary {
-    border-color: rgba(16, 185, 129, 0.5);
-    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.45);
+    background: rgba(16, 185, 129, 0.07);
 }
 
-.music-acc-acct-head {
-    display: flex;
+/* 「主 / 冷」单字标签：比原来两字胶囊省一半宽度，四个号也不会挤到换行 */
+.music-acc-acct-tag {
+    flex: 0 0 auto;
+    width: 1.2rem;
+    height: 1.2rem;
+    display: inline-flex;
     align-items: center;
-    gap: 0.45rem;
-    flex-wrap: wrap;
-}
-
-.music-acc-primary-tag,
-.music-acc-sub-tag {
-    font-size: 0.7rem;
-    padding: 0.1rem 0.42rem;
-    border-radius: 999px;
-    white-space: nowrap;
-}
-
-.music-acc-primary-tag {
-    background: rgba(16, 185, 129, 0.18);
-    color: #059669;
+    justify-content: center;
+    border-radius: 5px;
+    font-size: 0.66rem;
     font-weight: 600;
-}
-
-.music-acc-sub-tag {
     background: rgba(127, 127, 127, 0.16);
     color: var(--text-secondary, #8b8b8b);
 }
 
+.music-acc-acct-tag.is-primary {
+    background: rgba(16, 185, 129, 0.18);
+    color: #059669;
+}
+
 .music-acc-acct-name {
-    font-size: 0.86rem;
-    font-weight: 600;
+    flex: 1 1 auto;
     min-width: 0;
+    font-size: 0.84rem;
+    font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
 .music-acc-acct-vip {
-    margin-left: auto;
-    font-size: 0.76rem;
+    flex: 0 0 auto;
+    font-size: 0.74rem;
     color: var(--text-muted);
     white-space: nowrap;
 }
@@ -6561,16 +6562,78 @@ input:-webkit-autofill:active {
     color: #dc2626;
 }
 
-.music-acc-acct-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.35rem;
-    margin-top: 0.4rem;
+.music-acc-acct .music-acc-status {
+    flex: 0 0 auto;
 }
 
-.music-acc-acct-actions button {
-    font-size: 0.75rem;
-    padding: 0.26rem 0.6rem;
+.music-acc-acct-ops {
+    flex: 0 0 auto;
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.music-acc-mini-btn {
+    padding: 0.12rem 0.44rem;
+    border-radius: 6px;
+    border: 1px solid rgba(127, 127, 127, 0.28);
+    background: transparent;
+    color: var(--text-secondary, #8b8b8b);
+    font-size: 0.72rem;
+    line-height: 1.5;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.music-acc-mini-btn:hover {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.55);
+}
+
+.music-acc-more-btn {
+    padding: 0.1rem 0.36rem;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    letter-spacing: 0.04em;
+}
+
+/* 账号操作浮层（⋯ 与「＋ 账号 ▾」共用）：fixed 定位，不受卡片 overflow / 滚动容器裁切 */
+.music-acc-pop {
+    position: fixed;
+    z-index: 3000;
+    min-width: 132px;
+    padding: 0.25rem;
+    border-radius: 9px;
+    border: 1px solid rgba(127, 127, 127, 0.28);
+    background: var(--bg-card, #232323);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.music-acc-pop-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.4rem 0.6rem;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary, #e5e7eb);
+    font-size: 0.8rem;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.music-acc-pop-item:hover {
+    background: rgba(127, 127, 127, 0.16);
+}
+
+.music-acc-pop-item.is-danger {
+    color: #f87171;
 }
 
 /* ---- 概念版小节容器：账号列表 / 自动领会员 各自成块，和卡片其余内容拉开层次 ---- */
@@ -6592,7 +6655,8 @@ input:-webkit-autofill:active {
 }
 
 /* 多号平台的「展开其余 N 个」：贴在标题行最右，收起时卡片不会被堆到两三屏高 */
-.music-acc-fold-btn {
+.music-acc-fold-btn,
+.music-acc-subtoggle {
     margin-left: auto;
     padding: 0.15rem 0.5rem;
     border-radius: 6px;
@@ -6606,7 +6670,8 @@ input:-webkit-autofill:active {
     transition: color 0.15s ease, border-color 0.15s ease;
 }
 
-.music-acc-fold-btn:hover {
+.music-acc-fold-btn:hover,
+.music-acc-subtoggle:hover {
     color: #f59e0b;
     border-color: rgba(245, 158, 11, 0.55);
 }
@@ -6624,6 +6689,19 @@ input:-webkit-autofill:active {
 .music-acc-section-foot .btn-secondary {
     font-size: 0.78rem;
     padding: 0.3rem 0.7rem;
+}
+
+/* 压成一行：详细说明挪到 title，不再白占三行高度 */
+.music-acc-autoswitch.is-compact {
+    align-items: center;
+    padding: 0.32rem 0.55rem;
+    margin-top: 0.5rem;
+    font-size: 0.78rem;
+}
+
+.music-acc-section-foot .music-acc-add-btn {
+    font-size: 0.76rem;
+    padding: 0.24rem 0.62rem;
 }
 
 /* 主号失效自动切换：整行可点，说明文字用小字压在下面（默认关闭这件事必须写出来） */
