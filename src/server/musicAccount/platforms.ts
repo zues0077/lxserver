@@ -40,6 +40,16 @@ export interface MusicAccountPlatform {
   essentialKey?: string
   /** 缺 essentialKey 时给出的补救说明 */
   essentialHint?: string
+  /**
+   * Cookie 里能**稳定标识「这是哪个号」**的字段（按优先级，取第一个有值的）。
+   *
+   * 只用来做「扫码登录时同一个号就更新、不同号才新增」的判断，
+   * 不参与登录态判定。所以这里**只放不会变的字段**：
+   *   - 酷狗 KugooID / 酷我 userid / 咪咕 userid / B站 DedeUserID / QQ uin：用户维度唯一且稳定，放。
+   *   - 网易 MUSIC_U、汽水 sessionid：每次登录都会换新值，放进来会导致「重登一次多一个冷备号」，
+   *     所以不填 —— 这两个平台退回「覆盖主账号」的老语义。
+   */
+  uidKeys?: string[]
   /** 抓取步骤说明，展示在管理界面「如何获取」里 */
   guide: string[]
   /** 登录后能带来的收益说明 */
@@ -82,6 +92,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     loginKeys: ['qm_keyst', 'uin', 'wxuin'],
     essentialKey: 'qm_keyst',
     essentialHint: '只有 uin 没有 qm_keyst 会被当游客，SQ / 臻品音质拿不到，请重新登录 QQ 音乐后再取',
+    uidKeys: ['uin', 'wxuin'],
     guide: [
       '打开 https://y.qq.com 并登录',
       'F12 →「网络 / Network」，筛选 y.qq.com，点任意一条接口请求',
@@ -102,6 +113,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     short: '酷我',
     cookieDomain: 'www.kuwo.cn',
     loginKeys: ['kw_token', 'userid', 'user_id', 'websid', 'logintype', 'username'],
+    uidKeys: ['userid', 'user_id'],
     guide: [
       '打开 https://www.kuwo.cn 并登录，登录后播放一首歌（让 Cookie 尽量完整）',
       'F12 →「网络 / Network」，筛选 www.kuwo.cn，点播放相关请求（如 /api/v1/www/music/playUrl）',
@@ -117,6 +129,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     short: '酷狗',
     cookieDomain: 'www.kugou.com',
     loginKeys: ['t', 'KugooID'],
+    uidKeys: ['KugooID', 'userid'],
     guide: [
       '打开 https://www.kugou.com 并登录',
       'F12 →「网络 / Network」，筛选 kugou.com，点任意一条接口请求',
@@ -137,6 +150,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     loginKeys: ['token', 'userid'],
     essentialKey: 'mid',
     essentialHint: '缺少 mid（设备标识）会导致请求签名失败，取链必然报错，请用扫码或短信登录重新获取',
+    uidKeys: ['userid'],
     guide: [
       '推荐直接用下面的「扫码登录」或「手机号登录」——概念版登录态必须由 App 侧签发，网页 Cookie 用不了',
       '扫码：打开酷狗概念版 App → 我的 → 扫一扫',
@@ -153,6 +167,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     short: '咪咕',
     cookieDomain: 'music.migu.cn',
     loginKeys: ['*ticket*', '*utoken*', '*pacmtoken*', 'migu_music*', 'mg_auth*', 'pusk', 'userid'],
+    uidKeys: ['userid'],
     guide: [
       '打开 https://music.migu.cn 并登录，登录后播放一首歌',
       'F12 →「网络 / Network」，筛选 music.migu.cn',
@@ -172,6 +187,7 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     loginKeys: ['SESSDATA', 'bili_jct', 'DedeUserID'],
     essentialKey: 'SESSDATA',
     essentialHint: '没有 SESSDATA 等于游客身份，取流最高只有 192k；大会员的 Hi-Res / 杜比必须 SESSDATA 生效',
+    uidKeys: ['DedeUserID'],
     guide: [
       '打开 https://www.bilibili.com 并登录（大会员账号才解锁 Hi-Res / 杜比）',
       'F12 →「网络 / Network」，筛选 api.bilibili.com，任点一条请求',

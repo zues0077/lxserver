@@ -17,6 +17,7 @@ import * as kgliteSolver from '../resolvers/kglite'
 import { getPlatform } from '../platforms'
 import { normalizeCookieInput } from '../cookieParse'
 import * as store from '../store'
+import { extractAccountIdentity } from '../identity'
 import type { QrDriver, QrStatus } from './types'
 
 /** driverId → 实现。platforms.ts 里用同一套 id 声明「这个平台支持哪些扫码方式」 */
@@ -58,6 +59,60 @@ function sweep(): void {
 
 function newId(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+}
+
+// ---- 登录成功后落库：先认号，再决定「更新 / 新增 / 覆盖主账号」 ----
+
+export type LoginAction = 'updated' | 'created' | 'replaced'
+
+interface PersistResult {
+  ok: boolean
+  error?: string
+  /** updated = 同一个号，更新了原有条目；created = 新号，追加为冷备；replaced = 覆盖主账号 */
+  action: LoginAction
+  /** updated 时是命中条目的显示名 */
+  label?: string
+  total?: number
+}
+
+/**
+ * 把一个刚拿到的登录态存进去。
+ *
+ * 判断顺序（这就是「老账号覆盖、新账号增加」的实现）：
+ *   1. Cookie 里的稳定 uid 命中已有条目 → 只更新那一条（重扫同一个号，列表不会变长）
+ *   2. 同一份 Cookie（指纹相同）命中 → 同样只更新
+ *   3. 有 uid 但没命中 = 一个没见过的新号 → **直接追加为冷备**，不动主账号
+ *      （以前要用户先点「添加账号」才算追加，等于把「这是不是我存过的号」这个判断推给用户）
+ *   4. 平台没有稳定 uid（网易 MUSIC_U、汽水 sessionid 每次登录都变）→ 只能沿用老语义：
+ *      用户点了「添加账号」就追加，否则覆盖主账号
+ */
+export function persistLoginCookie(platform: string, cookie: string, append: boolean): PersistResult {
+  const ident = extractAccountIdentity(platform, cookie)
+  const matched = store.findItemByIdentity(platform, ident)
+
+  if (matched) {
+    const r = store.addCookie(platform, cookie, {
+      itemId: matched.id,
+      uid: ident.uid,
+      cookieHash: ident.cookieHash,
+    })
+    return { ok: r.success, error: r.error, action: 'updated', label: matched.label, total: r.total }
+  }
+
+  if (ident.uid || append) {
+    const r = store.addCookie(platform, cookie, { ...ident })
+    return { ok: r.success, error: r.error, action: 'created', total: r.total }
+  }
+
+  const r = store.setCookie(platform, cookie, ident)
+  return { ok: r.success, error: r.error, action: 'replaced' }
+}
+
+/** 登录成功后的提示文案：直接说清「更新了哪个号 / 新增了冷备」 */
+function loginSuccessMessage(r: PersistResult): string {
+  if (r.action === 'updated') return `登录成功，已更新账号「${r.label || '主账号'}」`
+  if (r.action === 'created') return `登录成功，已添加为新账号（冷备，共 ${r.total ?? 1} 个；需要用它取链请点「设为主账号」）`
+  return '登录成功，主账号已更新'
 }
 
 export interface QrStartPayload {
@@ -129,6 +184,8 @@ export interface QrPollPayload {
   message?: string
   /** 成功后置 true，提示前端可以刷新列表 */
   saved?: boolean
+  /** 落库方式：updated 更新已有号 / created 新增冷备 / replaced 覆盖主账号 */
+  action?: LoginAction
   error?: string
 }
 
@@ -160,17 +217,18 @@ export async function poll(sessionId: string): Promise<QrPollPayload> {
     // 各家驱动拼出来的串格式不完全统一，落库前统一收敛成 k=v; k=v
     const parsed = normalizeCookieInput(rawCookie)
     const cookie = parsed.ok ? parsed.cookie : rawCookie
-    const saved = s.append
-      ? store.addCookie(s.platform, cookie)
-      : store.setCookie(s.platform, cookie)
+    const saved = persistLoginCookie(s.platform, cookie, !!s.append)
     s.done = true
     sessions.delete(s.id)
-    if (!saved.success) {
+    if (!saved.ok) {
       return { ok: false, status: 'failed', message: saved.error || 'Cookie 保存失败' }
     }
     const name = getPlatform(s.platform)?.name || s.platform
-    console.log(`[平台账号] ${name} 扫码登录成功，Cookie 已加密保存${s.append ? '（追加为新账号）' : ''}（${cookie.length} 字符）`)
-    return { ok: true, status: 'success', message: '登录成功，账号已保存', saved: true }
+    const desc = saved.action === 'updated' ? `更新已有账号「${saved.label || ''}」`
+      : saved.action === 'created' ? `新增账号（共 ${saved.total ?? 1} 个）`
+        : '更新主账号'
+    console.log(`[平台账号] ${name} 扫码登录成功，Cookie 已加密保存，${desc}（${cookie.length} 字符）`)
+    return { ok: true, status: 'success', message: loginSuccessMessage(saved), saved: true, action: saved.action }
   } catch (e: any) {
     // 网络抖动不要直接判死，让前端继续轮询。
     // 错误细节只写日志，不往界面抛 —— 用户看到「socket hang up」只会更困惑。
@@ -251,6 +309,7 @@ export interface SmsLoginPayload {
   ok: boolean
   message: string
   saved?: boolean
+  action?: LoginAction
 }
 
 /** 用验证码完成登录并落库 */
@@ -265,13 +324,11 @@ export async function loginSms(sessionId: string, code: string): Promise<SmsLogi
 
   const parsed = normalizeCookieInput(res.cookie)
   const cookie = parsed.ok ? parsed.cookie : res.cookie
-  const saved = s.append
-    ? store.addCookie(s.platform, cookie)
-    : store.setCookie(s.platform, cookie)
-  if (!saved.success) return { ok: false, message: saved.error || '账号保存失败' }
+  const saved = persistLoginCookie(s.platform, cookie, !!s.append)
+  if (!saved.ok) return { ok: false, message: saved.error || '账号保存失败' }
 
   smsSessions.delete(sessionId)
   const name = getPlatform(s.platform)?.name || s.platform
-  console.log(`[平台账号] ${name} 短信登录成功，凭据已加密保存${s.append ? '（追加为新账号）' : ''}（${cookie.length} 字符）`)
-  return { ok: true, message: '登录成功，账号已保存', saved: true }
+  console.log(`[平台账号] ${name} 短信登录成功，凭据已加密保存（${saved.action}，${cookie.length} 字符）`)
+  return { ok: true, message: loginSuccessMessage(saved), saved: true, action: saved.action }
 }

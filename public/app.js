@@ -4985,6 +4985,8 @@ class App {
                 pathEl.textContent = `账号以加密形式存于：${data.storePath}（不写入 config.js，不会随配置备份或 WebDAV 上云）`;
             }
 
+            // 缓存一份，折叠/展开时直接重渲染，不必再打一次接口（多号列表展开很频繁）
+            this._lastMusicAccounts = { accounts: data.accounts || [], health: data.health || null };
             this.renderMusicAccounts(data.accounts || [], data.health || null);
             this.fillMusicAccountCheckSchedule(data.healthCheck || null);
             void this.renderMusicAccountPerms(data.allowedUsers || []);
@@ -5186,11 +5188,26 @@ class App {
             };
 
             // 多账号列表：主账号描边高亮。取链只走主账号，冷备号只参与定期校验
+            //
+            // 默认折叠：概念版常见 4~6 个号，全展开会把卡片拉到两三屏高，
+            // 同一行的其它平台也被顶着拉长，整页看着很乱。
+            // 所以默认只露主账号 + 1 个冷备，其余收在「展开其余 N 个」后面。
+            if (!this._accExpand) this._accExpand = {};
+            const expanded = !!this._accExpand[a.id];
+            const visibleItems = expanded ? items : items.slice(0, 2);
+            const hiddenCount = items.length - visibleItems.length;
+
             const accountsSection = items.length
                 ? `<div class="music-acc-section">
-                       <div class="music-acc-section-title">账号（${items.length}）<span class="music-acc-section-sub">取链只走「主账号」；其余是冷备，只做定期校验，不参与播放</span></div>
+                       <div class="music-acc-section-title">
+                           <span>账号（${items.length}）</span>
+                           <span class="music-acc-section-sub">取链只走「主账号」；其余是冷备，只做定期校验，不参与播放</span>
+                           ${items.length > 2
+                               ? `<button type="button" class="music-acc-fold-btn" onclick="app.toggleMusicAccountList('${a.id}')">${expanded ? '收起 ▴' : `展开其余 ${items.length - 2} 个 ▾`}</button>`
+                               : ''}
+                       </div>
                        <div class="music-acc-accounts">
-                           ${items.map(it => {
+                           ${visibleItems.map(it => {
                                const b = itemBadge(it);
                                return `<div class="music-acc-acct${it.primary ? ' is-primary' : ''}" data-item-id="${it.id}">
                                    <div class="music-acc-acct-head">
@@ -5271,7 +5288,7 @@ class App {
                 ? `<div class="music-acc-editor" id="music-acc-sms-kglite" style="display:none;" data-append="${items.length ? '1' : ''}">
                        <div class="music-acc-editor-tip">
                            输入酷狗账号绑定的手机号，短信验证码登录后凭据自动保存（与扫码等价）。
-                           已经有一个号时再登录，会作为新账号追加，不会覆盖原来的号。
+                           列表里已有这个号就直接更新那一条；没见过的号才追加成冷备，不会顶掉主账号。
                        </div>
                        <div class="music-acc-sms-row">
                            <input type="tel" id="music-acc-sms-mobile-kglite" maxlength="11" placeholder="11 位手机号" inputmode="numeric">
@@ -5291,18 +5308,19 @@ class App {
                     <span class="music-acc-dot" style="background:${a.configured ? a.color : '#9ca3af'}"></span>
                     <span class="music-acc-name">${this.escapeHtml(a.name)}</span>
                     <span class="music-acc-status ${statusClass}">${statusText}</span>
+                    <button type="button" class="music-acc-guide-link" title="如何获取 ${this.escapeHtml(a.name)} 的 Cookie"
+                        onclick="app.openMusicAccountGuide('${a.id}')">?</button>
                 </div>
                 <div class="music-acc-meta">${meta}${verifyMsg}</div>
                 ${accountsSection}
                 ${autoSwitchRow}
                 ${loginActions}
                 ${autoSection}
-                <div class="music-acc-actions">
+                <div class="music-acc-actions music-acc-actions--main">
                     ${isKglite ? '' : qrBtns}
                     <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">填写 Cookie</button>
                     <button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('${a.id}')">验证</button>
                     ${a.configured ? `<button type="button" class="btn-secondary" onclick="app.clearMusicAccount('${a.id}')">清除</button>` : ''}
-                    <button type="button" class="btn-secondary" onclick="app.openMusicAccountGuide('${a.id}')">如何获取</button>
                 </div>
                 ${vipLine}
                 ${smsPanel}
@@ -5329,6 +5347,18 @@ class App {
 
         // 概念版会员状态要额外打一次接口才知道，渲染后补上（不阻塞列表出现）
         void this.loadKugouLiteVip();
+    }
+
+    /** 账号列表折叠 / 展开（多号平台列表太长时用；状态存在内存里，重渲染后仍然保持） */
+    toggleMusicAccountList(platform) {
+        if (!this._accExpand) this._accExpand = {};
+        this._accExpand[platform] = !this._accExpand[platform];
+        // 折叠状态影响渲染结果，直接重渲染一次（数据没变，不用再请求接口）
+        if (this._lastMusicAccounts) {
+            this.renderMusicAccounts(this._lastMusicAccounts.accounts, this._lastMusicAccounts.health);
+        } else {
+            void this.refreshMusicAccounts();
+        }
     }
 
     /** 巡检设置回填（下拉选项只生成一次，避免每次重渲染都重建 DOM） */
@@ -6108,7 +6138,11 @@ class App {
             mask.style.display = 'flex';
             if (maskText) maskText.textContent = '✓ 登录成功';
         }
-        this._setQRStatus(data.message || '登录成功，账号已保存', 'is-ok');
+        // 后端会区分「更新已有账号 / 新增冷备 / 覆盖主账号」，这句提示是用户唯一能看到区别的地方，
+        // 所以除了弹窗里显示，也弹一个 toast —— 弹窗 1.2 秒后就关了，容易错过。
+        const msg = data.message || '登录成功，账号已保存';
+        this._setQRStatus(msg, 'is-ok');
+        if (typeof showSuccess === 'function') showSuccess(msg);
 
         window.setTimeout(() => {
             const modal = this._qrEl('music-acc-qr-modal');

@@ -6277,6 +6277,10 @@ input:-webkit-autofill:active {
     background: rgba(127, 127, 127, 0.04);
     padding: 0.9rem 1rem;
     transition: border-color 0.2s ease, background 0.2s ease;
+    /* 纵向 flex：内容多寡不一时把主动作区压到底部，同一行卡片的按钮才能对齐。
+       之前是普通块级流，按钮位置随内容长度上下浮动，看着很乱。 */
+    display: flex;
+    flex-direction: column;
 }
 
 .music-acc-item.is-configured {
@@ -6367,6 +6371,45 @@ input:-webkit-autofill:active {
 .music-acc-actions button {
     font-size: 0.8rem;
     padding: 0.32rem 0.7rem;
+}
+
+/* 卡片底部的主操作区：贴底 + 按钮等宽 */
+.music-acc-actions--main {
+    margin-top: auto;
+    padding-top: 0.85rem;
+}
+
+/* 同排按钮均分宽度。「扫码登录」是主色、「清除」是次要色没关系，
+   但一行里三四种宽度会显得零散；等分后即使换行也是整齐的两行。 */
+.music-acc-actions--main > button,
+.music-acc-actions--main > .music-acc-file-btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    text-align: center;
+    justify-content: center;
+}
+
+/* 「如何获取」是说明不是操作：从动作区挪到卡片标题行右侧的小圆形按钮，
+   否则它在窄卡片里总是被挤到第二行孤零零一个，还跟「清除」这种危险操作混在一起 */
+.music-acc-guide-link {
+    flex: none;
+    width: 1.3rem;
+    height: 1.3rem;
+    padding: 0;
+    border-radius: 50%;
+    border: 1px solid rgba(127, 127, 127, 0.38);
+    background: transparent;
+    color: var(--text-secondary, #8b8b8b);
+    font-size: 0.74rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.music-acc-guide-link:hover {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.6);
 }
 
 .music-acc-editor {
@@ -6546,6 +6589,26 @@ input:-webkit-autofill:active {
     font-weight: 600;
     color: var(--text-primary, #e5e7eb);
     margin-bottom: 0.5rem;
+}
+
+/* 多号平台的「展开其余 N 个」：贴在标题行最右，收起时卡片不会被堆到两三屏高 */
+.music-acc-fold-btn {
+    margin-left: auto;
+    padding: 0.15rem 0.5rem;
+    border-radius: 6px;
+    border: 1px dashed rgba(127, 127, 127, 0.35);
+    background: transparent;
+    color: var(--text-secondary, #8b8b8b);
+    font-size: 0.74rem;
+    font-weight: 400;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.music-acc-fold-btn:hover {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.55);
 }
 
 .music-acc-section-sub {

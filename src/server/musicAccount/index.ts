@@ -21,6 +21,7 @@ import { PLATFORMS, isSupportedSource, getPlatform } from './platforms'
 import { hasLoginKey, parseCookie } from './http'
 import { normalizeCookieInput, formatLabel } from './cookieParse'
 import * as store from './store'
+import { extractAccountIdentity } from './identity'
 import * as qrLogin from './qrLogin'
 import { summarize } from './health'
 import type { HealthSummary, AccountHealth } from './health'
@@ -365,7 +366,14 @@ export interface SaveAccountResult {
   created?: boolean
   /** 该平台当前账号总数 */
   total?: number
+  /** 命中已有账号的依据（uid 同号 / 同一份 Cookie），用于界面提示「已更新」 */
+  matchedBy?: 'itemId' | 'uid' | 'cookie'
 }
+
+// ---- 账号身份识别 ----
+// 实现放在 identity.ts（qrLogin 也要用，放在这里会形成循环依赖），这里只做透传。
+export { extractAccountIdentity } from './identity'
+export type { AccountIdentity } from './identity'
 
 /**
  * 保存账号：先把用户粘进来的任意内容归一化成 Cookie 头再落库。
@@ -421,9 +429,10 @@ export function saveAccount(
     warnings.push(`已自动丢弃 ${parsed.dropped.length} 个过期 Cookie`)
   }
 
+  const ident = extractAccountIdentity(platform, parsed.cookie)
   const res = opts.append || opts.itemId
-    ? store.addCookie(platform, parsed.cookie, { itemId: opts.itemId, label: opts.label, primary: opts.primary })
-    : store.setCookie(platform, parsed.cookie)
+    ? store.addCookie(platform, parsed.cookie, { itemId: opts.itemId, label: opts.label, primary: opts.primary, ...ident })
+    : store.setCookie(platform, parsed.cookie, ident)
 
   // 老语义（只更新主账号）也允许顺手改备注：setCookie 不认 label，
   // 所以这里补一次改名。注意**不能**改成走 addCookie —— 那会把「换个 Cookie」
@@ -495,11 +504,37 @@ export function getAccountHealth(): HealthSummary {
 }
 
 /**
+ * 巡检两个账号之间的等待。
+ *
+ * 三种节奏，按「谁在等结果」区分：
+ *   - 定时巡检：1~60 秒随机。一轮十几个号也就是几分钟，凌晨跑完没人感知；
+ *     而 1 分钟量级的抖动足以让请求序列在平台侧看起来不像批量脚本。
+ *   - 手动复查：0.8~2.2 秒随机。用户点了按钮正在等，隔一分钟一次会把界面挂成假死。
+ *   - 上一次失败：60~120 秒。失败多半是限流或风控，此时继续按原节奏打只会越打越严。
+ *
+ * 全部用随机而不是固定值，因为「严格等间隔」的请求序列比人类操作更像脚本。
+ */
+const HEALTH_PAUSE = {
+  scheduled: { base: 1000, span: 59000 },  // 1 ~ 60 秒
+  manual: { base: 800, span: 1400 },       // 0.8 ~ 2.2 秒
+  backoff: { base: 60000, span: 60000 },   // 60 ~ 120 秒
+}
+
+/** 导出只为自测能断言区间，业务代码不要直接调 */
+export const HEALTH_PAUSE_FOR_TEST = HEALTH_PAUSE
+
+function healthCheckPause(lastFailed: boolean, manual: boolean): Promise<void> {
+  const p = lastFailed ? HEALTH_PAUSE.backoff : manual ? HEALTH_PAUSE.manual : HEALTH_PAUSE.scheduled
+  return new Promise(r => setTimeout(r, p.base + Math.floor(Math.random() * p.span)))
+}
+
+/**
  * 立即巡检所有已配置账号。
  *
- * @param opts.force 为 true 时忽略总开关（手动触发用；总开关关掉时定时巡检会跳过）
+ * @param opts.force  为 true 时忽略总开关（手动触发用；总开关关掉时定时巡检会跳过）
+ * @param opts.manual 为 true 时用手动节奏（秒级间隔），默认走定时节奏（1~60 秒随机）
  */
-export async function runAccountHealthCheck(opts: { force?: boolean } = {}): Promise<
+export async function runAccountHealthCheck(opts: { force?: boolean; manual?: boolean } = {}): Promise<
   HealthSummary & { checkedAt: number; checked: number }
 > {
   const rows = store.listAccounts().filter(a => a.configured || a.accounts.some(i => i.configured))
@@ -513,28 +548,39 @@ export async function runAccountHealthCheck(opts: { force?: boolean } = {}): Pro
 
   // 逐账号巡检：多账号平台（酷狗概念版）每个号都要单独确认登录态，
   // 只查主账号会出现「主号绿着，副号早失效了却没人知道」。
+  //
+  // 并发策略：**串行**，一个号查完再查下一个。这里刻意不做并发 ——
+  // 巡检只是「确认登录态」，慢几分钟没有代价；而并发打同一平台的鉴权接口，
+  // 恰恰是风控最容易识别成「批量扫号」的形态。间隔见 healthCheckPause：
+  // 定时巡检 1~60 秒随机，手动复查压到秒级（用户在等），失败后统一退避。
+  const manual = !!opts.manual
   let checked = 0
+  let lastFailed = false
   for (const a of rows) {
     const items = (a.accounts || []).filter(i => i.configured)
     if (!items.length) {
       try {
         await verifyAccount(a.id)
         checked++
+        lastFailed = false
       } catch (e: any) {
+        lastFailed = true
         console.log(`[平台账号] 巡检 ${a.name} 出错（忽略）：${e?.message || e}`)
       }
-      await new Promise(r => setTimeout(r, 800))
+      await healthCheckPause(lastFailed, manual)
       continue
     }
     for (const item of items) {
       try {
         await verifyAccount(a.id, item.id)
         checked++
+        lastFailed = false
       } catch (e: any) {
+        lastFailed = true
         console.log(`[平台账号] 巡检 ${a.name}（${item.label}）出错（忽略）：${e?.message || e}`)
       }
       // 平台之间留点间隔：几个平台连打容易被各自的风控当成扫描
-      await new Promise(r => setTimeout(r, 800))
+      await healthCheckPause(lastFailed, manual)
     }
   }
 

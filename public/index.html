@@ -671,7 +671,8 @@
                                 <!-- 巡检节奏：定点（默认凌晨 3 点）+ 最小间隔。
                                      放到凌晨是为了别在用户边播边扫：那是平台风控最容易触发的形态 -->
                                 <div class="music-acc-toolbar" style="margin-top: 2px;">
-                                    <label class="music-acc-timeout-label" title="两次巡检之间至少间隔多久">
+                                    <label class="music-acc-timeout-label"
+                                        title="两轮巡检之间至少间隔多久。按整点吸附：填 101 会落到 5 天后的整点，想要 4 天一次填 96">
                                         巡检间隔
                                         <input type="number" id="music-acc-check-hours" class="input-field"
                                             min="1" max="168" step="1" style="width: 80px;">

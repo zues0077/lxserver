@@ -10314,7 +10314,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
-      // 手动触发一次全量巡检（会真的去各家接口确认登录态，耗时约 1~2 秒/平台）
+      // 手动触发一次全量巡检（会真的去各家接口确认登录态）。
+      // 走 manual 节奏：定时巡检是 1~60 秒随机间隔，但用户在这里等结果，压到秒级。
       if (pathname === '/api/music/accounts/check' && req.method === 'POST') {
         const auth = req.headers['x-frontend-auth']
         if (auth !== global.lx.config['admin.password']) {
@@ -10322,7 +10323,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
           return
         }
-        void musicAccount.runAccountHealthCheck({ force: true })
+        void musicAccount.runAccountHealthCheck({ force: true, manual: true })
           .then(data => {
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: true, data }))
