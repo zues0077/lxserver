@@ -77,7 +77,7 @@ function pickIds(songInfo: any): { contentId: string; copyrightId: string } {
  */
 const PROBE_CONTENT_ID = '1139098751' // 孤勇者（陈奕迅），SQ 需会员
 
-async function probeToneHasUrl(cookie: string, tone: string, ms: number): Promise<boolean> {
+async function probeTone(cookie: string, tone: string, ms: number): Promise<{ ok: boolean; cannotCode?: string; dialogText?: string }> {
   const params = new URLSearchParams({
     netType: '00',
     resourceType: '2',
@@ -102,16 +102,18 @@ async function probeToneHasUrl(cookie: string, tone: string, ms: number): Promis
       // 打一行诊断：区分「设备 id 缺失被软拒」和「真的没有会员权益 / 是试用会员」。
       // By 来自 Cookie 里的设备字段，浏览器 Cookie 天然有，短信登录要自己补。
       // 把完整返回体也带上（截断），便于看咪咕到底是「无权益」还是「试用不含无损」。
+      const cannotCode = String(body?.data?.cannotCode ?? '')
+      const dialogText = String(body?.data?.dialogInfo?.text ?? '')
       console.log(
         `[平台账号] 咪咕${tone}探针未出 url：code=${code || '-'} info=${body?.info || body?.message || '-'} ` +
-          `By=${authHeaders(cookie).By ? '有' : '缺'} body=${JSON.stringify(body)?.slice(0, 400)}`,
+          `By=${authHeaders(cookie).By ? '有' : '缺'} cannotCode=${cannotCode || '-'} body=${JSON.stringify(body)?.slice(0, 400)}`,
       )
-      return false
+      return { ok: false, cannotCode, dialogText }
     }
-    if (code && code !== '000000') return false
-    return true
+    if (code && code !== '000000') return { ok: false }
+    return { ok: true }
   } catch {
-    return false
+    return { ok: false }
   }
 }
 
@@ -121,22 +123,34 @@ async function probeToneHasUrl(cookie: string, tone: string, ms: number): Promis
  *   - SQ 出链：完整会员，无损可听；
  *   - SQ 空但 HQ 出链：多半是**试用 / 受限会员**（咪咕试用通常不含无损，只到 320k），
  *     这种情况账号确实「有权限」，只是不到无损档，UI 要如实说清楚，别误报成「完全没会员」；
- *   - HQ 也空、仅 PQ 出链：账号没有任何音频会员权益。
+ *   - HQ 也空、仅 PQ 出链：账号没有任何音频会员权益（咪咕会回 cannotCode=440008「需开通会员」）。
  * 三档全空：探针曲本次不可用，不要误报。
  */
 async function probeVip(cookie: string): Promise<{ vip: boolean | null; tier: string; note: string }> {
-  if (await probeToneHasUrl(cookie, 'SQ', 4500)) {
+  const sq = await probeTone(cookie, 'SQ', 4500)
+  if (sq.ok) {
     return { vip: true, tier: 'SQ', note: '会员权益生效，实测可取 SQ 无损' }
   }
-  if (await probeToneHasUrl(cookie, 'HQ', 4500)) {
+  const hq = await probeTone(cookie, 'HQ', 4500)
+  if (hq.ok) {
     return {
       vip: true,
       tier: 'HQ',
       note: '检测到受限/试用会员：可取 HQ 320k，但 SQ 无损被拒（咪咕试用会员通常不含无损）',
     }
   }
-  if (await probeToneHasUrl(cookie, 'PQ', 4500)) {
-    return { vip: false, tier: 'PQ', note: '账号没有可用音频会员权益（或试用不含音频特权），实测最高只到 PQ 128k' }
+  const pq = await probeTone(cookie, 'PQ', 4500)
+  if (pq.ok) {
+    // SQ/HQ 都被 440008 拒 → 账号确实没有高品质/无损音频权益。
+    // 把咪咕的原始 cannotCode + 文案透出来，用户一眼知道是「权益不足」而非「登录故障」。
+    const reason = sq.cannotCode || hq.cannotCode
+    const text = sq.dialogText || hq.dialogText
+    const extra = reason ? `（咪咕返回 ${reason}${text ? '：' + text : ''}）` : ''
+    return {
+      vip: false,
+      tier: 'PQ',
+      note: `账号没有可用音频会员权益（或试用不含音频特权），实测最高只到 PQ 128k${extra}`,
+    }
   }
   return { vip: null, tier: 'unknown', note: '探针曲本次不可用，会员状态以实际播放音质为准' }
 }
