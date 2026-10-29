@@ -99,11 +99,12 @@ async function probeToneHasUrl(cookie: string, tone: string, ms: number): Promis
     const code = String(body?.code ?? '')
     const url = String(body?.data?.url || '')
     if (!url) {
-      // 打一行诊断：区分「设备 id 缺失被软拒」和「真的没有会员权益」。
+      // 打一行诊断：区分「设备 id 缺失被软拒」和「真的没有会员权益 / 是试用会员」。
       // By 来自 Cookie 里的设备字段，浏览器 Cookie 天然有，短信登录要自己补。
+      // 把完整返回体也带上（截断），便于看咪咕到底是「无权益」还是「试用不含无损」。
       console.log(
         `[平台账号] 咪咕${tone}探针未出 url：code=${code || '-'} info=${body?.info || body?.message || '-'} ` +
-          `By=${authHeaders(cookie).By ? '有' : '缺'}`,
+          `By=${authHeaders(cookie).By ? '有' : '缺'} body=${JSON.stringify(body)?.slice(0, 400)}`,
       )
       return false
     }
@@ -114,15 +115,30 @@ async function probeToneHasUrl(cookie: string, tone: string, ms: number): Promis
   }
 }
 
-/** 返回 null = 无法判定（探针曲不可用），不要当成「没会员」 */
-async function probeVip(cookie: string): Promise<{ vip: boolean | null; note: string }> {
+/**
+ * 三档探测：SQ(无损) → HQ(320k) → PQ(128k)。
+ * 用来区分「真·无损会员 / 试用受限会员 / 无会员」三态：
+ *   - SQ 出链：完整会员，无损可听；
+ *   - SQ 空但 HQ 出链：多半是**试用 / 受限会员**（咪咕试用通常不含无损，只到 320k），
+ *     这种情况账号确实「有权限」，只是不到无损档，UI 要如实说清楚，别误报成「完全没会员」；
+ *   - HQ 也空、仅 PQ 出链：账号没有任何音频会员权益。
+ * 三档全空：探针曲本次不可用，不要误报。
+ */
+async function probeVip(cookie: string): Promise<{ vip: boolean | null; tier: string; note: string }> {
   if (await probeToneHasUrl(cookie, 'SQ', 4500)) {
-    return { vip: true, note: '会员权益生效，实测可取 SQ 无损' }
+    return { vip: true, tier: 'SQ', note: '会员权益生效，实测可取 SQ 无损' }
+  }
+  if (await probeToneHasUrl(cookie, 'HQ', 4500)) {
+    return {
+      vip: true,
+      tier: 'HQ',
+      note: '检测到受限/试用会员：可取 HQ 320k，但 SQ 无损被拒（咪咕试用会员通常不含无损）',
+    }
   }
   if (await probeToneHasUrl(cookie, 'PQ', 4500)) {
-    return { vip: false, note: '账号没有会员权益（或已过期），实测最高只到 PQ 128k' }
+    return { vip: false, tier: 'PQ', note: '账号没有可用音频会员权益（或试用不含音频特权），实测最高只到 PQ 128k' }
   }
-  return { vip: null, note: '探针曲本次不可用，会员状态以实际播放音质为准' }
+  return { vip: null, tier: 'unknown', note: '探针曲本次不可用，会员状态以实际播放音质为准' }
 }
 
 export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
