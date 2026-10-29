@@ -10194,7 +10194,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 记一条「请求到达」日志：用户反馈「同步了但后台没有」时，
             // 先看日志区分「插件根本没送到」和「送到了但平台/字段不对」
             console.log(`[平台账号] 收到保存请求：platform=${platform || '(空)'}，${String(cookie || '').length} 字符`
-              + `${append ? '，追加新账号' : itemId ? `，更新账号 ${itemId}` : ''}`)
+              + `${append ? '，显式追加新账号' : itemId ? `，更新账号 ${itemId}` : '，按 Cookie 身份自动认号'}`)
             // 用户粘进来的可能是 Cookie 头 / cURL / Netscape 文件 / JSON，
             // 统一在保存时归一化，避免「填了却播不了」
             const result = musicAccount.saveAccount(String(platform || ''), String(cookie || ''), {

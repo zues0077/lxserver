@@ -58,8 +58,9 @@ export interface MusicAccountPlatform {
   color: string
   /**
    * 支持的扫码登录方式。
-   * 有值前端就显示「扫码登录」按钮；没有就只能手工填 Cookie
-   * （酷我 / 咪咕官方没有可用的扫码换 token 接口，硬做只会给出假按钮）。
+   * 有值前端就显示「扫码登录」按钮；没有就只能手工填 Cookie。
+   * 酷我官方没有可用的扫码换 token 接口，硬做只会给出假按钮；
+   * 咪咕的通行证 qrcWeb 接口是通的，但「扫码后换 pacmtoken」这段还在按实扫响应补齐（标实验）。
    */
   qrLogins?: MusicAccountQrOption[]
 }
@@ -177,6 +178,8 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     ],
     benefit: '登录后可解锁 HQ(320k)、SQ 无损音质',
     color: '#FF6A00',
+    // 网页登录弹窗没给扫码 tab，但通行证 qrcWeb 接口是通的，先以「实验」身份放出来
+    qrLogins: [{ driver: 'migu', label: '扫码登录（实验）' }],
   },
   {
     id: 'bili',

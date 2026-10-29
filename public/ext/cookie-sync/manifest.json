@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LX 音乐账号 Cookie 同步",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "在当前音乐平台页面一键读取登录 Cookie，同步到自己的 LX 服务器，无需手工复制。",
   "permissions": [
     "cookies",

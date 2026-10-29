@@ -12,6 +12,7 @@
 import * as netease from './netease'
 import * as kugou from './kugou'
 import * as bilibili from './bilibili'
+import * as migu from './migu'
 import { qqDriver, wxDriver } from './qq'
 import * as kgliteSolver from '../resolvers/kglite'
 import { getPlatform } from '../platforms'
@@ -30,6 +31,9 @@ const DRIVERS: Record<string, QrDriver> = {
   tx: qqDriver,
   txwx: wxDriver,
   bili: { ttlSec: bilibili.TTL_SEC, pollIntervalMs: bilibili.POLL_INTERVAL_MS, create: bilibili.create, check: bilibili.check },
+  // 咪咕走通行证 qrcWeb 接口：二维码能出，但「扫码后换成 pacmtoken」这段没有公开文档，
+  // 只能真扫一次按响应补齐，所以界面上标成实验
+  migu: { ttlSec: migu.TTL_SEC, pollIntervalMs: migu.POLL_INTERVAL_MS, create: migu.create, check: migu.check },
 }
 
 interface Session {

@@ -368,6 +368,33 @@ export interface SaveAccountResult {
   total?: number
   /** 命中已有账号的依据（uid 同号 / 同一份 Cookie），用于界面提示「已更新」 */
   matchedBy?: 'itemId' | 'uid' | 'cookie'
+  /** 落库方式：updated 更新已有账号 / created 新增账号（冷备） / replaced 覆盖主账号 */
+  action?: SaveAccountAction
+  /** 一句给用户看的结论（插件、后台提示直接显示） */
+  message?: string
+}
+
+export type SaveAccountAction = 'updated' | 'created' | 'replaced'
+
+const ACTION_LOG: Record<SaveAccountAction, string> = {
+  updated: '更新已有账号',
+  created: '新增账号（默认不抢主账号）',
+  replaced: '覆盖主账号',
+}
+
+function actionMessage(
+  action: SaveAccountAction,
+  label: string | undefined,
+  total: number | undefined,
+  becamePrimary: boolean,
+): string {
+  if (action === 'updated') return `已更新已有账号「${label || '主账号'}」的 Cookie`
+  if (action === 'created') {
+    // 第一个号（或显式设为主账号）会成为主账号，这时不能说成「冷备」，否则用户以为没生效
+    if (becamePrimary) return '已保存为该平台主账号的 Cookie'
+    return `识别为一个新账号，已追加为冷备（共 ${total ?? 1} 个）；要用它取链请到后台点「设为主账号」`
+  }
+  return '已更新主账号的 Cookie'
 }
 
 // ---- 账号身份识别 ----
@@ -382,10 +409,11 @@ export type { AccountIdentity } from './identity'
  * 也能保存成功，但取链时整串会被当成一个 Cookie，表现为「填了却播不了」，
  * 排查成本极高。保存时就识别并回显，问题当场就能看见。
  *
- * 多账号：
- *   默认行为仍然是「更新主账号」（老界面、浏览器扩展同步都按这个语义走）。
- *   只有显式传 `append: true`（界面上点「添加账号」）才会追加一个新账号，
- *   避免用户只是想换个 Cookie，结果列表里多出一堆重复条目。
+ * 多账号（2026-10-29 起改为自动认号）：
+ *   不传 itemId / append 时，按 Cookie 里的稳定 uid 判断「这是不是存过的号」：
+ *   同号更新那一条，新号追加为冷备（不抢主账号），平台没有稳定 uid 才覆盖主账号。
+ *   显式传 `append: true`（界面「添加账号」）或 `itemId`（编辑某一条）时按调用方说的做。
+ *   这样插件一键同步不用再问用户「要不要追加」，也不会一推就把主号覆盖掉。
  */
 export function saveAccount(
   platform: string,
@@ -429,15 +457,40 @@ export function saveAccount(
     warnings.push(`已自动丢弃 ${parsed.dropped.length} 个过期 Cookie`)
   }
 
+  // 自动认号（2026-10-29）：
+  // 以前「插件推上来的是新号还是旧号」要用户自己勾「追加为新账号」，
+  // 勾了怕多出账号、不勾怕覆盖主号。现在把这个判断交给 Cookie 本身：
+  //   1. Cookie 里的稳定 uid / 指纹命中已有条目 → 只更新那一条（重推同一个号，列表不变长）
+  //   2. 有稳定 uid 但没命中 = 没见过的号 → 追加为冷备，不动主账号
+  //   3. 平台没有稳定 uid（网易 MUSIC_U、汽水 sessionid 每次都变）→ 沿用老语义：覆盖主账号
+  // 显式传 itemId / append 时仍按调用方说的做（后台「添加账号」「编辑账号」走这条）。
+  const forcedItem = !!(opts.append || opts.itemId)
   const ident = extractAccountIdentity(platform, parsed.cookie)
-  const res = opts.append || opts.itemId
+  const matched = forcedItem ? null : store.findItemByIdentity(platform, ident)
+  const res = forcedItem
     ? store.addCookie(platform, parsed.cookie, { itemId: opts.itemId, label: opts.label, primary: opts.primary, ...ident })
-    : store.setCookie(platform, parsed.cookie, ident)
+    : matched
+      ? store.addCookie(platform, parsed.cookie, { itemId: matched.id, label: opts.label, primary: opts.primary, ...ident })
+      : ident.uid
+        ? store.addCookie(platform, parsed.cookie, { label: opts.label, primary: opts.primary, ...ident })
+        : store.setCookie(platform, parsed.cookie, ident)
 
-  // 老语义（只更新主账号）也允许顺手改备注：setCookie 不认 label，
-  // 所以这里补一次改名。注意**不能**改成走 addCookie —— 那会把「换个 Cookie」
-  // 变成「追加一个新账号」，用户重登一次就多出一个不参与取链的冷备号。
-  if (!opts.append && !opts.itemId && opts.label) {
+  const action: SaveAccountAction = (forcedItem || matched)
+    ? ((res as any).created === false ? 'updated' : 'created')
+    : (ident.uid ? 'created' : 'replaced')
+
+  // 这次落库的条目是不是主账号（第一次存某个平台时就是它，界面文案要跟着变）
+  // setCookie 不返回 total，统一在这里补齐，前端提示「共 N 个」才不会是空的
+  const savedItems = store.listAccountItems(platform)
+  if ((res as any).total === undefined) (res as any).total = savedItems.length
+  const savedItemId = String((res as any).itemId || '')
+  const becamePrimary = savedItemId
+    ? !!savedItems.find(i => i.id === savedItemId && i.primary)
+    : false
+
+  // 覆盖主账号时 setCookie 不认 label，补一次改名；
+  // 其余分支的 label 已经在 addCookie 里落库了。
+  if (action === 'replaced' && opts.label) {
     const primary = store.listAccountItems(platform).find(i => i.primary)
     if (primary) store.renameAccount(platform, primary.id, opts.label)
   }
@@ -448,12 +501,16 @@ export function saveAccount(
     `[平台账号] 保存 ${platform}：识别为${formatLabel(parsed.format)}，${parsed.count} 个字段`
     + `（${parsed.keys.slice(0, 14).join(', ')}${parsed.keys.length > 14 ? ' …' : ''}），`
     + `${parsed.cookie.length} 字符`
-    + (opts.append || opts.itemId ? `，${(res as any).created === false ? '更新已有账号' : '新增账号'}${opts.label ? `「${opts.label}」` : ''}（共 ${(res as any).total ?? '?'} 个）` : '')
+    + `，${ACTION_LOG[action]}`
+    + ((res as any).total !== undefined ? `（共 ${(res as any).total} 个账号）` : '')
+    + (matched ? `，命中${matched.primary ? '主账号' : '已有账号'}「${matched.label}」` : '')
     + (warnings.length ? `；提示：${warnings.join('；')}` : ''),
   )
 
   return {
     ...res,
+    action,
+    message: actionMessage(action, matched?.label, (res as any).total, becamePrimary),
     format: parsed.format,
     formatText: formatLabel(parsed.format),
     count: parsed.count,
