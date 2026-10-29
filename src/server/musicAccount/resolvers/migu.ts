@@ -37,8 +37,17 @@ function authHeaders(cookie: string): Record<string, string> {
   if (token) headers.pacmtoken = token
   const uid = map.mg_auth_uid || map.userid || map.userId || map.uid || ''
   if (uid) headers.uid = uid
+  // 设备 id：浏览器 Cookie 自带 cookieId / mgAppH5CookieId；短信登录补的是 migu-device-uuid。
+  // 两个都为同一个设备标识服务，但咪咕不同接口认的字段不一样：
+  //   - listen-url 这类接口实测认 By 头（旧 lx-music 系实现）
+  //   - 真实咪咕 App（geek-server 抓包、Domdkw 实现）统一用 deviceId 请求头
+  // 之前短信登录只发了 By，会员档被当成陌生设备软拒（By=有却取不到 SQ）。
+  // 两个头都发、值用同一个设备 id，覆盖两种认字段方式。
   const by = map.cookieId || map['migu-device-uuid'] || map['mgAppH5CookieId'] || ''
-  if (by) headers.By = by
+  if (by) {
+    headers.By = by
+    headers.deviceId = by
+  }
   return headers
 }
 
