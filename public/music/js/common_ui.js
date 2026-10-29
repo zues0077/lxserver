@@ -220,6 +220,15 @@ function sortSearchResults(list, keyword, isSong = true) {
 
     // 2. 计算匹配相似度并排序
     const kw = keyword.trim().toLowerCase();
+    // 本地已有文件（已下载/已缓存）的曲目加权前置：这类曲子播放时零网络请求。
+    // 只加 0.4，低于「歌名精确匹配 +0.5 / 包含 +0.2」的组合，所以不会把弱相关结果顶上来。
+    const localFirst = !!(window.ServerFileState
+        && typeof window.ServerFileState.localFirstEnabled === 'function'
+        && window.ServerFileState.localFirstEnabled());
+    const hasLocal = localFirst && typeof window.ServerFileState.hasLocal === 'function'
+        ? (item) => window.ServerFileState.hasLocal(item)
+        : null;
+
     return uniqueList.map(item => {
         let targetText = '';
         if (isSong) {
@@ -237,6 +246,8 @@ function sortSearchResults(list, keyword, isSong = true) {
         } else if (lowerName.includes(kw)) {
             score += 0.2;
         }
+
+        if (hasLocal && hasLocal(item)) score += 0.4;
 
         return { score, data: item };
     })

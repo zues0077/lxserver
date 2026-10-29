@@ -4,6 +4,7 @@
  * 供搜索结果徽标、下载弹窗的音质标注复用，避免每首歌每个音质都打一次 check。
  */
 const SERVER_FILE_STATE_TTL = 60 * 1000;
+const LOCAL_FIRST_KEY = 'lx_search_local_first';
 
 window.ServerFileState = {
     bySong: new Map(),
@@ -82,6 +83,36 @@ window.ServerFileState = {
         const out = {};
         for (const [quality, info] of Object.entries(entries)) out[quality] = info.folder;
         return out;
+    },
+
+    /**
+     * 「搜索本地优先」开关（纯展示偏好，存 localStorage，默认开）。
+     * 关掉只是不参与排序，徽标照常显示。
+     */
+    localFirstEnabled() {
+        try { return localStorage.getItem(LOCAL_FIRST_KEY) !== '0'; } catch (e) { return true; }
+    },
+
+    setLocalFirstEnabled(on) {
+        try { localStorage.setItem(LOCAL_FIRST_KEY, on ? '1' : '0'); } catch (e) { }
+    },
+
+    /** 该歌在服务器上是否已有文件（下载或缓存，任意音质） */
+    hasLocal(song) {
+        const folders = this.foldersFor(song);
+        return !!folders && Object.keys(folders).length > 0;
+    },
+
+    /**
+     * 稳定分区：本地已有文件的项按原顺序提到最前，其余保持原顺序。
+     * 单平台搜索用——平台自身的相关性顺序不动，只把本地可直出的前置。
+     */
+    bumpLocalFirst(list) {
+        if (!Array.isArray(list) || list.length < 2 || this.unavailable) return list;
+        const local = [];
+        const rest = [];
+        for (const item of list) (this.hasLocal(item) ? local : rest).push(item);
+        return local.length ? local.concat(rest) : list;
     },
 
     /** 该歌某音质在服务器上的落点；没有则返回 null */

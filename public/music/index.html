@@ -372,6 +372,13 @@
                                 <i class="fas fa-search"></i>
                             </button>
 
+                            <!-- 本地优先开关：已下载/已缓存的歌排到最前 -->
+                            <button id="local-first-toggle" onclick="toggleLocalFirstSearch()"
+                                class="p-2 t-text-main hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded-lg transition-colors"
+                                title="本地优先：已下载/已缓存的歌排在最前（点按切换）">
+                                <i class="fas fa-hard-drive"></i>
+                            </button>
+
                             <select id="search-type" onchange="handleSearchTypeChange()"
                                 class="flex-1 md:flex-none px-4 py-3 t-bg-panel border t-border-main rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 shadow-sm t-text-main font-medium text-sm md:text-base">
                                 <option value="song">歌曲</option>

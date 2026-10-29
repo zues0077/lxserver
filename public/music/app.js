@@ -96,6 +96,7 @@ function initGlobalListSearch() {
 document.addEventListener('DOMContentLoaded', () => {
     initGlobalListSearch();
     if (window.DislikeManager) window.DislikeManager.load();
+    syncLocalFirstButton();
 });
 
 // Settings & Batch Selection
@@ -2412,6 +2413,31 @@ window.handleSearchTypeChange = handleSearchTypeChange;
 // 聚合搜索的源列表：歌曲全支持；歌手/专辑维度 B站为空结果（无此实体）、其余各源按 type 分派
 const SOURCES = ['kw', 'kg', 'tx', 'wy', 'mg', 'kglite', 'soda', 'bili'];
 
+/** 搜索「本地优先」开关：已下载/已缓存的歌排最前（纯前端偏好，存 localStorage） */
+function syncLocalFirstButton() {
+    const btn = document.getElementById('local-first-toggle');
+    if (!btn) return;
+    const on = !window.ServerFileState || window.ServerFileState.localFirstEnabled();
+    btn.classList.toggle('text-emerald-500', on);
+    btn.classList.toggle('t-text-muted', !on);
+    btn.classList.remove('t-text-main');
+    btn.title = on
+        ? '本地优先：开启（已下载/已缓存的歌排在最前，点按关闭）'
+        : '本地优先：关闭（按平台/相似度原顺序，点按开启）';
+}
+
+function toggleLocalFirstSearch() {
+    if (window.ServerFileState) {
+        window.ServerFileState.setLocalFirstEnabled(!window.ServerFileState.localFirstEnabled());
+    }
+    syncLocalFirstButton();
+    const input = document.getElementById('search-input');
+    // 已有搜索词就按新偏好立刻重排一次，省得用户再点一次搜索
+    if (input && input.value.trim()) doSearch();
+}
+window.toggleLocalFirstSearch = toggleLocalFirstSearch;
+window.syncLocalFirstButton = syncLocalFirstButton;
+
 
 //搜索歌曲
 async function doSearch(page = 1, append = false) {
@@ -2513,6 +2539,11 @@ async function doSearch(page = 1, append = false) {
         if (typeof authToken !== 'undefined' && authToken) headers['x-user-token'] = authToken;
         Object.assign(headers, getUserAuthHeaders());
 
+        // 本地优先排序要有「歌曲ID -> 本地文件」映射才能算，这里先确保就绪（60 秒 TTL，通常直接命中）
+        if (window.ServerFileState && window.ServerFileState.localFirstEnabled()) {
+            try { await window.ServerFileState.ensure(); } catch (e) { }
+        }
+
         const pageInfoEl = document.getElementById('page-info');
         let list = [];
         if (source === 'all') {
@@ -2551,6 +2582,10 @@ async function doSearch(page = 1, append = false) {
             }
 
             list = data.list.map(item => ({ ...item, source }));
+            // 单平台结果保留平台自身的相关性顺序，只把本地已有文件的前置（播放时零网络请求）
+            if (type === 'song' && window.ServerFileState && window.ServerFileState.localFirstEnabled()) {
+                list = window.ServerFileState.bumpLocalFirst(list);
+            }
             if (type === 'song') {
                 window.lastSearchMeta = {
                     total: data.total,
