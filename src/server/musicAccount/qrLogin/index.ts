@@ -14,6 +14,7 @@ import * as kugou from './kugou'
 import * as bilibili from './bilibili'
 import { qqDriver, wxDriver } from './qq'
 import * as kgliteSolver from '../resolvers/kglite'
+import * as kuwoSms from '../smsLogin/kuwo'
 import { getPlatform } from '../platforms'
 import {
   createSmsCaptcha,
@@ -279,6 +280,8 @@ interface SmsSession {
    * 换一次就对不上（服务端会当成换了台设备，表现为收得到码却登录失败）。
    */
   migu?: MiguPassportSession
+  /** 酷我短信登录会话 */
+  kw?: kuwoSms.KuwoSmsSession
 }
 const smsSessions = new Map<string, SmsSession>()
 const SMS_KEEP_MS = 10 * 60 * 1000
@@ -301,10 +304,10 @@ export interface SmsSendPayload {
  * - kglite：酷狗概念版，一步发码一步登录
  * - mg：咪咕，通行证每次都要先答一道图形验证码（算术题），所以多一步「取码」
  */
-const SMS_PLATFORMS = new Set(['kglite', 'mg'])
+const SMS_PLATFORMS = new Set(['kglite', 'mg', 'kw'])
 
 /** 需要先取图形验证码的平台 */
-const CAPTCHA_PLATFORMS = new Set(['mg'])
+const CAPTCHA_PLATFORMS = new Set(['mg', 'kw'])
 
 export interface SmsCaptchaPayload {
   ok: boolean
@@ -327,6 +330,20 @@ export async function smsCaptcha(platform: string, opts: { append?: boolean } = 
   if (!p) return { ok: false, message: `不支持的平台：${platform}` }
   if (!CAPTCHA_PLATFORMS.has(platform)) {
     return { ok: false, message: `${p.name} 的短信登录不需要图形验证码` }
+  }
+  if (platform === 'kw') {
+    const r = await kuwoSms.getCaptcha()
+    if (!r.ok || !r.token) return { ok: false, message: r.message }
+    const id = newId()
+    smsSessions.set(id, {
+      platform,
+      mobile: '',
+      state: { guid: '', mid: '', device: '' },
+      createdAt: Date.now(),
+      append: !!opts.append,
+      kw: { captchaToken: r.token, verifyCode: '', tm: '', jar: r.jar || {} },
+    })
+    return { ok: true, sessionId: id, image: r.image, message: r.message }
   }
   const res = await createSmsCaptcha()
   if (!res.ok || !res.session) return { ok: false, message: res.message }
@@ -370,6 +387,17 @@ export async function sendSms(
     return { ok: true, sessionId: opts.sessionId, message: res.message }
   }
 
+  if (platform === 'kw') {
+    const s = smsSessions.get(String(opts.sessionId || ''))
+    if (!s?.kw) return { ok: false, message: '验证码会话已过期，请重新获取一张' }
+    s.kw.verifyCode = String(opts.captcha || '')
+    const r = await kuwoSms.sendSmsCode(s.kw, tel)
+    if (!r.ok) return { ok: false, sessionId: opts.sessionId, message: r.message }
+    s.mobile = tel
+    s.createdAt = Date.now()
+    return { ok: true, sessionId: opts.sessionId, message: r.message }
+  }
+
   const res = await kgliteSolver.sendSmsCode(tel)
   if (!res.ok || !res.state) return { ok: false, message: res.message }
 
@@ -407,6 +435,22 @@ export async function loginSms(sessionId: string, code: string): Promise<SmsLogi
       `[平台账号] ${nameMg} 短信登录成功，凭据已加密保存（${savedMg.action}，${exchange.cookie.length} 字符）`,
     )
     return { ok: true, message: loginSuccessMessage(savedMg), saved: true, action: savedMg.action }
+  }
+
+  if (s.platform === 'kw') {
+    if (!s.kw) return { ok: false, message: '会话已失效，请重新获取图形验证码' }
+    if (!s.mobile) return { ok: false, message: '请先获取短信验证码' }
+    if (!s.kw.tm) return { ok: false, message: '短信会话已失效，请重新获取' }
+    const r = await kuwoSms.loginBySmsCode(s.kw, s.mobile, c)
+    if (!r.ok || !r.cookie) return { ok: false, message: r.message }
+    const parsed = normalizeCookieInput(r.cookie)
+    const cookie = parsed.ok ? parsed.cookie : r.cookie
+    const saved = persistLoginCookie(s.platform, cookie, !!s.append)
+    if (!saved.ok) return { ok: false, message: saved.error || '账号保存失败' }
+    smsSessions.delete(sessionId)
+    const name = getPlatform(s.platform)?.name || s.platform
+    console.log(`[平台账号] ${name} 短信登录成功，凭据已加密保存（${saved.action}，${cookie.length} 字符）`)
+    return { ok: true, message: loginSuccessMessage(saved), saved: true, action: saved.action }
   }
 
   const res = await kgliteSolver.loginBySmsCode(s.mobile, c, s.state)

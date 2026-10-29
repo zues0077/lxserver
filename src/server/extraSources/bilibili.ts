@@ -290,6 +290,13 @@ export interface BilibiliStream {
  * @param cookie 可为空：匿名也能取（最高 192k）
  */
 export async function getAudioUrl(songInfo: any, quality: string, cookie = ''): Promise<BilibiliStream> {
+  // 音频（MAID）优先：歌单/排行榜里的音频走 music-service-c/web/url
+  const audioId = String(songInfo?.meta?.audioId || '').trim()
+  if (audioId) {
+    const auid = auidOf(audioId)
+    if (auid) return fetchAudioStream(auid, quality, cookie)
+  }
+  // 否则按视频（bvid→cid→playurl）处理
   const { bvid, cid: rawCid } = pickIds(songInfo)
   if (!isBilibiliId(bvid)) throw new Error(`B站歌曲 id 不合法（${bvid || '空'}），无法取链`)
 
@@ -356,4 +363,230 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = ''): 
 /** 当前是否配置了 B站 账号（供上层判断是否需要把 VIP 档列进音质选择） */
 export function hasAccount(): boolean {
   return !!store.getCookie('bili')
+}
+
+// ---- 歌单 / 排行榜（B站音频区，独立于视频投稿体系） ----
+//
+// 与视频投稿（bv）是两套接口：
+//   - 排行榜：api.bilibili.com/x/copyright-music-publicity/toplist/{all_period,music_list}
+//   - 歌单  ：www.bilibili.com/audio/music-service-c/web/{menu/rank,menu/info,song/of-menu}
+// 实测均不需要 WBI 签名，匿名即可（带匿名指纹 buvid3）。
+// 音频流用 web/url（sid=MA音频id），与视频取流（playurl）是两条独立路径。
+
+const RANK_API = 'https://api.bilibili.com/x/copyright-music-publicity/toplist'
+const MENU_API = 'https://www.bilibili.com/audio/music-service-c/web'
+
+const BILI_BOARDS: Array<{ bangid: string; name: string; list_type: number }> = [
+  { bangid: 'hot', name: 'B站热歌榜', list_type: 1 },
+  { bangid: 'original', name: 'B站原创榜', list_type: 2 },
+]
+
+let periodCache: { at: number; ids: Record<number, number> } | null = null
+const PERIOD_TTL = 60 * 60 * 1000
+
+/** MA音频id → 纯数字 auid（music-service-c/web/url 用） */
+function auidOf(raw: any): string {
+  const s = String(raw || '').trim()
+  if (!s) return ''
+  return s.replace(/^MA/i, '')
+}
+
+/** 音频条目 → LX songInfo（meta.audioId 保留给 getAudioUrl 取流用） */
+function mapAudioSong(raw: any): any {
+  const auidRaw = String(raw?.id ?? raw?.music_id ?? '')
+  const auid = auidRaw.replace(/^MA/i, '')
+  const maId = raw?.music_id ? String(raw.music_id) : `MA${auid}`
+  const cover = normalizeCover(raw?.cover ?? raw?.mv_cover ?? raw?.creation_cover ?? '')
+  const title = decodeEntities(raw?.music_title ?? raw?.title ?? '')
+  const singer = decodeEntities(raw?.singer ?? raw?.author ?? '')
+  const duration = Number(raw?.duration ?? raw?.creation_duration ?? 0)
+  return {
+    source: 'bili',
+    id: `bili_${auid}`,
+    songmid: auid,
+    name: title || `音频 ${auid}`,
+    singer,
+    albumName: decodeEntities(raw?.album ?? ''),
+    albumId: '',
+    interval: secToInterval(duration),
+    img: cover,
+    types: [
+      { type: '128k' },
+      { type: '192k' },
+      { type: '320k' },
+      { type: 'flac' },
+    ],
+    _types: {},
+    typeUrl: {},
+    meta: {
+      audioId: maId,
+      bvid: String(raw?.creation_bvid ?? raw?.bvid ?? ''),
+      source: 'bili',
+    },
+  }
+}
+
+function mapMenuCard(m: any): any {
+  const cover = normalizeCover(m?.cover)
+  return {
+    id: String(m?.menuId ?? m?.id ?? ''),
+    name: decodeEntities(m?.title ?? ''),
+    img: cover,
+    picUrl: cover,
+    author: decodeEntities(m?.uname ?? ''),
+    total: Number(m?.snum ?? 0),
+    desc: decodeEntities(m?.intro ?? ''),
+    source: 'bili',
+  }
+}
+
+/** 取某榜单类型当前最新一期的 list_id（按 publish_time 取最大） */
+async function latestPeriodId(listType: number): Promise<number> {
+  const now = Date.now()
+  if (periodCache && now - periodCache.at < PERIOD_TTL && periodCache.ids[listType]) {
+    return periodCache.ids[listType]
+  }
+  const resp = await request<any>(`${RANK_API}/all_period?list_type=${listType}`, {
+    headers: await headersWithCookie(''),
+    timeout: 12000,
+  })
+  const body: any = resp.body || {}
+  if (Number(body.code) !== 0) throw new Error(`B站榜单列表获取失败（code=${body.code}）`)
+  const yearMap: any = body.data?.list || {}
+  let maxTime = 0
+  let id = 0
+  for (const year of Object.keys(yearMap)) {
+    for (const period of (yearMap[year] || [])) {
+      const t = Number(period?.publish_time || 0)
+      if (t > maxTime) { maxTime = t; id = Number(period?.ID || 0) }
+    }
+  }
+  if (!id) throw new Error('B站榜单暂无可用期数')
+  if (!periodCache) periodCache = { at: now, ids: {} }
+  periodCache.ids[listType] = id
+  periodCache.at = now
+  return id
+}
+
+export async function getLeaderboardBoards(): Promise<{ list: any[] }> {
+  return { list: BILI_BOARDS.map(b => ({ bangid: b.bangid, name: b.name })) }
+}
+
+export async function getLeaderboardList(bangid: string): Promise<any> {
+  const board = BILI_BOARDS.find(b => b.bangid === String(bangid || '').trim())
+  if (!board) throw new Error(`未知 B站榜单：${bangid}`)
+  const listId = await latestPeriodId(board.list_type)
+  const resp = await request<any>(`${RANK_API}/music_list?list_id=${listId}`, {
+    headers: await headersWithCookie(''),
+    timeout: 15000,
+  })
+  const body: any = resp.body || {}
+  if (Number(body.code) !== 0) throw new Error(`B站榜单内容获取失败（code=${body.code}）`)
+  const rawList: any[] = Array.isArray(body.data?.list) ? body.data.list : []
+  const list = rawList.map(mapAudioSong)
+  return { list, total: list.length, boardName: board.name }
+}
+
+export async function getSongListTags(): Promise<any> {
+  // B站音频无官方分类目录，用「官方推荐歌单」一个分类承载 menu/rank
+  return {
+    tags: [{ name: '官方推荐', list: [{ id: 'rank', name: '官方推荐歌单' }] }],
+    hotTag: { id: 'rank', name: '官方推荐歌单' },
+  }
+}
+
+export async function getSongListList(tagId: string, page = 1, pageSize = 20): Promise<any> {
+  // 目前只实现官方推荐（menu/rank），tagId 暂忽略
+  const resp = await request<any>(`${MENU_API}/menu/rank?pn=${page}&ps=${pageSize}`, {
+    headers: await headersWithCookie(''),
+    timeout: 15000,
+  })
+  const body: any = resp.body || {}
+  if (Number(body.code) !== 0) throw new Error(`B站歌单列表获取失败（code=${body.code}）`)
+  const menus: any[] = Array.isArray(body.data?.data) ? body.data.data : []
+  const list = menus.map(mapMenuCard)
+  const total = Number(body.data?.totalSize || list.length)
+  const allPage = Number(body.data?.pageCount || page)
+  return { list, total, allPage }
+}
+
+export async function getSongListDetail(id: string): Promise<any> {
+  const sid = String(id || '').trim()
+  if (!sid) throw new Error('缺少歌单 ID')
+  const infoResp = await request<any>(`${MENU_API}/menu/info?sid=${sid}`, {
+    headers: await headersWithCookie(''),
+    timeout: 12000,
+  })
+  const infoBody: any = infoResp.body || {}
+  if (Number(infoBody.code) !== 0 || !infoBody.data?.menuId) throw new Error('B站歌单不存在或已下架')
+  const infoData: any = infoBody.data
+  const cover = normalizeCover(infoData.cover)
+  const songs: any[] = []
+  for (let pn = 1; pn <= 5; pn++) {
+    const resp = await request<any>(`${MENU_API}/song/of-menu?sid=${sid}&pn=${pn}&ps=100`, {
+      headers: await headersWithCookie(''),
+      timeout: 15000,
+    })
+    const b: any = resp.body || {}
+    if (Number(b.code) !== 0) break
+    const arr: any[] = Array.isArray(b.data?.data) ? b.data.data : []
+    for (const s of arr) songs.push(mapAudioSong(s))
+    if (pn >= Number(b.data?.pageCount || 1) || !arr.length) break
+  }
+  return {
+    info: {
+      id: String(infoData.menuId),
+      name: decodeEntities(infoData.title),
+      img: cover,
+      picUrl: cover,
+      desc: decodeEntities(infoData.intro),
+      author: decodeEntities(infoData.uname),
+      total: songs.length,
+      source: 'bili',
+    },
+    list: songs,
+    total: songs.length,
+  }
+}
+
+export async function searchPlaylists(keyword: string, page = 1): Promise<any> {
+  // B站音频无歌单搜索接口，退回按「官方推荐歌单」标题/简介过滤
+  const text = String(keyword || '').trim().toLowerCase()
+  const resp = await request<any>(`${MENU_API}/menu/rank?pn=1&ps=50`, {
+    headers: await headersWithCookie(''),
+    timeout: 15000,
+  })
+  const body: any = resp.body || {}
+  let menus: any[] = Array.isArray(body.data?.data) ? body.data.data : []
+  if (text) {
+    menus = menus.filter(m => `${m?.title || ''} ${m?.intro || ''}`.toLowerCase().includes(text))
+  }
+  const pageSize = 20
+  const start = (page - 1) * pageSize
+  const list = menus.slice(start, start + pageSize).map(mapMenuCard)
+  const total = menus.length
+  const allPage = Math.max(1, Math.ceil(total / pageSize))
+  return { list, total, allPage }
+}
+
+/** 音频流（MAID）→ 直链，优先级高于视频（bvid）路径 */
+async function fetchAudioStream(auid: string, quality: string, cookie: string): Promise<BilibiliStream> {
+  const qMap: Record<string, number> = { '128k': 0, '192k': 1, '320k': 2, flac: 3, flac24bit: 3, atmos: 3, master: 3 }
+  const qn = qMap[quality] ?? 2
+  const params = new URLSearchParams({ sid: auid, privilege: '2', quality: String(qn) })
+  const resp = await request<any>(`${MENU_API}/url?${params.toString()}`, {
+    headers: await headersWithCookie(cookie),
+    timeout: 15000,
+  })
+  const body: any = resp.body || {}
+  if (Number(body.code) !== 0) throw new Error(`B站音频取流失败（code=${body.code} ${body.msg || ''}）`)
+  const cdns: string[] = Array.isArray(body.data?.cdns) ? body.data.cdns : []
+  if (!cdns.length) throw new Error('B站音频未返回可用 cdns（可能无版权或需登录）')
+  const isPreview = Number(body.data?.type) === -1
+  return {
+    url: cdns[0],
+    quality,
+    via: `audio:q${qn}${isPreview ? '(试听)' : ''}`,
+    ext: extFromUrl(cdns[0]) || 'm4a',
+  }
 }

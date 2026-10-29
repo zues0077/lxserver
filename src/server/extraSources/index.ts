@@ -84,42 +84,48 @@ export async function getAlbumSongs(source: string, albumId: string) {
 }
 
 // ---- 歌单 / 排行榜 ----
-// 只有汽水实现了这两个维度（B站是 UP 主投稿语义，没有歌单/榜单实体）。
-// 汽水没有官方的「分类目录」与「榜单」接口（/luna/pc/charts、/luna/pc/discover/mix
-// 实测已 404），因此用关键词搜索歌单 + 歌单详情兜底，内容真实可播。
+// 汽水（soda）与 B站（bili）都实现了这两个维度：
+//   - soda：用关键词搜索歌单 + 歌单详情兜底（官方 charts/discover 已 404）；
+//   - bili ：走独立音频区 API（排行榜 all_period/music_list、歌单 menu/info+song/of-menu）。
 
 export function hasSongList(source: string): boolean {
-  return source === 'soda'
+  return source === 'soda' || source === 'bili'
 }
 
 export async function getSongListTags(source: string) {
-  requireSoda(source, '歌单分类')
-  return soda.getPlaylistTags()
+  if (source === 'soda') return soda.getPlaylistTags()
+  if (source === 'bili') return bilibili.getSongListTags()
+  throw new Error(`${displayName(source)} 暂不支持歌单分类`)
 }
 
 export async function getSongListList(source: string, tagId: string, page = 1) {
-  requireSoda(source, '歌单列表')
-  return soda.getPlaylistList(tagId, page)
+  if (source === 'soda') return soda.getPlaylistList(tagId, page)
+  if (source === 'bili') return bilibili.getSongListList(tagId, page)
+  throw new Error(`${displayName(source)} 暂不支持歌单列表`)
 }
 
 export async function getSongListDetail(source: string, id: string) {
-  requireSoda(source, '歌单详情')
-  return soda.getPlaylistDetail(id)
+  if (source === 'soda') return soda.getPlaylistDetail(id)
+  if (source === 'bili') return bilibili.getSongListDetail(id)
+  throw new Error(`${displayName(source)} 暂不支持歌单详情`)
 }
 
 export async function searchSongList(source: string, text: string, page = 1) {
-  requireSoda(source, '歌单搜索')
-  return soda.searchPlaylists(text, page)
+  if (source === 'soda') return soda.searchPlaylists(text, page)
+  if (source === 'bili') return bilibili.searchPlaylists(text, page)
+  throw new Error(`${displayName(source)} 暂不支持歌单搜索`)
 }
 
 export async function getLeaderboardBoards(source: string) {
-  requireSoda(source, '排行榜')
-  return soda.getBoards()
+  if (source === 'soda') return soda.getBoards()
+  if (source === 'bili') return bilibili.getLeaderboardBoards()
+  throw new Error(`${displayName(source)} 暂不支持排行榜`)
 }
 
 export async function getLeaderboardList(source: string, bangid: string) {
-  requireSoda(source, '排行榜歌曲')
-  return soda.getBoardSongs(bangid)
+  if (source === 'soda') return soda.getBoardSongs(bangid)
+  if (source === 'bili') return bilibili.getLeaderboardList(bangid)
+  throw new Error(`${displayName(source)} 暂不支持排行榜歌曲`)
 }
 
 /**

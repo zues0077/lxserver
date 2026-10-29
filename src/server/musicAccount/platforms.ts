@@ -135,6 +135,9 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     ],
     benefit: '会员可解锁 320k、无损与付费曲库',
     color: '#FFA000',
+    // 酷我网页没有「扫酷我 App」的二维码（那只在桌面客户端里），但网页有手机号+图形码+短信码登录，
+    // 端点全部在 wapi.kuwo.cn，无需抓包。复用短信登录基础设施（含图形验证码一步）。
+    smsLogin: { label: '手机号登录', captcha: true },
   },
   {
     id: 'kg',

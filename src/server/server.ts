@@ -8717,6 +8717,35 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               res.end(JSON.stringify({ error: err?.message || '汽水歌单/榜单请求失败' }))
             }
             return
+          } else if (rawSource === 'bili') {
+            try {
+              let result: any = null
+              if (pathname === '/api/music/songList/tags') {
+                result = await extraSources.getSongListTags('bili')
+              } else if (pathname === '/api/music/songList/list') {
+                result = await extraSources.getSongListList('bili', urlObj.searchParams.get('tagId') || '', parseInt(urlObj.searchParams.get('page') || '1'))
+              } else if (pathname === '/api/music/songList/detail') {
+                result = await extraSources.getSongListDetail('bili', urlObj.searchParams.get('id') || '')
+              } else if (pathname === '/api/music/songList/search') {
+                result = await extraSources.searchSongList('bili', urlObj.searchParams.get('text') || '', parseInt(urlObj.searchParams.get('page') || '1'))
+              } else if (pathname === '/api/music/leaderboard/boards') {
+                result = await extraSources.getLeaderboardBoards('bili')
+              } else {
+                result = await extraSources.getLeaderboardList('bili', urlObj.searchParams.get('bangid') || '')
+              }
+              // 只有返回歌曲的端点需要归一（歌单列表 / 标签返回的是歌单对象，不是歌曲）
+              if (result && Array.isArray(result.list)
+                && (pathname === '/api/music/songList/detail' || pathname === '/api/music/leaderboard/list')) {
+                result.list = result.list.map(normalizeSongInfo)
+              }
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify(result))
+            } catch (err: any) {
+              console.error(`[B站歌单/榜单] 请求失败 (${pathname}):`, err)
+              res.writeHead(500, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: err?.message || 'B站歌单/榜单请求失败' }))
+            }
+            return
           }
         }
       }

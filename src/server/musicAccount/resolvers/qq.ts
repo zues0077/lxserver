@@ -107,13 +107,40 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   if (!hasKey) {
     return { ok: false, message: 'Cookie 缺少 qm_keyst，QQ音乐会按游客处理，付费与无损将取不到' }
   }
-  // QQ音乐没有公开的「查当前登录用户」接口，只能用 uin + qm_keyst 的存在性判断，
-  // 所以这里如实标 structural，不谎称已验证会员身份。
+  // 在线查会员：music.vipuser.vipUserInfo（依赖登录态 Cookie，comm.uin 仍置 0 避免超长微信 uin 失真）。
+  // 查不到就退化为 structural，不让会员查询失败阻断登录。
+  try {
+    const payload = {
+      comm: { ct: 24, cv: 0, uin: 0, format: 'json', platform: 'yqq.json' },
+      req_1: { module: 'music.vipuser.vipUserInfo', method: 'getVipUserInfo', param: { uin } },
+    }
+    const resp = await request(MUSICU, {
+      method: 'post',
+      headers: { 'User-Agent': UA, Referer: REFERER, 'Content-Type': 'application/json', Cookie: cookie },
+      json: payload,
+      timeout: 12000,
+    })
+    const r1: any = resp?.body?.req_1 || {}
+    if (Number(r1.code) === 0 && r1.data) {
+      const d: any = r1.data
+      const isVip = Number(d.vip) === 1 || Number(d.svipType) > 0 || Number(d.vipType) > 0 || Number(d.musicPackage) === 1 || Number(d.openVip) === 1
+      const tier = Number(d.svipType) > 0 ? '超级会员' : Number(d.vip) === 1 ? '绿钻' : Number(d.musicPackage) === 1 ? '音乐包' : '非会员'
+      return {
+        ok: true,
+        verified: 'online',
+        isVip,
+        nickname: `QQ账号 ${uin}`,
+        message: isVip ? `已登录，会员状态：${tier}` : '已登录，当前非会员（仅免费音质）',
+      }
+    }
+  } catch (e: any) {
+    console.warn('[QQ] 会员在线查询失败，退化为结构校验:', e?.message || e)
+  }
   return {
     ok: true,
     verified: 'structural',
     nickname: `QQ账号 ${uin}`,
-    message: '已完成结构校验（uin + qm_keyst 均存在）；会员状态以实际取链音质为准',
+    message: '已完成结构校验（uin + qm_keyst 均存在）；会员在线查询暂不可用，会员状态以实际取链音质为准',
   }
 }
 
