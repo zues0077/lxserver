@@ -97,6 +97,35 @@ async function getVkey(songmids: string[], filenames: string[], cookie: string):
   return filenames.map(f => byName.get(f) || '')
 }
 
+/**
+ * VIP 探针：对一首确定收费的歌试取 vkey，拿到 purl 即账号有会员权益。
+ *
+ * 为什么不用 music.vipuser.vipUserInfo：实测（2026-10-30）用户信息类模块全部要求
+ * App 级签名，网页 Cookie（qm_keyst）只对 vkey 通道有效——comm.uin 带真实值/置 0、
+ * cv 换新版本号，一律 code=500003 subcode=860100001。
+ * 所以照咪咕 probeVip 的思路：不问「我的会员状态」，直接验证「权益本身」。
+ *
+ * 选曲：周杰伦《晴天》songmid=0039MnYb0qxYhV（多年稳定收费），
+ * mediaMid=003Qui1q2u1Zho（2026-10-30 从聚合源返回的真实文件名 C400003Qui1q2u1Zho.m4a 反查）。
+ * 返回：true=有会员权益；false=探针正常返回但拿不到（大概率非会员）；
+ *       null=探针自身失败（网络/超时），不能下结论。
+ */
+const VIP_PROBE_SONGMID = '0039MnYb0qxYhV'
+const VIP_PROBE_MEDIA_MID = '003Qui1q2u1Zho'
+
+async function probeVipByVkey(cookie: string): Promise<boolean | null> {
+  const m = VIP_PROBE_MEDIA_MID
+  const filenames = [`F000${m}${m}.flac`, `M800${m}${m}.mp3`, `M500${m}${m}.mp3`]
+  const mids = filenames.map(() => VIP_PROBE_SONGMID)
+  try {
+    const purls = await withTimeout(getVkey(mids, filenames, cookie), 15000, 'QQ VIP 探针')
+    return purls.some(p => !!p)
+  } catch (e: any) {
+    console.warn('[QQ] VIP 探针失败（不下结论）:', e?.message || e)
+    return null
+  }
+}
+
 export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   const map = parseCookie(cookie)
   const uin = uinOf(cookie)
@@ -107,53 +136,24 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   if (!hasKey) {
     return { ok: false, message: 'Cookie 缺少 qm_keyst，QQ音乐会按游客处理，付费与无损将取不到' }
   }
-  // 在线查会员：music.vipuser.vipUserInfo（依赖登录态 Cookie）。
-  // 实测注意：comm.uin=0 时该模块按「未登录」处理（code 500003），网页端惯例是带真实 uin；
-  // vkey 那套「uin 必须为 0」的约束只对 GetVkey 成立，这里不能照搬。
-  // 查不到就退化为 structural，不让会员查询失败阻断登录，并把真实 code 记进日志与提示。
-  const uinNum = /^\d+$/.test(uin) && Number(uin) <= Number.MAX_SAFE_INTEGER ? Number(uin) : 0
-  const tryVipQuery = async (commUin: number, cv: number): Promise<any> => {
-    const payload = {
-      comm: { ct: 24, cv, uin: commUin, format: 'json', platform: 'yqq.json' },
-      req_1: { module: 'music.vipuser.vipUserInfo', method: 'getVipUserInfo', param: { uin: commUin || uin } },
+  // 会员打标：付费曲 vkey 探针（见 probeVipByVkey 注释）。探针失败不阻断登录，退化为 structural。
+  const probe = await probeVipByVkey(cookie)
+  if (probe !== null) {
+    return {
+      ok: true,
+      verified: 'online',
+      isVip: probe,
+      nickname: `QQ账号 ${uin}`,
+      message: probe
+        ? '已登录，会员权益有效（付费曲探针命中，可取 SQ/无损）'
+        : '已登录，当前无会员权益（付费曲探针未命中）；以实际取链音质为准',
     }
-    const resp = await request(MUSICU, {
-      method: 'post',
-      headers: { 'User-Agent': UA, Referer: REFERER, 'Content-Type': 'application/json', Cookie: cookie },
-      json: payload,
-      timeout: 12000,
-    })
-    return resp?.body?.req_1 || {}
-  }
-
-  let r1: any = {}
-  try {
-    // 变体1：网页端惯例（真实 uin + 当前 web 版本号）；变体2：旧版本号；变体3：comm.uin=0
-    for (const [commUin, cv] of [[uinNum, 18036330], [uinNum, 0], [0, 0]] as Array<[number, number]>) {
-      r1 = await tryVipQuery(commUin, cv)
-      if (Number(r1.code) === 0) break
-      console.warn(`[QQ] vipUserInfo 未命中（comm.uin=${commUin}, cv=${cv}）→ code=${r1?.code} subcode=${r1?.subcode}`)
-    }
-    if (Number(r1.code) === 0 && r1.data) {
-      const d: any = r1.data
-      const isVip = Number(d.vip) === 1 || Number(d.svipType) > 0 || Number(d.vipType) > 0 || Number(d.musicPackage) === 1 || Number(d.openVip) === 1
-      const tier = Number(d.svipType) > 0 ? '超级会员' : Number(d.vip) === 1 ? '绿钻' : Number(d.musicPackage) === 1 ? '音乐包' : '非会员'
-      return {
-        ok: true,
-        verified: 'online',
-        isVip,
-        nickname: `QQ账号 ${uin}`,
-        message: isVip ? `已登录，会员状态：${tier}` : '已登录，当前非会员（仅免费音质）',
-      }
-    }
-  } catch (e: any) {
-    console.warn('[QQ] 会员在线查询异常，退化为结构校验:', e?.message || e)
   }
   return {
     ok: true,
     verified: 'structural',
     nickname: `QQ账号 ${uin}`,
-    message: `已完成结构校验（uin + qm_keyst 均存在）；会员在线查询未成功（code=${r1?.code ?? '异常'}），会员状态以实际取链音质为准`,
+    message: '已完成结构校验（uin + qm_keyst 均存在）；会员探针网络异常，会员状态以实际取链音质为准',
   }
 }
 
