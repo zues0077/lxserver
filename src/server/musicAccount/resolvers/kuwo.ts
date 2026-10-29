@@ -181,11 +181,23 @@ function qualityFromResponse(bitrate: number, format: string): { quality: string
  * 真实的登录态探测：酷我没有独立的会员信息接口，
  * 这里只做结构校验，会员状态以实际取链拿到的音质为准。
  */
+/** Cookie 里的 username 常被 URL 编码，解码失败就原样用 */
+function decodeName(v?: string): string {
+  if (!v) return ''
+  try {
+    return decodeURIComponent(v)
+  } catch {
+    return v
+  }
+}
+
 export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   const keys = getPlatform('kw')?.loginKeys ?? ['kw_token', 'userid']
   if (!hasLoginKey(cookie, keys)) {
     return { ok: false, verified: 'structural', message: `Cookie 里没有找到 ${keys.join(' / ')}，请确认已登录酷我后再复制` }
   }
+  const map = parseCookie(cookie)
+  const nickname = decodeName(map['username']) || (map['userid'] ? `酷我账号 ${map['userid']}` : '')
 
   // 先在线查会员：www 接口 + csrf 头能拿到权益字段就如实标注，
   // 拿不到再退回结构校验（不猜、不谎报）。
@@ -210,7 +222,8 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   return {
     ok: true,
     verified: 'structural',
-    message: '已完成结构校验；会员在线查询未成功（多为 Cookie 缺 kw_token）。请打开 www.kuwo.cn 登录并播放一首歌后重新复制完整 Cookie（需含 kw_token），才能判定会员身份',
+    nickname: nickname || undefined,
+    message: '已登录（结构校验）；会员在线查询未成功，多为 Cookie 缺 kw_token。请打开 www.kuwo.cn 登录后重新复制完整 Cookie（需含 kw_token），才能判定会员身份',
   }
 }
 
