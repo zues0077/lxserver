@@ -5122,16 +5122,28 @@ class App {
                     statusText = a.healthText || '待确认';
                 } else if (h === 'ok') {
                     if (v.verified === 'structural') {
-                        // 只做了结构校验的平台不标「已登录/会员」，避免给出没根据的绿色
+                        // 只做了结构校验的平台不标「已登录/会员」，避免给出没根据的绿色。
+                        // 例外：咪咕这类「拿取链实测」得出会员结论的（isVip 是布尔值），
+                        // 结论有依据，照实显示——总比只给一句「结构校验通过」有用。
+                        if (typeof v.isVip === 'boolean') {
+                            statusClass = v.isVip ? 'vip' : 'ok';
+                            statusText = v.isVip ? '会员' : '无会员';
+                        } else {
+                            statusClass = 'ok';
+                            statusText = '结构校验通过';
+                        }
+                    } else {
+                        statusClass = v.isVip ? 'vip' : 'ok';
+                        statusText = v.isVip ? '会员' : '已登录';
+                    }
+                } else if (v.ok) {
+                    if (v.verified === 'structural' && typeof v.isVip !== 'boolean') {
                         statusClass = 'ok';
                         statusText = '结构校验通过';
                     } else {
                         statusClass = v.isVip ? 'vip' : 'ok';
                         statusText = v.isVip ? '会员' : '已登录';
                     }
-                } else if (v.ok) {
-                    statusClass = v.verified === 'structural' ? 'ok' : (v.isVip ? 'vip' : 'ok');
-                    statusText = v.verified === 'structural' ? '结构校验通过' : (v.isVip ? '会员' : '已登录');
                 } else if (v.at) {
                     if (v.verified === 'structural') {
                         statusClass = '';
@@ -6028,7 +6040,11 @@ class App {
             const info = (res && res.data) || {};
             if (!silent) {
                 if (info.ok) {
-                    showSuccess(info.isVip ? '验证通过：账号有效且为会员' : `验证通过：${info.message || '账号有效'}`);
+                    showSuccess(info.isVip === true
+                        ? '验证通过：账号有效且为会员'
+                        : info.isVip === false
+                            ? `验证通过：账号有效，但没检测到会员权益（${info.message || '以实际音质为准'}）`
+                            : `验证通过：${info.message || '账号有效'}`);
                 } else {
                     showError(`验证未通过：${info.message || '未知原因'}`);
                 }

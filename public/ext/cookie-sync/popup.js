@@ -213,7 +213,8 @@ $('sync').addEventListener('click', async () => {
   if (!password) return setStatus('请填写管理员密码（就是后台登录密码）', 'err')
 
   platformId = $('platform').value || platformId
-  await chrome.storage.local.set({ server, password })
+  const append = !!$('append').checked
+  await chrome.storage.local.set({ server, password, append })
   $('sync').disabled = true
   setStatus('正在同步…')
 
@@ -236,12 +237,17 @@ $('sync').addEventListener('click', async () => {
     if (!cookies.length) throw new Error('没有可同步的 Cookie：请确认已登录该平台并刷新页面')
 
     const cookie = toCookieHeader(cookies)
-    const { data: r } = await apiPost(server, '/api/music/accounts', password, { platform: platformId, cookie })
+    // append=true 走「追加/按 uid 认领」，否则是历史语义「覆盖主账号」。
+    // 给已有账号加第二个号时必须追加，否则主号会被顶掉。
+    const { data: r } = await apiPost(server, '/api/music/accounts', password, { platform: platformId, cookie, append })
     lastDiag.save = r
     if (!r.success) throw new Error(r.error || '服务器拒绝保存')
 
     const lines = []
     lines.push(`已保存到「${PLATFORMS[platformId].name}」：${r.count ?? names.length} 个字段（识别为${r.formatText || 'Cookie'}）`)
+    lines.push(append
+      ? `写入方式：${r.created === false ? '更新已有账号' : '新增账号'}${r.total ? `（该平台现共 ${r.total} 个）` : ''}`
+      : '写入方式：覆盖该平台主账号')
     lines.push(`字段：${fmtList(r.keys && r.keys.length ? r.keys : names)}`)
     for (const w of r.warnings || []) lines.push('⚠ ' + w)
     setStatus(lines.join('\n'), (r.warnings || []).length ? 'warn' : 'ok')
@@ -285,8 +291,9 @@ $('diag').addEventListener('click', async () => {
 })
 
 ;(async () => {
-  const saved = await chrome.storage.local.get(['server', 'password'])
+  const saved = await chrome.storage.local.get(['server', 'password', 'append'])
   if (saved.server) $('server').value = saved.server
   if (saved.password) $('password').value = saved.password
+  $('append').checked = !!saved.append
   await reload()
 })()

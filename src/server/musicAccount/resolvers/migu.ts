@@ -57,6 +57,54 @@ function pickIds(songInfo: any): { contentId: string; copyrightId: string } {
   }
 }
 
+/**
+ * 会员权益探针。
+ *
+ * 咪咕没有可用的「查我是谁 / 我是不是会员」接口（userInfo.do 返回「路由请求不支持」），
+ * 所以退一步用**取链行为**反推：同一首热门曲，匿名请求 SQ/HQ 会返回
+ * `code=000000 操作成功` 但 **data.url 为空**，只有带上会员 Cookie 才给 url（2026-10-29 实测）。
+ * PQ(128k) 匿名也能拿到 url —— 用它区分「确实没会员」和「探针曲本身失效」，
+ * 避免把「这首歌下架了」误报成「你没有会员」。
+ */
+const PROBE_CONTENT_ID = '1139098751' // 孤勇者（陈奕迅），SQ 需会员
+
+async function probeToneHasUrl(cookie: string, tone: string, ms: number): Promise<boolean> {
+  const params = new URLSearchParams({
+    netType: '00',
+    resourceType: '2',
+    songId: PROBE_CONTENT_ID,
+    toneFlag: tone,
+  })
+  try {
+    const resp = await withTimeout(request(`${LISTEN_URL}?${params.toString()}`, {
+      headers: {
+        'User-Agent': MIGU_UA,
+        Referer: 'https://m.music.migu.cn/v4',
+        channel: CHANNEL,
+        version: VERSION,
+        Cookie: cookie,
+        ...authHeaders(cookie),
+      },
+    }), ms, `咪咕${tone}探针`)
+    const body: any = resp.body
+    if (body?.code && body.code !== '000000') return false
+    return !!String(body?.data?.url || '')
+  } catch {
+    return false
+  }
+}
+
+/** 返回 null = 无法判定（探针曲不可用），不要当成「没会员」 */
+async function probeVip(cookie: string): Promise<{ vip: boolean | null; note: string }> {
+  if (await probeToneHasUrl(cookie, 'SQ', 4500)) {
+    return { vip: true, note: '会员权益生效，实测可取 SQ 无损' }
+  }
+  if (await probeToneHasUrl(cookie, 'PQ', 4500)) {
+    return { vip: false, note: '账号没有会员权益（或已过期），实测最高只到 PQ 128k' }
+  }
+  return { vip: null, note: '探针曲本次不可用，会员状态以实际播放音质为准' }
+}
+
 export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   // 咪咕同样没有可靠的「查当前登录用户」接口（试过的 userInfo.do 返回「路由请求不支持」）。
   // 用公开接口试探无效 —— 不登录也 200。如实只做结构校验。
@@ -68,10 +116,14 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   if (!hasLoginKey(cookie, keys)) {
     return { ok: false, verified: 'structural', message: `Cookie 里没有找到登录字段（${keys.join(' / ')}），请确认已登录咪咕后再复制` }
   }
+  // 结构校验通过后再实测一次会员：用户真正想知道的是「能不能拿到会员音质」，
+  // 而不是「Cookie 里有没有那几个字段」。判不出来时如实说判不出来。
+  const probe = await probeVip(cookie)
   return {
     ok: true,
     verified: 'structural',
-    message: '已完成结构校验；咪咕不提供可用的登录态查询接口，会员状态以实际取链音质为准',
+    ...(probe.vip === null ? {} : { isVip: probe.vip }),
+    message: `结构校验通过；${probe.note}`,
   }
 }
 

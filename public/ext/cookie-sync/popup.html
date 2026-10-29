@@ -40,6 +40,12 @@
     #status.err { background: #2a1618; color: #f87171; }
     #status.warn { background: #2a2213; color: #fbbf24; }
     .hint { margin-top: 10px; font-size: 11px; color: #6b7383; line-height: 1.5; }
+    .chk {
+      display: flex; align-items: flex-start; gap: 7px;
+      margin: 10px 0 0; font-size: 12px; color: #c8cedb; cursor: pointer;
+    }
+    .chk input { width: auto; flex: 0 0 auto; margin: 2px 0 0; padding: 0; }
+    .chk .tip { display: block; color: #6b7383; font-size: 11px; line-height: 1.45; }
     .plat { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: #9aa2b1; }
     .dot { width: 7px; height: 7px; border-radius: 50%; background: #4ade80; }
     .dot.off { background: #6b7383; }
@@ -69,6 +75,14 @@
     </select>
     <button id="refresh" style="margin-top:0;background:#262b34;color:#c8cedb;font-weight:500;flex:0 0 96px">重新读取</button>
   </div>
+
+  <label class="chk">
+    <input id="append" type="checkbox">
+    <span>
+      追加为新账号（不覆盖主号）
+      <span class="tip">不勾 = 覆盖该平台主账号。给已有账号加第二个号时请勾上。</span>
+    </span>
+  </label>
 
   <button id="sync">一键同步到服务器</button>
   <button id="copy">复制为 Netscape Cookie 文件</button>
