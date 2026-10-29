@@ -28,13 +28,94 @@
  *    该看的是这首歌本身有没有那个档位的资源。Cookie 仍然照发，等平台收紧时才会用到。
  */
 
-import { request, withTimeout, extFromUrl, hasLoginKey } from '../http'
+import { request, withTimeout, extFromUrl, hasLoginKey, parseCookie } from '../http'
 import { getPlatform } from '../platforms'
 import type { AccountResolveResult, AccountInfo } from '../types'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 const MOBI_API = 'https://mobi.kuwo.cn/mobi.s'
 const SOURCE = 'kwplayercar_ar_6.0.0.9_B_jiakong_vh.apk'
+const WWW = 'https://www.kuwo.cn'
+
+/**
+ * 会员信息候选路径。
+ *
+ * 酷我 www 接口的鉴权是 Cookie 里的 kw_token + 请求头 csrf（两者同值）+ reqId，
+ * 缺任一都会被网关回 `{"success":false,"message":"The request is illegal!"}`。
+ * 注意这个 illegal 是**风控层**的回包：连不存在的路径也回它，所以不能拿它判断
+ * 接口是否存在（wapi.kuwo.cn 才会给真 404）。这里按优先级排，逐个试到有数据为止。
+ */
+const VIP_PATHS = [
+  '/api/v1/www/user/getVipInfo',
+  '/api/v1/www/user/getUserInfo',
+  '/api/v1/www/vip/getVipInfo',
+  '/api/www/user/getVipInfo',
+  '/api/www/user/getUserInfo',
+]
+
+/** 平台返回体里"是不是会员"的字段名五花八门，宽松取一个真值即可 */
+const VIP_FIELDS = ['isVip', 'vip', 'vipFlag', 'isVipFlag', 'vipType', 'vipLevel', 'isVipUser', 'vipStatus']
+
+function pickVipFlag(data: any): boolean | null {
+  if (!data || typeof data !== 'object') return null
+  let saw = false
+  let vip = false
+  for (const k of VIP_FIELDS) {
+    const raw = (data as any)[k]
+    if (raw === undefined || raw === null || raw === '') continue
+    const n = Number(raw)
+    if (!Number.isFinite(n)) {
+      // 字符串型（如 "1" / "true" / "vip"）也认
+      const s = String(raw).trim().toLowerCase()
+      if (s === 'true' || s === 'vip' || s === 'yes') { saw = true; vip = true }
+      continue
+    }
+    saw = true
+    if (n > 0) vip = true
+  }
+  return saw ? vip : null
+}
+
+/**
+ * 在线查酷我会员。拿不到就返回 null，由调用方退化为结构校验。
+ * 命中的原始响应会记进日志，便于平台改字段后快速定位。
+ */
+async function probeVip(cookie: string): Promise<{ isVip: boolean; nickname?: string; raw?: string } | null> {
+  const map = parseCookie(cookie)
+  const csrf = map['kw_token'] || ''
+  if (!csrf) {
+    console.warn('[KW-VIP] Cookie 里没有 kw_token，无法构造 csrf 头，跳过在线会员查询')
+    return null
+  }
+  const reqId = `${Date.now().toString(16)}-${Math.floor(Math.random() * 1e9).toString(16)}`
+  for (const path of VIP_PATHS) {
+    try {
+      const resp = await withTimeout(request(`${WWW}${path}?reqId=${reqId}`, {
+        headers: {
+          'User-Agent': UA,
+          Referer: 'https://www.kuwo.cn/',
+          csrf,
+          Cookie: cookie,
+        },
+        timeout: 12000,
+      }), 13000, '酷我会员查询')
+      const body: any = resp?.body
+      const brief = typeof body === 'string' ? body.slice(0, 200) : JSON.stringify(body).slice(0, 220)
+      if (body && body.success === true && body.data) {
+        const isVip = pickVipFlag(body.data)
+        const nickname = (body.data.nickname || body.data.name || body.data.uname || body.data.userName || body.data.username) as string | undefined
+        console.warn(`[KW-VIP] ${path} 命中 → isVip=${isVip} nickname=${nickname || '-'}`)
+        if (typeof isVip === 'boolean') return { isVip, nickname, raw: brief }
+        console.warn(`[KW-VIP] ${path} 返回成功但认不出会员字段 → ${brief}`)
+      } else {
+        console.warn(`[KW-VIP] ${path} → ${brief}`)
+      }
+    } catch (e: any) {
+      console.warn(`[KW-VIP] ${path} 请求异常: ${e?.message || e}`)
+    }
+  }
+  return null
+}
 
 /**
  * 并行探测的档位。192kmp3 单独留着：它是「只有 aac 资源」的曲目能拿到
@@ -94,17 +175,35 @@ function qualityFromResponse(bitrate: number, format: string): { quality: string
  * 这里只做结构校验，会员状态以实际取链拿到的音质为准。
  */
 export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
-  // 酷我没有可靠的「查询当前登录用户」接口（/api/user/info 已 404），
-  // 拿公开榜单接口试探是无效判据 —— 不带 Cookie 也照样 200，会把游客判成已登录。
-  // 字段清单读平台定义，避免这里另写一份导致前后两套判据
   const keys = getPlatform('kw')?.loginKeys ?? ['kw_token', 'userid']
   if (!hasLoginKey(cookie, keys)) {
     return { ok: false, verified: 'structural', message: `Cookie 里没有找到 ${keys.join(' / ')}，请确认已登录酷我后再复制` }
   }
+
+  // 先在线查会员：www 接口 + csrf 头能拿到权益字段就如实标注，
+  // 拿不到再退回结构校验（不猜、不谎报）。
+  try {
+    const vip = await probeVip(cookie)
+    if (vip) {
+      const uid = parseCookie(cookie)['userid'] || parseCookie(cookie)['user_id'] || ''
+      return {
+        ok: true,
+        verified: 'online',
+        isVip: vip.isVip,
+        nickname: vip.nickname || (uid ? `酷我账号 ${uid}` : '酷我账号'),
+        message: vip.isVip
+          ? '已登录，会员身份有效（酷我取链暂不校验账号，音质仍取决于曲目本身）'
+          : '已登录，当前非会员（普通账号）',
+      }
+    }
+  } catch (e: any) {
+    console.warn('[KW-VIP] 会员查询异常，退化为结构校验:', e?.message || e)
+  }
+
   return {
     ok: true,
     verified: 'structural',
-    message: '已完成结构校验；酷我不提供可用的登录态查询接口，且取链接口目前不校验账号，音质取决于曲目本身',
+    message: '已完成结构校验；酷我会员信息接口不可用（网关拦截或字段变更），且取链接口目前不校验账号，音质取决于曲目本身',
   }
 }
 

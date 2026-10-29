@@ -5127,14 +5127,14 @@ class App {
                         // 结论有依据，照实显示——总比只给一句「结构校验通过」有用。
                         if (typeof v.isVip === 'boolean') {
                             statusClass = v.isVip ? 'vip' : 'ok';
-                            statusText = v.isVip ? '会员' : '无会员';
+                            statusText = v.isVip ? '会员' : '非会员';
                         } else {
                             statusClass = 'ok';
                             statusText = '结构校验通过';
                         }
                     } else {
                         statusClass = v.isVip ? 'vip' : 'ok';
-                        statusText = v.isVip ? '会员' : '已登录';
+                        statusText = v.isVip ? '会员' : '非会员';
                     }
                 } else if (v.ok) {
                     if (v.verified === 'structural' && typeof v.isVip !== 'boolean') {
@@ -5142,7 +5142,7 @@ class App {
                         statusText = '结构校验通过';
                     } else {
                         statusClass = v.isVip ? 'vip' : 'ok';
-                        statusText = v.isVip ? '会员' : '已登录';
+                        statusText = v.isVip ? '会员' : '非会员';
                     }
                 } else if (v.at) {
                     if (v.verified === 'structural') {
