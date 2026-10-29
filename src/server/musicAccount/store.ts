@@ -284,6 +284,8 @@ export function listAccounts(): Array<{
   healthText: string
   ageHours: number | null
   qrLogins: Array<{ driver: string; label: string }>
+  /** 手机号 + 短信验证码登录（有值才显示按钮），captcha 表示要先答图形码 */
+  smsLogin: { label: string; captcha: boolean } | null
   /** 该平台已配置的账号列表（至少 0 个，按添加顺序；主账号排在前面） */
   accounts: AccountItemView[]
   /**
@@ -334,6 +336,7 @@ export function listAccounts(): Array<{
       healthText: first?.healthText || '未配置',
       ageHours: first?.ageHours ?? null,
       qrLogins: p.qrLogins || [],
+      smsLogin: p.smsLogin ? { label: p.smsLogin.label, captcha: !!p.smsLogin.captcha } : null,
       accounts: views,
       multiAccount: true,
       autoSwitch: isAutoSwitchEnabled(p.id),

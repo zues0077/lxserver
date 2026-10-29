@@ -825,7 +825,9 @@ export const qrLoginStart = qrLogin.start
 export const qrLoginPoll = qrLogin.poll
 export const qrLoginClose = qrLogin.close
 
-// ---- 手机验证码登录（酷狗概念版） ----
+// ---- 手机验证码登录（酷狗概念版 / 咪咕） ----
+// 咪咕多发一步：通行证每次都要先答一道图形验证码，所以有 qrLoginSmsCaptcha。
+export const qrLoginSmsCaptcha = qrLogin.smsCaptcha
 export const qrLoginSendSms = qrLogin.sendSms
 export const qrLoginLoginSms = qrLogin.loginSms
 

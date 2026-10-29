@@ -5314,20 +5314,35 @@ class App {
             const vipLine = (isKglite && !items.length)
                 ? `<div class="music-acc-vip" id="music-acc-vip-kglite">登录后可查看概念版会员</div>`
                 : '';
-            const smsPanel = isKglite
-                ? `<div class="music-acc-editor" id="music-acc-sms-kglite" style="display:none;" data-append="${items.length ? '1' : ''}">
-                       <div class="music-acc-editor-tip">
-                           输入酷狗账号绑定的手机号，短信验证码登录后凭据自动保存（与扫码等价）。
-                           列表里已有这个号就直接更新那一条；没见过的号才追加成冷备，不会顶掉主账号。
+            // 手机号登录面板：由平台数据驱动（a.smsLogin），不再只给概念版开。
+            // captcha=1 的平台（咪咕）每次发短信号前都要先答一道算术图形题，
+            // 所以多一行「图片 + 答案 + 换一张」，答案随发码一起提交。
+            const smsOpt = a.smsLogin || null;
+            const smsCaptchaRow = (smsOpt && smsOpt.captcha)
+                ? `<div class="music-acc-sms-row">
+                       <img id="music-acc-sms-cap-img-${a.id}" alt="图形验证码" style="display:none;height:34px;width:100px;object-fit:contain;background:#fff;border-radius:6px;border:1px solid rgba(148,163,184,.35);">
+                       <input type="text" id="music-acc-sms-cap-${a.id}" maxlength="8" placeholder="图形验证码答案" inputmode="numeric">
+                       <button type="button" class="btn-secondary" onclick="app.reloadMusicAccountCaptcha('${a.id}')">换一张</button>
+                   </div>`
+                : '';
+            const smsTip = (smsOpt && smsOpt.captcha)
+                ? `输入${this.escapeHtml(a.name)}绑定的手机号，先看图形验证码再收短信。咪咕会先验证图形码，填错了要换一张重来。
+                   登录成功后凭据自动保存，与手工粘贴 Cookie 等价；列表里已有这个号就直接更新那条，没见过的号才追加成冷备。`
+                : `输入酷狗账号绑定的手机号，短信验证码登录后凭据自动保存（与扫码等价）。
+                   列表里已有这个号就直接更新那一条；没见过的号才追加成冷备，不会顶掉主账号。`;
+            const smsPanel = smsOpt
+                ? `<div class="music-acc-editor" id="music-acc-sms-${a.id}" style="display:none;"
+                       data-append="${items.length ? '1' : ''}" data-captcha="${smsOpt.captcha ? '1' : '0'}">
+                       <div class="music-acc-editor-tip">${smsTip}</div>
+                       ${smsCaptchaRow}
+                       <div class="music-acc-sms-row">
+                           <input type="tel" id="music-acc-sms-mobile-${a.id}" maxlength="11" placeholder="11 位手机号" inputmode="numeric">
+                           <button type="button" class="btn-secondary" onclick="app.sendMusicAccountSms('${a.id}')">发送验证码</button>
                        </div>
                        <div class="music-acc-sms-row">
-                           <input type="tel" id="music-acc-sms-mobile-kglite" maxlength="11" placeholder="11 位手机号" inputmode="numeric">
-                           <button type="button" class="btn-secondary" onclick="app.sendMusicAccountSms('kglite')">发送验证码</button>
-                       </div>
-                       <div class="music-acc-sms-row">
-                           <input type="text" id="music-acc-sms-code-kglite" maxlength="8" placeholder="短信验证码" inputmode="numeric">
-                           <button type="button" class="btn-primary" onclick="app.submitMusicAccountSms('kglite')">登录</button>
-                           <button type="button" class="btn-secondary" onclick="app.editMusicAccountSms('kglite')">取消</button>
+                           <input type="text" id="music-acc-sms-code-${a.id}" maxlength="8" placeholder="短信验证码" inputmode="numeric">
+                           <button type="button" class="btn-primary" onclick="app.submitMusicAccountSms('${a.id}')">登录</button>
+                           <button type="button" class="btn-secondary" onclick="app.editMusicAccountSms('${a.id}')">取消</button>
                        </div>
                    </div>`
                 : '';
@@ -5500,8 +5515,11 @@ class App {
             label: q.label,
             onClick: () => this.startMusicAccountQR(platform, q.driver),
         }));
-        if (platform === 'kglite') {
-            items.push({ label: '手机号登录', onClick: () => this.editMusicAccountSms('kglite') });
+        if (platformData.smsLogin) {
+            items.push({
+                label: platformData.smsLogin.label || '手机号登录',
+                onClick: () => this.editMusicAccountSms(platform)
+            });
         }
         items.push({ label: '粘贴 Cookie', onClick: () => this.editMusicAccount(platform, 'append') });
 
@@ -5828,6 +5846,34 @@ class App {
             if (mode === 'append') box.dataset.append = '1';
             box.closest('.music-acc-item')?.classList.add('is-editing');
             box.querySelector('input')?.focus();
+            // 需要图形码的平台（咪咕）展开就顺手取一张，省得用户再点一次
+            if (box.dataset.captcha === '1') this.reloadMusicAccountCaptcha(platform, true);
+        }
+    }
+
+    /**
+     * 取一张图形验证码（咪咕这类每次发短信前都要答一道算术题）
+     * @param {boolean} silent 静默模式：自动调用失败也只在出错时提示
+     */
+    async reloadMusicAccountCaptcha(platform, silent) {
+        const box = document.getElementById(`music-acc-sms-${platform}`);
+        if (!box || box.dataset.captcha !== '1') return;
+        const img = document.getElementById(`music-acc-sms-cap-img-${platform}`);
+        const input = document.getElementById(`music-acc-sms-cap-${platform}`);
+        try {
+            const res = await this.request('/api/music/accounts/sms/captcha', {
+                method: 'POST',
+                body: JSON.stringify({ platform, append: box.dataset.append === '1' })
+            });
+            const d = res?.data || {};
+            if (!d.ok) throw new Error(d.message || '图形验证码获取失败');
+            // 会话（公钥 + cookie jar）在取码时就建好了，发码和校验都靠它
+            box.dataset.session = d.sessionId || '';
+            if (input) input.value = '';
+            if (img && d.image) { img.src = d.image; img.style.display = 'block'; }
+            if (!silent) showSuccess(d.message || '图形验证码已刷新');
+        } catch (e) {
+            showError(`图形验证码获取失败：${e.message}`);
         }
     }
 
@@ -5839,11 +5885,24 @@ class App {
             showError('请输入 11 位手机号');
             return;
         }
+        const box0 = document.getElementById(`music-acc-sms-${platform}`);
+        const needCaptcha = box0?.dataset.captcha === '1';
+        const captchaEl = document.getElementById(`music-acc-sms-cap-${platform}`);
+        const captcha = String(captchaEl?.value || '').trim();
+        if (needCaptcha && !captcha) {
+            showError('请先填图形验证码');
+            return;
+        }
         try {
-            const box0 = document.getElementById(`music-acc-sms-${platform}`);
             const res = await this.request('/api/music/accounts/sms/send', {
                 method: 'POST',
-                body: JSON.stringify({ platform, mobile, append: box0?.dataset.append === '1' })
+                body: JSON.stringify({
+                    platform,
+                    mobile,
+                    append: box0?.dataset.append === '1',
+                    captcha: needCaptcha ? captcha : undefined,
+                    session: needCaptcha ? (box0?.dataset.session || '') : undefined
+                })
             });
             const d = res?.data || {};
             if (!d.ok) throw new Error(d.message || '发送失败');
@@ -5853,6 +5912,8 @@ class App {
             showSuccess('验证码已发送，请查看手机短信');
         } catch (e) {
             showError(`发送失败：${e.message}`);
+            // 图形码一次性，失败就换一张，否则用户拿着作废的图反复试
+            if (needCaptcha) this.reloadMusicAccountCaptcha(platform, true);
         }
     }
 

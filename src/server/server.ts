@@ -10578,6 +10578,28 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
+      // 手机验证码登录：取图形验证码（咪咕这类每次都要答算术题的平台）
+      if (pathname === '/api/music/accounts/sms/captcha' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { platform, append } = JSON.parse(body || '{}')
+            const payload = await musicAccount.qrLoginSmsCaptcha(String(platform || ''), { append: !!append })
+            res.writeHead(payload.ok ? 200 : 400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: payload.ok, data: payload, error: payload.ok ? undefined : payload.message }))
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
       // 手机验证码登录：发码（目前仅酷狗概念版）
       if (pathname === '/api/music/accounts/sms/send' && req.method === 'POST') {
         const auth = req.headers['x-frontend-auth']
@@ -10588,8 +10610,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
         void readBody(req).then(async body => {
           try {
-            const { platform, mobile, append } = JSON.parse(body || '{}')
-            const payload = await musicAccount.qrLoginSendSms(String(platform || ''), String(mobile || ''), { append: !!append })
+            const { platform, mobile, append, captcha, session } = JSON.parse(body || '{}')
+            const payload = await musicAccount.qrLoginSendSms(String(platform || ''), String(mobile || ''), {
+              append: !!append,
+              captcha: captcha === undefined ? undefined : String(captcha),
+              sessionId: session === undefined ? undefined : String(session),
+            })
             res.writeHead(payload.ok ? 200 : 400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: payload.ok, data: payload, error: payload.ok ? undefined : payload.message }))
           } catch (e: any) {

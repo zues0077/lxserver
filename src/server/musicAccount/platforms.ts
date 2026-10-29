@@ -16,6 +16,13 @@ export interface MusicAccountQrOption {
   label: string
 }
 
+export interface MusicAccountSmsOption {
+  /** 按钮文案 */
+  label: string
+  /** 是否要用户先答一道图形验证码（咪咕通行证要） */
+  captcha: boolean
+}
+
 export interface MusicAccountPlatform {
   /** 平台 id，同时是 LX source id */
   id: string
@@ -63,6 +70,11 @@ export interface MusicAccountPlatform {
    * 咪咕的通行证能出码，但 App 扫一扫只认 TV 端码（实测报「TV扫码登录失败」），同样不给按钮。
    */
   qrLogins?: MusicAccountQrOption[]
+  /**
+   * 手机号 + 短信验证码登录。
+   * 有值前端就显示「手机号登录」按钮 —— 适合官方有短信登录接口、但没有可用扫码的平台。
+   */
+  smsLogin?: MusicAccountSmsOption
 }
 
 export const PLATFORMS: MusicAccountPlatform[] = [
@@ -161,6 +173,8 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     benefit: '可看广告免费领 VIP（每天 8 次、每次 3 小时）；VIP 生效后能取 320k OGG 与 16bit / 24bit 无损',
     color: '#00C3FF',
     qrLogins: [{ driver: 'kglite', label: '扫码登录' }],
+    // 概念版不需要图形码，一步发码一步登录
+    smsLogin: { label: '手机号登录', captcha: false },
   },
   {
     id: 'mg',
@@ -179,8 +193,9 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     benefit: '登录后可解锁 HQ(320k)、SQ 无损音质',
     color: '#FF6A00',
     // 不做扫码入口：咪咕音乐 App 的扫一扫只认 TV 端码，扫通行证的网页码必然提示
-    // 「TV扫码登录失败」，服务端也收不到任何扫码上报（2026-10-29 实测）。
-    // 咪咕只能走 Cookie（手工 / 浏览器插件推送）。
+    // 「TV扫码登录失败」，服务端也收不到任何扫码上报（2026-10-29 实测，三个渠道 sourceid 都一样）。
+    // 改走通行证的手机验证码登录：能直接换到 pacmtoken，代价是每次要答一道算术图形题。
+    smsLogin: { label: '手机号登录', captcha: true },
   },
   {
     id: 'bili',

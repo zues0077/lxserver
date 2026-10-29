@@ -15,6 +15,13 @@ import * as bilibili from './bilibili'
 import { qqDriver, wxDriver } from './qq'
 import * as kgliteSolver from '../resolvers/kglite'
 import { getPlatform } from '../platforms'
+import {
+  createSmsCaptcha,
+  sendSmsCode as miguSendSmsCode,
+  verifySms as miguVerifySms,
+  exchangeToken as miguExchangeToken,
+  type MiguPassportSession,
+} from '../smsLogin/migu'
 import { normalizeCookieInput } from '../cookieParse'
 import * as store from '../store'
 import { extractAccountIdentity } from '../identity'
@@ -267,6 +274,11 @@ interface SmsSession {
   createdAt: number
   /** 登录成功后追加为新账号（多账号平台） */
   append?: boolean
+  /**
+   * 咪咕走通行证：公钥、cookie jar、图形码答案、设备 id 必须跨步骤复用，
+   * 换一次就对不上（服务端会当成换了台设备，表现为收得到码却登录失败）。
+   */
+  migu?: MiguPassportSession
 }
 const smsSessions = new Map<string, SmsSession>()
 const SMS_KEEP_MS = 10 * 60 * 1000
@@ -284,11 +296,58 @@ export interface SmsSendPayload {
   message: string
 }
 
-/** 支持短信验证码登录的平台（目前只有酷狗概念版） */
-const SMS_PLATFORMS = new Set(['kglite'])
+/**
+ * 支持短信验证码登录的平台。
+ * - kglite：酷狗概念版，一步发码一步登录
+ * - mg：咪咕，通行证每次都要先答一道图形验证码（算术题），所以多一步「取码」
+ */
+const SMS_PLATFORMS = new Set(['kglite', 'mg'])
+
+/** 需要先取图形验证码的平台 */
+const CAPTCHA_PLATFORMS = new Set(['mg'])
+
+export interface SmsCaptchaPayload {
+  ok: boolean
+  sessionId?: string
+  /** 图形验证码图片（data:image/jpeg;base64,...），前端直接塞 img.src */
+  image?: string
+  /** "0" = 算术题（填结果） / "1" = 中文（抄汉字） */
+  graphtype?: string
+  message: string
+}
+
+/**
+ * 取一张图形验证码并建会话（只有 CAPTCHA_PLATFORMS 需要）。
+ * 咪咕通行证每次发短信前都要先答一道算术题，这一屏躲不掉，
+ * 只能把图交给前端、用户填答案时一起提交。
+ */
+export async function smsCaptcha(platform: string, opts: { append?: boolean } = {}): Promise<SmsCaptchaPayload> {
+  sweepSms()
+  const p = getPlatform(platform)
+  if (!p) return { ok: false, message: `不支持的平台：${platform}` }
+  if (!CAPTCHA_PLATFORMS.has(platform)) {
+    return { ok: false, message: `${p.name} 的短信登录不需要图形验证码` }
+  }
+  const res = await createSmsCaptcha()
+  if (!res.ok || !res.session) return { ok: false, message: res.message }
+  const id = newId()
+  smsSessions.set(id, {
+    platform,
+    mobile: '',
+    state: { guid: '', mid: '', device: '' },
+    createdAt: Date.now(),
+    append: !!opts.append,
+    migu: res.session,
+  })
+  return { ok: true, sessionId: id, image: res.image, graphtype: res.graphtype, message: res.message }
+}
 
 /** 给指定平台发短信验证码 */
-export async function sendSms(platform: string, mobile: string, opts: { append?: boolean } = {}): Promise<SmsSendPayload> {
+export async function sendSms(
+  platform: string,
+  mobile: string,
+  opts: { append?: boolean; captcha?: string; sessionId?: string } = {},
+): Promise<SmsSendPayload> {
   sweepSms()
   const p = getPlatform(platform)
   if (!p) return { ok: false, message: `不支持的平台：${platform}` }
@@ -299,6 +358,17 @@ export async function sendSms(platform: string, mobile: string, opts: { append?:
   }
   const tel = String(mobile || '').replace(/[^\d]/g, '')
   if (!/^1\d{10}$/.test(tel)) return { ok: false, message: '请输入 11 位手机号' }
+
+  if (platform === 'mg') {
+    // 咪咕：会话在「取图形码」那一步就建好了，这里只补手机号
+    const s = smsSessions.get(String(opts.sessionId || ''))
+    if (!s?.migu) return { ok: false, message: '图形验证码已过期，请重新获取一张' }
+    const res = await miguSendSmsCode(s.migu, tel, String(opts.captcha || ''))
+    if (!res.ok) return { ok: false, sessionId: opts.sessionId, message: res.message }
+    s.mobile = tel
+    s.createdAt = Date.now()
+    return { ok: true, sessionId: opts.sessionId, message: res.message }
+  }
 
   const res = await kgliteSolver.sendSmsCode(tel)
   if (!res.ok || !res.state) return { ok: false, message: res.message }
@@ -321,6 +391,23 @@ export async function loginSms(sessionId: string, code: string): Promise<SmsLogi
   if (!s) return { ok: false, message: '验证码会话已过期，请重新获取' }
   const c = String(code || '').replace(/[^\d]/g, '')
   if (c.length < 4) return { ok: false, message: '请输入短信里的验证码' }
+
+  if (s.platform === 'mg') {
+    if (!s.migu) return { ok: false, message: '会话已失效，请重新获取图形验证码' }
+    if (!s.mobile) return { ok: false, message: '请先获取短信验证码' }
+    const verify = await miguVerifySms(s.migu, s.mobile, c)
+    if (!verify.ok || !verify.token) return { ok: false, message: verify.message }
+    const exchange = await miguExchangeToken(verify.token, s.migu.deviceId)
+    if (!exchange.ok || !exchange.cookie) return { ok: false, message: exchange.message }
+    const savedMg = persistLoginCookie(s.platform, exchange.cookie, !!s.append)
+    if (!savedMg.ok) return { ok: false, message: savedMg.error || '账号保存失败' }
+    smsSessions.delete(sessionId)
+    const nameMg = getPlatform(s.platform)?.name || s.platform
+    console.log(
+      `[平台账号] ${nameMg} 短信登录成功，凭据已加密保存（${savedMg.action}，${exchange.cookie.length} 字符）`,
+    )
+    return { ok: true, message: loginSuccessMessage(savedMg), saved: true, action: savedMg.action }
+  }
 
   const res = await kgliteSolver.loginBySmsCode(s.mobile, c, s.state)
   if (!res.ok || !res.cookie) return { ok: false, message: res.message }
