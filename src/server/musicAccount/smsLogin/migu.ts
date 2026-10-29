@@ -264,6 +264,26 @@ function pickPacmtoken(headers: Record<string, any>): string {
   return ''
 }
 
+/** 把 token-validate 下发的其它 Cookie（设备 id / 会话 id 之类）一并收进来，值非空才算 */
+function pickExtraCookies(headers: Record<string, any>): Record<string, string> {
+  const raw = headers['set-cookie'] ?? headers['Set-Cookie']
+  const list: string[] = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+  const keep = /^(cookieId|mgAppH5CookieId|migu-device-uuid|migu-utoken-sessionid|idmpauth|LTToken)$/i
+  const out: Record<string, string> = {}
+  for (const line of list) {
+    const first = String(line).split(';')[0]
+    const idx = first.indexOf('=')
+    if (idx <= 0) continue
+    const k = first.slice(0, idx).trim()
+    const v = first.slice(idx + 1).trim()
+    if (!v) continue
+    if (!keep.test(k)) continue
+    if (k.toLowerCase() === 'migu-device-uuid') continue // 用登录时的 deviceId，别被覆盖
+    out[k] = v
+  }
+  return out
+}
+
 /**
  * 第四、五步：用 token 去音乐侧换登录态，拿到 pacmtoken。
  * 这一步必须带 deviceId（大写 UUID v4），否则咪咕会当成陌生设备拒绝。
@@ -296,8 +316,25 @@ export async function exchangeToken(token: string, deviceId: string): Promise<Mi
       return { ok: false, message: '咪咕没有下发 pacmtoken，登录未生效' }
     }
     const uid = String(body?.data?.userId ?? '').trim()
+
+    // 咪咕取链接口除了 pacmtoken 还认「设备 id」（请求头 By）。
+    // 浏览器 Cookie 里本来就有 cookieId，所以插件推来的 Cookie 天然带设备；
+    // 短信登录这条路拿到的 Set-Cookie 只有 pacmtoken，必须自己把登录用的 deviceId
+    // 补进 Cookie，否则 resolvers 的 authHeaders() 取不到 By，
+    // 会员档（SQ/ZQ/HQ）会被当成陌生设备软拒（表现为「没有会员」）。
+    const extra = pickExtraCookies(res.headers)
     const parts = [`pacmtoken=${pacmtoken}`]
     if (uid) parts.push(`userid=${uid}`)
+    parts.push(`migu-device-uuid=${deviceId}`)
+    for (const [k, v] of Object.entries(extra)) parts.push(`${k}=${v}`)
+
+    // 记录返回了哪些 cookie 名 + data 里的字段名（值不落日志），
+    // 下次再怀疑「登录了但权益没生效」时能直接对照，不用再猜。
+    console.log(
+      `[平台账号] 咪咕 token-validate 成功：cookies=[${Object.keys(extra).join(',') || '-'}] ` +
+        `dataKeys=[${Object.keys(body?.data || {}).join(',') || '-'}] deviceId=${deviceId.slice(0, 8)}…`,
+    )
+
     return { ok: true, cookie: parts.join('; '), uid: uid || undefined, message: '登录成功' }
   } catch (e: any) {
     return { ok: false, message: `咪咕登录态换取连接失败：${e?.message || e}` }

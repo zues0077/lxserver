@@ -87,8 +87,19 @@ async function probeToneHasUrl(cookie: string, tone: string, ms: number): Promis
       },
     }), ms, `咪咕${tone}探针`)
     const body: any = resp.body
-    if (body?.code && body.code !== '000000') return false
-    return !!String(body?.data?.url || '')
+    const code = String(body?.code ?? '')
+    const url = String(body?.data?.url || '')
+    if (!url) {
+      // 打一行诊断：区分「设备 id 缺失被软拒」和「真的没有会员权益」。
+      // By 来自 Cookie 里的设备字段，浏览器 Cookie 天然有，短信登录要自己补。
+      console.log(
+        `[平台账号] 咪咕${tone}探针未出 url：code=${code || '-'} info=${body?.info || body?.message || '-'} ` +
+          `By=${authHeaders(cookie).By ? '有' : '缺'}`,
+      )
+      return false
+    }
+    if (code && code !== '000000') return false
+    return true
   } catch {
     return false
   }
