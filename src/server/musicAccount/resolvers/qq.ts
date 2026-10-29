@@ -107,12 +107,15 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   if (!hasKey) {
     return { ok: false, message: 'Cookie 缺少 qm_keyst，QQ音乐会按游客处理，付费与无损将取不到' }
   }
-  // 在线查会员：music.vipuser.vipUserInfo（依赖登录态 Cookie，comm.uin 仍置 0 避免超长微信 uin 失真）。
-  // 查不到就退化为 structural，不让会员查询失败阻断登录。
-  try {
+  // 在线查会员：music.vipuser.vipUserInfo（依赖登录态 Cookie）。
+  // 实测注意：comm.uin=0 时该模块按「未登录」处理（code 500003），网页端惯例是带真实 uin；
+  // vkey 那套「uin 必须为 0」的约束只对 GetVkey 成立，这里不能照搬。
+  // 查不到就退化为 structural，不让会员查询失败阻断登录，并把真实 code 记进日志与提示。
+  const uinNum = /^\d+$/.test(uin) && Number(uin) <= Number.MAX_SAFE_INTEGER ? Number(uin) : 0
+  const tryVipQuery = async (commUin: number, cv: number): Promise<any> => {
     const payload = {
-      comm: { ct: 24, cv: 0, uin: 0, format: 'json', platform: 'yqq.json' },
-      req_1: { module: 'music.vipuser.vipUserInfo', method: 'getVipUserInfo', param: { uin } },
+      comm: { ct: 24, cv, uin: commUin, format: 'json', platform: 'yqq.json' },
+      req_1: { module: 'music.vipuser.vipUserInfo', method: 'getVipUserInfo', param: { uin: commUin || uin } },
     }
     const resp = await request(MUSICU, {
       method: 'post',
@@ -120,7 +123,17 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
       json: payload,
       timeout: 12000,
     })
-    const r1: any = resp?.body?.req_1 || {}
+    return resp?.body?.req_1 || {}
+  }
+
+  let r1: any = {}
+  try {
+    // 变体1：网页端惯例（真实 uin + 当前 web 版本号）；变体2：旧版本号；变体3：comm.uin=0
+    for (const [commUin, cv] of [[uinNum, 18036330], [uinNum, 0], [0, 0]] as Array<[number, number]>) {
+      r1 = await tryVipQuery(commUin, cv)
+      if (Number(r1.code) === 0) break
+      console.warn(`[QQ] vipUserInfo 未命中（comm.uin=${commUin}, cv=${cv}）→ code=${r1?.code} subcode=${r1?.subcode}`)
+    }
     if (Number(r1.code) === 0 && r1.data) {
       const d: any = r1.data
       const isVip = Number(d.vip) === 1 || Number(d.svipType) > 0 || Number(d.vipType) > 0 || Number(d.musicPackage) === 1 || Number(d.openVip) === 1
@@ -134,13 +147,13 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
       }
     }
   } catch (e: any) {
-    console.warn('[QQ] 会员在线查询失败，退化为结构校验:', e?.message || e)
+    console.warn('[QQ] 会员在线查询异常，退化为结构校验:', e?.message || e)
   }
   return {
     ok: true,
     verified: 'structural',
     nickname: `QQ账号 ${uin}`,
-    message: '已完成结构校验（uin + qm_keyst 均存在）；会员在线查询暂不可用，会员状态以实际取链音质为准',
+    message: `已完成结构校验（uin + qm_keyst 均存在）；会员在线查询未成功（code=${r1?.code ?? '异常'}），会员状态以实际取链音质为准`,
   }
 }
 
