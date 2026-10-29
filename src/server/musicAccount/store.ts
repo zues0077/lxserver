@@ -248,8 +248,14 @@ export function listAccounts(): Array<{
   qrLogins: Array<{ driver: string; label: string }>
   /** 该平台已配置的账号列表（至少 0 个，按添加顺序；主账号排在前面） */
   accounts: AccountItemView[]
-  /** 是否支持多账号（目前只有酷狗概念版需要） */
+  /**
+   * 是否支持多账号。
+   * 2026-10-29：从「只有概念版」放开到全部平台 —— 存储层 items 本来就是通用的，
+   * 放开后每个平台都能存主号 + 若干冷备号（副号只做定期校验、绝不参与取链）。
+   */
   multiAccount: boolean
+  /** 该平台是否已开启「主号失效自动切到下一个可用号」 */
+  autoSwitch: boolean
 }> {
   const store = readStore()
   return PLATFORMS.map(p => {
@@ -291,9 +297,20 @@ export function listAccounts(): Array<{
       ageHours: first?.ageHours ?? null,
       qrLogins: p.qrLogins || [],
       accounts: views,
-      multiAccount: p.id === 'kglite',
+      multiAccount: true,
+      autoSwitch: isAutoSwitchEnabled(p.id),
     }
   })
+}
+
+/**
+ * 该平台是否开启了「主号失效自动切换」。
+ * 默认关闭：多号之间来回漂移的代价比「某首歌播不了」更大，必须用户显式勾选才生效。
+ */
+export function isAutoSwitchEnabled(id: string): boolean {
+  const map = global.lx?.config?.['musicAccount.autoSwitch']
+  if (!map || typeof map !== 'object') return false
+  return (map as Record<string, unknown>)[id] === true
 }
 
 /** 该平台所有账号的脱敏视图（供接口单独取用） */
@@ -470,9 +487,42 @@ export function setPrimaryAccount(id: string, itemId: string): { success: boolea
   return { success: true }
 }
 
-/** 删除某平台全部账号 */
-export function removeCookie(id: string): { success: boolean; error?: string } {
+/**
+ * 改某个账号的备注名。
+ *
+ * 只动 label，不动 Cookie 与校验记录 —— 备注是给人看的标签，
+ * 改它不应该让「上次校验结果」失效（否则用户改个名就看到一堆「未校验」）。
+ * 传空字符串等于清空备注，界面会退回按序号显示。
+ */
+export function renameAccount(id: string, itemId: string, label: string): { success: boolean; error?: string } {
   if (!getPlatform(id)) return { success: false, error: `不支持的平台：${id}` }
+  const store = readStore()
+  const acc = normalize(store.accounts[id])
+  if (!acc?.items?.length) return { success: false, error: '该平台没有账号' }
+  const target = acc.items.find(i => i.id === itemId)
+  if (!target) return { success: false, error: '账号不存在' }
+  const text = String(label ?? '').trim().slice(0, 32)
+  if (text) target.label = text
+  else delete target.label
+  writeStore(store)
+  return { success: true }
+}
+
+/** 开关某平台的「主号失效自动切换」（写进配置文件，重启后仍生效） */
+export function setAutoSwitchEnabled(id: string, on: boolean): { success: boolean; error?: string } {
+  if (!getPlatform(id)) return { success: false, error: `不支持的平台：${id}` }
+  const cfg = global.lx?.config
+  if (!cfg) return { success: false, error: '配置尚未加载' }
+  const prev = cfg['musicAccount.autoSwitch']
+  const map: Record<string, boolean> = (prev && typeof prev === 'object') ? { ...(prev as Record<string, boolean>) } : {}
+  if (on) map[id] = true
+  else delete map[id]
+  cfg['musicAccount.autoSwitch'] = map
+  return { success: true }
+}
+
+/** 删除某平台全部账号 */
+export function removeCookie(id: string): { success: boolean; error?: string } {  if (!getPlatform(id)) return { success: false, error: `不支持的平台：${id}` }
   const store = readStore()
   delete store.accounts[id]
   writeStore(store)

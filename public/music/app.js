@@ -2072,6 +2072,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // 启动时主动提示「哪个平台的账号已失效」：Cookie 过期是静默的，
+    // 不提示的话表现只是「突然只能试听」，用户根本想不到是账号的问题
+    void checkAccountHealthHints();
+
     // 恢复搜索来源缓存
     const cachedSearchSource = localStorage.getItem('search-source');
     if (cachedSearchSource) {
@@ -5563,10 +5567,70 @@ function isSingerMatch(sourceSinger, targetSinger) {
 }
 
 /**
- * 直连类音源（不走自定义源、不参与 supportedSources 白名单校验）。
- * bili：换平台的最后兜底；soda：暂不参与自动换源（正式版权曲为 CENC 加密，切过去也播不了）。
+ * 直连/特殊音源：不走自定义源、也不参与 supportedSources 白名单校验。
+ *   bili  ：视频音轨，换平台的最后兜底；
+ *   soda  ：汽水，有匿名明文通道，可按后台配置参与换源（版权曲只给 60 秒，所以排在常规平台之后）；
+ *   kglite：酷狗概念版，纯账号源（没账号必然取不到链），只在账号可用时参与。
  */
-const EXTRA_SOURCE_PLATFORMS = new Set(['bili', 'soda']);
+const EXTRA_SOURCE_PLATFORMS = new Set(['bili', 'soda', 'kglite']);
+
+/** 常规轮换：五个公共平台互相换（真正意义上的「跨平台换源」） */
+const PRIMARY_SOURCE_ORDER = ['wy', 'tx', 'kw', 'kg', 'mg'];
+
+/** 账号/匿名通道候选池缓存：换源一次可能触发多次搜索，不必每次都问后端 */
+let accountCapsCache = { at: 0, data: null };
+const ACCOUNT_CAPS_TTL = 60 * 1000;
+
+/**
+ * 问后端「这个用户此刻能不能用某个源的账号/匿名通道」。
+ *
+ * 为什么要问后端：跨平台换源是前端决策，但「总开关开没开、配没配号、
+ * 该用户在不在使用权限名单里」只有后端知道。拿不到就返回 null，
+ * 调用方按「只用常规五平台」处理——宁可少换一个源，也不要换到播不了的源上。
+ */
+async function fetchAccountCapabilities() {
+    if (accountCapsCache.data && Date.now() - accountCapsCache.at < ACCOUNT_CAPS_TTL) {
+        return accountCapsCache.data;
+    }
+    try {
+        const headers = Object.assign({}, getUserAuthHeaders());
+        const res = await fetch(`${API_BASE}/api/music/account-capabilities`, { headers });
+        const json = await res.json();
+        if (!json || !json.success) return accountCapsCache.data;
+        const data = { enabled: !!json.data?.enabled, sources: json.data?.sources || {} };
+        accountCapsCache = { at: Date.now(), data };
+        return data;
+    } catch (e) {
+        return accountCapsCache.data;
+    }
+}
+
+/** 已经提示过的失效平台（同一平台每次会话只弹一次，别每首歌都来一遍） */
+const accountHintShown = new Set();
+
+/**
+ * 播放端主动提示账号失效。
+ *
+ * 背景：Cookie 失效是静默的 —— 后台挂着三个月前的绿色「已登录」，
+ * 用户只会觉得「怎么突然只能试听了」，很难想到是账号过期。
+ * 这里在启动时问一次后端，失效就提示一句，把排查方向直接指到后台。
+ */
+async function checkAccountHealthHints() {
+    try {
+        const headers = Object.assign({}, getUserAuthHeaders());
+        const res = await fetch(`${API_BASE}/api/music/account-hints`, { headers });
+        const json = await res.json();
+        const hints = (json && json.data && json.data.hints) || [];
+        for (const h of hints) {
+            if (!h || !h.platform || accountHintShown.has(h.platform)) continue;
+            accountHintShown.add(h.platform);
+            // 用 info 而不是 error：这不是播放出错，是后台配置过期了
+            showInfo(h.text || `${h.name}账号已失效，请到后台重新登录`);
+        }
+    } catch (e) {
+        // 提示失败不影响播放
+    }
+}
 /** 视频音轨的时长容忍度：剪辑版/串烧很常见，放 8 秒会切到「把副歌剪了」的版本 */
 const VIDEO_SOURCE_MAX_DURATION_DIFF = 5;
 
@@ -5638,20 +5702,38 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
             });
         }
 
-        // 2. 切换到和当前不同源，并且根据优先级排列 (网易、QQ、酷我、酷狗、咪咕、B站兜底)
-        const baseOrder = ['wy', 'tx', 'kw', 'kg', 'mg', 'bili'];
-        const searchSourcesOrdered = baseOrder.filter(s => s !== song.source);
+        // 2. 三级候选池（2026-10-29 起：汽水/酷狗概念版可按配置参与）
+        //    一级 常规轮换 wy/tx/kw/kg/mg —— 真正意义上的「跨平台换源」
+        //    二级 账号/匿名通道 soda/kglite —— 由后端能力探测动态决定，见下
+        //    三级 bili 视频音轨 —— 最后的兜底（常带对白/解说，能不用就不用）
+        const primaryOrdered = PRIMARY_SOURCE_ORDER.filter(s => s !== song.source);
 
-        // 3. 过滤出自定义源支持解析的平台；直连音源（B站/汽水）不走 supportedSources 白名单
-        let searchSources = searchSourcesOrdered;
+        // 过滤出自定义源支持解析的平台；直连/特殊源不走 supportedSources 白名单
+        let primarySources = primaryOrdered;
         if (supportedPlatforms && !options.ignoreSupportedFilter) {
-            searchSources = searchSourcesOrdered.filter(s => EXTRA_SOURCE_PLATFORMS.has(s) || supportedPlatforms.has(s));
+            primarySources = primaryOrdered.filter(s => supportedPlatforms.has(s));
         }
 
-        // 4. 如果发现没有其他支持的平台可供切换
-        if (searchSources.length === 0) {
-            console.log(`[AutoSource] 换源跳过：没有其他自定义源支持的平台。当前源: ${song.source}`);
-            if (!isSilent) showError('未找到自定义源下支持的平台下的对应歌曲');
+        // 账号通道候选：汽水有匿名流（无账号也能出非版权曲整曲），概念版纯账号。
+        // 权限口径完全交给后端：总开关 / 是否配了号 / 该用户是否在白名单内，前端不自己猜。
+        const caps = await fetchAccountCapabilities();
+        const capSources = (caps && caps.sources) || {};
+        const accountSources = [];
+        if (song.source !== 'soda' && capSources.soda && (capSources.soda.account || capSources.soda.anonymous)) {
+            accountSources.push('soda');
+        }
+        if (song.source !== 'kglite' && capSources.kglite && capSources.kglite.account) {
+            accountSources.push('kglite');
+        }
+
+        const fallbackSources = PRIMARY_SOURCE_ORDER.includes(song.source) || EXTRA_SOURCE_PLATFORMS.has(song.source)
+            ? (song.source === 'bili' ? [] : ['bili'])
+            : [];
+
+        // 4. 一个候选都没有：说明既没装支持这些平台的自定义源，也没有可用的账号通道
+        if (primarySources.length === 0 && accountSources.length === 0 && fallbackSources.length === 0) {
+            console.log(`[AutoSource] 换源跳过：没有其他可用平台。当前源: ${song.source}`);
+            if (!isSilent) showError('未找到可用平台下的对应歌曲');
             return [];
         }
 
@@ -5680,18 +5762,27 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
             return found.sort((a, b) => (b._matchScore || 0) - (a._matchScore || 0));
         };
 
-        // 常规平台优先；B站（视频音轨）只在常规平台一个匹配都没有时才去搜：
-        // 一是没必要每次换源都多打一次 B站搜索（它有 412 风控），
+        // 一级：常规平台并发搜；一个都没命中才进下一级。
+        // B站（视频音轨）放最后：一是它有 412 风控，没必要每次换源都多打一次；
         // 二是视频音轨经常带对白/解说，能不用就不用。
-        const primarySources = searchSources.filter(s => !EXTRA_SOURCE_PLATFORMS.has(s));
-        const fallbackSources = searchSources.filter(s => EXTRA_SOURCE_PLATFORMS.has(s));
-
         const primaryResults = (await Promise.all(primarySources.map(searchOne))).flat();
         let matches = collectMatches(primaryResults);
 
+        // 二级：账号/匿名通道（汽水、酷狗概念版）。放在常规平台之后是刻意的：
+        // 汽水匿名通道对版权曲只给 60 秒，能命中常规平台就绝不走它。
+        if (matches.length === 0 && accountSources.length > 0) {
+            console.log(`[AutoSource] 常规平台无匹配，尝试账号通道: ${accountSources.join(',')}`);
+            if (!isSilent) {
+                showInfo(`常规平台未找到，正在尝试${accountSources.map(getSourceName).join(' / ')}...`);
+            }
+            const accountResults = (await Promise.all(accountSources.map(searchOne))).flat();
+            matches = collectMatches(accountResults);
+        }
+
+        // 三级：B站兜底
         if (matches.length === 0 && fallbackSources.length > 0) {
-            console.log(`[AutoSource] 常规平台无匹配，尝试直连音源兜底: ${fallbackSources.join(',')}`);
-            if (!isSilent) showInfo('常规平台未找到，正在尝试 B站...');
+            console.log(`[AutoSource] 仍未匹配，尝试直连音源兜底: ${fallbackSources.join(',')}`);
+            if (!isSilent) showInfo('仍在尝试 B站...');
             const fallbackResults = (await Promise.all(fallbackSources.map(searchOne))).flat();
             matches = collectMatches(fallbackResults);
         }
@@ -5722,7 +5813,7 @@ function timeToSeconds(timeStr) {
  * 辅助：获取源名称
  */
 function getSourceName(source) {
-    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', bili: 'B站', soda: '汽水' };
+    const names = { kw: '酷我', kg: '酷狗', tx: 'QQ', wy: '网易', mg: '咪咕', bili: 'B站', soda: '汽水', kglite: '酷狗概念版' };
     return names[source] || source.toUpperCase();
 }
 
@@ -6879,8 +6970,7 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
         const available = matches.filter(song => !state.triedPlatforms.includes(song.source));
         // B站是视频音轨（常带对白/解说），只在其它平台都没有可用匹配时才兜底使用
         const matchedSong = available.find(s => s.source !== 'bili') || available.find(s => s.source === 'bili');
-        if (matchedSong) {
-            state.currentSong = matchedSong;
+        if (matchedSong) {            state.currentSong = matchedSong;
             state.triedPlatforms.push(matchedSong.source);
             if (!state.triedApiSourcesByPlatform[matchedSong.source]) {
                 state.triedApiSourcesByPlatform[matchedSong.source] = [];
@@ -6911,6 +7001,8 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
             playSong(matchedSong, state.currentIndex, bestNextQuality, false, true);
         } else {
             // No untried source remains, move to the next recovery strategy.
+            // 全网都换不到时顺手再问一次账号状态：这类「整盘播不了」经常就是账号过期导致的
+            void checkAccountHealthHints();
             state.currentStepIndex++;
             await runRecoveryFlow(error, effectiveResumeTime, state);
         }
@@ -14276,6 +14368,35 @@ function resolveSourceOwner(sourceId) {
     return getCurrentUsername();
 }
 
+// 自定义源在 lxserver 里只负责「取链」：搜索、歌词、封面都由服务端内置实现提供。
+// 所以脚本声明的平台里，只有内置 musicSdk 覆盖的五个平台真会把取链请求交给它；
+// 其余 key（bilibili/qishui/qs/kuaishou/youtube/xmly…）永远不会被调用——
+// bili/soda 由内置 extraSources 接管，别的平台服务端根本没有入口。
+// 这里统一算一份标注，免得用户把「脚本声明」当成「能用」。
+const CUSTOM_SOURCE_NATIVE_PLATFORMS = new Set(['wy', 'tx', 'kw', 'kg', 'mg']);
+const CUSTOM_SOURCE_BUILTIN_LABELS = {
+    bili: 'B站', bilibili: 'B站', bilivideo: 'B站',
+    soda: '汽水', qs: '汽水', qishui: '汽水', qsmusic: '汽水'
+};
+
+function describeCustomSourcePlatform(key) {
+    const lower = String(key || '').trim().toLowerCase();
+    if (CUSTOM_SOURCE_NATIVE_PLATFORMS.has(lower)) return { native: true, tag: '', note: '' };
+    const builtin = CUSTOM_SOURCE_BUILTIN_LABELS[lower];
+    if (builtin) {
+        return {
+            native: false,
+            tag: '内置',
+            note: `${builtin}由本服务内置实现搜索与取链，脚本里这个平台的实现不会被调用`,
+        };
+    }
+    return {
+        native: false,
+        tag: '未接入',
+        note: '本服务未接入该平台，脚本里这个平台的实现不会被调用',
+    };
+}
+
 async function fetchCustomSources() {
     try {
         const username = getCurrentUsername();
@@ -14430,6 +14551,11 @@ async function renderCustomSources() {
                 ${source.supportedSources.map(s => {
                     const info = sourceMap[s] || { name: s, color: 't-badge-gray' };
                     const isPlatformDisabled = disabledSources.includes(s);
+                    const mark = describeCustomSourcePlatform(s);
+                    // 非内置平台：取链请求根本不会送到这个源，标签必须显示成虚线的「不生效」态
+                    if (!mark.native) {
+                        return `<span class="px-1.5 py-0.5 rounded-md text-[9px] md:text-[10px] font-medium border border-dashed t-border-main t-text-muted whitespace-nowrap cursor-help" title="${mark.note}">${info.name}<span class="ml-1 opacity-70">· ${mark.tag}</span></span>`;
+                    }
                     if (isPlatformDisabled) {
                         return `<span class="px-1.5 py-0.5 rounded-md text-[9px] md:text-[10px] font-medium transition-colors border border-transparent bg-gray-100 text-gray-400 dark:bg-neutral-800 dark:text-neutral-500 opacity-50 line-through whitespace-nowrap cursor-help" title="${info.name} (在此音源中已关闭)">${info.name}</span>`;
                     }
@@ -15137,6 +15263,31 @@ function openEditSourceModal(sourceId) {
                 color: 'text-gray-500 bg-gray-50 dark:bg-neutral-800'
             };
             const isEnabled = !disabledSources.includes(platform);
+            const mark = describeCustomSourcePlatform(platform);
+
+            // 非内置平台：这个开关拨了也不生效（请求根本不会送到这个源），做成只读提示，
+            // 免得用户以为打开就能听 b站/汽水/快手，然后遇到「取链失败」又找不到原因。
+            if (!mark.native) {
+                return `
+                <div class="flex items-center justify-between p-3 rounded-xl border border-dashed t-border-main t-bg-panel opacity-70 platform-toggle-item" data-platform="${platform}">
+                    <div class="flex items-center gap-3">
+                        <div class="w-9 h-9 rounded-xl flex items-center justify-center ${meta.color} flex-shrink-0 opacity-60">
+                            <i class="${meta.icon} text-sm"></i>
+                        </div>
+                        <div>
+                            <div class="font-bold text-xs md:text-sm t-text-main flex items-center gap-2">
+                                <span>${meta.name}</span>
+                                <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-gray-100 dark:bg-neutral-800 text-gray-500">${platform}</span>
+                            </div>
+                            <div class="text-[10px] t-text-muted mt-0.5 platform-status-text">${mark.note}</div>
+                        </div>
+                    </div>
+                    <div>
+                        <span class="text-[10px] font-medium px-2 py-1 rounded-md border border-dashed t-border-main t-text-muted whitespace-nowrap cursor-help" title="${mark.note}">${mark.tag}</span>
+                    </div>
+                </div>
+            `;
+            }
 
             return `
                 <div class="flex items-center justify-between p-3 rounded-xl border t-border-main t-bg-panel hover:shadow-sm transition-all platform-toggle-item" data-platform="${platform}">
@@ -15220,6 +15371,12 @@ async function saveEditSourcePlatforms() {
         const checkboxes = Array.from(document.querySelectorAll('#edit-source-platform-list .platform-checkbox'));
         // 收集被关闭的平台
         const disabledSources = checkboxes.filter(cb => !cb.checked).map(cb => cb.value);
+        // 非内置平台（bilibili/qishui/快手…）渲染成只读标注，没有复选框。
+        // 保存时要把它们原本的禁用记录原样带上，否则点一次保存就被静默抹掉。
+        const existingDisabled = Array.isArray(source.disabledSources) ? source.disabledSources : [];
+        existingDisabled.forEach(p => {
+            if (!describeCustomSourcePlatform(p).native && !disabledSources.includes(p)) disabledSources.push(p);
+        });
 
         // 平台开关必须写到音源自己的归属目录下。
         // 用当前歌单的拥有者会把改动写进不相干的用户目录：

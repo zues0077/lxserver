@@ -272,6 +272,24 @@ declare namespace LX {
     'musicAccount.allowedUsers'?: string[]
 
     /**
+     * 平台账号健康巡检的最小间隔（小时，1~168）。
+     * 巡检会拿 Cookie 去打各平台「需要登录态」的接口，打太勤容易被风控。
+     */
+    'musicAccount.checkHours'?: number
+
+    /**
+     * 巡检落在每天的几点（0-23）。放在凌晨，避免用户白天边播边扫。
+     * 同时满足「到点」与「距上次不少于 checkHours」才会真的跑。
+     */
+    'musicAccount.checkHour'?: number
+
+    /**
+     * 主号失效自动切换：{平台id: true}。默认空 = 全部关闭。
+     * 开启后只有确认主号登录态失效、且备号现场校验通过，才会把备号设为主账号。
+     */
+    'musicAccount.autoSwitch'?: Record<string, boolean>
+
+    /**
      * 酷狗概念版：是否自动领取每日 VIP（看广告/听歌任务）
      */
     'musicAccount.kglite.autoClaim'?: boolean

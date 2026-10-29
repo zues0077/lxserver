@@ -668,6 +668,28 @@
                                     </label>
                                 </div>
 
+                                <!-- 巡检节奏：定点（默认凌晨 3 点）+ 最小间隔。
+                                     放到凌晨是为了别在用户边播边扫：那是平台风控最容易触发的形态 -->
+                                <div class="music-acc-toolbar" style="margin-top: 2px;">
+                                    <label class="music-acc-timeout-label" title="两次巡检之间至少间隔多久">
+                                        巡检间隔
+                                        <input type="number" id="music-acc-check-hours" class="input-field"
+                                            min="1" max="168" step="1" style="width: 80px;">
+                                        小时
+                                    </label>
+                                    <label class="music-acc-timeout-label" title="巡检落在每天的几点（建议凌晨）">
+                                        巡检时间
+                                        <select id="music-acc-check-hour" class="input-field" style="width: 100px;">
+                                        </select>
+                                    </label>
+                                    <button type="button" class="btn-secondary"
+                                        onclick="app.saveMusicAccountCheckSchedule()" style="white-space: nowrap;">
+                                        保存巡检设置
+                                    </button>
+                                    <span id="music-acc-check-next" class="config-hint-text"
+                                        style="margin: 0; white-space: nowrap;"></span>
+                                </div>
+
                                 <!-- 汽水签名器（可选）：只有汽水需要，填一次即可，不用改环境变量 -->
                                 <div class="music-acc-toolbar" style="margin-top: 2px;">
                                     <label class="music-acc-timeout-label" style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">

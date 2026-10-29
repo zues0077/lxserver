@@ -1297,10 +1297,15 @@ function mapMediaResources(body: any): any[] {
 }
 
 function mapPlaylistNode(p: any): any {
+  // 封面同时给 img 与 picUrl：歌单列表/详情页（songlist_manager.js）只读 item.img / info.img，
+  // 而专辑页等读 picUrl；其它 musicSdk 平台 songList 返回的是 img 字段，故 soda 也要给 img，
+  // 否则汽水歌单卡片会全部回退成占位图（之前只给了 picUrl，导致歌单页无封面）。
+  const cover = imageOf(p.url_cover)
   return {
     id: String(p.id),
     name: String(p.title || '').trim(),
-    picUrl: imageOf(p.url_cover),
+    img: cover,
+    picUrl: cover,
     playCount: Number(p.stats?.count_played) || 0,
     desc: String(p.desc || ''),
     author: String(p.owner?.nickname || p.owner?.public_name || ''),
@@ -1332,11 +1337,13 @@ export async function getPlaylistDetail(playlistId: string): Promise<any> {
   const info = body?.playlist
   if (!info?.id) throw new Error('汽水歌单不存在或为私密歌单')
   const list = mapMediaResources(body)
+  const cover = imageOf(info.url_cover)
   return {
     info: {
       id: String(info.id),
       name: String(info.title || '').trim(),
-      picUrl: imageOf(info.url_cover),
+      img: cover,
+      picUrl: cover,
       desc: String(info.desc || ''),
       author: String(info.owner?.nickname || info.owner?.public_name || ''),
       total: Number(info.count_tracks) || list.length,

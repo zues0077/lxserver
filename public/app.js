@@ -4986,6 +4986,7 @@ class App {
             }
 
             this.renderMusicAccounts(data.accounts || [], data.health || null);
+            this.fillMusicAccountCheckSchedule(data.healthCheck || null);
             void this.renderMusicAccountPerms(data.allowedUsers || []);
             void this.loadQishuiSignerStatus();
         } catch (e) {
@@ -5154,53 +5155,77 @@ class App {
                 : '尚未填写 Cookie';
             const verifyMsg = v.message ? `<br><span style="opacity:.85">${this.escapeHtml(v.message)}</span>` : '';
 
-            // 支持扫码的平台把扫码按钮放前面：这是最省事的登录方式，不该藏在「填写 Cookie」后面
-            // 多账号平台（概念版）扫码走追加语义：已有账号时再扫，多出来的是一个新号
+            // 支持扫码的平台把扫码按钮放前面：这是最省事的登录方式，不该藏在「填写 Cookie」后面。
+            // 是否「追加为新账号」由卡片上的 data-append 决定（用户点了「＋ 添加账号」才有），
+            // 不按平台硬编码 —— 否则普通重登会悄悄多出一个不参与取链的冷备号。
             const qrBtns = (a.qrLogins || []).map(q =>
-                `<button type="button" class="btn-secondary music-acc-qr-btn" onclick="app.startMusicAccountQR('${a.id}','${q.driver}'${a.multiAccount ? `,'append'` : ''})">${this.escapeHtml(q.label)}</button>`
+                `<button type="button" class="btn-secondary music-acc-qr-btn" onclick="app.startMusicAccountQR('${a.id}','${q.driver}')">${this.escapeHtml(q.label)}</button>`
             ).join('');
 
-            // 酷狗概念版专属：手机号登录 + 免费领 VIP + 多账号。
-            // 这几个是概念版的核心价值，其他平台没有，所以只在它这张卡片上出现。
+            // 概念版专属能力（领 VIP / 手机号登录）只挂在它自己的卡片上；
+            // 多账号列表则是**所有平台**通用 —— 存储层 items 本来就是通用的，
+            // 放开后每个平台都能存主号 + 若干冷备号（2026-10-29 起）。
             const isKglite = a.id === 'kglite';
-            const kgItems = Array.isArray(a.accounts) ? a.accounts : [];
-            // 多账号列表：独立「账号」小节，主账号描边高亮；取链只走主账号、领 VIP 所有号都跑
-            const accountsSection = (isKglite && kgItems.length)
+            const items = Array.isArray(a.accounts) ? a.accounts : [];
+
+            // 逐账号健康徽章：口径跟平台级完全一致，全部读服务端 health，
+            // 前端不再自己拼判据，否则「超过 7 天待复查」这类规则会两处打架。
+            const itemBadge = (it) => {
+                const h = it.health;
+                const v = it.lastVerify || {};
+                if (h === 'expired') return { cls: 'bad', text: '已失效' };
+                if (h === 'stale') return { cls: '', text: '待复查' };
+                if (h === 'unchecked') return { cls: '', text: '未校验' };
+                if (h === 'structural') return { cls: '', text: it.healthText || '待确认' };
+                if (h === 'ok') {
+                    // 只做了结构校验的平台不标「已登录/会员」，避免给出没根据的绿色
+                    if (v.verified === 'structural') return { cls: 'ok', text: '结构校验通过' };
+                    return { cls: v.isVip ? 'vip' : 'ok', text: v.isVip ? '会员' : '已登录' };
+                }
+                return { cls: '', text: '未配置' };
+            };
+
+            // 多账号列表：主账号描边高亮。取链只走主账号，冷备号只参与定期校验
+            const accountsSection = items.length
                 ? `<div class="music-acc-section">
-                       <div class="music-acc-section-title">账号（${kgItems.length}）<span class="music-acc-section-sub">取链只走「主账号」，领 VIP 所有账号都会跑</span></div>
+                       <div class="music-acc-section-title">账号（${items.length}）<span class="music-acc-section-sub">取链只走「主账号」；其余是冷备，只做定期校验，不参与播放</span></div>
                        <div class="music-acc-accounts">
-                           ${kgItems.map(it => {
-                               const h = it.health;
-                               let cls = '';
-                               let text = it.configured ? '已配置' : '未配置';
-                               if (h === 'expired') { cls = 'bad'; text = '已失效'; }
-                               else if (h === 'stale') { cls = ''; text = '待复查'; }
-                               else if (h === 'unchecked') { cls = ''; text = '未校验'; }
-                               else if (h === 'ok') {
-                                   const v = it.lastVerify || {};
-                                   cls = v.isVip ? 'vip' : 'ok';
-                                   text = v.isVip ? '会员' : '已登录';
-                               }
-                               return `<div class="music-acc-acct${it.primary ? ' is-primary' : ''}">
+                           ${items.map(it => {
+                               const b = itemBadge(it);
+                               return `<div class="music-acc-acct${it.primary ? ' is-primary' : ''}" data-item-id="${it.id}">
                                    <div class="music-acc-acct-head">
-                                       ${it.primary ? '<span class="music-acc-primary-tag">主账号</span>' : '<span class="music-acc-sub-tag">小号</span>'}
+                                       ${it.primary ? '<span class="music-acc-primary-tag">主账号</span>' : '<span class="music-acc-sub-tag">冷备</span>'}
                                        <span class="music-acc-acct-name">${this.escapeHtml(it.label)}</span>
-                                       <span class="music-acc-status ${cls}">${text}</span>
-                                       <span class="music-acc-acct-vip" id="music-acc-vip-${it.id}">读取中…</span>
+                                       <span class="music-acc-status ${b.cls}">${b.text}</span>
+                                       ${isKglite ? `<span class="music-acc-acct-vip" id="music-acc-vip-${it.id}">读取中…</span>` : ''}
                                    </div>
                                    <div class="music-acc-acct-actions">
-                                       <button type="button" class="btn-secondary" onclick="app.claimKugouLiteVip(this,'${it.id}')">领取 VIP</button>
-                                       ${it.primary ? '' : `<button type="button" class="btn-secondary" onclick="app.setPrimaryMusicAccount('kglite','${it.id}')">设为主账号</button>`}
-                                       <button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('kglite', false, '${it.id}')">验证</button>
-                                       <button type="button" class="btn-secondary" onclick="app.removeMusicAccountItem('kglite','${it.id}')">删除</button>
+                                       ${isKglite ? `<button type="button" class="btn-secondary" onclick="app.claimKugouLiteVip(this,'${it.id}')">领取 VIP</button>` : ''}
+                                       ${it.primary ? '' : `<button type="button" class="btn-secondary" onclick="app.setPrimaryMusicAccount('${a.id}','${it.id}')">设为主账号</button>`}
+                                       <button type="button" class="btn-secondary" onclick="app.renameMusicAccount('${a.id}','${it.id}')">备注</button>
+                                       <button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('${a.id}', false, '${it.id}')">验证</button>
+                                       <button type="button" class="btn-secondary" onclick="app.removeMusicAccountItem('${a.id}','${it.id}')">删除</button>
                                    </div>
                                </div>`;
                            }).join('')}
                        </div>
                        <div class="music-acc-section-foot">
-                           <button type="button" class="btn-secondary" onclick="app.editMusicAccount('kglite', 'append')">＋ 添加账号</button>
+                           <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}', 'append')">＋ 添加账号</button>
                        </div>
                    </div>`
+                : '';
+
+            // 主号失效自动切换：只有一个号时谈不上切换，不给这个开关免得误导。
+            // 默认关闭 —— 「自己动账号」的开关必须显式勾选。
+            const autoSwitchRow = items.length >= 2
+                ? `<label class="music-acc-autoswitch">
+                       <input type="checkbox" ${a.autoSwitch ? 'checked' : ''}
+                           onchange="app.toggleMusicAccountAutoSwitch('${a.id}', this)">
+                       <span class="music-acc-autoswitch-text">
+                           主号失效时自动切换到下一个可用账号
+                           <em>默认关闭。仅当确认主号登录态失效、且备号现场验证通过才切换，10 分钟内最多切一次</em>
+                       </span>
+                   </label>`
                 : '';
 
             // 自动领会员：独立小节，表单纵向对齐更整齐；「立即全部领取」与它同组，语义更清晰
@@ -5239,11 +5264,11 @@ class App {
                    </div>`
                 : '';
 
-            const vipLine = (isKglite && !kgItems.length)
+            const vipLine = (isKglite && !items.length)
                 ? `<div class="music-acc-vip" id="music-acc-vip-kglite">登录后可查看概念版会员</div>`
                 : '';
             const smsPanel = isKglite
-                ? `<div class="music-acc-editor" id="music-acc-sms-kglite" style="display:none;" data-append="${kgItems.length ? '1' : ''}">
+                ? `<div class="music-acc-editor" id="music-acc-sms-kglite" style="display:none;" data-append="${items.length ? '1' : ''}">
                        <div class="music-acc-editor-tip">
                            输入酷狗账号绑定的手机号，短信验证码登录后凭据自动保存（与扫码等价）。
                            已经有一个号时再登录，会作为新账号追加，不会覆盖原来的号。
@@ -5269,6 +5294,7 @@ class App {
                 </div>
                 <div class="music-acc-meta">${meta}${verifyMsg}</div>
                 ${accountsSection}
+                ${autoSwitchRow}
                 ${loginActions}
                 ${autoSection}
                 <div class="music-acc-actions">
@@ -5286,6 +5312,8 @@ class App {
                         Netscape 的 <code>cookie.txt</code>、Cookie-Editor 导出的 JSON。
                     </div>
                     <textarea placeholder="粘贴 Cookie 请求头，或 cURL 命令，或直接导入 cookie.txt 文件…"></textarea>
+                    <input type="text" class="music-acc-label-input input-field" maxlength="32"
+                        placeholder="备注名（可选，如「小号 A / 家人的号」），留空按序号显示">
                     <div class="music-acc-actions" style="margin-top:.5rem;">
                         <button type="button" class="btn-primary" onclick="app.saveMusicAccount('${a.id}')">保存</button>
                         <label class="btn-secondary music-acc-file-btn">
@@ -5301,6 +5329,91 @@ class App {
 
         // 概念版会员状态要额外打一次接口才知道，渲染后补上（不阻塞列表出现）
         void this.loadKugouLiteVip();
+    }
+
+    /** 巡检设置回填（下拉选项只生成一次，避免每次重渲染都重建 DOM） */
+    fillMusicAccountCheckSchedule(state) {
+        const hoursEl = document.getElementById('music-acc-check-hours');
+        const hourSel = document.getElementById('music-acc-check-hour');
+        const nextEl = document.getElementById('music-acc-check-next');
+        if (hourSel && !hourSel.dataset.filled) {
+            hourSel.innerHTML = Array.from({ length: 24 }, (_, h) =>
+                `<option value="${h}">${String(h).padStart(2, '0')}:00</option>`).join('');
+            hourSel.dataset.filled = '1';
+        }
+        const d = state || {};
+        if (hoursEl && document.activeElement !== hoursEl) hoursEl.value = d.intervalHours || 72;
+        if (hourSel) hourSel.value = String(typeof d.hour === 'number' ? d.hour : 3);
+        if (nextEl) {
+            if (d.nextRunAt) {
+                const t = new Date(d.nextRunAt).toLocaleString('zh-CN', {
+                    hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+                });
+                nextEl.textContent = `下一轮巡检：${t}`;
+            } else {
+                nextEl.textContent = '巡检未排程（服务端刚启动时为「90 秒后首查」）';
+            }
+        }
+    }
+
+    /** 保存巡检节奏（定点小时 + 最小间隔），服务端会立刻重排定时器 */
+    async saveMusicAccountCheckSchedule() {
+        const hoursEl = document.getElementById('music-acc-check-hours');
+        const hourSel = document.getElementById('music-acc-check-hour');
+        try {
+            const res = await this.request('/api/music/accounts/config', {
+                method: 'POST',
+                body: JSON.stringify({
+                    checkHours: hoursEl ? Number(hoursEl.value) : undefined,
+                    checkHour: hourSel ? Number(hourSel.value) : undefined
+                })
+            });
+            this.fillMusicAccountCheckSchedule((res && res.data && res.data.healthCheck) || null);
+            showSuccess('已保存，巡检按新节奏执行');
+        } catch (e) {
+            showError(`保存失败：${e.message}`);
+        }
+    }
+
+    /** 改账号备注名（多账号时靠它区分「小号 A / 家人的号」） */
+    async renameMusicAccount(platform, itemId) {
+        // 限定在该平台卡片内查找：不同平台理论上可能撞 id，别改错号
+        const row = document.querySelector(
+            `.music-acc-item[data-platform="${platform}"] .music-acc-acct[data-item-id="${itemId}"]`
+        );
+        const shown = row ? row.querySelector('.music-acc-acct-name') : null;
+        const cur = shown ? shown.textContent.trim() : '';
+        // 界面上的「主账号 / 账号 2」是兜底显示值，不是用户填的备注，回填时不该当成已有备注
+        const isFallback = !cur || cur === '主账号' || /^账号 \d+$/.test(cur);
+        const next = window.prompt('给这个账号起个备注名（留空 = 按序号显示）', isFallback ? '' : cur);
+        if (next === null) return;
+        try {
+            await this.request('/api/music/accounts/label', {
+                method: 'POST',
+                body: JSON.stringify({ platform, itemId, label: next.trim() })
+            });
+            showSuccess(next.trim() ? `备注已改为「${next.trim()}」` : '已清空备注');
+            await this.refreshMusicAccounts();
+        } catch (e) {
+            showError(`改备注失败：${e.message}`);
+        }
+    }
+
+    /** 开关「主号失效自动切换」（每平台独立，默认关闭） */
+    async toggleMusicAccountAutoSwitch(platform, el) {
+        const on = !!(el && el.checked);
+        try {
+            await this.request('/api/music/accounts/config', {
+                method: 'POST',
+                body: JSON.stringify({ autoSwitch: { [platform]: on } })
+            });
+            showSuccess(on
+                ? '已开启：主号确认失效且备号验证通过时自动切换'
+                : '已关闭自动切换');
+        } catch (e) {
+            if (el) el.checked = !on;
+            showError(`保存失败：${e.message}`);
+        }
     }
 
     /** 读取酷狗概念版会员状态并填进卡片（多账号逐个填，失败只影响那一行） */
@@ -5567,7 +5680,12 @@ class App {
         box.dataset.append = (willShow && mode === 'append') ? '1' : '';
         if (willShow) {
             const item = box.closest('.music-acc-item');
-            if (item) item.classList.add('is-editing');
+            if (item) {
+                item.classList.add('is-editing');
+                // 卡片级追加标记：让同卡片上的扫码按钮也按「追加新账号」处理
+                if (box.dataset.append === '1') item.dataset.append = '1';
+                else delete item.dataset.append;
+            }
             const tip = box.querySelector('.music-acc-editor-tip');
             if (tip) {
                 tip.dataset.base = tip.dataset.base || tip.innerHTML;
@@ -5582,6 +5700,8 @@ class App {
     async saveMusicAccount(platform) {
         const box = document.getElementById(`music-acc-editor-${platform}`);
         const cookie = box?.querySelector('textarea')?.value || '';
+        const labelEl = box?.querySelector('.music-acc-label-input');
+        const label = labelEl ? labelEl.value.trim() : '';
         if (!cookie.trim()) {
             showError('请先粘贴 Cookie 内容，或导入 cookie.txt 文件');
             return;
@@ -5594,7 +5714,9 @@ class App {
                 body: JSON.stringify({
                     platform,
                     cookie,
-                    append: box?.dataset.append === '1'
+                    append: box?.dataset.append === '1',
+                    // 备注名只在填写了才传：空串会把已有备注清掉
+                    label: label || undefined
                 })
             });
             const warnings = Array.isArray(res?.warnings) ? res.warnings : [];
@@ -5612,6 +5734,7 @@ class App {
 
             box.style.display = 'none';
             box.dataset.append = '';
+            if (labelEl) labelEl.value = '';
             await this.refreshMusicAccounts();
 
             // 解析干净就顺手验一次，省得用户还要再点一脚
@@ -5883,7 +6006,10 @@ class App {
         if (st.session) this._closeQRSession(st.session);
         st.platform = platform;
         st.driver = driver || '';
-        st.append = mode === 'append';
+        // 追加语义只在用户显式进入「添加账号」模式时生效（卡片上打了 data-append 标记），
+        // 否则扫码一律按「更新主账号」处理 —— 否则重登一次就会多出一个不参与取链的冷备号。
+        const card = document.querySelector(`.music-acc-item[data-platform="${platform}"]`);
+        st.append = mode === 'append' || card?.dataset.append === '1';
         st.session = '';
         st.fails = 0;
         st.settled = false;

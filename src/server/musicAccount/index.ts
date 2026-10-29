@@ -17,13 +17,14 @@ import * as migu from './resolvers/migu'
 import * as bilibili from './resolvers/bilibili'
 import * as soda from './resolvers/soda'
 import * as kglite from './resolvers/kglite'
-import { isSupportedSource, getPlatform } from './platforms'
+import { PLATFORMS, isSupportedSource, getPlatform } from './platforms'
 import { hasLoginKey, parseCookie } from './http'
 import { normalizeCookieInput, formatLabel } from './cookieParse'
 import * as store from './store'
 import * as qrLogin from './qrLogin'
 import { summarize } from './health'
-import type { HealthSummary } from './health'
+import type { HealthSummary, AccountHealth } from './health'
+import { isUserAllowed } from './permission'
 import type { AccountResolveResult, AccountInfo, PlatformResolver } from './types'
 
 export { PLATFORMS, getPlatform, isSupportedSource } from './platforms'
@@ -108,6 +109,7 @@ export async function tryResolveByAccount(
   source: string,
   songInfo: any,
   quality: string,
+  opts: { allowPromote?: boolean } = {},
 ): Promise<AccountResolveResult | null> {
   if (!isEnabled()) return null
   if (!isSupportedSource(source)) return null
@@ -126,6 +128,13 @@ export async function tryResolveByAccount(
     try {
       const result = await withDeadline(resolver.resolve(songInfo, quality, cookie), perChannel)
       if (result?.ok && result.url) {
+        // 汽水特有：签名器通道（signer:*）才是「真的用上了账号」。
+        // 命中 h5/seo 明文通道说明账号没起作用 —— 要么这首歌本来就免费，
+        // 要么账号已经过期。按 30 分钟冷却顺手复核一次登录态，
+        // 这样「账号过期但歌还能匿名播」也能当场标红，不必等下一轮巡检（默认 72 小时）。
+        if (id === 'soda' && result.via && !String(result.via).startsWith('signer')) {
+          probeAccountAfterFailure(id)
+        }
         console.log(`[平台账号] ✓ ${name} 取链成功（通道 ${result.via ?? '-'}，音质 ${result.quality ?? quality}${result.isVip ? '，会员' : ''}）`)
         // 让上层显示实际命中的平台（概念版 vs 标准版），而不是拿 source 反查
         return { ...result, accountName: name }
@@ -140,7 +149,79 @@ export async function tryResolveByAccount(
       probeAccountAfterFailure(id)
     }
   }
+
+  // 所有通道都失败：若用户为该平台开了「主号失效自动切换」，再给自己一次机会。
+  // 只在 allowPromote 时尝试，且内部有 10 分钟冷却 + 「先确认主号真的坏了」两道闸，
+  // 避免唱到一首没版权的歌就把账号换掉（那会让后续播放整体漂移）。
+  if (opts.allowPromote !== false) {
+    let promoted = false
+    for (const id of ids) {
+      const res = await autoPromotePrimary(id)
+      if (res.promoted) promoted = true
+    }
+    if (promoted) {
+      return tryResolveByAccount(source, songInfo, quality, { allowPromote: false })
+    }
+  }
   return null
+}
+
+// ---- 主号失效自动切换 ----
+//
+// 为什么默认关：多账号之间来回漂移会让「同一首歌这次能播下次不能播」，排查成本极高。
+// 所以只有用户给某个平台显式勾了「主号失效自动切换」才生效，且必须确认主号真的失效
+// （调一次需登录接口），不能因为「这首歌没版权」就换号。
+
+const lastPromoteAt = new Map<string, number>()
+const PROMOTE_COOLDOWN_MS = 10 * 60 * 1000
+
+export interface PromoteResult {
+  promoted: boolean
+  from?: string
+  to?: string
+}
+
+export async function autoPromotePrimary(id: string): Promise<PromoteResult> {
+  if (!store.isAutoSwitchEnabled(id)) return { promoted: false }
+  if (!store.hasAccount(id)) return { promoted: false }
+
+  const last = lastPromoteAt.get(id) ?? 0
+  if (Date.now() - last < PROMOTE_COOLDOWN_MS) return { promoted: false }
+  lastPromoteAt.set(id, Date.now())
+
+  const items = store.listAccountItems(id)
+  const primary = items.find(i => i.primary)
+  if (!primary || items.length < 2) return { promoted: false }
+
+  const name = getPlatform(id)?.name ?? id
+  // 第一道闸：先确认主号是不是真的失效。主号正常还换号，属于把好号换掉。
+  // 每次校验都给 6 秒上限 —— 这段跑在「取链失败」的路径上，不能让它把整首歌的等待时间拖长。
+  const info = await withDeadline(verifyAccount(id, primary.id), 6000).catch(() => null)
+  if (info?.ok) return { promoted: false }
+
+  // 候选：已配置、没有明确坏掉（结构不对/已失效的不选），有 VIP 的排前面
+  const candidates = items
+    .filter(i => !i.primary && i.configured && i.health !== 'expired' && i.health !== 'structural')
+    .sort((a, b) => {
+      const vip = Number(!!b.lastVerify?.isVip) - Number(!!a.lastVerify?.isVip)
+      if (vip) return vip
+      return Number(b.health === 'ok') - Number(a.health === 'ok')
+    })
+
+  // 第二道闸：候选也必须现场验证通过才晋升，避免把另一个坏号扶正。
+  // 最多试 2 个、每个 6 秒，避免「全平台都坏」时在这一步耗掉几十秒。
+  for (const c of candidates.slice(0, 2)) {
+    const ci = await withDeadline(verifyAccount(id, c.id), 6000).catch(() => null)
+    if (!ci?.ok) continue
+    const ok = store.setPrimaryAccount(id, c.id)
+    if (!ok.success) return { promoted: false }
+    // 会员缓存是按平台存的，换号后必须清掉，否则会拿旧号的 VIP 状态去判断音质
+    vipCache.delete(id)
+    console.log(`[平台账号] 自动切换｜${name}：主账号「${primary.label}」已失效，改用「${c.label}」`)
+    return { promoted: true, from: primary.label, to: c.label }
+  }
+  console.log(`[平台账号] 自动切换｜${name}：主账号「${primary.label}」可能已失效，但没有可用的备号`)
+  return { promoted: false }
 }
 
 /**
@@ -328,6 +409,14 @@ export function saveAccount(
     ? store.addCookie(platform, parsed.cookie, { itemId: opts.itemId, label: opts.label, primary: opts.primary })
     : store.setCookie(platform, parsed.cookie)
 
+  // 老语义（只更新主账号）也允许顺手改备注：setCookie 不认 label，
+  // 所以这里补一次改名。注意**不能**改成走 addCookie —— 那会把「换个 Cookie」
+  // 变成「追加一个新账号」，用户重登一次就多出一个不参与取链的冷备号。
+  if (!opts.append && !opts.itemId && opts.label) {
+    const primary = store.listAccountItems(platform).find(i => i.primary)
+    if (primary) store.renameAccount(platform, primary.id, opts.label)
+  }
+
   // 留一条可追溯的日志：用户反馈「同步了但后台没有」时，
   // 看日志就能分清「没送到」还是「送到了但平台/字段不对」
   console.log(
@@ -364,9 +453,24 @@ export function saveAccount(
  * 三天一次足够在用户察觉「怎么只能试听了」之前把红标摆到界面上。
  */
 function checkIntervalHours(): number {
-  const n = Number(process.env.MUSIC_ACCOUNT_CHECK_HOURS)
-  if (!Number.isFinite(n) || n <= 0) return 72
-  return Math.max(1, Math.min(24 * 7, Math.round(n)))
+  const n = Number(config()['musicAccount.checkHours'])
+  if (Number.isFinite(n) && n > 0) return Math.max(1, Math.min(24 * 7, Math.round(n)))
+  const env = Number(process.env.MUSIC_ACCOUNT_CHECK_HOURS)
+  if (!Number.isFinite(env) || env <= 0) return 72
+  return Math.max(1, Math.min(24 * 7, Math.round(env)))
+}
+
+/**
+ * 巡检在每天的几点执行（0-23，默认 03:00）。
+ *
+ * 为什么改成「定点」而不是「固定间隔」：固定间隔会在启动后 72 小时整再跑，
+ * 时间点跟着重启漂移；落到凌晨固定小时，既能和「领 VIP」等任务错峰，
+ * 也不会在用户白天听歌时去打各家接口（风控最容易被触发的就是「边播边扫」）。
+ */
+function checkHourOfDay(): number {
+  const n = Number(config()['musicAccount.checkHour'])
+  if (!Number.isFinite(n)) return 3
+  return Math.min(23, Math.max(0, Math.floor(n)))
 }
 
 /** 当前账号健康度汇总（只读，不发请求） */
@@ -427,7 +531,78 @@ export async function runAccountHealthCheck(opts: { force?: boolean } = {}): Pro
   return { ...summary, checkedAt, checked }
 }
 
-let healthTimer: ReturnType<typeof setInterval> | null = null
+let healthTimer: ReturnType<typeof setTimeout> | null = null
+let healthNextRunAt = 0
+let healthLastRunAt = 0
+
+/**
+ * 算出下一次巡检时间：下一个 checkHour 整点，且距上次巡检不少于 checkHours 小时。
+ *
+ * 单独导出便于单测：跨天与「间隔未到就顺延」这两处最容易算错，
+ * 算错的表现是「再也不巡检了」或「每小时都在打接口」，都很难从界面看出来。
+ */
+export function nextHealthCheckAt(
+  hour: number,
+  intervalHours: number,
+  lastRunAt: number,
+  now = Date.now(),
+): number {
+  const h = Math.min(23, Math.max(0, Math.floor(Number.isFinite(hour) ? hour : 3)))
+  const base = new Date(now)
+  base.setHours(h, 0, 0, 0)
+  let at = base.getTime()
+  if (at <= now) at += 24 * 3600_000
+  const earliest = lastRunAt > 0 ? lastRunAt + Math.max(1, intervalHours) * 3600_000 : 0
+  // 间隔没到就一天一天往后推，直到既落在整点、又满足最小间隔
+  let guard = 0
+  while (at < earliest && guard++ < 400) at += 24 * 3600_000
+  return at
+}
+
+/** 当前巡检排程状态（前端回填表单用） */
+export function getHealthCheckState(): { intervalHours: number; hour: number; nextRunAt: number; lastRunAt: number } {
+  return {
+    intervalHours: checkIntervalHours(),
+    hour: checkHourOfDay(),
+    nextRunAt: healthNextRunAt,
+    lastRunAt: healthLastRunAt,
+  }
+}
+
+function scheduleHealthCheck(): void {
+  if (healthTimer) {
+    clearTimeout(healthTimer)
+    healthTimer = null
+  }
+  const at = nextHealthCheckAt(checkHourOfDay(), checkIntervalHours(), healthLastRunAt)
+  healthNextRunAt = at
+  const timer = setTimeout(() => {
+    healthTimer = null
+    healthNextRunAt = 0
+    void runAccountHealthCheck()
+      .catch(e => console.log(`[平台账号] 巡检出错（忽略）：${e?.message || e}`))
+      .finally(() => {
+        healthLastRunAt = Date.now()
+        scheduleHealthCheck()
+      })
+  }, Math.max(1000, at - Date.now()))
+  if (typeof timer.unref === 'function') timer.unref()
+  healthTimer = timer
+
+  const when = new Date(at)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  console.log(
+    `[平台账号] 账号巡检已排程：每天 ${pad(checkHourOfDay())}:00 检查一次，`
+    + `且距上次不少于 ${checkIntervalHours()} 小时；`
+    + `下一轮 ${when.getMonth() + 1}/${when.getDate()} ${pad(when.getHours())}:${pad(when.getMinutes())}`,
+  )
+}
+
+/** 配置改动（巡检间隔/时间点）后重排定时器，不必重启进程 */
+export function rescheduleAccountHealthCheck(): void {
+  if (!healthTimer) return
+  scheduleHealthCheck()
+}
 
 /**
  * 启动定时巡检。默认启动后等 90 秒再跑第一次：
@@ -435,14 +610,19 @@ let healthTimer: ReturnType<typeof setInterval> | null = null
  */
 export function startAccountHealthCheck(): void {
   if (healthTimer) return
-  const hours = checkIntervalHours()
   const boot = setTimeout(() => {
     void runAccountHealthCheck()
-    healthTimer = setInterval(() => void runAccountHealthCheck(), hours * 3600_000)
-    if (typeof healthTimer.unref === 'function') healthTimer.unref()
+      .catch(e => console.log(`[平台账号] 启动巡检出错（忽略）：${e?.message || e}`))
+      .finally(() => {
+        healthLastRunAt = Date.now()
+        scheduleHealthCheck()
+      })
   }, 90_000)
   if (typeof boot.unref === 'function') boot.unref()
-  console.log(`[平台账号] 账号巡检已安排：每 ${hours} 小时复查一次 Cookie 有效性（首次 90 秒后）`)
+  console.log(
+    `[平台账号] 账号巡检已安排：启动 90 秒后先查一次，之后每天 ${String(checkHourOfDay()).padStart(2, '0')}:00 起`
+    + `按不少于 ${checkIntervalHours()} 小时的间隔复查`,
+  )
 }
 
 // ---- 供接口层使用的 store 再导出，避免 API 直接依赖内部文件 ----
@@ -451,6 +631,75 @@ export const removeAccount = store.removeCookie
 export const removeAccountItem = store.removeAccountItem
 export const setPrimaryAccount = store.setPrimaryAccount
 export const getStoreFilePath = store.getStoreFilePath
+export const renameAccount = store.renameAccount
+export const setAutoSwitchEnabled = store.setAutoSwitchEnabled
+export const isAutoSwitchEnabled = store.isAutoSwitchEnabled
+
+// ---- 换源能力探测 / 播放端失效提示 ----
+//
+// 跨平台换源是**前端**在决策（public/music/app.js），但「这个用户到底能不能用账号」
+// 只有后端知道（总开关、是否配了号、是否在白名单里）。所以这里提供一个纯读接口，
+// 前端据此动态决定汽水/酷狗概念版要不要进候选池。
+//
+// 安全边界：只回布尔值，绝不带 Cookie、昵称等任何账号内容。
+
+/**
+ * 匿名（不登录）也能拿到可播直链的源。
+ *   soda  ：h5/seo 明文通道，非版权曲给整曲、版权曲只给 60 秒；
+ *   bili  ：视频音轨，公开可播（但有 412 风控）；
+ *   kglite：纯账号源（概念版 App token），没账号必然取不到链。
+ */
+const ANONYMOUS_CAPABLE: Record<string, boolean> = {
+  soda: true,
+  bili: true,
+  kglite: false,
+}
+
+export interface SourceCapability {
+  /** 此刻能否走「自己的账号」取链（总开关 + 平台受支持 + 已配账号 + 该用户在白名单内） */
+  account: boolean
+  /** 是否匿名也能取到链（无需账号） */
+  anonymous: boolean
+}
+
+export function getSourceCapabilities(username?: string): Record<string, SourceCapability> {
+  const allowed = isUserAllowed(username)
+  const enabled = isEnabled()
+  const out: Record<string, SourceCapability> = {}
+  for (const p of PLATFORMS) {
+    let account = false
+    try {
+      account = enabled && allowed && isSupportedSource(p.id) && hasAccount(p.id)
+    } catch {
+      account = false
+    }
+    out[p.id] = { account, anonymous: ANONYMOUS_CAPABLE[p.id] === true }
+  }
+  return out
+}
+
+export interface AccountHint {
+  platform: string
+  name: string
+  health: AccountHealth
+  text: string
+}
+
+/**
+ * 播放端要主动提示的账号问题。
+ * 只挑「已失效」——待复查/未校验属于提醒，不该在播放时打断用户；
+ * 失效则是「正在掉音质」的确定事实，值得弹一次。
+ */
+export function getAccountHints(): AccountHint[] {
+  return store.listAccounts()
+    .filter(r => r.configured && r.health === 'expired')
+    .map(r => ({
+      platform: r.id,
+      name: r.name,
+      health: r.health,
+      text: `${r.name}账号已失效，高音质会退回试听或匿名通道，请到后台「平台账号」重新登录或更新 Cookie`,
+    }))
+}
 
 // ---- 扫码登录（网易云 / QQ / 微信 / 酷狗 / 酷狗概念版） ----
 export const qrLoginStart = qrLogin.start

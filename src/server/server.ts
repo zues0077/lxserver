@@ -10082,6 +10082,30 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
       // Test Proxy API
       // ==================== 平台账号（用自己的会员账号听歌） ====================
+
+      // 换源能力探测（**普通用户**接口，不要求管理员）：前端换源时据此决定
+      // 汽水/酷狗概念版要不要进候选池。只回布尔值，不含任何账号内容。
+      if (pathname === '/api/music/account-capabilities' && req.method === 'GET') {
+        const username = verifyUserAuth(req)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          success: true,
+          data: {
+            enabled: musicAccount.isEnabled(),
+            sources: musicAccount.getSourceCapabilities(username || undefined),
+          },
+        }))
+        return
+      }
+
+      // 播放端失效提示（**普通用户**接口）：只回「哪个平台的账号已失效」，
+      // 不带 Cookie/昵称，游客也能看到（提示管理员去更新账号）。
+      if (pathname === '/api/music/account-hints' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: true, data: { hints: musicAccount.getAccountHints() } }))
+        return
+      }
+
       // 全部要求管理员身份：Cookie 是登录凭证，绝不能让普通用户读写。
       if (pathname === '/api/music/accounts' && req.method === 'GET') {
         const auth = req.headers['x-frontend-auth']
@@ -10100,6 +10124,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             allowedUsers: getAllowedUsers(),
             accounts: musicAccount.getAccounts(),
             health: musicAccount.getAccountHealth(),
+            healthCheck: musicAccount.getHealthCheckState(),
+            autoSwitch: global.lx.config['musicAccount.autoSwitch'] || {},
             storePath: musicAccount.getStoreFilePath(),
           },
         }))
@@ -10182,6 +10208,33 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const { platform, itemId } = JSON.parse(body || '{}')
             const result = musicAccount.setPrimaryAccount(String(platform || ''), String(itemId || ''))
             if (result.success) console.log(`[平台账号] ${platform} 主账号已切换为 ${itemId}`)
+            res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(result))
+          } catch (e: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
+      // 改账号备注名（多账号时靠它区分「小号 A / 家人的号」）
+      if (pathname === '/api/music/accounts/label' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async body => {
+          try {
+            const { platform, itemId, label } = JSON.parse(body || '{}')
+            const result = musicAccount.renameAccount(
+              String(platform || ''),
+              String(itemId || ''),
+              String(label ?? ''),
+            )
+            if (result.success) console.log(`[平台账号] ${platform} 账号 ${itemId} 备注改为「${String(label ?? '').slice(0, 32)}」`)
             res.writeHead(result.success ? 200 : 400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(result))
           } catch (e: any) {
@@ -10328,6 +10381,29 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             if (typeof patch.timeoutMs === 'number' && patch.timeoutMs >= 3000) {
               global.lx.config['musicAccount.timeoutMs'] = patch.timeoutMs
             }
+            // 主号失效自动切换：按平台存 map（默认空 = 全部关闭）。
+            // 这是唯一会「自己动账号」的开关，所以必须显式勾选才生效。
+            if (patch.autoSwitch && typeof patch.autoSwitch === 'object' && !Array.isArray(patch.autoSwitch)) {
+              const prev = global.lx.config['musicAccount.autoSwitch']
+              const map: Record<string, boolean> = (prev && typeof prev === 'object') ? { ...(prev as Record<string, boolean>) } : {}
+              for (const [pid, on] of Object.entries(patch.autoSwitch as Record<string, unknown>)) {
+                if (!musicAccount.getPlatform(pid)) continue
+                if (on === true) map[pid] = true
+                else delete map[pid]
+              }
+              global.lx.config['musicAccount.autoSwitch'] = map
+            }
+            // 巡检节奏：定点小时 + 最小间隔（改完立刻重排，不必重启）
+            let healthDirty = false
+            if (typeof patch.checkHours === 'number' && Number.isFinite(patch.checkHours)) {
+              global.lx.config['musicAccount.checkHours'] = Math.min(24 * 7, Math.max(1, Math.round(patch.checkHours)))
+              healthDirty = true
+            }
+            if (typeof patch.checkHour === 'number' && Number.isFinite(patch.checkHour)) {
+              global.lx.config['musicAccount.checkHour'] = Math.min(23, Math.max(0, Math.floor(patch.checkHour)))
+              healthDirty = true
+            }
+            if (healthDirty) musicAccount.rescheduleAccountHealthCheck()
             // 酷狗概念版自动领 VIP：改完立刻重排定时器（否则用户改了开始时间得重启才生效）
             let kgliteDirty = false
             if (typeof patch.kgliteAutoClaim === 'boolean') {
@@ -10356,6 +10432,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               kgliteStartHour: global.lx.config['musicAccount.kglite.startHour'] ?? 6,
               kgliteGapSeconds: global.lx.config['musicAccount.kglite.gapSeconds'] ?? 60,
               kgliteMinRemainHours: global.lx.config['musicAccount.kglite.minRemainHours'] ?? 24,
+              autoSwitch: global.lx.config['musicAccount.autoSwitch'] || {},
+              healthCheck: musicAccount.getHealthCheckState(),
             } }))
           } catch (e: any) {
             res.writeHead(400, { 'Content-Type': 'application/json' })
