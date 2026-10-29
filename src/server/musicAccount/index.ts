@@ -947,7 +947,8 @@ export function getKugouLiteAutoClaimConfig(): {
     startHour: num('musicAccount.kglite.startHour', 6, 0, 23),
     gapMinSeconds: gap.min,
     gapMaxSeconds: gap.max,
-    minRemainHours: num('musicAccount.kglite.minRemainHours', 24, 1, 24 * 30),
+    // 0 = 不限阈值：不管还剩多久，每轮都补（填 0 是合法值，别再钳成 1）
+    minRemainHours: num('musicAccount.kglite.minRemainHours', 24, 0, 24 * 30),
   }
 }
 
@@ -1076,7 +1077,8 @@ export async function runKugouLiteAutoClaim(opts: { force?: boolean } = {}): Pro
       accounts.push({ id: acct.id, label: acct.label, primary: acct.primary, skipped: true, reason: `会员信息查询失败：${vip.error || '未知原因'}` })
       continue
     }
-    if (!opts.force && vip.remainHours >= cfg.minRemainHours) {
+    // minRemainHours = 0 表示用户主动关掉了「够用就跳过」：不看剩余，每轮都补。
+    if (!opts.force && cfg.minRemainHours > 0 && vip.remainHours >= cfg.minRemainHours) {
       // 跳过也要留一行：否则定时器到底有没有在跑，只能靠猜
       console.log(`[平台账号] 概念版自动补领｜${acct.label}：剩余 ${vip.remainHours} 小时（≥${cfg.minRemainHours}），本轮跳过`)
       accounts.push({ id: acct.id, label: acct.label, primary: acct.primary, skipped: true, reason: `剩余 ${vip.remainHours} 小时，暂不需要补领` })
@@ -1132,7 +1134,7 @@ function scheduleNextAutoClaim(): void {
   const when = new Date(at)
   console.log(
     `[平台账号] 酷狗概念版 VIP 自动领取已排程：每天 ${pad(cfg.startHour)}:00 起，每 ${AUTO_CLAIM_ROUND_GAP_HOURS} 小时一轮（共 ${AUTO_CLAIM_ROUNDS} 轮）；`
-    + `剩余不足 ${cfg.minRemainHours} 小时才领，账号间隔 ${cfg.gapMinSeconds}~${cfg.gapMaxSeconds} 秒随机；`
+    + `${cfg.minRemainHours > 0 ? `剩余不足 ${cfg.minRemainHours} 小时才领` : '不看剩余、每轮都补'}，账号间隔 ${cfg.gapMinSeconds}~${cfg.gapMaxSeconds} 秒随机；`
     + `下一轮 ${when.getMonth() + 1}/${when.getDate()} ${pad(when.getHours())}:${pad(when.getMinutes())}`,
   )
 }

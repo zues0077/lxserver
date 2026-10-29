@@ -9701,7 +9701,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
               if (newConfig['musicAccount.kglite.minRemainHours'] !== undefined) {
                 const m = Number(newConfig['musicAccount.kglite.minRemainHours'])
-                global.lx.config['musicAccount.kglite.minRemainHours'] = Number.isFinite(m) ? Math.min(720, Math.max(1, Math.floor(m))) : 24
+                global.lx.config['musicAccount.kglite.minRemainHours'] = Number.isFinite(m) ? Math.min(720, Math.max(0, Math.floor(m))) : 24
               }
               if (kgliteScheduleDirty) musicAccount.rescheduleKugouLiteVipAutoClaim()
 
@@ -10478,7 +10478,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
             }
             if (typeof patch.kgliteMinRemainHours === 'number' && Number.isFinite(patch.kgliteMinRemainHours)) {
-              global.lx.config['musicAccount.kglite.minRemainHours'] = Math.min(720, Math.max(1, Math.floor(patch.kgliteMinRemainHours)))
+              global.lx.config['musicAccount.kglite.minRemainHours'] = Math.min(720, Math.max(0, Math.floor(patch.kgliteMinRemainHours)))
             }
             if (kgliteDirty) musicAccount.rescheduleKugouLiteVipAutoClaim()
             if (typeof global.lx?.saveConfig === 'function') global.lx.saveConfig()

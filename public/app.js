@@ -5256,7 +5256,7 @@ class App {
                 ? '已关闭'
                 : `${String(typeof autoCfg.startHour === 'number' ? autoCfg.startHour : 6).padStart(2, '0')}:00 起`
                   + ` · 间隔 ${this._gapText(autoCfg.gapMinSeconds, autoCfg.gapMaxSeconds)}`
-                  + ` · 剩余 <${typeof autoCfg.minRemainHours === 'number' ? autoCfg.minRemainHours : 24}h 才补`;
+                  + ` · ${this._kgliteRemainText(autoCfg.minRemainHours)}`;
             const autoSection = isKglite
                 ? `<div class="music-acc-section">
                        <div class="music-acc-section-title">
@@ -5283,9 +5283,9 @@ class App {
                                    账号间隔最长（秒）
                                    <input type="number" id="kglite-gap-max" min="5" max="3600" step="5">
                                </label>
-                               <label class="music-acc-auto-field" title="只在会员快到期时才补领：剩余时长少于这个值才动手，够用就跳过。这样不会把每天 8 次额度全用掉、把到期时间一路攒到几个月后">
-                                   VIP 剩余少于（小时才补）
-                                   <input type="number" id="kglite-min-remain" min="1" max="720">
+                               <label class="music-acc-auto-field" title="只在会员快到期时才补领：剩余时长少于这个值才动手，够用就跳过，避免把每天 8 次额度全用掉。填 0 = 不限，不管剩多久每轮都补（时长只增不减，但每天都会跑满 8 轮任务）">
+                                   VIP 剩余少于（小时才补，0=不限）
+                                   <input type="number" id="kglite-min-remain" min="0" max="720">
                                </label>
                            </div>
                            <div class="music-acc-auto-actions">
@@ -5581,6 +5581,12 @@ class App {
         }
     }
 
+    /** 补领阈值的人话：0 表示不限（不看剩余，每轮都补） */
+    _kgliteRemainText(h) {
+        const n = typeof h === 'number' ? h : 24;
+        return n <= 0 ? '每轮都补' : `剩余 <${n}h 才补`;
+    }
+
     /** 读取酷狗概念版会员状态并填进卡片（多账号逐个填，失败只影响那一行） */
     async loadKugouLiteVip() {
         const card = document.querySelector('.music-acc-item[data-platform="kglite"]');
@@ -5596,7 +5602,7 @@ class App {
                     ? '已关闭'
                     : `${String(typeof d.startHour === 'number' ? d.startHour : 6).padStart(2, '0')}:00 起`
                       + ` · 间隔 ${this._gapText(d.gapMinSeconds, d.gapMaxSeconds)}`
-                      + ` · 剩余 <${typeof d.minRemainHours === 'number' ? d.minRemainHours : 24}h 才补`;
+                      + ` · ${this._kgliteRemainText(d.minRemainHours)}`;
             }
             const autoEl = document.getElementById('kglite-auto-claim');
             if (autoEl) autoEl.checked = d.autoClaim !== false;
@@ -5616,7 +5622,10 @@ class App {
                     const t = new Date(d.nextRunAt).toLocaleString('zh-CN', {
                         hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
                     });
-                    nextEl.textContent = `下一轮：${t}（白天每 3 小时一轮；VIP 剩余少于 ${d.minRemainHours} 小时才补，够用就跳过）`;
+                    nextEl.textContent = `下一轮：${t}（白天每 3 小时一轮；`
+                        + `${typeof d.minRemainHours === 'number' && d.minRemainHours <= 0
+                            ? '不看剩余，每轮都补）'
+                            : `VIP 剩余少于 ${d.minRemainHours} 小时才补，够用就跳过）`}`;
                 } else {
                     nextEl.textContent = '';
                 }
@@ -5778,7 +5787,7 @@ class App {
                     kgliteStartHour: hourEl ? Number(hourEl.value) : undefined,
                     kgliteGapMinSeconds: gapMin,
                     kgliteGapMaxSeconds: gapMax,
-                    kgliteMinRemainHours: minEl ? Number(minEl.value) : undefined
+                    kgliteMinRemainHours: numOf(minEl)
                 })
             });
             // 服务端已经重排定时器，这里重新读一次拿「下一轮」时间
