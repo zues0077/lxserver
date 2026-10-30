@@ -1481,7 +1481,7 @@ export async function callUserApiGetMusicUrl(
         const accountTried = isEnabled() && isSupportedSource(source)
         let errMsg: string
         if (hasExcluded) {
-            errMsg = `支持 ${source} 平台的自定义源均已尝试且无法播放（已尝试 ${excludeApiSources.length} 个音源）`
+            errMsg = `支持 ${source} 平台的自定义源均已被本次请求排除（已排除 ${excludeApiSources.length} 个音源），无可用源可播放`
         } else if (accountTried) {
             errMsg = `未找到支持 ${source} 平台的自定义源，你配置的账号本次也未能取到链接（详见服务端日志 [平台账号]）`
         } else {
