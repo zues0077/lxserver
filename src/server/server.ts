@@ -10720,9 +10720,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           let body: any = {}
           try { body = raw ? JSON.parse(raw) : {} } catch { body = {} }
           if (body.all) {
-            const round = await musicAccount.runKugouLiteAutoClaim({ force: true })
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: true, data: round }))
+            // 整轮可能跑几十分钟（账号之间 300~1200 秒错峰），不能挂在请求上等：
+            // 交给后台跑，立刻返回 202，前端轮询 kglite/vip 的 claimAll 状态出结果。
+            const started = musicAccount.startKugouLiteClaimAll()
+            res.writeHead(started.started ? 202 : 409, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, data: started }))
             return
           }
           const data = await musicAccount.claimKugouLiteVip(body.itemId ? String(body.itemId) : undefined)

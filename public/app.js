@@ -5742,6 +5742,11 @@ class App {
             const d = res?.data || {};
             fillSettings(d);
 
+            // 后台还在跑「全部领取」：刷新页面/切回来也能接着看结果，不用重新点
+            if (d.claimAll && d.claimAll.running && !this._kgliteClaimPolling) {
+                void this.pollKugouLiteClaimAll(d.claimAll.startedAt || Date.now());
+            }
+
             if (!d.configured) {
                 const el = document.getElementById('music-acc-vip-kglite');
                 if (el) {
@@ -5797,29 +5802,26 @@ class App {
             });
             const d = res?.data || {};
             if (all) {
-                // 全部领取：服务端会按账号串行跑（账号之间有间隔），这里汇总一下结果
-                if (d.halted) {
-                    showInfo(`没有执行：${d.halted}`);
-                } else {
-                    const rows = d.accounts || [];
-                    const gained = rows.reduce((s, r) => s + (Number(r.gainedHours) || 0), 0);
-                    const failed = rows.filter(r => !r.skipped && r.error);
-                    if (failed.length) {
-                        showError(`已领 ${gained} 小时，${failed[0].label} 未成功：${failed[0].error || '未知原因'}`);
-                    } else {
-                        showSuccess(`全部账号已处理，合计 +${gained} 小时`);
-                    }
+                // 整轮是后台跑的（账号之间 300~1200 秒错峰，3 个号最坏 40 分钟），
+                // 这里只负责开跑 + 轮询，不占用按钮和请求
+                if (!d.started) {
+                    showInfo(d.message || '上一轮「全部领取」还在进行中，完成后再点');
+                    return;
                 }
+                showInfo(d.message || '已在后台逐个领取，完成后会自动提示结果');
+                const since = Date.now();
+                void this.pollKugouLiteClaimAll(since);
+                return;
+            }
+            // 单账号领取：结果直接随响应返回，不用轮询
+            const detail = (d.steps || [])
+                .map(s => `${s.name}：${s.ok ? '成功' : '未成功'}（${s.message}）`)
+                .join('；');
+            if (d.ok) {
+                showSuccess(`领取成功，本次 +${d.gainedHours} 小时${typeof d.remainHours === 'number' ? `，剩余 ${d.remainHours} 小时` : ''}`);
+                if (detail) showInfo(detail);
             } else {
-                const detail = (d.steps || [])
-                    .map(s => `${s.name}：${s.ok ? '成功' : '未成功'}（${s.message}）`)
-                    .join('；');
-                if (d.ok) {
-                    showSuccess(`领取成功，本次 +${d.gainedHours} 小时${typeof d.remainHours === 'number' ? `，剩余 ${d.remainHours} 小时` : ''}`);
-                    if (detail) showInfo(detail);
-                } else {
-                    showInfo(`${d.error || '本次没有领到 VIP'}${detail ? `（${detail}）` : ''}`);
-                }
+                showInfo(`${d.error || '本次没有领到 VIP'}${detail ? `（${detail}）` : ''}`);
             }
             // 刷新列表会顺带重新拉一次会员状态，不再单独调 loadKugouLiteVip
             await this.refreshMusicAccounts();
@@ -5828,6 +5830,56 @@ class App {
         } finally {
             if (btn) { btn.disabled = false; btn.textContent = label || '领取 VIP'; }
         }
+    }
+
+    /**
+     * 轮询「立即全部领取」的后台进度。
+     * 整轮最坏几十分钟（账号之间 300~1200 秒错峰），页面每 5 秒问一次状态，跑完再报明细。
+     * @param since 点按钮的时间戳，只认这之后结束的那一轮，避免把上一轮的结果当成本次
+     */
+    async pollKugouLiteClaimAll(since) {
+        if (this._kgliteClaimPolling) return; // 同一时刻只留一个轮询（刷新页面/重复点击都不会叠加）
+        this._kgliteClaimPolling = true;
+        const POLL_MS = 5000;
+        const MAX_MS = 100 * 60 * 1000; // 兜底：最多守 100 分钟（3 个号最坏约 40 分钟）
+        const t0 = Date.now();
+        try {
+            for (;;) {
+                await new Promise(r => setTimeout(r, POLL_MS));
+                let st = null;
+                try {
+                    const res = await this.request('/api/music/accounts/kglite/vip');
+                    st = (res?.data || {}).claimAll || null;
+                } catch (e) { /* 网络抖动就继续等，别打断后台那一轮 */ }
+                if (st && !st.running && (st.finishedAt || 0) >= since) {
+                    this._reportKugouLiteClaimAll(st.lastRound);
+                    await this.refreshMusicAccounts();
+                    return;
+                }
+                if (Date.now() - t0 > MAX_MS) {
+                    showInfo('领取还在后台进行，稍后刷新页面查看结果');
+                    return;
+                }
+            }
+        } finally {
+            this._kgliteClaimPolling = false;
+        }
+    }
+
+    /** 把「全部领取」一轮的结果讲成人话 */
+    _reportKugouLiteClaimAll(round) {
+        if (!round) { showInfo('领取已结束，但没拿到明细，请刷新查看'); return; }
+        if (round.halted) { showInfo(`没有执行：${round.halted}`); return; }
+        const rows = round.accounts || [];
+        const gained = rows.reduce((s, r) => s + (Number(r.gainedHours) || 0), 0);
+        const failed = rows.filter(r => !r.skipped && r.error);
+        const skipped = rows.filter(r => r.skipped);
+        if (failed.length) {
+            showError(`已领 ${gained} 小时；${failed[0].label} 未成功：${failed[0].error || '未知原因'}`);
+            return;
+        }
+        const skipText = skipped.length ? `（${skipped.length} 个跳过）` : '';
+        showSuccess(`全部账号处理完毕，合计 +${gained} 小时${skipText}`);
     }
 
     /** 把某个号设为主账号（取链只走主账号） */

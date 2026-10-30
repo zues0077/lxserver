@@ -1003,6 +1003,8 @@ export type KugouLiteVipState = kglite.LiteVipInfo & {
   minRemainHours: number
   /** 下一轮自动领取的时间戳（毫秒），没有排程时为 0 */
   nextRunAt: number
+  /** 手动「立即全部领取」的进度：running=true 时前端继续轮询 */
+  claimAll: { running: boolean; startedAt: number; finishedAt: number; lastRound: LiteAutoClaimRound | null }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1060,6 +1062,7 @@ export async function getKugouLiteVip(): Promise<KugouLiteVipState> {
     gapMaxSeconds: cfg.gapMaxSeconds,
     minRemainHours: cfg.minRemainHours,
     nextRunAt: vipNextRunAt,
+    claimAll: getKugouLiteClaimAllState(),
   }
   if (!list.length) {
     return { ok: false, isVip: false, expireAt: 0, remainHours: 0, error: '尚未配置账号', ...base, accounts: [] }
@@ -1238,6 +1241,58 @@ export interface LiteAutoClaimRound {
   /** 整轮没跑的原因（总开关关 / 自动领取关 / 没账号） */
   halted?: string
   accounts: LiteAutoClaimAccount[]
+}
+
+/**
+ * 手动「立即全部领取」的进度状态。
+ *
+ * 一轮最多可能跑几十分钟（账号之间要按 300~1200 秒错峰），挂在 HTTP 请求上等必然被
+ * 浏览器/反代掐断，用户看到的是「领取失败」而后台其实还在跑 —— 所以改成后台跑、前端轮询。
+ */
+let claimAllRunning = false
+let claimAllStartedAt = 0
+let claimAllFinishedAt = 0
+let claimAllLastRound: LiteAutoClaimRound | null = null
+
+export function getKugouLiteClaimAllState(): {
+  running: boolean
+  startedAt: number
+  finishedAt: number
+  lastRound: LiteAutoClaimRound | null
+} {
+  return {
+    running: claimAllRunning,
+    startedAt: claimAllStartedAt,
+    finishedAt: claimAllFinishedAt,
+    lastRound: claimAllLastRound,
+  }
+}
+
+/** 手动「立即全部领取」：后台开跑，立刻返回，结果靠轮询 claimAll 状态拿 */
+export function startKugouLiteClaimAll(): { started: boolean; running: boolean; message: string } {
+  if (claimAllRunning) {
+    return { started: false, running: true, message: '上一轮「全部领取」还在进行中，完成后再点' }
+  }
+  claimAllRunning = true
+  claimAllStartedAt = Date.now()
+  claimAllFinishedAt = 0
+  void runKugouLiteAutoClaim({ force: true })
+    .then(round => {
+      claimAllLastRound = round
+    })
+    .catch((e: any) => {
+      console.log(`[平台账号] 概念版全部领取出错（忽略）：${e?.message || e}`)
+      claimAllLastRound = { startedAt: claimAllStartedAt, halted: `出错：${e?.message || e}`, accounts: [] }
+    })
+    .finally(() => {
+      claimAllRunning = false
+      claimAllFinishedAt = Date.now()
+    })
+  return {
+    started: true,
+    running: true,
+    message: '已在后台逐个领取（账号之间有错峰间隔），完成后自动出结果',
+  }
 }
 
 /**
