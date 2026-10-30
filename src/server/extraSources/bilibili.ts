@@ -294,7 +294,21 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = ''): 
   const audioId = String(songInfo?.meta?.audioId || '').trim()
   if (audioId) {
     const auid = auidOf(audioId)
-    if (auid) return fetchAudioStream(auid, quality, cookie)
+    if (auid) {
+      try {
+        return await fetchAudioStream(auid, quality, cookie)
+      } catch (e: any) {
+        // ⚠️ 排行榜（copyright-music-publicity/toplist/music_list）的 music_id 不是音频区 sid，
+        // 直连 web/url 全报 4511001「音频未找到或已下架」（2026-10-30 实测 5/5）。
+        // 官方页面用关联稿件播放，azusa-player 也走 creation_bvid —— 有 bvid 就回落视频取流。
+        const fbBvid = String(songInfo?.meta?.bvid || '')
+        if (fbBvid && isBilibiliId(fbBvid)) {
+          console.warn(`[bili] 音频 sid=${auid} 取流失败（${String(e?.message || e).slice(0, 60)}），回落 bvid=${fbBvid}`)
+        } else {
+          throw e
+        }
+      }
+    }
   }
   // 否则按视频（bvid→cid→playurl）处理
   const { bvid, cid: rawCid } = pickIds(songInfo)
