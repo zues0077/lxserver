@@ -38,7 +38,12 @@ process.on('unhandledRejection', (reason: any) => {
   } else {
     // 非 DEBUG 模式下精简输出一行，避免第三方音源后台请求失败时刷屏
     const msg = reason?.message || reason || '未知错误'
-    console.warn(`[异步警告] 脚本/网络未捕获异常: ${msg}`)
+    // 只给 message 的话无法定位来源——同一个报错既可能出自主进程请求，也可能出自音源脚本，
+    // 带一帧调用点能直接区分（2026-10-30 排查 unescaped characters 时就卡在这一步）。
+    const frame = typeof reason?.stack === 'string'
+      ? String(reason.stack.split('\n').slice(1).find((l: string) => l.trim()) || '').trim().slice(0, 180)
+      : ''
+    console.warn(`[异步警告] 脚本/网络未捕获异常: ${msg}${frame ? ` @ ${frame}` : ''}`)
   }
 })
 

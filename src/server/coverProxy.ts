@@ -1,5 +1,6 @@
 import http from 'http'
 import { getProxyAgent } from '../modules/utils/proxy.js'
+import { encodeRequestUrl } from '../utils/urlEncode'
 
 /**
  * 封面图片代理与缓存（图片显示核心实现）
@@ -105,7 +106,7 @@ export async function proxyCoverImage(res: http.ServerResponse, picUrl: string, 
             // 开启 app 代理时改用 needle：原生 fetch 无法指定 agent
             if (appAgent) {
                 const needle = (await import('needle')).default
-                const r: any = await needle('get', fetchUrl, null, {
+                const r: any = await needle('get', encodeRequestUrl(fetchUrl), null, {
                     agent: appAgent,
                     response_timeout: 20000,
                     follow_max: 3,

@@ -5,6 +5,7 @@ import { probeNewSource } from './sourceProbe'
 import type { IncomingMessage, ServerResponse } from 'http'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
+import { encodeRequestUrl } from '../utils/urlEncode'
 import { verifyUser } from './userAuth'
 import { getFlagFor } from './sourceGuard'
 
@@ -277,7 +278,7 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
             // （原生 https.get 无法直接使用 tunnel agent）
             const agent = await getProxyAgent(targetUrl, 'app')
             if (agent) {
-                const resp: any = await needle('get', targetUrl, null, {
+                const resp: any = await needle('get', encodeRequestUrl(targetUrl), null, {
                     agent,
                     follow_max: 5,
                     response_timeout: 30000,

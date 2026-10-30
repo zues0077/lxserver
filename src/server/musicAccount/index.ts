@@ -23,8 +23,9 @@ import { normalizeCookieInput, formatLabel } from './cookieParse'
 import * as store from './store'
 import { extractAccountIdentity } from './identity'
 import * as qrLogin from './qrLogin'
-import { summarize } from './health'
+import { summarize, isSnapshotFromOtherVersion } from './health'
 import type { HealthSummary, AccountHealth } from './health'
+import { getAppVersion } from '../../utils/version'
 import { isUserAllowed } from './permission'
 import type { AccountResolveResult, AccountInfo, PlatformResolver } from './types'
 
@@ -757,8 +758,12 @@ async function runHealthCheckLoop(
   // 启动巡检的「陈旧」门槛：距上次校验不足一个巡检间隔的账号直接跳过。
   const boot = !!opts.boot
   const staleMs = checkIntervalHours() * 3600_000
-  const isStale = (item: { lastVerify?: { at?: number } | null }): boolean => {
+  const ver = getAppVersion()
+  const isStale = (item: { lastVerify?: { at?: number; byVersion?: string } | null }): boolean => {
     if (!boot) return true
+    // 上一版写下的结论直接作废重查：校验口径会随版本变（1.5.49 才给 QQ/酷我/咪咕
+    // 加了在线会员判定），沿用旧快照就会出现「升级后会员徽章退回结构校验」的假象。
+    if (isSnapshotFromOtherVersion(item.lastVerify, ver)) return true
     const at = item.lastVerify?.at
     return !at || Date.now() - at >= staleMs
   }
@@ -905,12 +910,21 @@ export function rescheduleAccountHealthCheck(): void {
 /** 所有已配置账号里最早的一次校验时间；没有任何校验记录时回 0（=从未巡检） */
 function oldestVerifiedAt(): number {
   const times: number[] = []
+  const ver = getAppVersion()
+  // 上一版写的快照不算「已验证」：它已经会被 isStale 判成需要重查，
+  // 时间轴也不该拿它当基准，否则界面上「上次巡检」会一直停在旧版本的时间。
+  const usable = (v: { at?: number; byVersion?: string } | null | undefined): number | null =>
+    v && v.at && !isSnapshotFromOtherVersion(v, ver) ? v.at : null
   for (const a of store.listAccounts()) {
     const items = (a.accounts || []).filter(i => i.configured)
     if (items.length) {
-      for (const i of items) if (i.lastVerify?.at) times.push(i.lastVerify.at)
-    } else if (a.lastVerify?.at) {
-      times.push(a.lastVerify.at)
+      for (const i of items) {
+        const at = usable(i.lastVerify)
+        if (at) times.push(at)
+      }
+    } else {
+      const at = usable(a.lastVerify)
+      if (at) times.push(at)
     }
   }
   return times.length ? Math.min(...times) : 0

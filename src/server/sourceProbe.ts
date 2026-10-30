@@ -28,6 +28,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import needle from 'needle'
 import { getProxyAgent } from '@/modules/utils/proxy.js'
+import { encodeRequestUrl } from '@/utils/urlEncode'
 import { syncLog } from '@/utils/log4js'
 import { localTime } from '@/utils/time'
 import { markSourceBusy } from './sourceGuard'
@@ -493,15 +494,6 @@ const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise
     )
   })
 
-/**
- * 音源常把中文歌名/文件名直接拼进链接，这些字符不转义时 needle（底层 url.parse）
- * 会打 "Request path contains unescaped characters" 警告，把日志刷脏（请求本身还能发出去）。
- * 这里只把非可见 ASCII 字符做百分号编码，已编码的 %XX 与各种保留字符保持原样，
- * 不影响签名参数（签名只看原值，编码发生在传输层）。
- */
-const encodeUnsafeUrlChars = (url: string): string =>
-  url.replace(/[^\x21-\x7e]/g, ch => encodeURIComponent(ch))
-
 /** 与 userApi.validateReturnedMusicUrl 同等语义的轻量校验：必须是可播放的 http(s) 直链 */
 const normalizeProbeUrl = (raw: any): string | null => {
   if (!raw || typeof raw !== 'string') return null
@@ -511,7 +503,7 @@ const normalizeProbeUrl = (raw: any): string | null => {
   if (!lower.startsWith('http://') && !lower.startsWith('https://')) return null
   // 试听/付费片段不算可用
   if (lower.includes('freetrial') || lower.includes('trial=1') || lower.includes('onlyplay')) return null
-  return encodeUnsafeUrlChars(trimmed)
+  return encodeRequestUrl(trimmed)
 }
 
 /** 链接所在的域名，仅用于把失败原因写清楚（便于判断是 CDN/域名问题还是音源问题） */
@@ -544,7 +536,7 @@ const confirmLinkByGet = (url: string, agent: any): Promise<{ ok: boolean; code?
 
     let stream: any
     try {
-      stream = needle.get(url, {
+      stream = needle.get(encodeRequestUrl(url), {
         follow_max: 3,
         open_timeout: 6000,
         response_timeout: 6000,
@@ -590,7 +582,9 @@ const checkLinkReachable = async (url: string): Promise<{ ok: boolean; error?: s
 
   let code: number | undefined
   try {
-    const resp = await needle('head', url, null, {
+    // 幂等编码：调用方（normalizeProbeUrl）已经编过一次，这里再兜一层，
+    // 防止以后新增调用点直接传原始 URL 又把 unescaped characters 带回来。
+    const resp = await needle('head', encodeRequestUrl(url), null, {
       follow_max: 3,
       open_timeout: 6000,
       response_timeout: 6000,

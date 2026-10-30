@@ -21,8 +21,9 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import { PLATFORMS, getPlatform } from './platforms'
-import { classifyHealth } from './health'
+import { classifyHealth, isSnapshotFromOtherVersion } from './health'
 import { extractAccountIdentity } from './identity'
+import { getAppVersion } from '../../utils/version'
 import type { AccountHealth } from './health'
 
 const FILE_VERSION = 1
@@ -37,6 +38,12 @@ export interface VerifyRecord {
   nickname?: string
   /** 校验强度：online = 调了需登录接口；structural = 只核对了 Cookie 字段 */
   verified?: 'online' | 'structural'
+  /**
+   * 写下这条结论时的应用版本。
+   * 校验口径会随版本变化（1.5.49 才给 QQ/酷我/咪咕 加了在线会员判定），
+   * 版本对不上的旧结论会被当成「未校验」触发重查，避免卡片显示上一版的旧口径。
+   */
+  byVersion?: string
 }
 
 export interface StoredAccountItem {
@@ -298,6 +305,7 @@ export function listAccounts(): Array<{
   autoSwitch: boolean
 }> {
   const store = readStore()
+  const ver = getAppVersion()
   return PLATFORMS.map(p => {
     const acc = normalize(store.accounts[p.id])
     const items = acc?.items || []
@@ -305,7 +313,12 @@ export function listAccounts(): Array<{
     const views: AccountItemView[] = items.map((it, idx) => {
       const cookie = decryptSafe(p.id, it.cookie)
       const configured = cookie.trim().length > 0
-      const hp = classifyHealth(configured, it.lastVerify ?? null)
+      // 版本对不上的旧快照对外按「没有」处理：卡片显示「待重新校验」，
+      // 前端也不会再拿旧口径的 isVip 去画会员徽章（否则就成了升级后状态倒退的假象）
+      const raw = it.lastVerify ?? null
+      const staleByVersion = isSnapshotFromOtherVersion(raw, ver)
+      // 健康分类要拿原始快照算，才能给出「待重新校验」而不是笼统的「未校验」
+      const hp = classifyHealth(configured, raw, Date.now(), ver)
       return {
         id: it.id,
         label: it.label || (it.primary ? '主账号' : `账号 ${idx + 1}`),
@@ -314,7 +327,7 @@ export function listAccounts(): Array<{
         cookieLength: cookie.length,
         cookiePreview: preview(cookie),
         updatedAt: it.addedAt || null,
-        lastVerify: it.lastVerify ?? null,
+        lastVerify: staleByVersion ? null : raw,
         health: hp.health,
         healthText: hp.text,
         ageHours: hp.ageHours,
@@ -674,7 +687,8 @@ export function saveVerifyResult(id: string, result: VerifyRecord | undefined, i
   if (!acc?.items?.length) return
   const target = itemId ? acc.items.find(i => i.id === itemId) : primaryItem(acc)
   if (!target) return
-  target.lastVerify = result
+  // 统一在这里盖版本戳：所有写入点（手查、巡检、概念版状态刷新）都不会漏
+  target.lastVerify = result ? { ...result, byVersion: getAppVersion() } : undefined
   writeStore(store)
 }
 

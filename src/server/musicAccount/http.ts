@@ -7,6 +7,7 @@
 
 import needle from 'needle'
 import { getProxyAgent } from '@/modules/utils/proxy.js'
+import { encodeRequestUrl } from '@/utils/urlEncode'
 
 const UA_PC = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -102,7 +103,9 @@ export async function request<T = any>(url: string, opts: RequestOpts = {}): Pro
   else if (opts.form !== undefined) payload = opts.form
   else if (opts.body !== undefined) payload = opts.body
 
-  const resp = await needle(method, url, payload, options)
+  // 平台接口 URL 基本是纯 ASCII，但咪咕/酷我 会把昵称或 UA 片段拼进查询串，
+  // 统一在这里编码，避免 needle（url.parse）抛 unescaped characters。
+  const resp = await needle(method, encodeRequestUrl(url), payload, options)
 
   let body: any = resp.body
   // 不少音乐平台的接口用 text/html 返回 JSON（实测酷狗 getSongInfo 就是），

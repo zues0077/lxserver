@@ -29,6 +29,27 @@ export interface VerifySnapshot {
   at: number
   ok: boolean
   verified?: 'online' | 'structural'
+  /** 写下这条结论时的应用版本（见 isSnapshotFromOtherVersion） */
+  byVersion?: string
+}
+
+/**
+ * 快照是不是「上一版写的」。
+ *
+ * 背景（2026-10-30）：1.5.48 及以前 QQ/酷我/咪咕 只有结构校验，1.5.49 才加在线会员判定。
+ * 换镜像后卡片仍显示旧版写下的「结构校验通过」，看着像功能退化了（手册 P-0983），
+ * 实际只是旧口径没被刷新。校验口径会随版本变，所以快照必须记下写它的版本号；
+ * 对不上就当作没校验过，让首查重新跑一遍。
+ *
+ * 版本读不出来时（'unknown'）不做判断，免得环境异常导致每次启动全量重查。
+ */
+export function isSnapshotFromOtherVersion(
+  last: { at?: number; byVersion?: string } | null | undefined,
+  currentVersion?: string,
+): boolean {
+  if (!currentVersion || currentVersion === 'unknown') return false
+  if (!last || !last.at) return false
+  return last.byVersion !== currentVersion
 }
 
 /**
@@ -50,9 +71,15 @@ export function classifyHealth(
   configured: boolean,
   last: VerifySnapshot | null | undefined,
   now = Date.now(),
+  currentVersion?: string,
 ): HealthInfo {
   if (!configured) return { health: 'none', text: '未配置', ageHours: null }
   if (!last || !last.at) return { health: 'unchecked', text: '未校验', ageHours: null }
+
+  // 上一版写下的结论不拿来冒充当前状态，直接回到「待重新校验」（首查会自动补）
+  if (isSnapshotFromOtherVersion(last, currentVersion)) {
+    return { health: 'unchecked', text: '待重新校验', ageHours: null }
+  }
 
   const ageHours = Math.max(0, Math.round((now - last.at) / 3600_000))
 

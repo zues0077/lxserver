@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import {
   STALE_AFTER_DAYS,
   classifyHealth,
+  isSnapshotFromOtherVersion,
   summarize,
 } from '../src/server/musicAccount/health'
 
@@ -77,4 +78,42 @@ test('summarize：全部正常时不给提示语（避免常驻黄条）', () =>
   ])
   assert.equal(s.expired, 0)
   assert.equal(s.message, '')
+})
+
+// —— 快照版本戳：跨版本升级后旧口径自动作废（手册 P-0983 / P-0985）——
+
+test('isSnapshotFromOtherVersion：同版本、无版本参数、读不到版本时都不算过期', () => {
+  const snap = { at: now - HOUR, ok: true, verified: 'online' as const, byVersion: '1.5.49' }
+  assert.equal(isSnapshotFromOtherVersion(snap, '1.5.49'), false)
+  // 没有当前版本可比（老调用点）→ 不判，保持原行为
+  assert.equal(isSnapshotFromOtherVersion(snap, undefined), false)
+  // 版本号读不出来时不能一刀切全判过期，否则环境异常会天天全量重查
+  assert.equal(isSnapshotFromOtherVersion(snap, 'unknown'), false)
+  // 根本没有快照 → 交给「未校验」分支处理，不算「版本不符」
+  assert.equal(isSnapshotFromOtherVersion(null, '1.5.49'), false)
+})
+
+test('isSnapshotFromOtherVersion：版本不同、或老数据没版本戳，都算过期', () => {
+  const older = { at: now - HOUR, ok: true, verified: 'online' as const, byVersion: '1.5.48' }
+  assert.equal(isSnapshotFromOtherVersion(older, '1.5.49'), true)
+  // 升级前的历史数据没有 byVersion —— 正是这次要治的场景
+  const legacy = { at: now - HOUR, ok: true, verified: 'structural' as const }
+  assert.equal(isSnapshotFromOtherVersion(legacy, '1.5.49'), true)
+})
+
+test('classifyHealth：上一版写的在线结论也降级成「待重新校验」', () => {
+  const snap = { at: now - HOUR, ok: true, verified: 'online' as const, byVersion: '1.5.48' }
+  const r = classifyHealth(true, snap, now, '1.5.49')
+  assert.equal(r.health, 'unchecked')
+  assert.equal(r.text, '待重新校验')
+  // 时间也别再沿用旧快照，前端不会显示「3 小时前校验过」
+  assert.equal(r.ageHours, null)
+})
+
+test('classifyHealth：同版本快照照旧走正常分类', () => {
+  const snap = { at: now - 3 * HOUR, ok: true, verified: 'online' as const, byVersion: '1.5.49' }
+  const r = classifyHealth(true, snap, now, '1.5.49')
+  assert.equal(r.health, 'ok')
+  assert.equal(r.text, '正常')
+  assert.equal(r.ageHours, 3)
 })

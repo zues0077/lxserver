@@ -22,6 +22,7 @@ import {
 } from './sourceActivity'
 
 import needle from 'needle'
+import { encodeRequestUrl } from '../utils/urlEncode'
 import * as crypto from 'crypto'
 import * as zlib from 'zlib'
 import { promisify } from 'util'
@@ -472,7 +473,7 @@ async function createLxRequest(
             // 排队期间实例可能已被卸载（禁用/重载/隔离），此时发起请求会让回调
             // 写进已释放的 VM2 沙箱——实测会直接 SIGSEGV 崩掉整个进程
             if (cancelled || isDisposed?.()) { releaseSlotOnce(); return }
-                const request = needle.request(method, url, data, requestOptions, (err: any, resp: any, body: any) => {
+                const request = needle.request(method, encodeRequestUrl(url), data, requestOptions, (err: any, resp: any, body: any) => {
                     // 响应回来的时刻是卡顿归因的关键锚点，必须抢在任何同步处理之前记下
                     if (tracked) noteCallback(owner, id, name)
                     if (abortHolder.fn) pendingAborts?.delete(abortHolder.fn)
@@ -1148,8 +1149,11 @@ export const verifyUrlPlayable = async (url: string, sourceName: string): Promis
         ...(referer ? { 'Referer': referer } : {}),
     }
     const agent = await getProxyAgent(url, 'music').catch(() => undefined)
+    // 音源直链里带中文文件名时，needle（url.parse）会抛 unescaped characters，
+    // 被当成「链接不可播」误杀——这里统一编码后再探测（已编码的 %XX 不受影响）。
+    const safeUrl = encodeRequestUrl(url)
     const request = async (method: 'head' | 'get'): Promise<number | undefined> => {
-        const resp: any = await needle(method, url, null, {
+        const resp: any = await needle(method, safeUrl, null, {
             follow_max: 2,
             response_timeout: VERIFY_TIMEOUT_MS,
             read_timeout: VERIFY_TIMEOUT_MS,

@@ -5258,8 +5258,10 @@ class App {
                     statusClass = '';
                     statusText = '待复查';
                 } else if (h === 'unchecked') {
+                    // 跨版本升级后旧快照会被服务端判成「待重新校验」（healthText 已给出文案），
+                    // 这里优先用它，别把「换镜像了要重查」显示成单纯的「未校验」
                     statusClass = '';
-                    statusText = '未校验';
+                    statusText = a.healthText || '未校验';
                 } else if (h === 'structural') {
                     statusClass = '';
                     statusText = a.healthText || '待确认';
@@ -5950,7 +5952,10 @@ class App {
                 .map(s => `${s.name}：${s.ok ? '成功' : '未成功'}（${s.message}）`)
                 .join('；');
             if (d.ok) {
-                showSuccess(`领取成功，本次 +${d.gainedHours} 小时${typeof d.remainHours === 'number' ? `，剩余 ${d.remainHours} 小时` : ''}`);
+                // balanceDelayed：平台余额接口有缓存，刚领完查到的剩余比真实值少几小时，
+                // 这里如实说明，免得用户以为「领了但时长没加」（见手册 P-0986）
+                const lag = d.balanceDelayed ? '（平台余额有延迟，稍后刷新即追平）' : '';
+                showSuccess(`领取成功，本次 +${d.gainedHours} 小时${typeof d.remainHours === 'number' ? `，剩余 ${d.remainHours} 小时` : ''}${lag}`);
                 if (detail) showInfo(detail);
             } else {
                 showInfo(`${d.error || '本次没有领到 VIP'}${detail ? `（${detail}）` : ''}`);

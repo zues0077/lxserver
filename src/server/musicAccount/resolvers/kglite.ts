@@ -530,8 +530,16 @@ export interface ClaimVipResult {
    * 拿它算次数会显示成「1/8」，与实际额度（看广告接口返回的 done/total）对不上。
    */
   claimedToday?: boolean
-  /** 领取后剩余 VIP 小时 */
+  /** 领取后剩余 VIP 小时（已按「领取前 + 本次获得」校正，见 balanceDelayed） */
   remainHours?: number
+  /** 领完后立刻查接口拿到的原始值（平台侧有缓存，通常比真实值小几小时） */
+  remainHoursRaw?: number
+  /**
+   * 领完立刻查到的余额比预期少 —— 平台 `batch_union_vipinfo` 有秒级~分钟级缓存。
+   * 实测（2026-10-30）：三个号领完立刻查都少 2~3 小时（正好是最后一条广告的量），
+   * 过半小时再查就追平了。所以展示值用「领取前 + 本次获得」推算，实测值只做参考。
+   */
+  balanceDelayed?: boolean
   /**
    * 广告额度进度（来自 play_report 返回的 data.done / data.total，实测可信）。
    * 自动轮用它在「今天已领满」时直接跳过后续轮次，避免每 3 小时白打一次接口。
@@ -539,6 +547,31 @@ export interface ClaimVipResult {
   adDone?: number
   adTotal?: number
   error?: string
+}
+
+/**
+ * 校正「领取后剩余时长」的展示值。
+ *
+ * 平台 `batch_union_vipinfo` 有缓存，领完立刻查会少 2~3 小时（正好是最后一条广告的量）。
+ * 实测 2026-10-30：三个号分别报 +12/+12/+15，领完立刻查只涨了 9/9/12，
+ * 半小时后再查全部追平 —— 时长没丢，是查询值滞后。
+ *
+ * 所以展示时用「领取前 + 本次获得」推算，与实测值取较大者；两者差异明显时标记
+ * balanceDelayed，让界面说明「稍后刷新即追平」，而不是让用户以为没到账。
+ */
+export function reconcileRemain(
+  beforeHours: number | null,
+  gainedHours: number,
+  measuredHours: number | null,
+): { remainHours?: number; balanceDelayed: boolean } {
+  const measured = measuredHours === null || measuredHours === undefined ? undefined : measuredHours
+  // 领取前余额可能是负数（已过期），按 0 起算；null 才是「查不到」，不参与推算
+  const expected = beforeHours !== null && beforeHours !== undefined && gainedHours > 0
+    ? Math.max(0, beforeHours) + gainedHours
+    : undefined
+  if (expected === undefined) return { remainHours: measured, balanceDelayed: false }
+  if (measured === undefined) return { remainHours: expected, balanceDelayed: false }
+  return { remainHours: Math.max(measured, expected), balanceDelayed: measured < expected - 1 }
 }
 
 /** 领取选项：默认行为（什么都不传）= 手动点一次，只领 1 条广告 + 冷却保护 */
@@ -677,6 +710,11 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
   let gained = 0
   const day = todayKey()
 
+  // 先记一次领取前余额，用于最后校正展示值。
+  // 平台 batch_union_vipinfo 有缓存：领完立刻查会比真实值少 2~3 小时（正好是最后一条
+  // 广告的量），用户看到「获得 12 小时、剩余只涨 9」就会以为时长没到账（2026-10-30 实测）。
+  const before = await getVipInfo(cookie)
+
   // 1) 听歌领（加分项，失败不阻断；一天只报一次）
   if (listenDoneAt.get(claimsKey) === day) {
     steps.push({ name: '听歌领 VIP', ok: true, hours: 0, message: '今日已领取，不再重复上报' })
@@ -767,15 +805,27 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
   const today = await getTodayClaimCount(cookie)
   const vip = await getVipInfo(cookie)
 
-  // 注意：getVipInfo 走的 batch_union_vipinfo 有秒级查询延迟，刚领完立刻查会拿到旧值
-  //（实测 expireAt 已 +3h、remainHours 还停在旧数）。判断有没有领到请看 gainedHours / adDone。
+  // 展示口径：以「领取前 + 本次获得」为准，实测值只取较大者。
+  // 原因见上面 before 的注释 —— 实测值有缓存延迟，直接展示会看起来像没加上。
+  const measured = vip.ok ? vip.remainHours : null
+  const reconciled = reconcileRemain(before.ok ? before.remainHours : null, gained, measured)
+  const { remainHours } = reconciled
+  if (reconciled.balanceDelayed) {
+    console.log(
+      `[平台账号] 概念版余额查询有延迟（${extractCreds(cookie).userid || 'default'}）：`
+      + `实测 ${measured} 小时 < 预期 ${remainHours} 小时，本次按预期展示，稍后刷新即追平`,
+    )
+  }
+
   const allSettled = steps.every(s => s.ok)
   return {
     ok: gained > 0,
     gainedHours: gained,
     steps,
     claimedToday: today?.claimed,
-    remainHours: vip.ok ? vip.remainHours : undefined,
+    remainHours,
+    remainHoursRaw: measured ?? undefined,
+    balanceDelayed: reconciled.balanceDelayed,
     adDone,
     adTotal,
     error: gained > 0 || allSettled ? undefined : '本次没有领到 VIP（多为今日额度已用完或触发频率限制）',

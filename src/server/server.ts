@@ -49,6 +49,7 @@ import { getDownloadQualityCandidates } from './downloadQuality'
 import crypto from 'node:crypto'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
+import { encodeRequestUrl } from '../utils/urlEncode'
 import * as musicAccount from './musicAccount'
 import { isUserAllowed, getAllowedUsers } from './musicAccount/permission'
 import * as extraSources from './extraSources'
@@ -1767,6 +1768,8 @@ const getAudioRemoteSize = async (audioUrl: string): Promise<number | null> => {
   if (!/^https?:\/\//i.test(audioUrl)) return null
 
   const urlObj = new URL(audioUrl)
+  // needle 走 url.parse，URL 里直接带中文文件名会抛 unescaped characters；先编码再发
+  const safeUrl = encodeRequestUrl(audioUrl)
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': urlObj.origin,
@@ -1781,7 +1784,7 @@ const getAudioRemoteSize = async (audioUrl: string): Promise<number | null> => {
   }
 
   try {
-    const resp = await needle('head', audioUrl, null, options)
+    const resp = await needle('head', safeUrl, null, options)
     const size = parseContentLength(resp.headers || {})
     if (size) return size
   } catch (e: any) {
@@ -1789,7 +1792,7 @@ const getAudioRemoteSize = async (audioUrl: string): Promise<number | null> => {
   }
 
   try {
-    const resp = await needle('get', audioUrl, null, {
+    const resp = await needle('get', safeUrl, null, {
       ...options,
       headers: {
         ...headers,
@@ -8498,7 +8501,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   const checkRedirect = async (u: string, depth: number = 0): Promise<string> => {
                     if (depth > 3) return u // Max depth 3
                     try {
-                      const resp = await needle('head', u, null, {
+                      // 音源直链常把中文歌名拼进路径，needle（url.parse）遇到未编码字符直接 throw，
+                      // 以前这里被 catch 掉，看起来只是「重定向解析失败」，实际中文链接的 302 全没解析。
+                      const resp = await needle('head', encodeRequestUrl(u), null, {
                         follow_max: 0,
                         response_timeout: 4000, // Increase timeout slightly
                         read_timeout: 4000,
