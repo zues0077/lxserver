@@ -22,6 +22,11 @@ export interface FlushOptions {
   limit?: number
   /** true = 即使探活失败也尝试（仅用于排查/测试） */
   force?: boolean
+  /**
+   * true = 连「已失败到顶」的条目也再试一次（管理页「重试全部」用）。
+   * 会先把这些条目的 tries 清零，否则试成功了也不会被移出「已放弃」状态。
+   */
+  retryExhausted?: boolean
 }
 
 export interface FlushResult {
@@ -55,9 +60,31 @@ export async function flush(opts: FlushOptions = {}): Promise<FlushResult> {
     return { started: false, reason: 'already-running', message: '已有补传任务在进行中', total: 0, ok: 0, failed: 0, skipped: 0 }
   }
 
-  const items = pending.list()
+  let items = pending.list()
   if (!items.length) {
     return { started: false, reason: 'empty', message: '待补清单为空', total: 0, ok: 0, failed: 0, skipped: 0 }
+  }
+
+  // 「已失败到顶」的条目自动补传一律不碰：它们多半是「已下架 / 仅客户端可播」这类永久性失败，
+  // 每轮再撞只会刷日志。只有手动点「重试全部」(retryExhausted) 才清零重给一次机会，
+  // 否则条件里的 isExhausted 恒为真、tries 会一路涨到几百。
+  if (opts.retryExhausted) {
+    const retried = pending.resetTries()
+    if (retried) console.log(`[汽水待补] 手动重试：${retried} 首的失败次数已清零`)
+    items = pending.list()
+  }
+  const candidates = opts.retryExhausted ? items : items.filter(i => !pending.isExhausted(i))
+  const exhausted = items.length - candidates.length
+  if (!candidates.length) {
+    return {
+      started: false,
+      reason: 'all-exhausted',
+      message: `${items.length} 首待补均已失败 ${pending.MAX_TRIES} 次以上，自动补传已暂停；可在管理页点「重试全部」或清空清单`,
+      total: items.length,
+      ok: 0,
+      failed: 0,
+      skipped: items.length,
+    }
   }
 
   const st = await signer.status()
@@ -91,15 +118,10 @@ export async function flush(opts: FlushOptions = {}): Promise<FlushResult> {
   const details: NonNullable<FlushResult['items']> = []
   let ok = 0
   let failed = 0
-  let skipped = 0
+  const skipped = exhausted
 
   try {
-    for (const item of items.slice(0, limit)) {
-      if (pending.isExhausted(item)) {
-        skipped++
-        details.push({ key: item.key, name: item.song.name, ok: false, message: `已失败 ${item.tries} 次，跳过` })
-        continue
-      }
+    for (const item of candidates.slice(0, limit)) {
       try {
         // 落回「当时是谁在播」的目录：优先用清单里记的用户，其次才是调用方指定的。
         // 以前固定 _open，导致登录用户的配额/统计/清理都算不到他头上。
@@ -141,7 +163,7 @@ export async function flush(opts: FlushOptions = {}): Promise<FlushResult> {
 
   const result: FlushResult = {
     started: true,
-    message: `本轮补传完成：成功 ${ok}，失败 ${failed}${skipped ? `，跳过 ${skipped}` : ''}`,
+    message: `本轮补传完成：成功 ${ok}，失败 ${failed}${skipped ? `，跳过 ${skipped} 首（已放弃）` : ''}`,
     total: items.length,
     ok,
     failed,
@@ -195,19 +217,36 @@ export async function runAutoOnce(): Promise<void> {
   if (autoDisabledByConfig()) { autoState.lastSkip = 'disabled-by-config'; return }
   const items = pending.list()
   if (!items.length) { autoState.lastSkip = 'empty'; return }
-  // 探活失败不是错误：签名器没开/没配本来就是常态，等它上线
+  // 清单里全是「已失败到顶」的条目时直接return，不要进 flush：
+  // 旧逻辑每轮都会走一遍「成功 0 失败 0 跳过 3」，每 3 分钟刷一行，两天空转几百轮（P-0990）。
+  // 提示只在状态切换时打一次，避免自己又变成新的刷屏源。
+  if (!items.some(i => !pending.isExhausted(i))) {
+    if (autoState.lastSkip !== 'all-exhausted') {
+      autoState.lastSkip = 'all-exhausted'
+      console.log(
+        `[汽水待补] 清单里 ${items.length} 首都已失败 ${pending.MAX_TRIES} 次以上，自动补传暂停；`
+        + '这不是错误（多为已下架/仅客户端可播），管理页可点「重试全部」或清空清单',
+      )
+    }
+    return
+  }
   const st = await signer.status().catch(() => null)
   if (!st?.configured) { autoState.lastSkip = 'signer-not-configured'; return }
   if (!st.online) { autoState.lastSkip = 'signer-offline'; return }
 
-  autoState.lastSkip = ''
-  autoState.rounds += 1
   // 每轮最多 3 首：补传和正在播放的请求共用同一个签名器，大批量会把播放拖慢
   const r = await flush({ limit: 3 }).catch((e: any) => {
     console.log(`[汽水待补] 自动补传异常：${e?.message || e}`)
     return null
   })
-  if (r?.started) console.log(`[汽水待补] 自动补传第 ${autoState.rounds} 轮：${r.message}`)
+  // 真的动手了才算一轮（跳过/取消不计），否则 rounds 会虚高到几百
+  if (r?.started) {
+    autoState.lastSkip = ''
+    autoState.rounds += 1
+    console.log(`[汽水待补] 自动补传第 ${autoState.rounds} 轮：${r.message}`)
+  } else if (r?.reason) {
+    autoState.lastSkip = r.reason
+  }
 }
 
 /**

@@ -209,7 +209,8 @@ export async function searchSongs(keyword: string, page = 1, pageSize = 20): Pro
         ],
         _types: {},
         typeUrl: {},
-        meta: { bvid },
+        // mid 留着给「UP 主作品列表」按作者过滤（B站没有歌手实体，UP 主是最接近的语义）
+        meta: { bvid, mid: String(item.mid || '') },
       }
     })
 
@@ -607,4 +608,193 @@ async function fetchAudioStream(auid: string, quality: string, cookie: string): 
     via: `audio:q${qn}${isPreview ? '(试听)' : ''}`,
     ext: extFromUrl(cdns[0]) || 'm4a',
   }
+}
+
+// ---------------------------------------------------------------------------
+// 歌手 / 专辑维度
+//
+// B站没有「歌手」「专辑」实体，这里给两层映射，都在界面上标了来源，不会伪装成别的平台：
+//   歌手 → UP 主（search_type=bili_user）。点进去用「UP 主名」搜视频、再按 mid 过滤，
+//          拿到的是该 UP 主的投稿，不需要 WBI 签名（space/wbi 那套很容易 412）。
+//   专辑 → 「视频合集」：把关键词包装成一条虚拟专辑（id 里带 `kw|` 前缀 + base64 关键词），
+//          点进去就是该关键词的视频列表。B站确实没有专辑，这是能给出的最接近的东西。
+// ---------------------------------------------------------------------------
+
+const CARD_API = 'https://api.bilibili.com/x/web-interface/card'
+
+/** 虚拟专辑 id：`bili-kw|<base64url(关键词)>` */
+const KW_ALBUM_PREFIX = 'bili-kw|'
+
+const encodeKeywordId = (keyword: string): string =>
+  KW_ALBUM_PREFIX + Buffer.from(String(keyword || ''), 'utf8').toString('base64url')
+
+/** 解析虚拟专辑 id；不是虚拟专辑就返回空串 */
+export const decodeKeywordId = (id: string): string => {
+  const text = String(id || '')
+  if (!text.startsWith(KW_ALBUM_PREFIX)) return ''
+  try {
+    return Buffer.from(text.slice(KW_ALBUM_PREFIX.length), 'base64url').toString('utf8')
+  } catch {
+    return ''
+  }
+}
+
+export const isKeywordAlbumId = (id: string): boolean => String(id || '').startsWith(KW_ALBUM_PREFIX)
+
+/** 搜 UP 主（= 歌手维度）。返回结构与其它平台的 extendSearch.searchSinger 对齐 */
+export async function searchUsers(keyword: string, page = 1, pageSize = 20): Promise<{
+  list: any[]
+  total: number
+  allPage: number
+}> {
+  const params = new URLSearchParams({
+    search_type: 'bili_user',
+    keyword,
+    page: String(page),
+    page_size: String(pageSize),
+  })
+  const resp = await request<any>(`${SEARCH_API}?${params.toString()}`, {
+    headers: await headersWithCookie(''),
+    timeout: 15000,
+  })
+  if (resp.statusCode === 412) {
+    throw new Error('B站 UP 主搜索被风控拦截（HTTP 412）：请稍后重试或配置服务器代理')
+  }
+  const body: any = resp.body || {}
+  if (Number(body.code) !== 0) {
+    throw new Error(`B站 UP 主搜索失败（code=${body.code ?? '-'}，${body.message || '无返回'}）`)
+  }
+  const rawList: any[] = Array.isArray(body.data?.result) ? body.data.result : []
+  const list = rawList
+    .filter(item => item && item.mid)
+    .map(item => {
+      const mid = String(item.mid)
+      const videos = Number(item.videos) || 0
+      return {
+        source: 'bili',
+        // 歌手 id 直接用 mid，artistDetail / artistSongs 都按它查
+        id: mid,
+        name: decodeEntities(item.uname) || `UP主${mid}`,
+        picUrl: normalizeCover(item.upic),
+        // 简介放 alias，卡片上显示一行，和别的平台一致
+        alias: item.usign ? [decodeEntities(item.usign)] : [],
+        musicSize: videos,
+        albumSize: 0,
+        meta: { mid, fans: Number(item.fans) || 0, isUp: true },
+      }
+    })
+
+  const total = Number(body.data?.numResults || list.length)
+  const allPage = Number(body.data?.numPages || Math.max(1, Math.ceil(total / pageSize)))
+  return { list, total, allPage }
+}
+
+/** UP 主名片 → 歌手详情。card 接口免签，实测 mid=2 直接 200 */
+export async function getUserCard(mid: string): Promise<any> {
+  const id = String(mid || '').trim()
+  if (!/^\d+$/.test(id)) throw new Error('B站 UP 主 id 不合法')
+  const resp = await request<any>(`${CARD_API}?mid=${encodeURIComponent(id)}`, {
+    headers: await headersWithCookie(''),
+    timeout: 12000,
+  })
+  const body: any = resp.body || {}
+  if (Number(body.code) !== 0) {
+    throw new Error(`B站 UP 主信息获取失败（code=${body.code ?? '-'}，${body.message || '无返回'}）`)
+  }
+  const card: any = body.data?.card || {}
+  return {
+    source: 'bili',
+    id,
+    name: decodeEntities(card.name) || id,
+    avatar: normalizeCover(card.face),
+    picUrl: normalizeCover(card.face),
+    desc: decodeEntities(card.sign) || '',
+    musicSize: Number(body.data?.archive_count) || 0,
+    albumSize: 0,
+    // 粉丝数借 alias 透出，卡片上不额外占位
+    alias: Number(card.fans) ? [`${Number(card.fans)} 粉丝`] : [],
+  }
+}
+
+/**
+ * UP 主作品列表（= 歌手歌曲维度）。
+ *
+ * 说明：B站「按 UP 主取投稿」的官方接口要 WBI 签名（w_rid + img_key），服务端没实现，
+ * 硬上很容易 412。这里用「UP 主名搜视频 + 按 mid 过滤」，结果同样只包含该 UP 主的投稿。
+ * 代价是受搜索分页限制（最多前 3 页），不是全量投稿；对「听这个 UP 主发的歌」足够。
+ */
+export async function getUserVideos(mid: string, uname: string, page = 1, pageSize = 50): Promise<{
+  source: string
+  list: any[]
+  total: number
+}> {
+  const id = String(mid || '').trim()
+  const name = String(uname || '').trim()
+  if (!name) return { source: 'bili', list: [], total: 0 }
+  // 服务端 artistSongs 会按页循环拉全量；这里一次把前 3 页搜完、只在第 1 页返回，
+  // 后续页返回空让循环尽快收敛（否则每页都重搜一遍，一轮下来十几个请求）。
+  if (Math.max(1, page) > 1) return { source: 'bili', list: [], total: 0 }
+
+  const collected: any[] = []
+  const seen = new Set<string>()
+  for (let p = 1; p <= 3; p++) {
+    let data: { list: any[] }
+    try {
+      data = await searchSongs(name, p, 50)
+    } catch {
+      break
+    }
+    for (const item of data.list) {
+      const itemMid = String(item?.meta?.mid || '')
+      // 只留这个 UP 主自己的投稿；个别条目没有 mid 时退化为「作者名字相同」
+      const sameAuthor = itemMid ? itemMid === id : String(item.singer || '').trim() === name
+      if (!sameAuthor) continue
+      const key = String(item.id)
+      if (seen.has(key)) continue
+      seen.add(key)
+      collected.push(item)
+    }
+    if (data.list.length < 50) break
+  }
+
+  return { source: 'bili', list: collected.slice(0, pageSize), total: collected.length }
+}
+
+/**
+ * 专辑维度：包装成一条「视频合集」。
+ * 只有命中足够多的视频才给这条，避免搜「VIP曲2」这种给出一个空合集。
+ */
+export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): Promise<{
+  list: any[]
+  total: number
+  allPage: number
+}> {
+  if (Math.max(1, page) > 1) return { list: [], total: 0, allPage: 1 }
+  const data = await searchSongs(keyword, 1, 50).catch(() => ({ list: [] as any[], total: 0 }))
+  const hits = data.list || []
+  if (hits.length < 3) return { list: [], total: 0, allPage: 1 }
+  const first = hits[0]
+  return {
+    list: [{
+      source: 'bili',
+      id: encodeKeywordId(keyword),
+      name: `${keyword}（B站视频合集）`,
+      picUrl: first?.img || '',
+      singer: 'B站',
+      // 这里放视频数，专辑卡片会显示成「N 首」
+      songCount: hits.length,
+      publishTime: '',
+      meta: { keyword, virtual: true },
+    }],
+    total: 1,
+    allPage: 1,
+  }
+}
+
+/** 虚拟专辑的歌曲列表 */
+export async function getAlbumSongs(id: string): Promise<{ source: string, list: any[], total: number }> {
+  const keyword = decodeKeywordId(id)
+  if (!keyword) throw new Error('B站没有专辑实体；这里只支持「关键词视频合集」')
+  const data = await searchSongs(keyword, 1, 50)
+  return { source: 'bili', list: data.list, total: data.list.length }
 }

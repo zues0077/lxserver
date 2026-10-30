@@ -997,6 +997,23 @@ export interface SourceCapability {
   account: boolean
   /** 是否匿名也能取到链（无需账号） */
   anonymous: boolean
+  /**
+   * 该平台账号当前是否会员（决定换源时是否给「音质加权」）。
+   * 只有 account=true 才会为真 —— 没权限的用户拿不到这个信号，
+   * 换源顺序自然退化成固定平台序，不会泄露账号状态。
+   */
+  member?: boolean
+}
+
+/** 任一账号的最后一次校验里标了会员就算会员（多账号时取「至少一个会员」） */
+function platformIsMember(platformId: string): boolean {
+  try {
+    const acc = store.listAccounts().find(a => a.id === platformId)
+    const items = acc?.accounts || []
+    return items.some(i => i?.lastVerify?.isVip === true)
+  } catch {
+    return false
+  }
 }
 
 export function getSourceCapabilities(username?: string): Record<string, SourceCapability> {
@@ -1010,7 +1027,12 @@ export function getSourceCapabilities(username?: string): Record<string, SourceC
     } catch {
       account = false
     }
-    out[p.id] = { account, anonymous: ANONYMOUS_CAPABLE[p.id] === true }
+    out[p.id] = {
+      account,
+      anonymous: ANONYMOUS_CAPABLE[p.id] === true,
+      // 没账号/没权限一律 false：换源端拿不到会员信号，就按固定平台顺序走
+      member: account && platformIsMember(p.id),
+    }
   }
   return out
 }

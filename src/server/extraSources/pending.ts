@@ -151,6 +151,32 @@ export function clear(): number {
 }
 
 /** 超过 5 次失败不再自动重试 */
+export const MAX_TRIES = 5
+
 export function isExhausted(item: PendingItem): boolean {
-  return item.tries >= 5
+  return item.tries >= MAX_TRIES
+}
+
+/** 已放弃（失败次数到顶）的条目数 */
+export function exhaustedCount(): number {
+  return readAll().filter(isExhausted).length
+}
+
+/**
+ * 手动重试：把失败次数清零，让条目重新回到自动补传队列。
+ * 不传 keys 就重置全部（管理页「重试全部」按钮用）。
+ * 返回实际重置的条数。
+ */
+export function resetTries(keys?: string[]): number {
+  const items = readAll()
+  const set = keys?.length ? new Set(keys) : null
+  let n = 0
+  for (const it of items) {
+    if (set && !set.has(it.key)) continue
+    if (it.tries === 0) continue
+    it.tries = 0
+    n++
+  }
+  if (n) writeAll(items)
+  return n
 }

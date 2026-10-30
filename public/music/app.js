@@ -2394,8 +2394,9 @@ function handleSearchTypeChange() {
 
     if (typeSelect.value === 'singer' || typeSelect.value === 'album') {
         // 能力表：wy/tx/kg/kw/mg/kglite/soda 支持歌手/专辑搜索（后端 extendSearch / kglite / 汽水 extraSources 通道）
-        // bili/all 不支持（B站无歌手/专辑实体；all 聚合按 type 分派后其实也支持，但聚合入口保持歌曲语义更直观）
-        const supported = ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda'];
+        // bili 也支持，但语义不同：歌手=UP主，专辑=关键词视频合集（B站没有这两个实体，卡片上带 BILI 来源标）
+        // all 聚合按 type 分派后同样支持，这里一起放开
+        const supported = ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda', 'bili', 'all'];
         if (!supported.includes(sourceSelect.value)) {
             sourceSelect.value = 'wy';
         }
@@ -2561,6 +2562,8 @@ async function doSearch(page = 1, append = false) {
             );
             const results = await Promise.all(promises);
             const flatList = results.flat();
+            // 留一份给换源用：同一首歌在你手上已经有 8 个平台的版本，不必再全网搜一遍
+            if (type === 'song') rememberAggregatedResults(flatList);
             if (typeof window.sortSearchResults === 'function') {
                 list = window.sortSearchResults(flatList, input, type === 'song');
             } else {
@@ -3616,7 +3619,9 @@ async function loadArtistSongs(id, source, order, forceFetch = false) {
     renderArtistSongsLoading();
 
     try {
-        const res = await fetch(`${API_BASE}/artistSongs?id=${id}&source=${source}&order=${order}`);
+        // name 只有 B站 用得上：它没有艺人 id 索引，得拿 UP 主名当关键词搜视频再按 mid 过滤
+        const artistName = (currentArtistInfo && currentArtistInfo.name) || '';
+        const res = await fetch(`${API_BASE}/artistSongs?id=${id}&source=${source}&order=${order}&name=${encodeURIComponent(artistName)}`);
         if (!res.ok) throw new Error(await extractApiError(res, 'Failed to fetch songs'));
         const list = await res.json();
 
@@ -5612,6 +5617,119 @@ const EXTRA_SOURCE_PLATFORMS = new Set(['bili', 'soda', 'kglite']);
 /** 常规轮换：五个公共平台互相换（真正意义上的「跨平台换源」） */
 const PRIMARY_SOURCE_ORDER = ['wy', 'tx', 'kw', 'kg', 'mg'];
 
+/**
+ * 平台兜底顺序：匹配分、会员加权都一样时按它走。
+ * 必须显式写死 —— 以前靠 Promise.all 的返回顺序 + Array.sort 的稳定性「碰巧」得到，
+ * 换个并发或排序实现顺序就变了。
+ */
+const SOURCE_RANK = { wy: 1, tx: 2, kw: 3, kg: 4, mg: 5, soda: 6, kglite: 7, bili: 8 };
+
+/**
+ * 会员平台加权分。取 4 是刻意的：
+ * - 压得过「时长差 3 秒」（3 分），所以会员平台的同版本能胜出；
+ * - 压不过「完全同名 vs 仅包含」（10 分），所以不会为了会员去听一首名字都不太对的歌。
+ */
+const MEMBER_BONUS = 4;
+
+/** 版本词：命中就要降级（normalizeSongMatchText 会删掉括号，Live/伴奏会被当成「完全同名」） */
+const VERSION_WORD_RE = /(伴奏|纯音乐|karaoke|instrumental|off\s?vocal|dj\s?版|remix|翻唱|cover|片段|试听|现场|演唱会|live|music\s?video|\bmv\b)/i;
+
+/** 0=常规五平台  1=soda/kglite 账号通道  2=bili 视频音轨 */
+function sourceTierOf(source) {
+    if (source === 'bili') return 2;
+    if (source === 'soda' || source === 'kglite') return 1;
+    return 0;
+}
+
+/** 候选里带 Live/伴奏这类版本词、而原曲没有 → 降级（返回 true） */
+function isVersionMismatch(candidateName, targetName) {
+    const candidate = String(candidateName || '');
+    const target = String(targetName || '');
+    if (!VERSION_WORD_RE.test(candidate)) return false;
+    // 原曲本来就是 Live 版就不降级
+    return !VERSION_WORD_RE.test(target);
+}
+
+/**
+ * 换源候选统一排序（唯一入口，别再各处自己 sort）：
+ *   tier → 版本词 → 匹配分 + 会员加权 → 平台顺序
+ * 同一平台最多留 2 条：只留 1 条时，独占可用平台可能因为一条坏链就全盘失败。
+ */
+function rankSourceCandidates(list, song, options = {}) {
+    const memberSources = options.memberSources || null;
+    const ranked = [];
+    for (const item of list || []) {
+        if (!item || !item.source) continue;
+        const score = typeof item._matchScore === 'number' ? item._matchScore : getSongMatchScore(item, song);
+        if (score < 0) continue;
+        ranked.push({
+            item,
+            tier: sourceTierOf(item.source),
+            penalty: isVersionMismatch(item.name, song && song.name) ? 1 : 0,
+            bonus: memberSources && memberSources.has(item.source) ? MEMBER_BONUS : 0,
+            score,
+        });
+    }
+    ranked.sort((a, b) => (
+        a.tier - b.tier
+        || a.penalty - b.penalty
+        || (b.score + b.bonus) - (a.score + a.bonus)
+        || (SOURCE_RANK[a.item.source] || 99) - (SOURCE_RANK[b.item.source] || 99)
+    ));
+    const out = [];
+    const perSource = new Map();
+    for (const r of ranked) {
+        const used = perSource.get(r.item.source) || 0;
+        if (used >= 2) continue;
+        perSource.set(r.item.source, used + 1);
+        out.push({ ...r.item, _matchScore: r.score, _tier: r.tier });
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// 聚合搜索结果复用
+//
+// 聚合搜索已经把 8 个平台的同名歌都摆出来了，换源却要再全网搜一遍（实测 1~9 秒）。
+// 这里把结果按「歌名+歌手」缓存：换源时先看缓存，命中度高的平台直接跳过实搜，
+// 只存元数据、不存 URL（URL 本来就每次现取），所以 10 分钟内不会过期。
+// ---------------------------------------------------------------------------
+const AGG_CACHE_TTL = 10 * 60 * 1000;
+const AGG_CACHE_MAX = 20;
+const aggregatedSearchCache = new Map();
+
+function rememberAggregatedResults(items) {
+    if (!Array.isArray(items) || !items.length) return;
+    const key = `${items.length}:${String(items[0] && items[0].name || '')}`;
+    aggregatedSearchCache.set(key, { at: Date.now(), items });
+    if (aggregatedSearchCache.size > AGG_CACHE_MAX) {
+        const oldest = [...aggregatedSearchCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (oldest) aggregatedSearchCache.delete(oldest[0]);
+    }
+}
+
+/** 从缓存里捞出「和这首歌对得上」的其它平台条目 */
+function lookupAggregatedCandidates(song) {
+    if (!song || !song.name || !song.singer) return [];
+    const now = Date.now();
+    const found = [];
+    const seen = new Set();
+    for (const [key, entry] of aggregatedSearchCache) {
+        if (!entry || now - entry.at > AGG_CACHE_TTL) { aggregatedSearchCache.delete(key); continue; }
+        for (const item of entry.items) {
+            if (!item || !item.source || item.source === song.source) continue;
+            const score = getSongMatchScore(item, song);
+            if (score < 0) continue;
+            // 同一个平台同一条只收一次（聚合结果里可能重复）
+            const dedupeKey = `${item.source}:${item.id || item.songmid || item.name}`;
+            if (seen.has(dedupeKey)) continue;
+            seen.add(dedupeKey);
+            found.push({ ...item, _matchScore: score });
+        }
+    }
+    return found;
+}
+
 /** 账号/匿名通道候选池缓存：换源一次可能触发多次搜索，不必每次都问后端 */
 let accountCapsCache = { at: 0, data: null };
 const ACCOUNT_CAPS_TTL = 60 * 1000;
@@ -5747,11 +5865,21 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
         //    三级 bili 视频音轨 —— 最后的兜底（常带对白/解说，能不用就不用）
         const primaryOrdered = PRIMARY_SOURCE_ORDER.filter(s => s !== song.source);
 
+        // 聚合搜索缓存：同一批结果里的其它平台版本，匹配度天然最高，还能省掉一次全网搜索
+        const cachedAll = lookupAggregatedCandidates(song);
+        const cachedPrimary = cachedAll.filter(c => sourceTierOf(c.source) === 0);
+        const cachedAccount = cachedAll.filter(c => sourceTierOf(c.source) === 1);
+        const cachedVideo = cachedAll.filter(c => sourceTierOf(c.source) === 2);
+        // 只对「歌名完全一致」(score>=20) 的缓存条目跳过该平台实搜：
+        // 宁可多搜一次，也不能拿一个「名字只是包含」的版本顶上去
+        const coveredSources = new Set(cachedPrimary.filter(c => c._matchScore >= 20).map(c => c.source));
+
         // 过滤出自定义源支持解析的平台；直连/特殊源不走 supportedSources 白名单
         let primarySources = primaryOrdered;
         if (supportedPlatforms && !options.ignoreSupportedFilter) {
             primarySources = primaryOrdered.filter(s => supportedPlatforms.has(s));
         }
+        const searchSources = primarySources.filter(s => !coveredSources.has(s));
 
         // 账号通道候选：汽水有匿名流（无账号也能出非版权曲整曲），概念版纯账号。
         // 权限口径完全交给后端：总开关 / 是否配了号 / 该用户是否在白名单内，前端不自己猜。
@@ -5764,13 +5892,18 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
         if (song.source !== 'kglite' && capSources.kglite && capSources.kglite.account) {
             accountSources.push('kglite');
         }
+        // 会员平台加权：后端只对「有账号权限」的用户下发 member，
+        // 游客拿到全是 undefined/false，排序自然退化成固定平台顺序。
+        const memberSources = new Set(
+            Object.keys(capSources).filter(k => capSources[k] && capSources[k].member === true)
+        );
 
         const fallbackSources = PRIMARY_SOURCE_ORDER.includes(song.source) || EXTRA_SOURCE_PLATFORMS.has(song.source)
             ? (song.source === 'bili' ? [] : ['bili'])
             : [];
 
-        // 4. 一个候选都没有：说明既没装支持这些平台的自定义源，也没有可用的账号通道
-        if (primarySources.length === 0 && accountSources.length === 0 && fallbackSources.length === 0) {
+        // 4. 一个候选都没有：说明既没装支持这些平台的自定义源，也没有可用的账号通道，缓存也空
+        if (searchSources.length === 0 && accountSources.length === 0 && fallbackSources.length === 0 && cachedAll.length === 0) {
             console.log(`[AutoSource] 换源跳过：没有其他可用平台。当前源: ${song.source}`);
             if (!isSilent) showError('未找到可用平台下的对应歌曲');
             return [];
@@ -5788,44 +5921,39 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
                 .then(data => (data.list || []).map(item => ({ ...item, source: s })))
                 .catch(() => []);
 
-        const collectMatches = flatResults => {
-            const found = [];
-            for (const item of flatResults) {
-                const score = getSongMatchScore(item, song);
-                if (score < 0) continue;
+        if (cachedAll.length) {
+            console.log(`[AutoSource] 复用聚合搜索缓存 ${cachedAll.length} 条，跳过 ${coveredSources.size} 个平台的重复搜索`);
+        }
 
-                const durationDiff = getSongDurationDiff(item, song);
-                console.log(`[AutoSource] 匹配成功: ${item.name} via ${item.source} (score: ${score}, 时长误差: ${durationDiff === null ? '未知' : `${durationDiff}s`})`);
-                found.push({ ...item, _matchScore: score });
-            }
-            return found.sort((a, b) => (b._matchScore || 0) - (a._matchScore || 0));
-        };
-
-        // 一级：常规平台并发搜；一个都没命中才进下一级。
+        // 一级：常规平台并发搜（缓存已覆盖的平台跳过）；一个都没命中才进下一级。
         // B站（视频音轨）放最后：一是它有 412 风控，没必要每次换源都多打一次；
         // 二是视频音轨经常带对白/解说，能不用就不用。
-        const primaryResults = (await Promise.all(primarySources.map(searchOne))).flat();
-        let matches = collectMatches(primaryResults);
+        const primaryResults = (await Promise.all(searchSources.map(searchOne))).flat();
+        let matches = rankSourceCandidates([...cachedPrimary, ...primaryResults], song, { memberSources });
 
         // 二级：账号/匿名通道（汽水、酷狗概念版）。放在常规平台之后是刻意的：
         // 汽水匿名通道对版权曲只给 60 秒，能命中常规平台就绝不走它。
-        if (matches.length === 0 && accountSources.length > 0) {
-            console.log(`[AutoSource] 常规平台无匹配，尝试账号通道: ${accountSources.join(',')}`);
-            if (!isSilent) {
+        if (matches.length === 0 && (accountSources.length > 0 || cachedAccount.length > 0)) {
+            console.log(`[AutoSource] 常规平台无匹配，尝试账号通道: ${accountSources.join(',') || '缓存'}`);
+            if (!isSilent && accountSources.length > 0) {
                 showInfo(`常规平台未找到，正在尝试${accountSources.map(getSourceName).join(' / ')}...`);
             }
             const accountResults = (await Promise.all(accountSources.map(searchOne))).flat();
-            matches = collectMatches(accountResults);
+            matches = rankSourceCandidates([...cachedAccount, ...accountResults], song, { memberSources });
         }
 
         // 三级：B站兜底
-        if (matches.length === 0 && fallbackSources.length > 0) {
-            console.log(`[AutoSource] 仍未匹配，尝试直连音源兜底: ${fallbackSources.join(',')}`);
-            if (!isSilent) showInfo('仍在尝试 B站...');
+        if (matches.length === 0 && (fallbackSources.length > 0 || cachedVideo.length > 0)) {
+            console.log(`[AutoSource] 仍未匹配，尝试直连音源兜底: ${fallbackSources.join(',') || '缓存'}`);
+            if (!isSilent && fallbackSources.length > 0) showInfo('仍在尝试 B站...');
             const fallbackResults = (await Promise.all(fallbackSources.map(searchOne))).flat();
-            matches = collectMatches(fallbackResults);
+            matches = rankSourceCandidates([...cachedVideo, ...fallbackResults], song, { memberSources });
         }
 
+        for (const m of matches) {
+            const durationDiff = getSongDurationDiff(m, song);
+            console.log(`[AutoSource] 候选: ${m.name} via ${m.source} (tier${m._tier} score ${m._matchScore}, 时长误差 ${durationDiff === null ? '未知' : `${durationDiff}s`})`);
+        }
         if (matches.length === 0) {
             console.log(`[AutoSource] 未找到合适的匹配结果 (常规平台搜到 ${primaryResults.length} 条)`)
         }

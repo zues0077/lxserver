@@ -47,40 +47,54 @@ export async function searchSongs(source: string, keyword: string, page = 1, pag
   return searcher(keyword, page, pageSize)
 }
 
-// ---- 歌手 / 专辑维度（目前只有汽水有；B站没有歌手/专辑实体，直接明确报不支持） ----
+// ---- 歌手 / 专辑维度 ----
+// 汽水：真艺人/专辑实体。
+// B站：没有这两个实体，做了语义映射（见 bilibili.ts 里那段注释）——
+//      歌手 = UP 主，专辑 = 关键词视频合集。界面上都带 BILI 来源标，不伪装。
 
-function requireSoda(source: string, what: string) {
-  if (source !== 'soda') throw new Error(`${displayName(source)} 暂不支持${what}`)
+function unsupported(source: string, what: string): never {
+  throw new Error(`${displayName(source)} 暂不支持${what}`)
 }
 
 export async function searchSingers(source: string, keyword: string, page = 1, pageSize = 20) {
-  requireSoda(source, '歌手搜索')
-  return soda.searchSingers(keyword, page, pageSize)
+  if (source === 'soda') return soda.searchSingers(keyword, page, pageSize)
+  if (source === 'bili') return bilibili.searchUsers(keyword, page, pageSize)
+  return unsupported(source, '歌手搜索')
 }
 
 export async function searchAlbums(source: string, keyword: string, page = 1, pageSize = 20) {
-  requireSoda(source, '专辑搜索')
-  return soda.searchAlbums(keyword, page, pageSize)
+  if (source === 'soda') return soda.searchAlbums(keyword, page, pageSize)
+  if (source === 'bili') return bilibili.searchAlbums(keyword, page, pageSize)
+  return unsupported(source, '专辑搜索')
 }
 
 export async function getArtistDetail(source: string, artistId: string) {
-  requireSoda(source, '歌手详情')
-  return soda.getArtistDetail(artistId)
+  if (source === 'soda') return soda.getArtistDetail(artistId)
+  if (source === 'bili') return bilibili.getUserCard(artistId)
+  return unsupported(source, '歌手详情')
 }
 
-export async function getArtistSongs(source: string, artistId: string, page = 1, pageSize = 50) {
-  requireSoda(source, '歌手歌曲列表')
-  return soda.getArtistSongs(artistId, page, pageSize)
+/**
+ * 歌手歌曲列表。B站这里多一个 `name`：它没有艺人 id 索引，
+ * 必须靠「UP 主名」当关键词去搜视频，再按 mid 过滤。
+ */
+export async function getArtistSongs(source: string, artistId: string, page = 1, pageSize = 50, name = '') {
+  if (source === 'soda') return soda.getArtistSongs(artistId, page, pageSize)
+  if (source === 'bili') return bilibili.getUserVideos(artistId, name, page, pageSize)
+  return unsupported(source, '歌手歌曲列表')
 }
 
 export async function getArtistAlbums(source: string, artistId: string, page = 1, pageSize = 30) {
-  requireSoda(source, '歌手专辑列表')
-  return soda.getArtistAlbums(artistId, page, pageSize)
+  if (source === 'soda') return soda.getArtistAlbums(artistId, page, pageSize)
+  // B站 UP 主没有专辑，返回空列表让前端走「暂无专辑」空态，而不是报错
+  if (source === 'bili') return { source: 'bili', list: [] as any[], total: 0 }
+  return unsupported(source, '歌手专辑列表')
 }
 
 export async function getAlbumSongs(source: string, albumId: string) {
-  requireSoda(source, '专辑歌曲列表')
-  return soda.getAlbumSongs(albumId)
+  if (source === 'soda') return soda.getAlbumSongs(albumId)
+  if (source === 'bili') return bilibili.getAlbumSongs(albumId)
+  return unsupported(source, '专辑歌曲列表')
 }
 
 // ---- 歌单 / 排行榜 ----

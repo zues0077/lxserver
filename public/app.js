@@ -5156,13 +5156,18 @@ class App {
     /** 待补清单 + 自动补传状态（签名器在线且清单非空时，后台每几分钟自己补 3 首） */
     async loadQishuiPrefetchHint() {
         const hintEl = document.getElementById('qishui-prefetch-hint');
+        const actionsEl = document.getElementById('qishui-prefetch-actions');
         if (!hintEl) return;
         try {
             const res = await this.request('/api/music/prefetch/status');
             const d = (res && res.data) || {};
-            const count = (d.pending && d.pending.count) || 0;
+            const pending = d.pending || {};
+            const count = pending.count || 0;
+            const exhausted = pending.exhausted || 0;
+            const maxTries = pending.maxTries || 5;
             const auto = d.auto || {};
             const mins = Math.round((auto.intervalMs || 180000) / 60000);
+            if (actionsEl) actionsEl.style.display = count > 0 ? 'flex' : 'none';
             if (!count) {
                 hintEl.textContent = auto.enabled
                     ? `待补清单为空。自动补传已开启（每 ${mins} 分钟检查一次，无需手动点）`
@@ -5170,18 +5175,62 @@ class App {
                 hintEl.style.color = '';
                 return;
             }
+            // 全部到顶：自动补传已经停了，必须告诉用户「停在哪、要点哪里」，否则会以为还在后台补
+            if (exhausted >= count) {
+                hintEl.textContent = `待补 ${count} 首都已失败 ${maxTries} 次以上，自动补传已暂停（多为已下架或仅客户端可播）。可点「重试全部」再给一次机会，或「清空清单」放弃`;
+                hintEl.style.color = '#ef4444';
+                return;
+            }
             let why = '';
             if (!auto.enabled) why = '自动补传未开启'
             else if (d.running || auto.lastSkip === 'already-running') why = '正在补传中'
             else if (auto.lastSkip === 'signer-offline') why = '等签名器上线'
             else if (auto.lastSkip === 'signer-not-configured') why = '等填签名器地址'
+            else if (auto.lastSkip === 'all-exhausted') why = `剩余 ${count - exhausted} 首可补`
             else if (auto.lastSkip === 'disabled-by-config') why = '已在配置里关闭自动补传'
             else why = `每 ${mins} 分钟自动补 3 首`
-            hintEl.textContent = `待补 ${count} 首（受限曲，补进缓存后即以整曲播放）：${why}`
+            const exhaustedNote = exhausted > 0 ? `，其中 ${exhausted} 首已放弃` : '';
+            hintEl.textContent = `待补 ${count} 首${exhaustedNote}（受限曲，补进缓存后即以整曲播放）：${why}`;
             hintEl.style.color = '#f59e0b'
         } catch (e) {
-            hintEl.textContent = ''
+            hintEl.textContent = '';
+            if (actionsEl) actionsEl.style.display = 'none';
         }
+    }
+
+    /** 「重试全部」：失败次数清零后再补一轮（限 5 首，避免一次占住签名器太久） */
+    async retryQishuiPrefetch() {
+        try {
+            const res = await this.request('/api/music/prefetch/flush', {
+                method: 'POST',
+                body: JSON.stringify({ retryExhausted: true, limit: 5 }),
+            });
+            const d = (res && res.data) || {};
+            if (d.started) {
+                this.toast && this.toast(d.message || '已开始重试', 'success');
+            } else {
+                this.toast && this.toast(d.message || '重试未启动', 'error');
+            }
+        } catch (e) {
+            this.toast && this.toast('重试失败：' + (e.message || e), 'error');
+        }
+        void this.loadQishuiPrefetchHint();
+    }
+
+    /** 「清空清单」：二次确认后放弃这些曲子（只是不再补，已缓存的不受影响） */
+    async clearQishuiPrefetch() {
+        const ok = typeof window.confirm === 'function'
+            ? window.confirm('清空待补清单？这些曲子不会被删除，只是不再自动补传。')
+            : true;
+        if (!ok) return;
+        try {
+            const res = await this.request('/api/music/prefetch/clear', { method: 'POST' });
+            const d = (res && res.data) || {};
+            this.toast && this.toast(`已清空 ${d.removed || 0} 首`, 'success');
+        } catch (e) {
+            this.toast && this.toast('清空失败：' + (e.message || e), 'error');
+        }
+        void this.loadQishuiPrefetchHint();
     }
 
     /** 保存并立即探测签名器 */

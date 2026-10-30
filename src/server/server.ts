@@ -1808,6 +1808,22 @@ const getAudioRemoteSize = async (audioUrl: string): Promise<number | null> => {
 }
 
 const AUTO_SOURCE_ORDER = ['wy', 'tx', 'kw', 'kg', 'mg']
+
+/**
+ * 换源候选排序的兜底平台序（与前端 SOURCE_RANK 保持一致）。
+ * 分数/会员加权都相同时按它走，保证结果可复现，不依赖 Array.sort 的稳定性。
+ */
+const SOURCE_RANK: Record<string, number> = { wy: 1, tx: 2, kw: 3, kg: 4, mg: 5, soda: 6, kglite: 7, bili: 8 }
+/** 会员平台加权：压得过「时长差 3 秒」，压不过「完全同名 vs 仅包含」的 10 分差 */
+const MEMBER_BONUS = 4
+/** 版本词：normalizeSongMatchText 会删括号，Live/伴奏会被当成「完全同名」，这里单独降级 */
+const VERSION_WORD_RE = /(伴奏|纯音乐|karaoke|instrumental|off\s?vocal|dj\s?版|remix|翻唱|cover|片段|试听|现场|演唱会|live|music\s?video|\bmv\b)/i
+
+const hasVersionMismatch = (candidateName: unknown, targetName: unknown): boolean => {
+  const candidate = String(candidateName || '')
+  if (!VERSION_WORD_RE.test(candidate)) return false
+  return !VERSION_WORD_RE.test(String(targetName || ''))
+}
 const SOURCE_MATCH_CACHE_TTL = 60_000
 const sourceMatchCache = new Map<string, { expiresAt: number, promise: Promise<any[]> }>()
 
@@ -1913,11 +1929,41 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
       console.warn(`[自动换源] 搜索 ${source} 失败: ${err?.message || err}`)
       return []
     }
-  })).then(resultGroups => resultGroups.flat()
-    .map(candidate => ({ candidate, score: getSongMatchScore(candidate, songInfo) }))
-    .filter(item => item.score >= 0)
-    .sort((a, b) => b.score - a.score)
-    .map(item => item.candidate))
+  })).then(resultGroups => {
+    // 会员平台加权：只对「有账号权限」的用户有效（getSourceCapabilities 内部已按白名单过滤），
+    // 游客拿到全是 false，排序自然退化成固定平台序。
+    let memberSources = new Set<string>()
+    try {
+      const caps = musicAccount.getSourceCapabilities(username)
+      memberSources = new Set(Object.keys(caps).filter(k => (caps as any)[k]?.member === true))
+    } catch {
+      memberSources = new Set()
+    }
+
+    const scored = resultGroups.flat()
+      .map(candidate => ({ candidate, score: getSongMatchScore(candidate, songInfo) }))
+      .filter(item => item.score >= 0)
+    scored.sort((a, b) => {
+      const penaltyA = hasVersionMismatch(a.candidate?.name, songInfo?.name) ? 1 : 0
+      const penaltyB = hasVersionMismatch(b.candidate?.name, songInfo?.name) ? 1 : 0
+      if (penaltyA !== penaltyB) return penaltyA - penaltyB
+      const bonusA = memberSources.has(a.candidate?.source) ? MEMBER_BONUS : 0
+      const bonusB = memberSources.has(b.candidate?.source) ? MEMBER_BONUS : 0
+      if (b.score + bonusB !== a.score + bonusA) return (b.score + bonusB) - (a.score + bonusA)
+      return (SOURCE_RANK[a.candidate?.source] || 99) - (SOURCE_RANK[b.candidate?.source] || 99)
+    })
+    // 同一平台最多留 2 条：只留 1 条时，独占可用平台可能因为一条坏链就整盘失败
+    const out: any[] = []
+    const perSource = new Map<string, number>()
+    for (const item of scored) {
+      const source = String(item.candidate?.source || '')
+      const used = perSource.get(source) || 0
+      if (used >= 2) continue
+      perSource.set(source, used + 1)
+      out.push(item.candidate)
+    }
+    return out
+  })
 
   sourceMatchCache.set(cacheKey, { expiresAt: now + SOURCE_MATCH_CACHE_TTL, promise })
   return promise
@@ -1941,16 +1987,24 @@ const resolveServerSong = async (
   const originalSong = normalizeSongInfo({ ...rawSongInfo })
   if (!originalSong?.source) throw new Error('Missing song source')
 
-  // 额外音源（Bilibili / 汽水）直接取链：让缓存、下载、音质探测也能走通这条链路
+  // 额外音源（Bilibili / 汽水）优先走自己的通道：让缓存、下载、音质探测也能走通这条链路。
+  // 但取链失败不再直接抛错 —— 汽水很多曲目「已下架 / 仅客户端可播」，直接失败等于让歌彻底没声。
+  // 失败就落到下面的常规换源：先让它响，成功了再把这条从待补清单里摘掉（清单只留全网都没有的）。
+  let extraError: string | null = null
   if (extraSources.isExtraSource(originalSong.source)) {
-    const extra = await extraSources.getMusicUrl(originalSong.source, originalSong, requestedQuality, username)
-    return {
-      url: extra.url,
-      quality: extra.type,
-      songInfo: originalSong,
-      requestedSource: originalSong.source,
-      downloadSource: fileCache.detectDownloadSource(extra.url, originalSong.source),
-      sourceName: extra.sourceName,
+    try {
+      const extra = await extraSources.getMusicUrl(originalSong.source, originalSong, requestedQuality, username)
+      return {
+        url: extra.url,
+        quality: extra.type,
+        songInfo: originalSong,
+        requestedSource: originalSong.source,
+        downloadSource: fileCache.detectDownloadSource(extra.url, originalSong.source),
+        sourceName: extra.sourceName,
+      }
+    } catch (err: any) {
+      extraError = err?.message || String(err)
+      console.warn(`[换源] ${originalSong.source} 取链失败，先尝试换到其它平台：${extraError}`)
     }
   }
 
@@ -1988,14 +2042,38 @@ const resolveServerSong = async (
 
   const matches = await findServerSourceMatches(originalSong, username)
   const switchedResult = await tryCandidates(requestedQuality, matches)
-  if (switchedResult) return switchedResult
+  if (switchedResult) {
+    // 换源成功 → 原曲其实能听（只是这个平台不给），把它从待补清单摘掉，
+    // 否则清单会被「其实能播」的曲子长期污染，自动补传也会一直撞它。
+    removePendingAfterSwitch(originalSong)
+    return switchedResult
+  }
 
   for (const quality of qualities.slice(1)) {
     const fallbackResult = await tryCandidates(quality, [originalSong, ...matches])
-    if (fallbackResult) return fallbackResult
+    if (fallbackResult) {
+      removePendingAfterSwitch(originalSong)
+      return fallbackResult
+    }
   }
 
-  throw new Error(`No downloadable source found (${errors.join('; ')})`)
+  throw new Error(extraError
+    ? `No downloadable source found (${extraError})`
+    : `No downloadable source found (${errors.join('; ')})`)
+}
+
+/** 换源成功后清掉这条待补记录（只有汽水会进清单；key 与 pending.add 保持一致） */
+const removePendingAfterSwitch = (song: any): void => {
+  try {
+    const source = String(song?.source || '')
+    if (source !== 'soda') return
+    const id = String(song?.id || song?.songmid || song?.meta?.trackId || '').trim()
+    if (!id) return
+    extraSources.pending.remove(`${source}:${id}`)
+    console.log(`[汽水待补] 换源成功，已从待补清单移除：${song?.name || id}`)
+  } catch {
+    // 清清单失败不影响播放
+  }
 }
 
 const isPathInside = (child: string, parent: string): boolean => {
@@ -7143,9 +7221,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         try {
           // 额外音源（Bilibili / 汽水）自带搜索实现，不经过 musicSdk（那个目录会被上游覆盖）
           if (extraSources.isExtraSource(source)) {
-            // 歌手/专辑维度目前只有汽水有（B站没有歌手/专辑实体）
+            // 歌手/专辑维度：汽水有真实体；B站没有，映射成「UP 主 / 关键词视频合集」（见 bilibili.ts）
             if (type === 'singer' || type === 'album') {
-              if (source !== 'soda') {
+              if (source !== 'soda' && source !== 'bili') {
                 res.writeHead(400, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({
                   success: false,
@@ -7246,7 +7324,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               // 歌手/专辑维度：musicSdk 源走 extendSearch，kglite 走专用实现，soda 走 extraSources；bili 无此维度
               if (type === 'singer' || type === 'album') {
                 if (extraSources.isExtraSource(src)) {
-                  if (src !== 'soda') return []
+                  if (src !== 'soda' && src !== 'bili') return []
                   const d = type === 'singer'
                     ? await extraSources.searchSingers(src, name, pageNo, pageSize)
                     : await extraSources.searchAlbums(src, name, pageNo, pageSize)
@@ -7449,9 +7527,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
-        // 额外音源（目前只有汽水支持歌手详情）；kglite 与酷狗同 ID 体系，转调 kg 的实现
+        // 额外音源（汽水有真实艺人；B站映射成 UP 主名片）；kglite 与酷狗同 ID 体系，转调 kg 的实现
         if (extraSources.isExtraSource(source)) {
-          if (source !== 'soda') {
+          if (source !== 'soda' && source !== 'bili') {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: false, error: `${extraSources.displayName(source)} 暂不支持歌手详情` }))
             return
@@ -7490,7 +7568,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           res.writeHead(400); res.end('Missing id'); return
         }
         if (extraSources.isExtraSource(source)) {
-          if (source !== 'soda') {
+          if (source !== 'soda' && source !== 'bili') {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: false, error: `${extraSources.displayName(source)} 暂不支持歌手专辑列表` }))
             return
@@ -7525,6 +7603,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         const id = urlObj.searchParams.get('id')
         const source = urlObj.searchParams.get('source') || 'wy'
         const order = urlObj.searchParams.get('order') || 'hot'
+        // B站没有艺人 id 索引：必须拿 UP 主名当关键词去搜视频，再按 mid 过滤
+        const artistName = urlObj.searchParams.get('name') || ''
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
@@ -7535,9 +7615,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             ? Math.min(Math.floor(configuredMaxPages), 100)
             : 20
         if (typeof musicSdk[source]?.extendDetail?.getArtistSongs !== 'function') {
-          // 额外音源（目前只有汽水支持）；kglite 与酷狗同 ID 体系，转调 kg 的实现
+          // 额外音源（汽水真实艺人 / B站 UP 主）；kglite 与酷狗同 ID 体系，转调 kg 的实现
           const detailSource = source === 'kglite' ? 'kg' : source
-          const useExtra = extraSources.isExtraSource(source) && source === 'soda'
+          const useExtra = extraSources.isExtraSource(source) && (source === 'soda' || source === 'bili')
           if (!useExtra && typeof musicSdk[detailSource]?.extendDetail?.getArtistSongs !== 'function') {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: false, error: `音源 ${source} 暂不支持歌手歌曲列表` }))
@@ -7547,7 +7627,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             let allSongs: any[] = []
             for (let p = 1; p <= MAX_PAGES; p++) {
               const data = useExtra
-                ? await extraSources.getArtistSongs(source, id, p, PAGE_SIZE)
+                ? await extraSources.getArtistSongs(source, id, p, PAGE_SIZE, artistName)
                 : await musicSdk[detailSource].extendDetail.getArtistSongs(id, p, PAGE_SIZE, order)
               const pageList: any[] = data.list || []
               allSongs = allSongs.concat(pageList)
@@ -7584,9 +7664,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
-        // 额外音源（目前只有汽水支持）；kglite 与酷狗同 ID 体系，转调 kg 的实现
+        // 额外音源（汽水真实专辑 / B站关键词视频合集）；kglite 与酷狗同 ID 体系，转调 kg 的实现
         if (extraSources.isExtraSource(source)) {
-          if (source !== 'soda') {
+          if (source !== 'soda' && source !== 'bili') {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: false, error: `${extraSources.displayName(source)} 暂不支持专辑歌曲列表` }))
             return
@@ -10890,12 +10970,16 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 signer: signerStatus,
                 pending: {
                   count: items.length,
+                  // 已失败到顶、自动补传不再尝试的条数（count 全为 exhausted 时就等于「都在空转」）
+                  exhausted: items.filter(i => extraSources.pending.isExhausted(i)).length,
+                  maxTries: extraSources.pending.MAX_TRIES,
                   items: items.slice(0, 50).map(i => ({
                     key: i.key,
                     name: i.song.name,
                     singer: i.song.singer,
                     reason: i.reason,
                     tries: i.tries,
+                    exhausted: extraSources.pending.isExhausted(i),
                     lastError: i.lastError,
                     at: i.at,
                     // 补传会落回这个用户的缓存目录；空 = 匿名 _open
@@ -10931,6 +11015,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               quality: String(patch.quality || '320k'),
               limit: Number(patch.limit) || 10,
               force: patch.force === true,
+              // 管理页「重试全部」：连已放弃的条目也再试一次
+              retryExhausted: patch.retryExhausted === true,
             })
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: true, data: result }))

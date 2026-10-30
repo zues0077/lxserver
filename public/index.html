@@ -717,6 +717,17 @@
 
                                 <!-- 待补清单 + 自动补传状态（签名器在线时会自己把受限曲补进缓存） -->
                                 <p class="config-hint-text" id="qishui-prefetch-hint" style="margin: 4px 0 0;"></p>
+                                <!-- 有待补时才显示：重试全部 = 把失败次数清零再补一轮；清空 = 直接放弃这些曲子 -->
+                                <div id="qishui-prefetch-actions" class="music-acc-toolbar" style="display: none; margin-top: 2px;">
+                                    <button type="button" class="btn-secondary" onclick="app.retryQishuiPrefetch()"
+                                        style="white-space: nowrap;">
+                                        重试全部
+                                    </button>
+                                    <button type="button" class="btn-secondary" onclick="app.clearQishuiPrefetch()"
+                                        style="white-space: nowrap;">
+                                        清空清单
+                                    </button>
+                                </div>
 
                                 <!-- 平台列表（由 JS 渲染，新增平台时后端加一条即可，这里不用改） -->
                                 <div id="music-accounts-list" class="music-acc-list">
