@@ -1978,6 +1978,42 @@ interface ServerSongResolveResult {
   sourceName?: string
 }
 
+/**
+ * 只做「换到其它平台」这一步，供 resolveServerSong 与 /api/music/url 的额外音源失败分支共用。
+ * 额外音源（汽水/B站）取链失败时以前是直接抛错，歌就彻底没声了；
+ * 实际上很多曲子只是这个平台不下发流，别的平台有 —— 先让它响，成功再摘掉待补记录。
+ */
+const switchToOtherSource = async (
+  originalSong: any,
+  requestedQuality: string,
+  username: string,
+  precomputedMatches?: any[],
+): Promise<ServerSongResolveResult | null> => {
+  const matches = precomputedMatches && precomputedMatches.length
+    ? precomputedMatches
+    : await findServerSourceMatches(originalSong, username)
+  for (const rawCandidate of matches) {
+    const candidate = normalizeSongInfo({ ...rawCandidate })
+    const source = candidate?.source
+    if (!source || !isSourceSupported(source, username)) continue
+    try {
+      const result = await callUserApiGetMusicUrl(source, candidate, requestedQuality, username, undefined, true)
+      if (!result?.url) continue
+      return {
+        url: result.url,
+        quality: result.type || requestedQuality,
+        songInfo: candidate,
+        requestedSource: originalSong.source,
+        downloadSource: fileCache.detectDownloadSource(result.url, source),
+        sourceName: result.sourceName,
+      }
+    } catch {
+      // 单个候选失败继续试下一个
+    }
+  }
+  return null
+}
+
 const resolveServerSong = async (
   rawSongInfo: any,
   requestedQuality: string,
@@ -2041,7 +2077,7 @@ const resolveServerSong = async (
   if (originalResult) return originalResult
 
   const matches = await findServerSourceMatches(originalSong, username)
-  const switchedResult = await tryCandidates(requestedQuality, matches)
+  const switchedResult = await switchToOtherSource(originalSong, requestedQuality, username, matches)
   if (switchedResult) {
     // 换源成功 → 原曲其实能听（只是这个平台不给），把它从待补清单摘掉，
     // 否则清单会被「其实能播」的曲子长期污染，自动补传也会一直撞它。
@@ -8395,6 +8431,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 额外音源（Bilibili / 汽水）不依赖 musicSdk、也不依赖自定义源：
             // 搜索由 extraSources 提供，取流同样自带（B站匿名可用，配了 Cookie 才有大会员音质）。
             // 命中本地缓存时跳过（否则会把缓存结果覆盖成一次全新的远端取链）。
+            let extraSourceError: string | null = null
             if (!result && extraSources.isExtraSource(source)) {
               try {
                 const extra = await withHardBudget(
@@ -8458,10 +8495,35 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   void pushProgress({ name: extra.sourceName, status: 'success' })
                 }
               } catch (e: any) {
-                console.error(`[额外音源] ${source} 取链失败:`, e?.message || e)
-                rememberMusicUrlFailure(failKey, e?.message || String(e))
-                throw e
+                // 不再直接抛错：汽水大量曲目「已下架 / 仅客户端可播」，直接失败等于让歌彻底没声。
+                // 先记下原因落到下面的换源，换成功就把这条从待补清单摘掉（清单只留全网都没有的）。
+                const extraMsg = e?.message || String(e)
+                console.warn(`[额外音源] ${source} 取链失败，改走换源: ${extraMsg}`)
+                extraSourceError = extraMsg
               }
+            }
+
+            // 额外音源失败后的换源：与常规平台的失败处理保持一致（先让它响）
+            if (!result && extraSourceError) {
+              try {
+                const switched = await switchToOtherSource(songInfo, quality || '128k', verifiedUsername)
+                if (switched?.url) {
+                  removePendingAfterSwitch(songInfo)
+                  result = {
+                    url: switched.url,
+                    type: switched.quality,
+                    sourceName: switched.sourceName,
+                    sourceId: `extra-switch:${switched.songInfo?.source || ''}`,
+                    attempts: [{ name: switched.sourceName, status: 'success' }],
+                  }
+                  void pushProgress({ name: switched.sourceName, status: 'success' })
+                  console.log(`[换源] ${extraSources.displayName(source)} 失败后已换到 ${switched.sourceName}：${songInfo.name}`)
+                }
+              } catch (switchErr: any) {
+                console.warn(`[换源] ${source} 失败后换源也未命中: ${switchErr?.message || switchErr}`)
+              }
+              // 换源也没成，才把失败写进短缓存（避免把「其实能换到」的曲子也一起缓存掉）
+              if (!result) rememberMusicUrlFailure(failKey, extraSourceError)
             }
 
             // 账号通道独立于自定义源存在：即使一个自定义源都没装，
@@ -8486,7 +8548,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
             let customSourceError: string | null = null
             let attempts: any[] = []
-            if (!result && (isSourceSupported(source, verifiedUsername) || accountUsable)) {
+            if (!result && !extraSourceError && (isSourceSupported(source, verifiedUsername) || accountUsable)) {
               try {
                 console.log(`[歌曲播放] 使用自定义源解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
 
@@ -8515,9 +8577,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 attempts = (userApiError && userApiError.attempts) || []
                 // 不抛出错误，继续尝试内置源
               }
-            } else if (!result) {
-              // isSourceSupported = false: 无任何自定义源支持此平台，立即通知前端
-              const why = accountBlockedByPermission
+              } else if (!result && !extraSourceError) {
+                // isSourceSupported = false: 无任何自定义源支持此平台，立即通知前端
+                const why = accountBlockedByPermission
                 ? `${sourceName} 只能通过平台账号取链，但当前用户「${verifiedUsername}」不在使用权限名单内`
                 : musicAccount.isSupportedSource(source)
                   ? `未找到支持 ${source} 平台的自定义源；如已在「平台账号」里填写 Cookie，请确认总开关已打开`
@@ -8532,7 +8594,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 : accountBlockedByPermission
                   ? `${sourceName} 只能通过平台账号取链，但当前用户「${verifiedUsername}」不在使用权限名单内；请联系管理员在「平台账号 → 使用权限」里加入该用户`
                   : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
-              const errMsg = customSourceError || fallbackMsg
+              const errMsg = customSourceError || extraSourceError || fallbackMsg
               const err: any = new Error(errMsg)
               err.attempts = attempts
               rememberMusicUrlFailure(failKey, errMsg, attempts)
