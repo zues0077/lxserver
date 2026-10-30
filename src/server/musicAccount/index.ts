@@ -809,6 +809,20 @@ export function rescheduleAccountHealthCheck(): void {
   scheduleHealthCheck()
 }
 
+/** 所有已配置账号里最早的一次校验时间；没有任何校验记录时回 0（=从未巡检） */
+function oldestVerifiedAt(): number {
+  const times: number[] = []
+  for (const a of store.listAccounts()) {
+    const items = (a.accounts || []).filter(i => i.configured)
+    if (items.length) {
+      for (const i of items) if (i.lastVerify?.at) times.push(i.lastVerify.at)
+    } else if (a.lastVerify?.at) {
+      times.push(a.lastVerify.at)
+    }
+  }
+  return times.length ? Math.min(...times) : 0
+}
+
 /**
  * 启动定时巡检（受 musicAccount.healthCheckEnabled 控制，默认开）：
  * 启动后等 90 秒再跑第一次，且只查「陈旧」账号（距上次校验 ≥ 巡检间隔）。
@@ -823,9 +837,14 @@ export function startAccountHealthCheck(): void {
   const boot = setTimeout(() => {
     // boot 模式：只补查陈旧的，刚查过的不重复探测
     void runAccountHealthCheck({ boot: true })
+      .then(r => {
+        // 一个都没查（全都很新）时不能把「上次巡检」记成现在 —— 那等于每次重启
+        // 都把定时巡检往后推一个间隔，反复重建容器会让定时巡检永远不到点。
+        // 这种情况把锚点回填成「最陈旧账号的实际校验时间」，排程继续按真实节奏走。
+        healthLastRunAt = r.checked > 0 ? Date.now() : oldestVerifiedAt()
+      })
       .catch(e => console.log(`[平台账号] 启动巡检出错（忽略）：${e?.message || e}`))
       .finally(() => {
-        healthLastRunAt = Date.now()
         scheduleHealthCheck()
       })
   }, 90_000)
