@@ -75,7 +75,19 @@ const VIP_ID_FIELDS = ['uid', 'userid', 'userId', 'uname', 'nickname', 'username
  */
 async function probeVip(cookie: string): Promise<{ isVip: boolean; nickname?: string; tier?: string } | null> {
   try {
-    const resp = await withTimeout(request(VIP1_API, {
+    // 酷我 App（手机短信登录的账号就属于这类）的登录态靠 uid + sid 参数传，
+    // 不是纯靠 Cookie 头 —— 见上方注释里的实证脚本形态。
+    // 网页 Cookie 里的 userid/sid 也一并带上，两种机制都覆盖，多发的参数在网页侧无害。
+    const map = parseCookie(cookie)
+    const uid = map['userid'] || map['user_id'] || map['loginUid'] || ''
+    const sid = map['sid'] || map['loginSid'] || map['websid'] || ''
+    const extra: string[] = []
+    if (uid) extra.push(`uid=${encodeURIComponent(uid)}`)
+    if (sid) extra.push(`sid=${encodeURIComponent(sid)}`)
+    extra.push('signver=new')
+    const url = `${VIP1_API}&${extra.join('&')}`
+    console.warn(`[KW-VIP] 请求形态: op=ui${uid ? ' +uid' : ''}${sid ? ' +sid' : ''} +signver=new`)
+    const resp = await withTimeout(request(url, {
       headers: {
         'User-Agent': UA,
         Referer: 'https://vip1.kuwo.cn/',
