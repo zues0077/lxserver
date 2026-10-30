@@ -161,34 +161,59 @@ async function probeVip(cookie: string): Promise<{ vip: boolean | null; tier: st
 }
 
 /**
- * 登录态查询：官方 H5 用户信息接口（GitHub 实证：Domdkw/miguMusic-api-enhanced）。
- * 匿名请求回 299999「uid不能为空」；带有效登录 Cookie 回 000000 + 用户信息。
- * 这是咪咕第一个能**直接**区分「真登录」和「服务端当你是匿名」的接口 ——
- * 之前只有结构校验 + 取链探针（440006 与匿名一致时无法排除「已登录非会员」的歧义）。
+ * 登录态 + 会员档位查询：官方 H5 用户信息接口。
+ *
+ * 实证来源（2026-10-30 对照两处开源实现）：
+ *   - Domdkw/miguMusic-api-enhanced `user_queryInfo.ts`：凭证只放 Cookie 里的 pacmtoken；
+ *   - MuLiuSaMa/NexBox `music_api/migu.rs::login_info`：**只发 Cookie 头**（连 channel 都不带），
+ *     响应里读 `userInfoItem`（userId / nickName / vipFlag / vipStatus / vipLevel / vipEndTime），
+ *     判定成功与否看 `userInfoItem.userId` 是否为空，**不看 code**。
+ *
+ * 之前踩的坑（别再犯）：
+ *   1) 去读 `body.data` —— 实际字段是 `body.userInfoItem`，登录成功也读不到 → 误报「查询不可用」；
+ *   2) 加了一堆 header（channel/pacmtoken/By/uid）反而可能被网关拒；
+ *      匿名或凭证无效时网关统一回 `299999 uid不能为空`，那不是「缺 uid 参数」，是「没解出登录态」。
  */
-async function queryUserInfo(cookie: string): Promise<{ online: boolean; nickname?: string }> {
-  try {
-    const resp = await withTimeout(request(USER_INFO_URL, {
-      headers: {
-        'User-Agent': MIGU_UA,
-        Referer: 'https://music.migu.cn/',
-        channel: USER_INFO_CHANNEL,
-        Cookie: cookie,
-        ...authHeaders(cookie),
-      },
-    }), 8000, '咪咕用户信息')
-    const body: any = resp.body
-    if (String(body?.code ?? '') !== '000000' || !body?.data) return { online: false }
-    const data = body.data
-    const nickname = String(
-      data.nickname || data.nickName || data.userNickName ||
-      data.userInfo?.nickname || data.userInfo?.nickName ||
-      data.user?.nickname || data.user?.nickName || '',
-    ).trim()
-    return { online: true, ...(nickname ? { nickname } : {}) }
-  } catch {
-    return { online: false }
+async function queryUserInfo(cookie: string): Promise<{ online: boolean; nickname?: string; isVip?: boolean }> {
+  const attempts: Array<Record<string, string>> = [
+    // ① 照 NexBox：最小头，只要有 Cookie（实测最稳）
+    { 'User-Agent': MIGU_UA, Cookie: cookie },
+    // ② 兜底：补上 channel/Referer 与解析出的 token 头
+    {
+      'User-Agent': MIGU_UA,
+      Referer: 'https://music.migu.cn/',
+      channel: USER_INFO_CHANNEL,
+      Cookie: cookie,
+      ...authHeaders(cookie),
+    },
+  ]
+  for (const headers of attempts) {
+    try {
+      const resp = await withTimeout(request(USER_INFO_URL, { headers }), 8000, '咪咕用户信息')
+      const body: any = resp.body
+      const u = body?.userInfoItem || body?.data?.userInfoItem || body?.data
+      const uid = u?.userId != null ? String(u.userId) : ''
+      if (!uid) {
+        console.log(`[平台账号] 咪咕用户信息未解析出 uid：code=${body?.code ?? '-'} info=${body?.info || body?.message || '-'} body=${JSON.stringify(body)?.slice(0, 240)}`)
+        continue
+      }
+      const nickname = String(u.nickName || u.nickname || '').trim()
+      // VIP 判定：字段名各家实现都在猜，这里按「出现任一 VIP 字段才下结论」，
+      // 全都没有则返回 undefined（交给取链探针），绝不默默算成会员。
+      const truthy = (v: any) => v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true'
+      const hasVipField = ['vipFlag', 'vipStatus', 'isVip', 'vipLevel', 'vipEndTime'].some(k => u[k] != null && u[k] !== '')
+      let isVip: boolean | undefined
+      if (hasVipField) {
+        const level = Number(u.vipLevel ?? 0)
+        const end = Number(u.vipEndTime ?? 0)
+        isVip = truthy(u.vipFlag) || truthy(u.vipStatus) || truthy(u.isVip) || level > 0 || (end > 0 && end > Date.now())
+      }
+      return { online: true, ...(nickname ? { nickname } : {}), ...(isVip === undefined ? {} : { isVip }) }
+    } catch (e: any) {
+      console.log(`[平台账号] 咪咕用户信息请求失败：${e?.message || e}`)
+    }
   }
+  return { online: false }
 }
 
 export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
@@ -200,17 +225,21 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
     return { ok: false, verified: 'structural', message: `Cookie 里没有找到登录字段（${keys.join(' / ')}），请确认已登录咪咕后再复制` }
   }
   // 两步实测：
-  // ① queryUserInfo —— 登录态是否被服务端承认（权威信号）；
-  // ② 取链探针 —— 实测会员档位（用户真正关心的）。
-  const probe = await probeVip(cookie)
-  const user = await queryUserInfo(cookie)
+  // ① queryUserInfo —— 登录态是否被服务端承认，并直接读出 VIP 字段（权威信号）；
+  // ② 取链探针 —— 实测能拿到哪一档音质（用户真正关心的）。
+  // 注意：探针不能单独当会员判据。实测（2026-10-30）非会员号登录后也能取 SQ
+  // （咪咕对「登录用户」就放开了这首探针曲），只看探针会把非会员误标成会员。
+  const [probe, user] = await Promise.all([probeVip(cookie), queryUserInfo(cookie)])
   if (user.online) {
+    const vip = user.isVip === undefined ? probe.vip : user.isVip
+    const nick = user.nickname ? `（${user.nickname}）` : ''
+    const vipText = vip === true ? '会员（VIP）有效' : vip === false ? '已登录，当前非会员（VIP）' : '会员档位未识别'
     return {
       ok: true,
       verified: 'online',
       ...(user.nickname ? { nickname: user.nickname } : {}),
-      ...(probe.vip === null ? {} : { isVip: probe.vip }),
-      message: `登录态有效${user.nickname ? `（昵称：${user.nickname}）` : ''}；${probe.note}`,
+      ...(vip === null || vip === undefined ? {} : { isVip: vip }),
+      message: `登录态有效${nick}，${vipText}；${probe.note}`,
     }
   }
   // 查不到登录态。若探针表现与匿名请求一致（VIP 曲同样回 440006「请先登录」），
@@ -224,11 +253,11 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
     }
   }
   // 探针也判不出来（如探针曲不可用）：如实只说结构校验，不妄下结论。
+  // 不把 probe.vip 写进 isVip —— 探针只能证明「能取到哪档音质」，不能证明会员身份。
   return {
     ok: true,
     verified: 'structural',
-    ...(probe.vip === null ? {} : { isVip: probe.vip }),
-    message: `结构校验通过；登录态查询不可用，${probe.note}`,
+    message: `结构校验通过；登录态查询未返回用户信息，会员档位无法确认（${probe.note}）`,
   }
 }
 
