@@ -89,6 +89,7 @@ const config: LX.Config = {
   'musicAccount.allowedUsers': [], // 使用权限名单：允许走账号取链的用户名（游客=_open）；空=所有人可用
   'musicAccount.checkHours': 72, // 账号健康巡检的最小间隔（小时，1~168）
   'musicAccount.checkHour': 3, // 巡检落在每天的几点（0-23），放在凌晨避免边播边扫
+  'musicAccount.healthCheckEnabled': true, // 自动巡检开关：关掉后启动/定时都不巡检，只靠取链失败复核与手动检查
   'musicAccount.autoSwitch': {}, // 主号失效自动切换：{平台id: true}，默认空=全部关闭（多号漂移代价大）
   // 酷狗概念版 VIP 自动领取：多账号轮流做任务，每个账号每天可领 8 次（每次 3 小时）
   'musicAccount.kglite.autoClaim': true, // 是否开启定时自动领取

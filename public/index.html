@@ -669,16 +669,24 @@
                                 </div>
 
                                 <!-- 巡检节奏：定点（默认凌晨 3 点）+ 最小间隔。
-                                     放到凌晨是为了别在用户边播边扫：那是平台风控最容易触发的形态 -->
+                                     放到凌晨是为了别在用户边播边扫：那是平台风控最容易触发的形态。
+                                     「间隔」才是真实频率，「巡检时间」只是跨过间隔后落在哪个整点。 -->
                                 <div class="music-acc-toolbar" style="margin-top: 2px;">
+                                    <label class="music-acc-timeout-label" style="display: flex; align-items: center; gap: 8px;"
+                                        title="关掉后启动与定时都不巡检，账号失效只在「取歌失败当场复核」和手动「立即检查」时发现">
+                                        <input type="checkbox" id="music-acc-check-enabled"
+                                            onchange="app.toggleMusicAccountAutoCheck(this.checked)">
+                                        启用自动巡检
+                                    </label>
                                     <label class="music-acc-timeout-label"
-                                        title="两轮巡检之间至少间隔多久。按整点吸附：填 101 会落到 5 天后的整点，想要 4 天一次填 96">
+                                        title="真实频率由它决定：填 101 = 距上次满 101 小时后的那个巡检时间点才跑（约 5 天）。想 4 天一次填 96">
                                         巡检间隔
                                         <input type="number" id="music-acc-check-hours" class="input-field"
                                             min="1" max="168" step="1" style="width: 80px;">
                                         小时
                                     </label>
-                                    <label class="music-acc-timeout-label" title="巡检落在每天的几点（建议凌晨）">
+                                    <label class="music-acc-timeout-label"
+                                        title="跨过巡检间隔后，落在每天的几点执行（建议凌晨，避开边播边扫）">
                                         巡检时间
                                         <select id="music-acc-check-hour" class="input-field" style="width: 100px;">
                                         </select>

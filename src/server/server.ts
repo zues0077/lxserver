@@ -10201,6 +10201,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             accounts: musicAccount.getAccounts(),
             health: musicAccount.getAccountHealth(),
             healthCheck: musicAccount.getHealthCheckState(),
+            checking: musicAccount.isHealthChecking(),
             autoSwitch: global.lx.config['musicAccount.autoSwitch'] || {},
             storePath: musicAccount.getStoreFilePath(),
           },
@@ -10365,15 +10366,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
           return
         }
+        // 异步执行：手动巡检的账号间隔已放宽到 5~60 秒（用户 2026-10-30 要求，
+        // 为的是不让平台侧看起来像脚本），一轮十几个号要几分钟。
+        // 挂在一个长连接上等，浏览器和反代都会先超时断开，用户只看到「失败」。
+        // 改成：立刻返回「已开始」，前端轮询 /api/music/accounts 看每个账号的校验时间更新。
+        if (musicAccount.isHealthChecking()) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: true, data: { started: false, running: true, message: '已有一轮巡检在进行' } }))
+          return
+        }
+        res.writeHead(202, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: true, data: { started: true, running: true, message: '巡检已在后台开始，页面会自动刷新' } }))
         void musicAccount.runAccountHealthCheck({ force: true, manual: true })
-          .then(data => {
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: true, data }))
-          })
-          .catch((e: any) => {
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
-          })
+          .then(data => console.log(`[平台账号] 手动巡检完成：已查 ${data.checked} 个账号`))
+          .catch((e: any) => console.log(`[平台账号] 手动巡检出错（忽略）：${e?.message || String(e)}`))
         return
       }
 
@@ -10472,6 +10478,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             }
             // 巡检节奏：定点小时 + 最小间隔（改完立刻重排，不必重启）
             let healthDirty = false
+            if (typeof patch.healthCheckEnabled === 'boolean') {
+              global.lx.config['musicAccount.healthCheckEnabled'] = patch.healthCheckEnabled
+              healthDirty = true
+            }
             if (typeof patch.checkHours === 'number' && Number.isFinite(patch.checkHours)) {
               global.lx.config['musicAccount.checkHours'] = Math.min(24 * 7, Math.max(1, Math.round(patch.checkHours)))
               healthDirty = true

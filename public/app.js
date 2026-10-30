@@ -5581,23 +5581,48 @@ class App {
         const hoursEl = document.getElementById('music-acc-check-hours');
         const hourSel = document.getElementById('music-acc-check-hour');
         const nextEl = document.getElementById('music-acc-check-next');
+        const enabledEl = document.getElementById('music-acc-check-enabled');
         if (hourSel && !hourSel.dataset.filled) {
             hourSel.innerHTML = Array.from({ length: 24 }, (_, h) =>
                 `<option value="${h}">${String(h).padStart(2, '0')}:00</option>`).join('');
             hourSel.dataset.filled = '1';
         }
         const d = state || {};
+        const enabled = d.enabled !== false;
+        if (enabledEl) enabledEl.checked = enabled;
+        // 关掉自动巡检时，把节奏控件置灰：让人一眼看出「设置了也不会跑」，避免以为改了就生效
+        for (const el of [hoursEl, hourSel]) {
+            if (el) el.disabled = !enabled;
+        }
         if (hoursEl && document.activeElement !== hoursEl) hoursEl.value = d.intervalHours || 72;
         if (hourSel) hourSel.value = String(typeof d.hour === 'number' ? d.hour : 3);
         if (nextEl) {
-            if (d.nextRunAt) {
+            if (!enabled) {
+                nextEl.textContent = '自动巡检已关闭（失效靠取链失败当场复核 + 手动「立即检查」发现）';
+            } else if (d.nextRunAt) {
                 const t = new Date(d.nextRunAt).toLocaleString('zh-CN', {
                     hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
                 });
                 nextEl.textContent = `下一轮巡检：${t}`;
+            } else if (d.running) {
+                nextEl.textContent = '巡检进行中…';
             } else {
-                nextEl.textContent = '巡检未排程（服务端刚启动时为「90 秒后首查」）';
+                nextEl.textContent = '巡检未排程（服务端刚启动时为「90 秒后补查陈旧账号」）';
             }
+        }
+    }
+
+    /** 切换自动巡检开关后立刻保存（用户勾一下就该生效，不该再点保存） */
+    async toggleMusicAccountAutoCheck(enabled) {
+        try {
+            const res = await this.request('/api/music/accounts/config', {
+                method: 'POST',
+                body: JSON.stringify({ healthCheckEnabled: !!enabled })
+            });
+            this.fillMusicAccountCheckSchedule((res && res.data && res.data.healthCheck) || { enabled: !!enabled });
+            showSuccess(enabled ? '已开启自动巡检' : '已关闭自动巡检，失效将由取链失败当场复核与手动检查发现');
+        } catch (e) {
+            showError(`保存失败：${e.message}`);
         }
     }
 
@@ -6175,20 +6200,43 @@ class App {
 
     /**
      * 一键复查全部平台账号。
-     * 服务端会依次请求各家「需要登录态」的接口，每个平台约 1~2 秒，所以这里要给进度提示，
-     * 否则用户会以为按钮没反应。
+     *
+     * 服务端现在是「后台异步执行 + 立刻返回」：手动巡检的账号间隔已放宽到 5~60 秒随机
+     * （防止平台风控把连续请求识别成脚本），一轮十几个号要几分钟，挂在 HTTP 请求上等
+     * 必然被浏览器或反代先掐断。这里改成提交后轮询，直到 running 变 false 再报结果。
      */
     async checkAllMusicAccounts() {
-        showInfo('正在复查全部账号，每个平台约 1~2 秒…');
+        showInfo('已提交巡检，正在后台逐个复查（每个账号间隔 5~60 秒，可能需要几分钟）…');
         try {
             const res = await this.request('/api/music/accounts/check', { method: 'POST' });
             const d = (res && res.data) || {};
-            if (d.expired) {
-                showError(`有 ${d.expired} 个账号已失效${d.expiredNames && d.expiredNames.length ? '：' + d.expiredNames.join('、') : ''}，请重新导出 Cookie`);
-            } else if (d.message) {
-                showInfo(d.message);
+            if (!d.running) {
+                showInfo(d.message || '巡检未开始');
+                return;
+            }
+            await this.refreshMusicAccounts();
+            // 轮询：每 5 秒看一次是否还在跑（上限 15 分钟，超时就放手，服务端仍会跑完）
+            const startedAt = Date.now();
+            while (Date.now() - startedAt < 15 * 60 * 1000) {
+                await new Promise(r => setTimeout(r, 5000));
+                let checking = false;
+                try {
+                    const cur = await this.request('/api/music/accounts');
+                    checking = !!(cur && cur.data && cur.data.checking);
+                } catch (e) {
+                    // 单次查询失败不影响巡检本身，下一轮再试
+                    checking = true;
+                }
+                if (!checking) break;
+            }
+            const done = await this.request('/api/music/accounts');
+            const health = (done && done.data && done.data.health) || {};
+            if (health.expired) {
+                showError(`有 ${health.expired} 个账号已失效${health.expiredNames && health.expiredNames.length ? '：' + health.expiredNames.join('、') : ''}，请重新登录或更新 Cookie`);
+            } else if (health.structural) {
+                showInfo(`复查完成：${health.configured || 0} 个账号中 ${health.structural} 个待确认（登录态未能确认，多为 Cookie 已失效）`);
             } else {
-                showSuccess(`复查完成：${d.configured || 0} 个账号均正常`);
+                showSuccess(`复查完成：${health.configured || 0} 个账号均正常`);
             }
             await this.refreshMusicAccounts();
         } catch (e) {

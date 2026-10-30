@@ -284,6 +284,12 @@ declare namespace LX {
     'musicAccount.checkHour'?: number
 
     /**
+     * 自动巡检开关（默认 true）。
+     * 关掉后启动首查与定时巡检都不跑，失效发现只剩「取链失败当场复核」和手动「立即检查」。
+     */
+    'musicAccount.healthCheckEnabled'?: boolean
+
+    /**
      * 主号失效自动切换：{平台id: true}。默认空 = 全部关闭。
      * 开启后只有确认主号登录态失效、且备号现场校验通过，才会把备号设为主账号。
      */

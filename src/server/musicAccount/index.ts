@@ -79,6 +79,26 @@ export function isEnabled(): boolean {
 }
 
 /**
+ * 定时巡检开关（默认开）。
+ *
+ * 用户 2026-10-30 明确：账号每天被自动探测太频繁，希望能自己决定要不要自动巡检。
+ * 关掉后**启动首查与定时巡检都不跑**，失效发现只剩两条路：
+ *   ① 取链失败时的当场单账号复核（probeAccountAfterFailure）
+ *   ② 面板上的手动「立即检查」
+ * 手动检查走 force，不受这个开关影响 —— 用户点了按钮就应该真的去查。
+ */
+export function isHealthCheckEnabled(): boolean {
+  return config()['musicAccount.healthCheckEnabled'] !== false
+}
+
+/** 是否有一轮巡检正在跑（前端据此轮询刷新，而不是干等一个长连接） */
+let healthRunning = false
+
+export function isHealthChecking(): boolean {
+  return healthRunning
+}
+
+/**
  * 该 source 当前能否走账号通道（开关开 + 平台受支持 + 已配置账号）。
  * 供上层路由判断「没有自定义源时还要不要试账号」。
  *
@@ -264,7 +284,16 @@ function probeAccountAfterFailure(id: string): void {
   void verifyAccount(id)
     .then(info => {
       const name = getPlatform(id)?.name ?? id
-      if (info.ok) return
+      if (info.ok) {
+        // 登录态是好的 —— 那是「非会员」还是「这首没版权」？只能如实区分到这一步：
+        // 会员状态明确为 false 时给一条「非会员」提示（不进失效红标、不触发自动换号），
+        // 否则什么也不说（一首没版权的歌不该留下任何账号痕迹）。
+        if (info.isVip === false) {
+          notVipHintAt.set(id, Date.now())
+          console.log(`[平台账号] ${name} 取链失败，但登录态正常且为非会员 —— 按「会员权益不足」提示，不标失效、不换号`)
+        }
+        return
+      }
       if (info.verified === 'structural') {
         console.log(`[平台账号] ${name} 取链失败，但本平台只能做结构校验，无法判断登录态：${info.message || ''}`)
         return
@@ -564,17 +593,21 @@ export function getAccountHealth(): HealthSummary {
  * 巡检两个账号之间的等待。
  *
  * 三种节奏，按「谁在等结果」区分：
- *   - 定时巡检：1~60 秒随机。一轮十几个号也就是几分钟，凌晨跑完没人感知；
- *     而 1 分钟量级的抖动足以让请求序列在平台侧看起来不像批量脚本。
- *   - 手动复查：0.8~2.2 秒随机。用户点了按钮正在等，隔一分钟一次会把界面挂成假死。
- *   - 上一次失败：60~120 秒。失败多半是限流或风控，此时继续按原节奏打只会越打越严。
+ *   - 定时/启动巡检：10~120 秒随机。用户 2026-10-30 明确要求放宽到这一档（原 1~60 秒），
+ *     理由是巡检本来就是低频兜底，没必要把请求打得那么密。一轮十几个号约 5~20 分钟，
+ *     凌晨跑完没人感知。
+ *   - 手动复查：5~60 秒随机。用户同样要求放宽（原 0.8~2.2 秒），宁可多等几分钟也不愿
+ *     让平台侧看起来像脚本。代价是手动巡检一轮要几分钟 —— 所以 /accounts/check 改成了
+ *     后台异步执行、前端轮询刷新，不再让浏览器干等一个长连接。
+ *   - 上一次失败：120~300 秒。失败多半是限流或风控，此时继续按原节奏打只会越打越严；
+ *     这个值必须明显大于正常间隔，否则「退避」等于没退。
  *
  * 全部用随机而不是固定值，因为「严格等间隔」的请求序列比人类操作更像脚本。
  */
 const HEALTH_PAUSE = {
-  scheduled: { base: 1000, span: 59000 },  // 1 ~ 60 秒
-  manual: { base: 800, span: 1400 },       // 0.8 ~ 2.2 秒
-  backoff: { base: 60000, span: 60000 },   // 60 ~ 120 秒
+  scheduled: { base: 10000, span: 110000 },  // 10 ~ 120 秒
+  manual: { base: 5000, span: 55000 },       // 5 ~ 60 秒
+  backoff: { base: 120000, span: 180000 },   // 120 ~ 300 秒
 }
 
 /** 导出只为自测能断言区间，业务代码不要直接调 */
@@ -589,9 +622,12 @@ function healthCheckPause(lastFailed: boolean, manual: boolean): Promise<void> {
  * 立即巡检所有已配置账号。
  *
  * @param opts.force  为 true 时忽略总开关（手动触发用；总开关关掉时定时巡检会跳过）
- * @param opts.manual 为 true 时用手动节奏（秒级间隔），默认走定时节奏（1~60 秒随机）
+ * @param opts.manual 为 true 时用手动节奏（5~60 秒随机），默认走定时节奏（10~120 秒随机）
+ * @param opts.boot   为 true 时只查「陈旧」账号（距上次校验 ≥ 巡检间隔）。启动首查用：
+ *                    测试容器频繁重建时，刚查过的账号不再重复探测，避免每次重启都把
+ *                    全平台账号重新打一遍（风控敏感平台尤其吃亏）。
  */
-export async function runAccountHealthCheck(opts: { force?: boolean; manual?: boolean } = {}): Promise<
+export async function runAccountHealthCheck(opts: { force?: boolean; manual?: boolean; boot?: boolean } = {}): Promise<
   HealthSummary & { checkedAt: number; checked: number }
 > {
   const rows = store.listAccounts().filter(a => a.configured || a.accounts.some(i => i.configured))
@@ -602,6 +638,37 @@ export async function runAccountHealthCheck(opts: { force?: boolean; manual?: bo
     // 账号通道整体关着时不做无谓请求，但把现状照常报出去
     return { ...getAccountHealth(), checkedAt, checked: 0 }
   }
+  // 非手动（启动/定时）且巡检开关关着：什么都不做。手动走 force，用户点了就该真查。
+  if (!opts.force && !isHealthCheckEnabled()) {
+    return { ...getAccountHealth(), checkedAt, checked: 0 }
+  }
+
+  // 同一时刻只允许一轮巡检：定时器与用户点「立即检查」可能撞在一起。
+  if (healthRunning) {
+    console.log('[平台账号] 已有一轮巡检在进行，本次跳过')
+    return { ...getAccountHealth(), checkedAt, checked: 0 }
+  }
+  healthRunning = true
+  try {
+    return await runHealthCheckLoop(opts, rows, checkedAt)
+  } finally {
+    healthRunning = false
+  }
+}
+
+async function runHealthCheckLoop(
+  opts: { force?: boolean; manual?: boolean; boot?: boolean },
+  rows: ReturnType<typeof store.listAccounts>,
+  checkedAt: number,
+): Promise<HealthSummary & { checkedAt: number; checked: number }> {
+  // 启动巡检的「陈旧」门槛：距上次校验不足一个巡检间隔的账号直接跳过。
+  const boot = !!opts.boot
+  const staleMs = checkIntervalHours() * 3600_000
+  const isStale = (item: { lastVerify?: { at?: number } | null }): boolean => {
+    if (!boot) return true
+    const at = item.lastVerify?.at
+    return !at || Date.now() - at >= staleMs
+  }
 
   // 逐账号巡检：多账号平台（酷狗概念版）每个号都要单独确认登录态，
   // 只查主账号会出现「主号绿着，副号早失效了却没人知道」。
@@ -609,13 +676,17 @@ export async function runAccountHealthCheck(opts: { force?: boolean; manual?: bo
   // 并发策略：**串行**，一个号查完再查下一个。这里刻意不做并发 ——
   // 巡检只是「确认登录态」，慢几分钟没有代价；而并发打同一平台的鉴权接口，
   // 恰恰是风控最容易识别成「批量扫号」的形态。间隔见 healthCheckPause：
-  // 定时巡检 1~60 秒随机，手动复查压到秒级（用户在等），失败后统一退避。
+  // 定时 10~120 秒随机，手动 5~60 秒，失败后统一退避 120~300 秒。
   const manual = !!opts.manual
   let checked = 0
   let lastFailed = false
   for (const a of rows) {
-    const items = (a.accounts || []).filter(i => i.configured)
+    const items = (a.accounts || []).filter(i => i.configured && isStale(i))
+    // boot 模式下整平台都是新鲜的就整平台跳过（连间隔等待也省了）
+    if (boot && !items.length) continue
     if (!items.length) {
+      // 单账号平台（老数据形态，没有 accounts 细分）：用平台级 lastVerify 判陈旧
+      if (!isStale(a)) continue
       try {
         await verifyAccount(a.id)
         checked++
@@ -679,12 +750,21 @@ export function nextHealthCheckAt(
 }
 
 /** 当前巡检排程状态（前端回填表单用） */
-export function getHealthCheckState(): { intervalHours: number; hour: number; nextRunAt: number; lastRunAt: number } {
+export function getHealthCheckState(): {
+  intervalHours: number
+  hour: number
+  nextRunAt: number
+  lastRunAt: number
+  enabled: boolean
+  running: boolean
+} {
   return {
     intervalHours: checkIntervalHours(),
     hour: checkHourOfDay(),
     nextRunAt: healthNextRunAt,
     lastRunAt: healthLastRunAt,
+    enabled: isHealthCheckEnabled(),
+    running: healthRunning,
   }
 }
 
@@ -692,6 +772,12 @@ function scheduleHealthCheck(): void {
   if (healthTimer) {
     clearTimeout(healthTimer)
     healthTimer = null
+  }
+  // 开关关着就不排程（下次打开时由 rescheduleAccountHealthCheck 重新拉起）
+  if (!isHealthCheckEnabled()) {
+    healthNextRunAt = 0
+    console.log('[平台账号] 自动巡检已关闭，不再排程（失效靠取链失败复核与手动检查发现）')
+    return
   }
   const at = nextHealthCheckAt(checkHourOfDay(), checkIntervalHours(), healthLastRunAt)
   healthNextRunAt = at
@@ -711,26 +797,32 @@ function scheduleHealthCheck(): void {
   const when = new Date(at)
   const pad = (n: number) => String(n).padStart(2, '0')
   console.log(
-    `[平台账号] 账号巡检已排程：每天 ${pad(checkHourOfDay())}:00 检查一次，`
-    + `且距上次不少于 ${checkIntervalHours()} 小时；`
+    `[平台账号] 账号巡检已排程：候选点每天 ${pad(checkHourOfDay())}:00，`
+    + `且距上次不少于 ${checkIntervalHours()} 小时（间隔才是真实频率）；`
     + `下一轮 ${when.getMonth() + 1}/${when.getDate()} ${pad(when.getHours())}:${pad(when.getMinutes())}`,
   )
 }
 
-/** 配置改动（巡检间隔/时间点）后重排定时器，不必重启进程 */
+/** 配置改动（巡检间隔/时间点/开关）后重排定时器，不必重启进程 */
 export function rescheduleAccountHealthCheck(): void {
-  if (!healthTimer) return
+  // 开关可能刚从「关」变「开」，此时没有 timer 也要重新排上
   scheduleHealthCheck()
 }
 
 /**
- * 启动定时巡检。默认启动后等 90 秒再跑第一次：
+ * 启动定时巡检（受 musicAccount.healthCheckEnabled 控制，默认开）：
+ * 启动后等 90 秒再跑第一次，且只查「陈旧」账号（距上次校验 ≥ 巡检间隔）。
  * 启动瞬间音源巡检、会话恢复都在抢网络，别在这时候再加一堆外部请求。
  */
 export function startAccountHealthCheck(): void {
   if (healthTimer) return
+  if (!isHealthCheckEnabled()) {
+    console.log('[平台账号] 自动巡检已关闭（musicAccount.healthCheckEnabled=false），启动不巡检')
+    return
+  }
   const boot = setTimeout(() => {
-    void runAccountHealthCheck()
+    // boot 模式：只补查陈旧的，刚查过的不重复探测
+    void runAccountHealthCheck({ boot: true })
       .catch(e => console.log(`[平台账号] 启动巡检出错（忽略）：${e?.message || e}`))
       .finally(() => {
         healthLastRunAt = Date.now()
@@ -739,8 +831,8 @@ export function startAccountHealthCheck(): void {
   }, 90_000)
   if (typeof boot.unref === 'function') boot.unref()
   console.log(
-    `[平台账号] 账号巡检已安排：启动 90 秒后先查一次，之后每天 ${String(checkHourOfDay()).padStart(2, '0')}:00 起`
-    + `按不少于 ${checkIntervalHours()} 小时的间隔复查`,
+    `[平台账号] 账号巡检已安排：启动 90 秒后补查陈旧账号，之后每天 ${String(checkHourOfDay()).padStart(2, '0')}:00 候选`
+    + `且距上次不少于 ${checkIntervalHours()} 小时才真跑`,
   )
 }
 
@@ -802,22 +894,51 @@ export interface AccountHint {
   name: string
   health: AccountHealth
   text: string
+  /** expired=登录态失效；notVip=登录正常但不是会员（取会员歌失败时记下） */
+  kind?: 'expired' | 'notVip'
 }
 
 /**
+ * 记录「某平台取链失败且当场复核确认是登录正常但非会员」的时刻。
+ * 只用于提示，不影响健康度（非会员不是故障，标红会让用户白折腾重新登录）。
+ */
+const notVipHintAt = new Map<string, number>()
+const NOT_VIP_HINT_TTL = 2 * 3600_000
+
+/**
  * 播放端要主动提示的账号问题。
- * 只挑「已失效」——待复查/未校验属于提醒，不该在播放时打断用户；
- * 失效则是「正在掉音质」的确定事实，值得弹一次。
+ *
+ * 两类混在一起会让用户白忙：失效要「重新登录」，非会员「重新登录也没用」。
+ *   - expired：Cookie 过期/被顶掉 —— 指引重新登录
+ *   - notVip：登录正常但没会员权益 —— 指引开会员/换号（仅记录 2 小时内真实触发过的）
+ * 待复查/未校验属于提醒，不该在播放时打断用户，不在此列。
  */
 export function getAccountHints(): AccountHint[] {
-  return store.listAccounts()
-    .filter(r => r.configured && r.health === 'expired')
-    .map(r => ({
-      platform: r.id,
-      name: r.name,
-      health: r.health,
-      text: `${r.name}账号已失效，高音质会退回试听或匿名通道，请到后台「平台账号」重新登录或更新 Cookie`,
-    }))
+  const hints: AccountHint[] = []
+  for (const r of store.listAccounts()) {
+    if (!r.configured) continue
+    if (r.health === 'expired') {
+      hints.push({
+        platform: r.id,
+        name: r.name,
+        health: r.health,
+        kind: 'expired',
+        text: `${r.name}账号已失效，高音质会退回试听或匿名通道，请到后台「平台账号」重新登录或更新 Cookie`,
+      })
+      continue
+    }
+    const at = notVipHintAt.get(r.id) ?? 0
+    if (at && Date.now() - at < NOT_VIP_HINT_TTL) {
+      hints.push({
+        platform: r.id,
+        name: r.name,
+        health: r.health,
+        kind: 'notVip',
+        text: `${r.name}账号登录正常，但当前不是会员 —— 会员歌曲取不到高音质（重新登录无效；需开通会员，或在后台把有会员的冷备号设为「主账号」）`,
+      })
+    }
+  }
+  return hints
 }
 
 // ---- 扫码登录（网易云 / QQ / 微信 / 酷狗 / 酷狗概念版） ----
