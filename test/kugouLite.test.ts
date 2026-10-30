@@ -72,3 +72,37 @@ test('平台定义：kglite 已注册且支持扫码登录', () => {
   assert.ok(p!.qrLogins && p!.qrLogins.length > 0, '必须提供扫码登录入口')
   assert.equal(p!.qrLogins![0].driver, 'kglite')
 })
+
+// —— 领取：错误码口径与连领间隔（2026-10-30 按上游实现纠正） ——
+
+test('领取错误码：130012 是「今日已领取」，不是失败', () => {
+  // 上游 KGM-AUTO-CHECKIN main.js:198、tgbot KuGouLogic.kt:252 都当正常终态
+  const text = kglite.claimErrorText({ status: 0, error_code: 130012 })
+  assert.match(text, /今日已领取/)
+  assert.doesNotMatch(text, /不可用/)
+})
+
+test('领取错误码：30002 / 20028 / 20018 各有独立人话', () => {
+  assert.match(kglite.claimErrorText({ error_code: 30002 }), /次数已用光/)
+  assert.match(kglite.claimErrorText({ error_code: 20028 }), /人机验证/)
+  assert.match(kglite.claimErrorText({ error_code: 20018 }), /登录态已失效/)
+})
+
+test('领取错误码：未知码兜底带上 status 与 error_code，不吞信息', () => {
+  const text = kglite.claimErrorText({ status: 0, error_code: 999 })
+  assert.match(text, /status=0/)
+  assert.match(text, /error_code=999/)
+})
+
+test('连领间隔必须 ≥30 秒（play_start/play_end 固定差 30000ms）', () => {
+  // 间隔短于 30 秒会让两次上报的播放时间段重叠，明显是脚本
+  assert.ok(kglite.AD_CLAIM_INTERVAL_MS >= 30_000, `实际 ${kglite.AD_CLAIM_INTERVAL_MS}ms`)
+  // 也不要太夸张，8 次要在一次定时任务窗口内跑完
+  assert.ok(kglite.AD_CLAIM_INTERVAL_MS <= 60_000)
+})
+
+test('每日额度常量与上游一致：8 次 × 3 小时 = 24 小时', () => {
+  assert.equal(kglite.DAILY_CLAIM_LIMIT, 8)
+  assert.equal(kglite.HOURS_PER_CLAIM, 3)
+  assert.equal(kglite.DAILY_CLAIM_LIMIT * kglite.HOURS_PER_CLAIM, 24)
+})

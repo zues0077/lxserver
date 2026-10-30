@@ -5859,7 +5859,7 @@ class App {
                     const t = new Date(d.nextRunAt).toLocaleString('zh-CN', {
                         hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
                     });
-                    nextEl.textContent = `下一轮：${t}（白天每 3 小时一轮；`
+                    nextEl.textContent = `下一轮：${t}（白天每 3 小时一轮，每轮把当日额度领满；`
                         + `${typeof d.minRemainHours === 'number' && d.minRemainHours <= 0
                             ? '不看剩余，每轮都补）'
                             : `VIP 剩余少于 ${d.minRemainHours} 小时才补，够用就跳过）`}`;

@@ -196,3 +196,56 @@ test('旧版本回写 cookie 时，以旧字段为准（降级一致性）', () 
   assert.equal(store.listAccountItems('kglite').length, 1)
   reset()
 })
+
+// ---- setAccountUid：把「平台接口问出来的身份」补进库 ----
+//
+// 场景：咪咕浏览器 Cookie 没有 userid，保存时是「按 Cookie 指纹」或「覆盖主账号」落的库，
+// 巡检时 queryUserInfo 答出 userId，必须补记下来，否则下次同步还是认不出号。
+
+test('setAccountUid：原本没有 uid 时补上（主账号）', () => {
+  reset()
+  store.addCookie('kglite', COOKIE_A)
+  assert.equal(store.setAccountUid('kglite', undefined, '98765432109876543210987'), true)
+  // 补身份不能把 Cookie 弄丢
+  assert.equal(store.getCookie('kglite'), COOKIE_A)
+  const file = JSON.parse(fs.readFileSync(store.getStoreFilePath(), 'utf-8'))
+  assert.equal(file.accounts.kglite.items[0].uid, '98765432109876543210987')
+  reset()
+})
+
+test('setAccountUid：已有相同 uid 时不重复写（幂等）', () => {
+  reset()
+  store.addCookie('kglite', COOKIE_A, { uid: '98765432109876543210987' })
+  assert.equal(store.setAccountUid('kglite', undefined, '98765432109876543210987'), false)
+  reset()
+})
+
+test('setAccountUid：已有不同 uid 时不覆盖（那是另一个号，静默改写会抹掉身份）', () => {
+  reset()
+  store.addCookie('kglite', COOKIE_A, { uid: 'old-uid-111' })
+  assert.equal(store.setAccountUid('kglite', undefined, 'new-uid-222'), false)
+  const file = JSON.parse(fs.readFileSync(store.getStoreFilePath(), 'utf-8'))
+  assert.equal(file.accounts.kglite.items[0].uid, 'old-uid-111')
+  reset()
+})
+
+test('setAccountUid：指定 itemId 只动那一条，不碰主账号', () => {
+  reset()
+  store.addCookie('kglite', COOKIE_A)
+  const second = store.addCookie('kglite', COOKIE_B)
+  assert.equal(store.setAccountUid('kglite', second.itemId, 'uid-bbb'), true)
+  const file = JSON.parse(fs.readFileSync(store.getStoreFilePath(), 'utf-8'))
+  const items = file.accounts.kglite.items
+  assert.equal(items.find((i: any) => i.id === second.itemId).uid, 'uid-bbb')
+  assert.equal(items.find((i: any) => i.primary).uid, undefined, '主账号不该被顺带写身份')
+  reset()
+})
+
+test('setAccountUid：空 uid 或未知平台直接拒绝', () => {
+  reset()
+  store.addCookie('kglite', COOKIE_A)
+  assert.equal(store.setAccountUid('kglite', undefined, ''), false)
+  assert.equal(store.setAccountUid('kglite', undefined, '   '), false)
+  assert.equal(store.setAccountUid('nope', undefined, '123456789'), false)
+  reset()
+})

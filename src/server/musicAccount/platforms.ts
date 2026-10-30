@@ -185,12 +185,18 @@ export const PLATFORMS: MusicAccountPlatform[] = [
     short: '咪咕',
     cookieDomain: 'music.migu.cn',
     loginKeys: ['*ticket*', '*utoken*', '*pacmtoken*', 'migu_music*', 'mg_auth*', 'pusk', 'userid'],
+    // 登录判据里 `*utoken*` 会把 migu-utoken-sessionid 也算进去，但那只是会话标记，
+    // 接口只认 pacmtoken（缺了必回 299999 uid不能为空）。所以单独盯这一个字段，
+    // 只复制到会话字段时界面要当场提示，而不是等到取链失败才发现「填了却播不了」。
+    essentialKey: 'pacmtoken',
+    essentialHint: '缺少 pacmtoken：咪咕接口只认这张短期票，只有 migu-utoken-sessionid 之类会话字段取不到登录态（会回 299999）',
     uidKeys: ['userid'],
     guide: [
       '打开 https://music.migu.cn 并登录，登录后播放一首歌',
       'F12 →「网络 / Network」，筛选 music.migu.cn',
       '点 listen-url 这类音频接口，复制请求标头里的 Cookie 整行',
       '关键字段：pacmtoken（新版网页登录后必定有），另外 idmpauth / migu-utoken-sessionid / LTToken 也算',
+      '浏览器 Cookie 里没有 userid 也不影响：保存时会向平台确认是哪个号，一键同步不会顶掉主账号',
       '未登录只能拿到 PQ(128k)，带登录 Cookie 才有 HQ(320k) / SQ',
     ],
     benefit: '登录后可解锁 HQ(320k)、SQ 无损音质',

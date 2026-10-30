@@ -149,6 +149,10 @@ export async function tryResolveByAccount(
     try {
       const result = await withDeadline(resolver.resolve(songInfo, quality, cookie), perChannel)
       if (result?.ok && result.url) {
+        // 取链过程中平台续了新证（咪咕 pacmtoken）：立刻写回主账号，下次播放就不用再换票
+        if (result.refreshedCookie) {
+          store.setCookie(id, result.refreshedCookie)
+        }
         // 汽水特有：签名器通道（signer:*）才是「真的用上了账号」。
         // 命中 h5/seo 明文通道说明账号没起作用 —— 要么这首歌本来就免费，
         // 要么账号已经过期。交给 noteSodaAnonymousLink 统一判断并复核（30 分钟冷却）。
@@ -345,6 +349,21 @@ export async function verifyAccount(id: string, itemId?: string): Promise<Accoun
   if (!itemId && info.ok && typeof info.isVip === 'boolean') {
     vipCache.set(id, { at: Date.now(), isVip: info.isVip })
   }
+  // 平台在校验过程中顺带续了新证（目前只有咪咕 pacmtoken）：必须立刻落库，
+  // 否则这次续期等于白续 —— 下次请求还在用旧票，3 小时后照样失效。
+  if (info.refreshedCookie && info.refreshedCookie !== cookie) {
+    if (itemId) store.addCookie(id, info.refreshedCookie, { itemId })
+    else store.setCookie(id, info.refreshedCookie)
+    console.log(`[平台账号] ${platform.name} 短期凭证已自动续期并写回（${platform.name}账号「${itemId || '主账号'}」）`)
+  }
+  // 平台顺带把「这是哪个号」也答了（咪咕 queryUserInfo 的 userId）：
+  // 老数据 / 浏览器 Cookie 存的号本来没有 uid，认过一次就落库，
+  // 下次一键同步才能按号认领，而不是又变成「认不出 → 覆盖主账号」。
+  if (info.ok && info.uid) {
+    if (store.setAccountUid(id, itemId, info.uid)) {
+      console.log(`[平台账号] ${platform.name}账号「${itemId || '主账号'}」已补记身份 uid（以后一键同步能按号认领）`)
+    }
+  }
   store.saveVerifyResult(id, {
     at: Date.now(),
     ok: info.ok,
@@ -431,6 +450,33 @@ function actionMessage(
 export { extractAccountIdentity } from './identity'
 export type { AccountIdentity } from './identity'
 
+/** 保存链路问平台要账号身份的预算：用户正在界面上等结果，不能为了认号把人卡住 */
+const REMOTE_UID_TIMEOUT_MS = 6000
+/** 顺手确认「没有身份的老条目」用的预算：纯迁移路径，值不值得多等这几秒要掂量 */
+const ORPHAN_UID_TIMEOUT_MS = 3000
+
+/**
+ * 问平台「这份 Cookie 是哪个号」，取不到返回空串。
+ *
+ * 只有实现了 `resolveUid` 的 resolver 才会真发请求（目前只有咪咕）。
+ * 不抛错 —— 认号是**优化**，不是保存的硬前置；失败由调用方决定怎么兜底。
+ */
+async function probeUid(platform: string, cookie: string, ms: number): Promise<string> {
+  const fn = RESOLVERS[platform]?.resolveUid
+  if (!fn) return ''
+  try {
+    return String(await withDeadline(fn(cookie), ms) || '').trim()
+  } catch (e: any) {
+    console.log(`[平台账号] ${getPlatform(platform)?.name ?? platform}：账号身份查询失败（${e?.message || e}）`)
+    return ''
+  }
+}
+
+/** 日志里露一半：uid 是账号标识，不是凭据，但没必要整串上日志 */
+function maskUid(uid: string): string {
+  return uid.length <= 8 ? uid : `${uid.slice(0, 4)}…${uid.slice(-4)}`
+}
+
 /**
  * 保存账号：先把用户粘进来的任意内容归一化成 Cookie 头再落库。
  *
@@ -443,12 +489,17 @@ export type { AccountIdentity } from './identity'
  *   同号更新那一条，新号追加为冷备（不抢主账号），平台没有稳定 uid 才覆盖主账号。
  *   显式传 `append: true`（界面「添加账号」）或 `itemId`（编辑某一条）时按调用方说的做。
  *   这样插件一键同步不用再问用户「要不要追加」，也不会一推就把主号覆盖掉。
+ *
+ * 2026-10-30 补：**「Cookie 里没有稳定 uid」不等于「平台认不出号」**。
+ * 咪咕浏览器登录的 Cookie 只有会话字段（idmpauth / pacmtoken / migu-utoken-sessionid），
+ * 没有 userid，于是老逻辑一律走 setCookie 覆盖主账号 —— 用户就踩到了这个数据损失。
+ * 现在改为先问一次平台（resolver.resolveUid），问到 userId 就正常认号。
  */
-export function saveAccount(
+export async function saveAccount(
   platform: string,
   rawCookie: string,
   opts: { itemId?: string; label?: string; primary?: boolean; append?: boolean } = {},
-): SaveAccountResult {
+): Promise<SaveAccountResult> {
   const p = getPlatform(platform)
   if (!p) return { success: false, error: `不支持的平台：${platform}` }
 
@@ -491,11 +542,52 @@ export function saveAccount(
   // 勾了怕多出账号、不勾怕覆盖主号。现在把这个判断交给 Cookie 本身：
   //   1. Cookie 里的稳定 uid / 指纹命中已有条目 → 只更新那一条（重推同一个号，列表不变长）
   //   2. 有稳定 uid 但没命中 = 没见过的号 → 追加为冷备，不动主账号
-  //   3. 平台没有稳定 uid（网易 MUSIC_U、汽水 sessionid 每次都变）→ 沿用老语义：覆盖主账号
+  //   3. Cookie 里没有稳定 uid 时**先问平台**（咪咕：queryUserInfo 的 userId），
+  //      问到了就按第 1/2 条走；真问不出来才算「认不出」——
+  //      此时若已有账号就拒收（否则覆盖主账号等于拿坏 Cookie 换掉好号），一个号都没有才照老语义存
   // 显式传 itemId / append 时仍按调用方说的做（后台「添加账号」「编辑账号」走这条）。
   const forcedItem = !!(opts.append || opts.itemId)
   const ident = extractAccountIdentity(platform, parsed.cookie)
-  const matched = forcedItem ? null : store.findItemByIdentity(platform, ident)
+  // 平台能不能「问出这是哪个号」—— 能问的平台才有后面那套保护
+  const canIdentify = !!RESOLVERS[platform]?.resolveUid
+  // Cookie 里没有稳定 uid 时，先问一次平台「这是哪个号」。
+  // 这一步是「覆盖主账号」这个老问题的正解：认不出号才会走 setCookie，
+  // 而 setCookie 会直接改写主账号的 Cookie —— 推一个别的号上来就是数据损失。
+  let uidFromPlatform = ''
+  if (!ident.uid && canIdentify) {
+    uidFromPlatform = await probeUid(platform, parsed.cookie, REMOTE_UID_TIMEOUT_MS)
+    if (uidFromPlatform) {
+      ident.uid = uidFromPlatform
+      console.log(`[平台账号] ${p.name}：Cookie 里没有稳定 uid，已向平台确认账号身份（${maskUid(uidFromPlatform)}）`)
+    }
+  }
+  let matched = forcedItem ? null : store.findItemByIdentity(platform, ident)
+  // 认出了号、但列表里没有 → 回头确认一次「没有身份记录的老条目」（最多 1 条，优先主账号）。
+  // 不补这一步的后果：咪咕主账号本来就是用浏览器 Cookie 存的（没有 userid），
+  // 再同步同一个号时按 uid 找不到人，就会平白多出一个一模一样的冷备号。
+  if (!matched && !forcedItem && ident.uid) {
+    const orphans = store.getCookies(platform).filter(c => !c.uid)
+    const orphan = orphans.find(c => c.primary) || orphans[0]
+    if (orphan) {
+      const uid = await probeUid(platform, orphan.cookie, ORPHAN_UID_TIMEOUT_MS)
+      if (uid && uid === ident.uid) {
+        matched = { id: orphan.id, label: orphan.label, primary: orphan.primary }
+        console.log(`[平台账号] ${p.name}：老条目「${orphan.label}」原来没有身份记录，已确认是同一个号，按更新处理`)
+      }
+    }
+  }
+  // 认不出号 + 没匹配 = 下一步必然走 setCookie 覆盖主账号。
+  // 对能问出身份的平台，这基本意味着 Cookie 已失效（咪咕票过期就回 299999），
+  // 拿一份坏 Cookie 换掉手上的号不划算：宁可拒收，让用户重新登录。
+  // 平台一个号都没有时不拦 —— 没有可保护的对象，先存下来再说。
+  if (!forcedItem && !matched && !ident.uid && canIdentify && store.listAccountItems(platform).length > 0) {
+    console.log(`[平台账号] 保存 ${platform} 被拒：无法确认账号身份，为避免覆盖主账号`)
+    return {
+      success: false,
+      error: `无法确认这份 Cookie 属于哪个号（${p.name}接口没有返回用户信息，通常是登录凭证已过期）。`
+        + '为避免覆盖主账号，本次没有保存：请重新登录后再同步；如果确认这是另一个号，可以用「添加账号」显式追加',
+    }
+  }
   const res = forcedItem
     ? store.addCookie(platform, parsed.cookie, { itemId: opts.itemId, label: opts.label, primary: opts.primary, ...ident })
     : matched
@@ -531,6 +623,7 @@ export function saveAccount(
     + `（${parsed.keys.slice(0, 14).join(', ')}${parsed.keys.length > 14 ? ' …' : ''}），`
     + `${parsed.cookie.length} 字符`
     + `，${ACTION_LOG[action]}`
+    + (uidFromPlatform ? '，账号身份取自平台接口（Cookie 里没有 userid）' : '')
     + ((res as any).total !== undefined ? `（共 ${(res as any).total} 个账号）` : '')
     + (matched ? `，命中${matched.primary ? '主账号' : '已有账号'}「${matched.label}」` : '')
     + (warnings.length ? `；提示：${warnings.join('；')}` : ''),
@@ -1027,10 +1120,28 @@ function findLiteAccount(itemId?: string) {
 const vipInflight = new Set<string>()
 
 /**
+ * 当天额度已领满的账号（itemId → 日期串）。
+ *
+ * 目的：8 轮定时任务里，第 1 轮就把 8 次额度领完了，后面 7 轮不该再去打平台接口
+ * （空转也要 1 次 play_report + 1 次听歌上报，纯属给风控添素材）。
+ * 只放内存：重启后忘掉不要紧，下一轮第一次请求返回 30002 会重新记上。
+ */
+const liteAdExhaustedAt = new Map<string, string>()
+
+function liteDayKey(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/**
  * 立即给某个账号领一次概念版 VIP（听歌 + 看广告）。
  * @param itemId 指定账号；省略时用主账号
+ * @param opts.internal 自动连领模式（定时任务）：跳过 90 秒手动冷却、按额度连领
  */
-export async function claimKugouLiteVip(itemId?: string): Promise<kglite.ClaimVipResult> {
+export async function claimKugouLiteVip(
+  itemId?: string,
+  opts: { internal?: boolean; maxAdTimes?: number } = {},
+): Promise<kglite.ClaimVipResult> {
   const acct = findLiteAccount(itemId)
   if (!acct) {
     return { ok: false, gainedHours: 0, steps: [], error: '尚未配置酷狗概念版账号，请先扫码或短信登录' }
@@ -1042,7 +1153,16 @@ export async function claimKugouLiteVip(itemId?: string): Promise<kglite.ClaimVi
   }
   vipInflight.add(acct.id)
   try {
-    const res = await kglite.claimVip(acct.cookie)
+    const adExhausted = liteAdExhaustedAt.get(acct.id) === liteDayKey()
+    const res = await kglite.claimVip(acct.cookie, {
+      internal: opts.internal,
+      maxAdTimes: opts.maxAdTimes,
+      adExhausted: opts.internal ? adExhausted : false,
+    })
+    // done >= total 说明今天额度用光，后续轮次直接跳过
+    if (res.adDone !== undefined && res.adTotal !== undefined && res.adTotal > 0 && res.adDone >= res.adTotal) {
+      liteAdExhaustedAt.set(acct.id, liteDayKey())
+    }
     await refreshKugouLiteStatus(acct.cookie, acct.primary ? undefined : acct.id)
     return res
   } finally {
@@ -1339,10 +1459,13 @@ export async function runKugouLiteAutoClaim(opts: { force?: boolean } = {}): Pro
       continue
     }
 
-    const res = await claimKugouLiteVip(acct.id)
+    // 一轮内把当天额度领满（平台 8 次 × 3 小时 = 24 小时，刚好覆盖一天）；
+    // 之后的轮次会因为 done>=total 自动空转，只留一行日志，不再打扰平台。
+    const res = await claimKugouLiteVip(acct.id, { internal: true, maxAdTimes: kglite.DAILY_CLAIM_LIMIT })
+    const quota = res.adDone !== undefined ? `，今日额度 ${res.adDone}/${res.adTotal ?? kglite.DAILY_CLAIM_LIMIT}` : ''
     console.log(
       `[平台账号] 概念版自动补领｜${acct.label}（领取前剩余 ${vip.remainHours} 小时）：`
-      + `${res.ok ? `获得 ${res.gainedHours} 小时` : '未获得'}`
+      + `${res.ok ? `获得 ${res.gainedHours} 小时` : '未获得'}${quota}`
       + `${res.remainHours !== undefined ? `，现剩余 ${res.remainHours} 小时` : ''}`
       + `${res.ok ? '' : `（${res.error || ''}）`}`,
     )
@@ -1387,7 +1510,7 @@ function scheduleNextAutoClaim(): void {
   const pad = (n: number) => String(n).padStart(2, '0')
   const when = new Date(at)
   console.log(
-    `[平台账号] 酷狗概念版 VIP 自动领取已排程：每天 ${pad(cfg.startHour)}:00 起，每 ${AUTO_CLAIM_ROUND_GAP_HOURS} 小时一轮（共 ${AUTO_CLAIM_ROUNDS} 轮）；`
+    `[平台账号] 酷狗概念版 VIP 自动领取已排程：每天 ${pad(cfg.startHour)}:00 起，每 ${AUTO_CLAIM_ROUND_GAP_HOURS} 小时一轮（共 ${AUTO_CLAIM_ROUNDS} 轮，每轮把当日额度连领到满）；`
     + `${cfg.minRemainHours > 0 ? `剩余不足 ${cfg.minRemainHours} 小时才领` : '不看剩余、每轮都补'}，账号间隔 ${cfg.gapMinSeconds}~${cfg.gapMaxSeconds} 秒随机；`
     + `下一轮 ${when.getMonth() + 1}/${when.getDate()} ${pad(when.getHours())}:${pad(when.getMinutes())}`,
   )

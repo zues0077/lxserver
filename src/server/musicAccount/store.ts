@@ -371,13 +371,17 @@ export function getCookie(id: string): string {
   return decryptSafe(id, item.cookie)
 }
 
-/** 取某平台全部账号的明文 Cookie（领 VIP 时逐个执行） */
-export function getCookies(id: string): Array<{ id: string; label: string; primary: boolean; cookie: string }> {
+/**
+ * 取某平台全部账号的明文 Cookie（领 VIP 时逐个执行）。
+ * uid 一并带出来：保存链路要靠它判断「哪些条目还没有身份记录」。
+ */
+export function getCookies(id: string): Array<{ id: string; label: string; primary: boolean; uid?: string; cookie: string }> {
   const acc = normalize(readStore().accounts[id])
   return (acc?.items || []).map((it, idx) => ({
     id: it.id,
     label: it.label || (it.primary ? '主账号' : `账号 ${idx + 1}`),
     primary: !!it.primary,
+    ...(it.uid ? { uid: it.uid } : {}),
     cookie: decryptSafe(id, it.cookie),
   })).filter(a => a.cookie.trim().length > 0)
 }
@@ -573,6 +577,37 @@ export function removeAccountItem(id: string, itemId: string): { success: boolea
   }
   writeStore(store)
   return { success: true }
+}
+
+/**
+ * 补写某个账号的身份 uid —— 用于「Cookie 里本来没有稳定 id，平台接口能问出来」的情况
+ * （目前只有咪咕：浏览器 Cookie 没有 userid，queryUserInfo 会返回 userId）。
+ *
+ * 两条纪律：
+ *   1) **只在本来没有 uid 时补**。已有 uid 却与本次识别结果不同，说明这条的 Cookie
+ *      已经被另一个号替换（或平台改了 id 口径）；此时静默改写会抹掉原身份，
+ *      反而更难查，所以只留一条告警、保持原值。
+ *   2) 不改 Cookie、不清 lastVerify —— 补身份不改变「这份登录态验证过」这个事实。
+ *
+ * @param itemId 指定账号；不传则作用于主账号
+ * @returns 是否真的写入了
+ */
+export function setAccountUid(id: string, itemId: string | undefined, uid: string): boolean {
+  const text = String(uid || '').trim()
+  if (!text || !getPlatform(id)) return false
+  const store = readStore()
+  const acc = normalize(store.accounts[id])
+  if (!acc?.items?.length) return false
+  const item = itemId ? acc.items.find(i => i.id === itemId) : primaryItem(acc)
+  if (!item) return false
+  if (item.uid === text) return false
+  if (item.uid) {
+    console.log(`[平台账号] ${id} 账号「${item.id}」已有身份 uid，与本次识别结果不一致，保持原值不变`)
+    return false
+  }
+  item.uid = text
+  writeStore(store)
+  return true
 }
 
 /** 设为主账号（取链只走主账号） */

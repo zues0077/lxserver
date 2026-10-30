@@ -38,6 +38,7 @@ import { setUserAuthVerifier } from './userAuth'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
 import { checkPersistentVolumes } from './volumeCheck'
+import { ensureWritableDir, isUnsafeFilesystemPath } from '@/utils/fsSafePath'
 import * as customMusicManager from './customMusicManager'
 import * as serverDownloadQueue from './serverDownloadQueue'
 import * as remasterQueue from './remasterQueue'
@@ -2529,6 +2530,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     if (/[<>"|?*]/.test(trimmedMusicDir)) {
                       res.writeHead(422, { 'Content-Type': 'application/json' })
                       res.end(JSON.stringify({ success: false, error: '自定义音乐目录包含非法字符 (< > " | ? *)' }))
+                      return
+                    }
+                    // 虚拟 / 系统目录先拦掉：在 /proc 这类位置同步 mkdir 会让进程进入不可中断等待，
+                    // HTTP 与看门狗一起失效，只能重启容器（2026-10-30 实测，见 fsSafePath 注释）
+                    if (isUnsafeFilesystemPath(trimmedMusicDir)) {
+                      res.writeHead(422, { 'Content-Type': 'application/json' })
+                      res.end(JSON.stringify({ success: false, error: `自定义音乐目录不能指向系统或虚拟目录 (${trimmedMusicDir})` }))
                       return
                     }
                     try {
@@ -9504,7 +9512,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         }
 
         if (req.method === 'POST') {
-          void readBody(req).then(body => {
+          void readBody(req).then(async body => {
             try {
               const newConfig = JSON.parse(body)
               if (newConfig.serverName !== undefined) global.lx.config.serverName = newConfig.serverName
@@ -9663,27 +9671,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
 
               // [路径合法性校验] 校验配置备份目录与歌单快照路径
-              const validateDirectoryPath = (rawPath: string, fieldName: string): string => {
-                const trimmed = rawPath.trim()
-                if (!trimmed) return ''
-                // 检查系统非法字符 (如 < > " | ? *)
-                if (/[<>"|?*]/.test(trimmed)) {
-                  throw new Error(`${fieldName} 包含非法字符 (< > " | ? *)`)
-                }
-                const resolved = path.isAbsolute(trimmed) ? trimmed : path.join(global.lx.dataPath, trimmed)
-                // 尝试创建目录检测有效性与写入权限
-                try {
-                  fs.mkdirSync(resolved, { recursive: true })
-                  fs.accessSync(resolved, fs.constants.W_OK)
-                } catch (e: any) {
-                  throw new Error(`${fieldName} 路径无效或无写入权限 (${resolved}): ${e.message || e}`)
-                }
-                return trimmed
-              }
-
+              // 注意：这里**不能**用 fs.mkdirSync。对 /proc 之类的虚拟文件系统同步 mkdir 会让
+              // 进程进入不可中断等待，HTTP 与看门狗一起失效，只能重启容器（2026-10-30 实测）。
+              // 统一走 ensureWritableDir：黑名单 → 异步 mkdir + access → 超时兜底。
               if (newConfig['configBackup.dir'] !== undefined) {
                 try {
-                  global.lx.config['configBackup.dir'] = validateDirectoryPath(String(newConfig['configBackup.dir']), '配置备份目录')
+                  global.lx.config['configBackup.dir'] = await ensureWritableDir(String(newConfig['configBackup.dir']), {
+                    baseDir: global.lx.dataPath,
+                    fieldName: '配置备份目录',
+                  })
                 } catch (err: any) {
                   res.writeHead(422, { 'Content-Type': 'application/json' })
                   res.end(JSON.stringify({ success: false, error: err.message }))
@@ -9693,7 +9689,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
               if (newConfig['snapshot.backupPath'] !== undefined) {
                 try {
-                  global.lx.config['snapshot.backupPath'] = validateDirectoryPath(String(newConfig['snapshot.backupPath']), '歌单快照备份路径')
+                  global.lx.config['snapshot.backupPath'] = await ensureWritableDir(String(newConfig['snapshot.backupPath']), {
+                    baseDir: global.lx.dataPath,
+                    fieldName: '歌单快照备份路径',
+                  })
                 } catch (err: any) {
                   res.writeHead(422, { 'Content-Type': 'application/json' })
                   res.end(JSON.stringify({ success: false, error: err.message }))
@@ -10252,7 +10251,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               + `${append ? '，显式追加新账号' : itemId ? `，更新账号 ${itemId}` : '，按 Cookie 身份自动认号'}`)
             // 用户粘进来的可能是 Cookie 头 / cURL / Netscape 文件 / JSON，
             // 统一在保存时归一化，避免「填了却播不了」
-            const result = musicAccount.saveAccount(String(platform || ''), String(cookie || ''), {
+            const result = await musicAccount.saveAccount(String(platform || ''), String(cookie || ''), {
               itemId: itemId ? String(itemId) : undefined,
               label: label !== undefined ? String(label) : undefined,
               primary: primary === undefined ? undefined : !!primary,

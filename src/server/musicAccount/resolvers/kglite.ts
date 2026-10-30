@@ -532,7 +532,26 @@ export interface ClaimVipResult {
   claimedToday?: boolean
   /** 领取后剩余 VIP 小时 */
   remainHours?: number
+  /**
+   * 广告额度进度（来自 play_report 返回的 data.done / data.total，实测可信）。
+   * 自动轮用它在「今天已领满」时直接跳过后续轮次，避免每 3 小时白打一次接口。
+   */
+  adDone?: number
+  adTotal?: number
   error?: string
+}
+
+/** 领取选项：默认行为（什么都不传）= 手动点一次，只领 1 条广告 + 冷却保护 */
+export interface ClaimVipOptions {
+  /**
+   * 自动连领模式（定时任务用）：
+   * 跳过 90 秒手动冷却，并允许按 done/total 连领到额度用光。
+   */
+  internal?: boolean
+  /** 本次最多领几次广告（1~8）。默认 1；自动轮传 8，由平台 done/total 决定何时停。 */
+  maxAdTimes?: number
+  /** 调用方已知「当天额度已领满」，直接跳过广告那条（不发请求） */
+  adExhausted?: boolean
 }
 
 /** 今天是否已领过 VIP（month_vip_record 里是否有今天这条） */
@@ -563,18 +582,55 @@ export async function getTodayClaimCount(cookie: string): Promise<{ claimed: boo
 /**
  * 领 VIP 的错误码 → 人话。
  *
- * 实测两个码必须单独翻译，否则用户只会看到 status=0 一头雾水：
- *   30000  = 操作频繁（连着领会被风控挡住，隔一两分钟即可）
- *   130012 = 听歌任务当前不可用（平台侧限制，看广告那条不受影响）
+ * 130012 的口径纠正（2026-10-30）：上游 KGM-AUTO-CHECKIN（main.js:198）与 tgbot
+ * （KuGouLogic.kt:252）都把 130012 当「今日已领取」的正常终态，这跟平台实际行为一致
+ * （听歌任务一天只算一次）。早期这里误判成「平台侧限制」，导致每天刷 7 条假失败日志。
  */
-function claimErrorText(b: any): string {
+export function claimErrorText(b: any): string {
   const code = Number(b?.error_code ?? b?.errcode) || 0
   const raw = String(b?.error_msg || b?.error || b?.msg || b?.message || '').trim()
   if (code === 30000) return '操作过于频繁，请等一两分钟再试（平台风控）'
-  if (code === 130012) return '听歌任务当前不可用（平台侧限制），用「看广告」那条即可'
+  if (code === 130012) return '今日已领取（130012）'
+  if (code === 30002) return '今日领取次数已用光（30002）'
+  if (code === 20018) return '登录态已失效（20018），需要重新扫码或短信登录'
+  if (code === 20006) return '请求被限流（20006），稍后再试'
+  if (code === 20028) return '触发平台人机验证（20028），本次跳过'
   if (raw) return raw
   return `status=${b?.status ?? '-'}${code ? `，error_code=${code}` : ''}`
 }
+
+/**
+ * 终态错误码：见到就停，不再继续连领。
+ * 这些都不是「等一会儿就能好」的错误，继续打只会加重风控。
+ */
+const AD_TERMINAL_CODES = new Set([130012, 30002, 20018, 20028])
+
+/**
+ * 自动连领时两次广告上报之间的间隔。
+ *
+ * 不能比 30 秒短：上报体里 `play_start = now - 30000`、`play_end = now`，
+ * 固定表示「刚看完一条 30 秒广告」，间隔短于 30 秒会让两段播放时间重叠，
+ * 一眼就是脚本（主流实现取 30 秒 / 35 秒，这里取 32 秒留 2 秒余量）。
+ */
+export const AD_CLAIM_INTERVAL_MS = 32_000
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/** 本机日期串，用于「听歌任务今天已经报过」的去重 */
+function todayKey(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/**
+ * 听歌上报去重表（userid → 日期串）。
+ *
+ * 听歌任务平台侧一天只认一次，重复上报只会拿回 130012。放内存即可：
+ * 即使重启后忘了，再报一次也是「今日已领取」，不会误判成失败。
+ */
+const listenDoneAt = new Map<string, string>()
 
 /**
  * 两次领取之间的最小间隔。平台对连续领取有风控（实测隔几十秒就返回 30000 操作频繁），
@@ -588,90 +644,141 @@ const CLAIM_COOLDOWN_MS = 90_000
 const lastClaimAt = new Map<string, number>()
 
 /**
- * 领概念版 VIP：听歌领一次 + 看广告领一次。
+ * 领概念版 VIP：听歌领一次 + 看广告领（按额度连领）。
  *
- * 实测口径：看广告每次 +3 小时、每天 8 次额度，合计覆盖 24 小时；
- * 听歌那条经常返回 130012（平台侧不可用），所以它是**加分项**，
- * 失败不影响整体判定（只要有一条领到就算成功）。
+ * 实测口径（2026-10-30，在 246 主号实领验证）：
+ *   - 看广告每次 +3 小时、每天 8 次额度，返回体带 `done/total/remain/award_vip_hour`；
+ *     8 次合计 24 小时，刚好覆盖一天，所以漏一次就是净 -3 小时；
+ *   - 听歌任务平台一天只认一次，重复上报返回 130012（今日已领取，不是失败）。
+ *
+ * 因此：听歌那条每天只报一次；广告在自动模式下连领到 `remain<=0 / 30002 / 满 8 次`。
+ * 手动点按钮仍只领一次（maxAdTimes 默认 1），90 秒冷却也只管手动。
  */
-export async function claimVip(cookie: string): Promise<ClaimVipResult> {
+export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Promise<ClaimVipResult> {
   if (!hasLiteCreds(cookie)) {
     return { ok: false, gainedHours: 0, steps: [], error: '概念版账号凭据不完整，请先登录' }
   }
 
   const claimsKey = extractCreds(cookie).userid || 'default'
-  const since = Date.now() - (lastClaimAt.get(claimsKey) || 0)
-  if (lastClaimAt.has(claimsKey) && since < CLAIM_COOLDOWN_MS) {
-    const wait = Math.ceil((CLAIM_COOLDOWN_MS - since) / 1000)
-    return {
-      ok: false, gainedHours: 0, steps: [],
-      error: `刚领过，请等 ${wait} 秒再试（平台对连续领取有频率限制）`,
+  // 冷却只为挡手动连点；自动连领内部按 32 秒自己控间隔，不能被这道闸挡住。
+  if (!opts.internal) {
+    const since = Date.now() - (lastClaimAt.get(claimsKey) || 0)
+    if (lastClaimAt.has(claimsKey) && since < CLAIM_COOLDOWN_MS) {
+      const wait = Math.ceil((CLAIM_COOLDOWN_MS - since) / 1000)
+      return {
+        ok: false, gainedHours: 0, steps: [],
+        error: `刚领过，请等 ${wait} 秒再试（平台对连续领取有频率限制）`,
+      }
     }
   }
   lastClaimAt.set(claimsKey, Date.now())
 
   const steps: ClaimVipResult['steps'] = []
   let gained = 0
+  const day = todayKey()
 
-  // 1) 听歌领（加分项，失败不阻断）
-  try {
-    const r = await liteCall('/youth/v2/report/listen_song', cookie, {
-      method: 'POST',
-      params: { clientver: LISTEN_CLIENT_VER },
-      data: { mixsongid: LISTEN_MIXSONGID },
-      ua: LISTEN_UA,
-      timeout: 15000,
-    })
-    const b: any = r.body || {}
-    const ok = Number(b.status) === 1
-    const hours = Number(b?.data?.award_vip_hour) || (ok ? HOURS_PER_CLAIM : 0)
-    if (ok) gained += hours
-    steps.push({
-      name: '听歌领 VIP',
-      ok,
-      hours: ok ? hours : 0,
-      message: ok ? `+${hours} 小时` : claimErrorText(b),
-    })
-  } catch (e: any) {
-    steps.push({ name: '听歌领 VIP', ok: false, message: e?.message || String(e) })
+  // 1) 听歌领（加分项，失败不阻断；一天只报一次）
+  if (listenDoneAt.get(claimsKey) === day) {
+    steps.push({ name: '听歌领 VIP', ok: true, hours: 0, message: '今日已领取，不再重复上报' })
+  } else {
+    try {
+      const r = await liteCall('/youth/v2/report/listen_song', cookie, {
+        method: 'POST',
+        params: { clientver: LISTEN_CLIENT_VER },
+        data: { mixsongid: LISTEN_MIXSONGID },
+        ua: LISTEN_UA,
+        timeout: 15000,
+      })
+      const b: any = r.body || {}
+      const ok = Number(b.status) === 1
+      const code = Number(b?.error_code) || 0
+      const hours = Number(b?.data?.award_vip_hour) || (ok ? HOURS_PER_CLAIM : 0)
+      if (ok) gained += hours
+      // 130012 = 今日已领取，同样说明「这条今天不用再报了」
+      if (ok || code === 130012) listenDoneAt.set(claimsKey, day)
+      steps.push({
+        name: '听歌领 VIP',
+        ok: ok || code === 130012,
+        hours: ok ? hours : 0,
+        message: ok ? `+${hours} 小时` : claimErrorText(b),
+      })
+    } catch (e: any) {
+      steps.push({ name: '听歌领 VIP', ok: false, message: e?.message || String(e) })
+    }
   }
 
-  // 2) 看广告领（主通道）
-  try {
-    const now = Date.now()
-    const r = await liteCall('/youth/v1/ad/play_report', cookie, {
-      method: 'POST',
-      data: { ad_id: AD_ID, play_start: now - 30000, play_end: now },
-      timeout: 15000,
-    })
-    const b: any = r.body || {}
-    const ok = Number(b.status) === 1
-    const hours = Number(b?.data?.award_vip_hour) || (ok ? HOURS_PER_CLAIM : 0)
-    if (ok) gained += hours
-    const quota = b?.data
-    const quotaText = (quota && Number.isFinite(Number(quota.done)))
-      ? `（今日 ${quota.done}/${quota.total ?? DAILY_CLAIM_LIMIT}）`
-      : ''
-    steps.push({
-      name: '看广告领 VIP',
-      ok,
-      hours: ok ? hours : 0,
-      message: ok ? `+${hours} 小时${quotaText}` : claimErrorText(b),
-    })
-  } catch (e: any) {
-    steps.push({ name: '看广告领 VIP', ok: false, message: e?.message || String(e) })
+  // 2) 看广告领（主通道，可连领）
+  let adDone: number | undefined
+  let adTotal: number | undefined
+  if (opts.adExhausted) {
+    steps.push({ name: '看广告领 VIP', ok: true, hours: 0, message: '今日额度已领满，本轮跳过' })
+  } else {
+    const limit = Math.min(Math.max(1, Math.floor(opts.maxAdTimes ?? 1)), DAILY_CLAIM_LIMIT)
+    let lastMessage = ''
+    let okCount = 0
+    let totalHours = 0
+    for (let i = 0; i < limit; i++) {
+      // 第一次立刻发，之后每次隔 32 秒（必须 ≥30 秒，见 AD_CLAIM_INTERVAL_MS 注释）
+      if (i > 0) await sleep(AD_CLAIM_INTERVAL_MS)
+      const now = Date.now()
+      let b: any = {}
+      try {
+        const r = await liteCall('/youth/v1/ad/play_report', cookie, {
+          method: 'POST',
+          data: { ad_id: AD_ID, play_start: now - 30000, play_end: now },
+          timeout: 15000,
+        })
+        b = r.body || {}
+      } catch (e: any) {
+        lastMessage = e?.message || String(e)
+        break
+      }
+      const ok = Number(b.status) === 1
+      if (!ok) {
+        const code = Number(b?.error_code) || 0
+        lastMessage = claimErrorText(b)
+        // 30002（次数用光）/ 130012（今日已领）都是正常终态，不算失败，直接停
+        break
+      }
+      const data = b?.data || {}
+      const hours = Number(data.award_vip_hour) || HOURS_PER_CLAIM
+      gained += hours
+      totalHours += hours
+      okCount += 1
+      if (Number.isFinite(Number(data.done))) adDone = Number(data.done)
+      if (Number.isFinite(Number(data.total))) adTotal = Number(data.total)
+      // 额度用光就停，别再打第 9 次
+      const remain = Number(data.remain)
+      if (Number.isFinite(remain) && remain <= 0) break
+    }
+    const quotaText = adDone !== undefined ? `（今日 ${adDone}/${adTotal ?? DAILY_CLAIM_LIMIT}）` : ''
+    if (okCount > 0) {
+      steps.push({
+        name: '看广告领 VIP',
+        ok: true,
+        hours: totalHours,
+        message: `+${totalHours} 小时${quotaText}${okCount > 1 ? `，连领 ${okCount} 次` : ''}`,
+      })
+    } else {
+      steps.push({ name: '看广告领 VIP', ok: false, message: lastMessage || '未获得 VIP' })
+    }
   }
 
   const today = await getTodayClaimCount(cookie)
   const vip = await getVipInfo(cookie)
 
+  // 注意：getVipInfo 走的 batch_union_vipinfo 有秒级查询延迟，刚领完立刻查会拿到旧值
+  //（实测 expireAt 已 +3h、remainHours 还停在旧数）。判断有没有领到请看 gainedHours / adDone。
+  const allSettled = steps.every(s => s.ok)
   return {
     ok: gained > 0,
     gainedHours: gained,
     steps,
     claimedToday: today?.claimed,
     remainHours: vip.ok ? vip.remainHours : undefined,
-    error: gained > 0 ? undefined : '本次没有领到 VIP（多为今日额度已用完或触发频率限制）',
+    adDone,
+    adTotal,
+    error: gained > 0 || allSettled ? undefined : '本次没有领到 VIP（多为今日额度已用完或触发频率限制）',
   }
 }
 
