@@ -413,8 +413,6 @@ function mapAudioSong(raw: any): any {
     types: [
       { type: '128k' },
       { type: '192k' },
-      { type: '320k' },
-      { type: 'flac' },
     ],
     _types: {},
     typeUrl: {},
@@ -571,6 +569,10 @@ export async function searchPlaylists(keyword: string, page = 1): Promise<any> {
 
 /** 音频流（MAID）→ 直链，优先级高于视频（bvid）路径 */
 async function fetchAudioStream(auid: string, quality: string, cookie: string): Promise<BilibiliStream> {
+  // ⚠️ 2026-10-30 实测（手册 P-0959）：music-service-c/web/url 的 quality 参数（0=128K/1=192K/2=320K/3=FLAC，
+  // 见 wood3n/biu 项目的注释）**服务端实际忽略**——0/1/2/3 四档返回同一个文件。
+  // B站音频区每首歌只有官方上传的一档流，实测 112s/2.73MB ≈ 195kbps ≈ 192k AAC。
+  // 所以请求值只按档位给个建议值，返回时如实标 192k 上限，不虚标 320k/flac。
   const qMap: Record<string, number> = { '128k': 0, '192k': 1, '320k': 2, flac: 3, flac24bit: 3, atmos: 3, master: 3 }
   const qn = qMap[quality] ?? 2
   const params = new URLSearchParams({ sid: auid, privilege: '2', quality: String(qn) })
@@ -583,9 +585,11 @@ async function fetchAudioStream(auid: string, quality: string, cookie: string): 
   const cdns: string[] = Array.isArray(body.data?.cdns) ? body.data.cdns : []
   if (!cdns.length) throw new Error('B站音频未返回可用 cdns（可能无版权或需登录）')
   const isPreview = Number(body.data?.type) === -1
+  // 服务端忽略 quality：B站音频区实际最高 192k，高于此的请求如实降标
+  const actualQuality = (QUALITY_RANK[quality] ?? 3) > (QUALITY_RANK['192k'] ?? 3) ? '192k' : quality
   return {
     url: cdns[0],
-    quality,
+    quality: actualQuality,
     via: `audio:q${qn}${isPreview ? '(试听)' : ''}`,
     ext: extFromUrl(cdns[0]) || 'm4a',
   }
