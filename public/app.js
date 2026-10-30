@@ -5810,9 +5810,13 @@ class App {
 
     /** 删除单个账号（该平台的其他账号不受影响） */
     async removeMusicAccountItem(platform, itemId) {
+        const plat = (this._lastMusicAccounts?.accounts || []).find(x => x.id === platform)
+        const platName = plat?.name || platform
+        const item = (plat?.accounts || []).find(i => i.id === itemId)
+        const itemLabel = item?.label || itemId
         const ok = await (window.showConfirm
-            ? window.showConfirm('删除这个账号？', '只删除这一个账号，同平台的其他账号继续保留。确认继续？')
-            : Promise.resolve(window.confirm('确认删除这个账号？')));
+            ? window.showConfirm(`删除「${platName}」的账号「${itemLabel}」？`, '只删除这一个账号，同平台的其他账号继续保留。确认继续？')
+            : Promise.resolve(window.confirm(`确认删除「${platName}」的账号「${itemLabel}」？`)));
         if (!ok) return;
         try {
             await this.request('/api/music/accounts', {
@@ -6109,9 +6113,12 @@ class App {
     }
 
     async clearMusicAccount(platform) {
+        // 2026-10-30 事故教训：清除确认里不写平台名，误点相邻卡片会把别的平台账号全删掉。
+        // 确认弹窗必须点名「即将清除哪个平台」，让误点在确认一步就暴露出来。
+        const platName = (this._lastMusicAccounts?.accounts || []).find(x => x.id === platform)?.name || platform
         const ok = await (window.showConfirm
-            ? window.showConfirm('确认清除', '清除后将无法用该账号取链，需要重新填写 Cookie。确认继续？')
-            : Promise.resolve(window.confirm('确认清除该平台的账号 Cookie？')));
+            ? window.showConfirm(`确认清除「${platName}」`, `即将删除「${platName}」的全部账号（含备注名），清除后无法再用该账号取链，需要重新登录或填写 Cookie。确认继续？`)
+            : Promise.resolve(window.confirm(`确认清除「${platName}」的全部账号 Cookie？`)));
         if (!ok) return;
         try {
             await this.request('/api/music/accounts', {
