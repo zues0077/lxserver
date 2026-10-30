@@ -5090,15 +5090,26 @@ class App {
             return;
         }
 
-        // 顶部汇总条：只在真有需要处理的问题时出现，没问题时不留白占位
-        const banner = (health && health.message)
+        // 汇总条（2026-10-30 改版）：原来悬浮在卡片列表**上方**、不说平台名，
+        // 出现/消失时整列卡片上下位移，误点过相邻卡片的「清除」（酷狗概念版账号被连带的教训）。
+        // 现在改为：① 点名问题平台；② 放到列表**底部**，不再影响上方卡片位置。
+        const buckets = {};
+        for (const a of accounts) {
+            if (!a.configured || !a.health || a.health === 'ok') continue;
+            (buckets[a.health] = buckets[a.health] || []).push(a.name);
+        }
+        const healthLabel = { expired: 'Cookie 已失效', stale: '超过 7 天未复查', structural: 'Cookie 待确认（字段对不上或服务端未识别登录态）', unchecked: '尚未校验' };
+        const healthParts = Object.entries(buckets)
+            .sort((x, y) => (x[0] === 'expired' ? -1 : y[0] === 'expired' ? 1 : 0))
+            .map(([k, names]) => `${names.join('、')} 的${healthLabel[k] || k}`);
+        const banner = healthParts.length
             ? `<div class="music-acc-banner">
-                   <span>${this.escapeHtml(health.message)}</span>
+                   <span>${this.escapeHtml(healthParts.join('；'))}，高音质会退回试听或匿名通道</span>
                    <button type="button" class="btn-secondary" onclick="app.checkAllMusicAccounts()">立即复查</button>
                </div>`
             : '';
 
-        listEl.innerHTML = banner + accounts.map(a => {
+        listEl.innerHTML = accounts.map(a => {
             const v = a.lastVerify || {};
             // 状态口径统一由服务端 health 决定（配置状态 + 校验结果 + 时间三合一）。
             // 前端不再自己拼判据，否则「超过 7 天待复查」这类规则会两处打架。
@@ -5405,7 +5416,7 @@ class App {
                     </div>
                 </div>
             </div>`;
-        }).join('');
+        }).join('') + banner;
 
         // 概念版会员状态要额外打一次接口才知道，渲染后补上（不阻塞列表出现）
         void this.loadKugouLiteVip();
