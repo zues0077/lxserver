@@ -5657,9 +5657,13 @@ async function checkAccountHealthHints() {
         const json = await res.json();
         const hints = (json && json.data && json.data.hints) || [];
         for (const h of hints) {
-            if (!h || !h.platform || accountHintShown.has(h.platform)) continue;
-            accountHintShown.add(h.platform);
-            // 用 info 而不是 error：这不是播放出错，是后台配置过期了
+            if (!h || !h.platform) continue;
+            // 按「平台 + 类型」去重：同一个平台先提示过「失效」，之后确认是「非会员」时仍要提示，
+            // 否则用户会一直以为重新登录能解决
+            const key = h.platform + ':' + (h.kind || 'expired');
+            if (accountHintShown.has(key)) continue;
+            accountHintShown.add(key);
+            // 用 info 而不是 error：这不是播放出错，是后台账号配置的问题
             showInfo(h.text || `${h.name}账号已失效，请到后台重新登录`);
         }
     } catch (e) {
