@@ -5378,8 +5378,8 @@ class App {
                 <div class="music-acc-actions music-acc-actions--main">
                     ${loginBtns}
                     <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">填写 Cookie</button>
-                    <button type="button" class="btn-secondary music-acc-guide-link" title="这些按钮的作用"
-                        onclick="app.showMusicAccountActionsHelp(this)">?</button>
+                    <button type="button" class="music-acc-help-dot" title="这些按钮分别是什么意思"
+                        onclick="app.showMusicAccountActionsHelp(this)">ⓘ</button>
                     ${isKglite ? '' : `<button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('${a.id}')">验证</button>`}
                     ${a.configured ? `<button type="button" class="btn-secondary" onclick="app.clearMusicAccount('${a.id}')">清除</button>` : ''}
                 </div>

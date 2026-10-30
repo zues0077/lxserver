@@ -6412,6 +6412,27 @@ input:-webkit-autofill:active {
     border-color: rgba(245, 158, 11, 0.6);
 }
 
+/* 动作行末尾的「ⓘ」帮助图标：无边框淡色，不像操作按钮，悬停才提亮 */
+.music-acc-help-dot {
+    flex: none;
+    margin-left: auto;
+    align-self: center;
+    padding: 0 0.2rem;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary, #6b7280);
+    font-size: 0.88rem;
+    line-height: 1;
+    cursor: help;
+    opacity: 0.75;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.music-acc-help-dot:hover {
+    opacity: 1;
+    color: var(--text-primary, #e5e7eb);
+}
+
 .music-acc-editor {
     margin-top: 0.7rem;
 }
