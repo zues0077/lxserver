@@ -32,9 +32,15 @@ const UNSAFE_FS_PREFIXES = [
 /**
  * 判断绝对路径是否落在系统 / 虚拟文件系统内。
  * Windows 路径（`C:/proc`）不以 `/` 开头，不会被误判。
+ *
+ * **必须先归一化再比对**：`/tmp/../proc/self/x` 这种写法里 `..` 会把路径折回 `/proc/self/x`，
+ * 只做「开头是否等于 /proc」的字符串判断会被直接绕过，随后 sync mkdir 照样卡死内核。
+ * 这里用 `path.posix.normalize` 折叠 `.` / `..` / 重复斜杠，**纯字符串运算、不碰文件系统**。
  */
 export function isUnsafeFilesystemPath(input: string): boolean {
-  const norm = String(input || '').replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+  const raw = String(input || '').trim().replace(/\\/g, '/')
+  if (!raw) return false
+  const norm = path.posix.normalize(raw).replace(/\/+$/, '')
   if (!norm.startsWith('/')) return false
   const lower = norm.toLowerCase()
   return UNSAFE_FS_PREFIXES.some(prefix => lower === prefix || lower.startsWith(`${prefix}/`))
@@ -47,6 +53,11 @@ export interface EnsureWritableDirOptions {
   fieldName: string
   /** 文件系统操作超时（毫秒），默认 3000 */
   timeoutMs?: number
+  /**
+   * 需要校验的权限：默认 `w`（配置类目录都是写入目标）。
+   * 目录只作为读取来源时传 `r` —— 只读挂载也能通过，与老行为一致。
+   */
+  accessMode?: 'r' | 'w'
 }
 
 /**
@@ -58,7 +69,7 @@ export interface EnsureWritableDirOptions {
  * - mkdir + access 全部异步，且带超时，绝不阻塞事件循环
  */
 export async function ensureWritableDir (rawPath: string, opts: EnsureWritableDirOptions): Promise<string> {
-  const { baseDir, fieldName, timeoutMs = 3000 } = opts
+  const { baseDir, fieldName, timeoutMs = 3000, accessMode = 'w' } = opts
   const trimmed = String(rawPath || '').trim()
   if (!trimmed) return ''
 
@@ -77,7 +88,7 @@ export async function ensureWritableDir (rawPath: string, opts: EnsureWritableDi
     await Promise.race([
       (async () => {
         await fs.promises.mkdir(resolved, { recursive: true })
-        await fs.promises.access(resolved, fs.constants.W_OK)
+        await fs.promises.access(resolved, accessMode === 'r' ? fs.constants.R_OK : fs.constants.W_OK)
       })(),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('文件系统操作超时')), timeoutMs)

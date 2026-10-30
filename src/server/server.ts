@@ -38,7 +38,7 @@ import { setUserAuthVerifier } from './userAuth'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
 import { checkPersistentVolumes } from './volumeCheck'
-import { ensureWritableDir, isUnsafeFilesystemPath } from '@/utils/fsSafePath'
+import { ensureWritableDir } from '@/utils/fsSafePath'
 import * as customMusicManager from './customMusicManager'
 import * as serverDownloadQueue from './serverDownloadQueue'
 import * as remasterQueue from './remasterQueue'
@@ -2501,7 +2501,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
         if (req.method === 'PUT') {
-          void readBody(req).then(body => {
+          void readBody(req).then(async body => {
             try {
               const { name, newName, password, enableCustomMusicDir, customMusicDir, allowOperateCustomMusicDir, allowWriteCustomMusicDir, enableAutoDownload } = JSON.parse(body)
               if (!name) {
@@ -2518,6 +2518,28 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
               const user = global.lx.config.users[userIdx]
 
+              // 自定义音乐目录先在**落库之前**异步校验一次：
+              // 这里是唯一会真正去建目录的地方，对 /proc 这类虚拟文件系统做同步 mkdir 会让进程进入
+              // 不可中断等待（HTTP 与看门狗一起失效，只能重启容器，2026-10-30 实测）。
+              // 校验放在重命名分支之前，避免「先改名成功、再报目录非法」的半完成状态。
+              if (customMusicDir !== undefined) {
+                const trimmedMusicDir = String(customMusicDir).trim()
+                if (trimmedMusicDir) {
+                  try {
+                    // 保持老语义：只要求可读（不强制可写），其余交给下载链路自己报错
+                    await ensureWritableDir(trimmedMusicDir, {
+                      baseDir: global.lx.dataPath,
+                      fieldName: '自定义音乐目录',
+                      accessMode: 'r',
+                    })
+                  } catch (err: any) {
+                    res.writeHead(422, { 'Content-Type': 'application/json' })
+                    res.end(JSON.stringify({ success: false, error: err.message }))
+                    return
+                  }
+                }
+              }
+
               const handleFinalUpdate = () => {
                 const oldEnabled = !!user.enableCustomMusicDir
                 const oldCustomDir = (user.customMusicDir || '').trim()
@@ -2525,30 +2547,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 if (password) user.password = password
                 if (enableCustomMusicDir !== undefined) user.enableCustomMusicDir = !!enableCustomMusicDir
                 if (customMusicDir !== undefined) {
-                  const trimmedMusicDir = String(customMusicDir).trim()
-                  if (trimmedMusicDir) {
-                    if (/[<>"|?*]/.test(trimmedMusicDir)) {
-                      res.writeHead(422, { 'Content-Type': 'application/json' })
-                      res.end(JSON.stringify({ success: false, error: '自定义音乐目录包含非法字符 (< > " | ? *)' }))
-                      return
-                    }
-                    // 虚拟 / 系统目录先拦掉：在 /proc 这类位置同步 mkdir 会让进程进入不可中断等待，
-                    // HTTP 与看门狗一起失效，只能重启容器（2026-10-30 实测，见 fsSafePath 注释）
-                    if (isUnsafeFilesystemPath(trimmedMusicDir)) {
-                      res.writeHead(422, { 'Content-Type': 'application/json' })
-                      res.end(JSON.stringify({ success: false, error: `自定义音乐目录不能指向系统或虚拟目录 (${trimmedMusicDir})` }))
-                      return
-                    }
-                    try {
-                      fs.mkdirSync(trimmedMusicDir, { recursive: true })
-                      fs.accessSync(trimmedMusicDir, fs.constants.R_OK)
-                    } catch (e: any) {
-                      res.writeHead(422, { 'Content-Type': 'application/json' })
-                      res.end(JSON.stringify({ success: false, error: `自定义音乐目录无效或无法访问 (${trimmedMusicDir}): ${e.message || e}` }))
-                      return
-                    }
-                  }
-                  user.customMusicDir = trimmedMusicDir
+                  // 目录已在进入本函数之前用 ensureWritableDir 异步校验（含系统目录黑名单与超时兜底），
+                  // 这里只负责落值 —— 别再在这里做任何同步 mkdir。
+                  user.customMusicDir = String(customMusicDir).trim()
                 }
                 if (allowOperateCustomMusicDir !== undefined) user.allowOperateCustomMusicDir = !!allowOperateCustomMusicDir
                 if (allowWriteCustomMusicDir !== undefined) user.allowWriteCustomMusicDir = !!allowWriteCustomMusicDir

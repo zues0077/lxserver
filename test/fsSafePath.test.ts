@@ -56,6 +56,33 @@ test('反斜杠与重复斜杠也按 Linux 绝对路径处理', () => {
   assert.equal(isUnsafeFilesystemPath('/PROC/x'), true, '大小写混写也要拦住')
 })
 
+test('.. 折返不能绕过黑名单（2026-10-30 自查发现的洞）', () => {
+  // 只做「开头是不是 /proc」的字符串比对时，这几种写法全都能绕过，随后 sync mkdir 照样卡死内核
+  for (const p of [
+    '/tmp/../proc/self/mem',
+    '/vol1/1000/../../proc/1',
+    '/data/music/../../sys/kernel',
+    '/usr/./../proc/x',
+  ]) {
+    assert.equal(isUnsafeFilesystemPath(p), true, `${p} 折返后落在系统目录，必须拦住`)
+  }
+  // 反向：折返离开系统目录的写法不该被误杀
+  for (const p of ['/proc/../tmp/backup', '/sys/../vol1/music', '/etc/../server/data']) {
+    assert.equal(isUnsafeFilesystemPath(p), false, `${p} 折返后是普通目录，不该拦`)
+  }
+  // 相对路径本身判不了（不知道基准目录），交给 ensureWritableDir 拼成绝对路径后再判
+  assert.equal(isUnsafeFilesystemPath('./../etc/passwd'), false, '相对路径由调用方补全后再判')
+})
+
+test('ensureWritableDir：.. 折返进系统目录同样在触达文件系统之前被拒', async () => {
+  const started = Date.now()
+  await assert.rejects(
+    () => ensureWritableDir('/tmp/../proc/lx-nope', { baseDir: DATA_DIR, fieldName: '配置备份目录' }),
+    /不能指向系统或虚拟目录/,
+  )
+  assert.ok(Date.now() - started < 1500, '必须在纯字符串阶段拒绝')
+})
+
 test('ensureWritableDir：黑名单路径直接抛错，不触达文件系统', () => {
   const started = Date.now()
   assert.rejects(
@@ -101,7 +128,9 @@ test('server.ts 里配置目录校验不再使用同步 mkdir', () => {
   const backupBlock = src.slice(src.indexOf("newConfig['configBackup.dir'] !== undefined"), src.indexOf("newConfig['snapshot.backupPath'] !== undefined"))
   assert.match(backupBlock, /await ensureWritableDir\(/, '配置备份目录必须走异步校验')
   assert.doesNotMatch(backupBlock, /mkdirSync/, '配置备份目录不能再同步 mkdir')
-  // 自定义音乐目录（同步上下文）至少要过黑名单
-  const musicBlock = src.slice(src.indexOf('trimmedMusicDir'), src.indexOf('trimmedMusicDir') + 1200)
-  assert.match(musicBlock, /isUnsafeFilesystemPath\(trimmedMusicDir\)/, '自定义音乐目录必须过黑名单')
+  // 自定义音乐目录改成「落库前异步校验」：必须 await ensureWritableDir + accessMode 'r'（老语义只要求可读）
+  const musicBlock = src.slice(src.indexOf('自定义音乐目录先在'), src.indexOf('handleFinalUpdate = '))
+  assert.match(musicBlock, /await ensureWritableDir\(/, '自定义音乐目录必须走异步校验')
+  assert.match(musicBlock, /accessMode: 'r'/, '自定义音乐目录老语义只要求可读')
+  assert.doesNotMatch(src, /mkdirSync\(trimmedMusicDir/, '自定义音乐目录不能再同步 mkdir')
 })
