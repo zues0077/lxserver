@@ -9384,6 +9384,16 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           const config = {
             serverName: global.lx.config.serverName,
             'debug.enabled': global.lx.config['debug.enabled'] || false,
+            // 日志级别：把「debug.enabled（音源详细日志）」与「subsonic.enableDebug（Subsonic 请求日志）」
+            // 两个重叠开关合成一个视图；底层仍写回原来的两个 key，兼容旧 config.js
+            'log.level': (() => {
+              const audioDebug = !!global.lx.config['debug.enabled']
+              const subsonicDebug = !!global.lx.config['subsonic.enableDebug']
+              if (audioDebug && subsonicDebug) return 'verbose'
+              if (audioDebug) return 'debug'
+              if (subsonicDebug) return 'subsonic'
+              return 'off'
+            })(),
             maxSnapshotNum: global.lx.config.maxSnapshotNum,
             'list.addMusicLocationType': global.lx.config['list.addMusicLocationType'],
             'proxy.enabled': global.lx.config['proxy.enabled'],
@@ -9401,14 +9411,18 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'user.enableCacheSizeLimit': global.lx.config['user.enableCacheSizeLimit'],
             'user.cacheSizeLimit': global.lx.config['user.cacheSizeLimit'],
             'cache.maxAgeDays': typeof global.lx.config['cache.maxAgeDays'] !== 'undefined' ? global.lx.config['cache.maxAgeDays'] : 14,
-            'admin.password': global.lx.config['admin.password'],
+            // 密码类字段一律不回传明文：只告诉前端「是否已设置」，留空即不修改
+            'admin.password': '',
+            adminPasswordSet: !!global.lx.config['admin.password'],
             'player.name': global.lx.config['player.name'] || 'LX Music Web',
             'player.enableAuth': global.lx.config['player.enableAuth'] || false,
-            'player.password': global.lx.config['player.password'] || '',
+            'player.password': '',
+            playerPasswordSet: !!global.lx.config['player.password'],
             'webdav.enable': global.lx.config['webdav.enable'] ?? false,
             'webdav.url': global.lx.config['webdav.url'] || '',
             'webdav.username': global.lx.config['webdav.username'] || '',
-            'webdav.password': global.lx.config['webdav.password'] || '',
+            'webdav.password': '',
+            webdavPasswordSet: !!global.lx.config['webdav.password'],
             'webdav.syncPath': global.lx.config['webdav.syncPath'] || '/lx-sync',
             'webdav.backupPath': global.lx.config['webdav.backupPath'] || '/lx-sync-backups',
             'sync.interval': global.lx.config['sync.interval'] || 60,
@@ -9460,7 +9474,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'system.allowUnsafeVM': global.lx.config['system.allowUnsafeVM'] || false,
             // 音源平台可用性巡检：此前只能手改 config.js，改完还要重启才生效
             'customSource.probe.enabled': global.lx.config['customSource.probe.enabled'] !== false,
-            'customSource.probe.intervalMinutes': Number(global.lx.config['customSource.probe.intervalMinutes']) || 180,
+            'customSource.probe.intervalMinutes': Number(global.lx.config['customSource.probe.intervalMinutes']) || 360,
             'customSource.probe.failThreshold': Number(global.lx.config['customSource.probe.failThreshold']) || 2,
             'customSource.probe.concurrency': Math.min(8, Math.max(1, Number(global.lx.config['customSource.probe.concurrency']) || 6)),
             'customSource.probe.autoDisablePlatform': global.lx.config['customSource.probe.autoDisablePlatform'] !== false,
@@ -9520,7 +9534,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 global.lx.config['customSource.probe.enabled'] = !!newConfig['customSource.probe.enabled']
               }
               if (newConfig['customSource.probe.intervalMinutes'] !== undefined) {
-                global.lx.config['customSource.probe.intervalMinutes'] = Math.max(5, parseInt(newConfig['customSource.probe.intervalMinutes']) || 180)
+                global.lx.config['customSource.probe.intervalMinutes'] = Math.max(5, parseInt(newConfig['customSource.probe.intervalMinutes']) || 360)
               }
               if (newConfig['customSource.probe.failThreshold'] !== undefined) {
                 global.lx.config['customSource.probe.failThreshold'] = Math.max(1, parseInt(newConfig['customSource.probe.failThreshold']) || 2)
@@ -9545,7 +9559,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 try {
                   scheduler.updateTaskConfig('custom_source_health_probe', {
                     enabled: global.lx.config['customSource.probe.enabled'] !== false,
-                    intervalMs: (Number(global.lx.config['customSource.probe.intervalMinutes']) || 180) * 60 * 1000,
+                    intervalMs: (Number(global.lx.config['customSource.probe.intervalMinutes']) || 360) * 60 * 1000,
                   })
                 } catch { /* 调度器尚未启动时忽略 */ }
               }
@@ -9567,18 +9581,23 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   warning += '检测到重复密码！开启“根路径”模式要求所有用户密码唯一，否则可能导致连接错误。'
                 }
               }
-              if (newConfig['admin.password'] !== undefined) global.lx.config['admin.password'] = newConfig['admin.password']
+              // 密码类字段：前端不再回填明文（GET 只返回「是否已设置」），
+              // 因此提交空值一律视为「保持原值」，避免一次保存把密码清空。
+              const nextAdminPassword = typeof newConfig['admin.password'] === 'string' ? newConfig['admin.password'] : ''
+              if (nextAdminPassword !== '') global.lx.config['admin.password'] = nextAdminPassword
 
               // Web播放器配置
               if (newConfig['player.name'] !== undefined) global.lx.config['player.name'] = newConfig['player.name']
               if (newConfig['player.enableAuth'] !== undefined) global.lx.config['player.enableAuth'] = newConfig['player.enableAuth']
-              if (newConfig['player.password'] !== undefined) global.lx.config['player.password'] = newConfig['player.password']
+              const nextPlayerPassword = typeof newConfig['player.password'] === 'string' ? newConfig['player.password'] : ''
+              if (nextPlayerPassword !== '') global.lx.config['player.password'] = nextPlayerPassword
 
               // WebDAV 配置
               if (newConfig['webdav.enable'] !== undefined) global.lx.config['webdav.enable'] = newConfig['webdav.enable']
               if (newConfig['webdav.url'] !== undefined) global.lx.config['webdav.url'] = newConfig['webdav.url']
               if (newConfig['webdav.username'] !== undefined) global.lx.config['webdav.username'] = newConfig['webdav.username']
-              if (newConfig['webdav.password'] !== undefined) global.lx.config['webdav.password'] = newConfig['webdav.password']
+              const nextWebdavPassword = typeof newConfig['webdav.password'] === 'string' ? newConfig['webdav.password'] : ''
+              if (nextWebdavPassword !== '') global.lx.config['webdav.password'] = nextWebdavPassword
               if (newConfig['webdav.syncPath'] !== undefined) global.lx.config['webdav.syncPath'] = newConfig['webdav.syncPath']
               if (newConfig['webdav.backupPath'] !== undefined) global.lx.config['webdav.backupPath'] = newConfig['webdav.backupPath']
               if (newConfig['sync.interval'] !== undefined) global.lx.config['sync.interval'] = parseInt(newConfig['sync.interval'])
@@ -9692,6 +9711,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 global.lx.config['subsonic.port'] = !isNaN(port) && port >= 0 ? port : 0
               }
               if (newConfig['subsonic.enableDebug'] !== undefined) global.lx.config['subsonic.enableDebug'] = newConfig['subsonic.enableDebug']
+              // 日志级别（四档）→ 反写两个旧开关。放在上面两处之后，保证以后者为准。
+              if (newConfig['log.level'] !== undefined) {
+                const level = String(newConfig['log.level'])
+                global.lx.config['debug.enabled'] = level === 'debug' || level === 'verbose'
+                global.lx.config['subsonic.enableDebug'] = level === 'subsonic' || level === 'verbose'
+              }
               // [本地配置备份] configBackup 配置
               // 平台账号（Cookie 本体不在这里保存，只存开关；Cookie 走 /api/music/accounts）
               if (newConfig['musicAccount.enabled'] !== undefined) global.lx.config['musicAccount.enabled'] = !!newConfig['musicAccount.enabled']

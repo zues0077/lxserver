@@ -1101,7 +1101,7 @@ if (fs.existsSync(activeWatcherConfigPath)) {
             // eslint-disable-next-line @typescript-eslint/no-var-requires
             const { updateTaskConfig } = require('@/server/scheduler')
             const probeEnabled = global.lx.config['customSource.probe.enabled'] !== false
-            const probeMinutes = Number(global.lx.config['customSource.probe.intervalMinutes']) || 180
+            const probeMinutes = Number(global.lx.config['customSource.probe.intervalMinutes']) || 360
             updateTaskConfig('custom_source_health_probe', {
               enabled: probeEnabled,
               intervalMs: probeMinutes * 60 * 1000,

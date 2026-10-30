@@ -2606,8 +2606,8 @@ class App {
             const form = document.getElementById('config-form');
 
             form.elements['serverName'].value = config.serverName || '';
-            if (form.elements['debug.enabled']) {
-                form.elements['debug.enabled'].checked = config['debug.enabled'] || false;
+            if (form.elements['log.level']) {
+                form.elements['log.level'].value = config['log.level'] || 'off';
             }
             form.elements['maxSnapshotNum'].value = config.maxSnapshotNum || 10;
             form.elements['list.addMusicLocationType'].value = config['list.addMusicLocationType'] || 'top';
@@ -2671,7 +2671,15 @@ class App {
             if (form.elements['singer.sourcePriority']) {
                 form.elements['singer.sourcePriority'].value = config['singer.sourcePriority'] || 'tx,wy';
             }
-            form.elements['admin.password'].value = config['admin.password'] || '';
+            // 密码类字段后端不回传明文：一律清空，用 placeholder 提示是否已设置，留空即不修改
+            [['admin.password', config.adminPasswordSet, '用于登录控制台和播放器管理员'],
+             ['player.password', config.playerPasswordSet, '播放器专属密码'],
+             ['webdav.password', config.webdavPasswordSet, '留空＝不修改']].forEach(([name, isSet, emptyHint]) => {
+                const el = form.elements[name];
+                if (!el) return;
+                el.value = '';
+                el.placeholder = isSet ? '已设置，留空则不修改' : emptyHint;
+            });
 
             // Web播放器配置
             if (form.elements['player.name']) {
@@ -2679,9 +2687,6 @@ class App {
             }
             if (form.elements['player.enableAuth']) {
                 form.elements['player.enableAuth'].checked = config['player.enableAuth'] === true;
-            }
-            if (form.elements['player.password']) {
-                form.elements['player.password'].value = config['player.password'] || '';
             }
 
             // WebDAV 配置
@@ -2694,9 +2699,6 @@ class App {
             }
             if (form.elements['webdav.username']) {
                 form.elements['webdav.username'].value = config['webdav.username'] || '';
-            }
-            if (form.elements['webdav.password']) {
-                form.elements['webdav.password'].value = config['webdav.password'] || '';
             }
             if (form.elements['webdav.syncPath']) {
                 form.elements['webdav.syncPath'].value = config['webdav.syncPath'] || '/lx-sync';
@@ -2736,7 +2738,7 @@ class App {
                 form.elements['customSource.probe.enabled'].checked = config['customSource.probe.enabled'] !== false;
             }
             if (form.elements['customSource.probe.intervalMinutes']) {
-                form.elements['customSource.probe.intervalMinutes'].value = config['customSource.probe.intervalMinutes'] || 180;
+                form.elements['customSource.probe.intervalMinutes'].value = config['customSource.probe.intervalMinutes'] || 360;
             }
             if (form.elements['customSource.probe.concurrency']) {
                 form.elements['customSource.probe.concurrency'].value = config['customSource.probe.concurrency'] || 6;
@@ -2773,9 +2775,6 @@ class App {
             }
             if (form.elements['subsonic.path']) {
                 form.elements['subsonic.path'].value = config['subsonic.path'] || '/rest';
-            }
-            if (form.elements['subsonic.enableDebug']) {
-                form.elements['subsonic.enableDebug'].checked = config['subsonic.enableDebug'] === true;
             }
             if (form.elements['subsonic.port']) {
                 form.elements['subsonic.port'].value = config['subsonic.port'] || 0;
@@ -2916,9 +2915,92 @@ class App {
             if (configBackupJsPathRef && config.configFilePath) {
                 configBackupJsPathRef.textContent = config.configFilePath;
             }
+            this.initConfigPageUi();
         } catch (err) {
             console.error('Failed to load config:', err);
         }
+    }
+
+    // ===== 系统配置页：分组导航 / 依赖锁定 / 页内跳转 =====
+    initConfigPageUi() {
+        // 顶栏是 sticky 的，分组导航的吸顶偏移要按它的实际高度算
+        const syncStickyOffset = () => {
+            const topBar = document.querySelector('.top-bar');
+            const h = topBar ? topBar.getBoundingClientRect().height : 0;
+            document.documentElement.style.setProperty('--cfg-sticky-top', (h + 10) + 'px');
+        };
+        syncStickyOffset();
+        if (!this._cfgStickyBound) {
+            window.addEventListener('resize', syncStickyOffset);
+            this._cfgStickyBound = true;
+        }
+
+        const subnav = document.getElementById('config-subnav');
+        if (subnav && !subnav.dataset.bound) {
+            subnav.dataset.bound = '1';
+            subnav.querySelectorAll('.config-subnav-item').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const el = document.getElementById(btn.dataset.target);
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    this.setConfigSubnavActive(btn.dataset.target);
+                });
+            });
+            // 滚动时自动高亮当前分组
+            const sections = Array.from(document.querySelectorAll('#config-form > .config-group'));
+            if (sections.length && 'IntersectionObserver' in window) {
+                const io = new IntersectionObserver((entries) => {
+                    const visible = entries
+                        .filter(e => e.isIntersecting)
+                        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+                    if (visible) this.setConfigSubnavActive(visible.target.id);
+                }, { rootMargin: '-25% 0px -65% 0px', threshold: 0 });
+                sections.forEach(s => io.observe(s));
+            }
+        }
+
+        // 页内跳转按钮（跨分组 / 跨页面）
+        document.querySelectorAll('#view-config .config-jump-btn').forEach(btn => {
+            if (btn.dataset.bound) return;
+            btn.dataset.bound = '1';
+            btn.addEventListener('click', () => {
+                const target = btn.dataset.target;
+                if (target === 'cfg-webdav-page') {
+                    this.switchView('webdav');
+                    return;
+                }
+                const el = document.getElementById(target);
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                if (target) this.setConfigSubnavActive(target);
+            });
+        });
+
+        this.refreshConfigDependentLocks();
+        const form = document.getElementById('config-form');
+        if (form && !form.dataset.lockBound) {
+            form.dataset.lockBound = '1';
+            form.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                if (cb.name) cb.addEventListener('change', () => this.refreshConfigDependentLocks());
+            });
+        }
+    }
+
+    setConfigSubnavActive(id) {
+        document.querySelectorAll('#config-subnav .config-subnav-item').forEach(item => {
+            item.classList.toggle('active', item.dataset.target === id);
+        });
+    }
+
+    // 依赖父开关的输入框：父开关关闭时置灰只读（用 readOnly 而非 disabled，保证仍随表单提交）
+    refreshConfigDependentLocks() {
+        const form = document.getElementById('config-form');
+        if (!form) return;
+        form.querySelectorAll('[data-requires]').forEach(input => {
+            const dep = form.elements[input.dataset.requires];
+            const on = !!(dep && dep.checked);
+            input.readOnly = !on;
+            if (on) input.removeAttribute('data-locked');
+            else input.setAttribute('data-locked', '1');
+        });
     }
 
     toggleWebdavVisibility() {
@@ -2926,13 +3008,9 @@ class App {
         const childWrapper = document.getElementById('webdav-options');
         const hintWrapper = document.getElementById('webdav-disabled-hint');
         if (webdavCb && childWrapper && hintWrapper) {
-            if (webdavCb.checked) {
-                childWrapper.style.display = 'block';
-                hintWrapper.style.display = 'none';
-            } else {
-                childWrapper.style.display = 'none';
-                hintWrapper.style.display = 'block';
-            }
+            // 用 .hidden 类切换，避免内联 display 覆盖卡片内的 flex 间距排版
+            childWrapper.classList.toggle('hidden', !webdavCb.checked);
+            hintWrapper.classList.toggle('hidden', webdavCb.checked);
         }
     }
 
@@ -2940,7 +3018,7 @@ class App {
         const lbCb = document.querySelector('input[name="subsonic.publicLeaderboards"]');
         const childWrapper = document.getElementById('subsonic-leaderboard-options');
         if (lbCb && childWrapper) {
-            childWrapper.style.display = lbCb.checked ? 'block' : 'none';
+            childWrapper.classList.toggle('hidden', !lbCb.checked);
         }
     }
 
@@ -3253,7 +3331,7 @@ class App {
         const favCb = document.querySelector('input[name="user.enablePublicFavorites"]');
         const childWrapper = document.getElementById('public-non-admin-access-wrapper');
         if (favCb && childWrapper) {
-            childWrapper.style.display = favCb.checked ? 'block' : 'none';
+            childWrapper.classList.toggle('hidden', !favCb.checked);
         }
     }
 
@@ -3261,7 +3339,7 @@ class App {
         const resCb = document.querySelector('input[name="user.enablePublicRestriction"]');
         const childWrapper = document.getElementById('public-non-admin-local-music-wrapper');
         if (resCb && childWrapper) {
-            childWrapper.style.display = resCb.checked ? 'block' : 'none';
+            childWrapper.classList.toggle('hidden', !resCb.checked);
         }
     }
 
@@ -3269,6 +3347,28 @@ class App {
         if (!this.configLoaded) return;
         const form = document.getElementById('config-form');
         const formData = new FormData(form);
+
+        // 连接方式：至少保留一种，前端直接拦住（否则后端会静默把根路径改回开启）
+        const enablePathCb = form.elements['user.enablePath'];
+        const enableRootCb = form.elements['user.enableRoot'];
+        if (enablePathCb && enableRootCb && !enablePathCb.checked && !enableRootCb.checked) {
+            const noteEl = document.getElementById('user-path-note');
+            if (noteEl) {
+                noteEl.textContent = '⚠️「用户路径」与「根路径」至少要开启一种，否则客户端无法连接。';
+                noteEl.classList.add('config-note--error');
+                noteEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            showError('「用户路径」与「根路径」至少要开启一种');
+            return;
+        }
+        const restorePathNote = () => {
+            const noteEl = document.getElementById('user-path-note');
+            if (noteEl) {
+                noteEl.textContent = '两种方式可同时开启，但至少要保留一种，否则客户端无法连接。';
+                noteEl.classList.remove('config-note--error');
+            }
+        };
+        restorePathNote();
 
         // 路径校验
         const adminPath = (formData.get('admin.path') || '').trim();
@@ -3294,9 +3394,14 @@ class App {
         }
         if (pathError) return;
 
+        // 密码留空表示不修改：不放进 payload，后端也就不会覆盖
+        const adminPasswordInput = formData.get('admin.password') || '';
+        const playerPasswordInput = formData.get('player.password') || '';
+        const webdavPasswordInput = formData.get('webdav.password') || '';
+
         const config = {
             serverName: formData.get('serverName'),
-            'debug.enabled': formData.get('debug.enabled') === 'on',
+            'log.level': formData.get('log.level') || 'off',
             maxSnapshotNum: parseInt(formData.get('maxSnapshotNum')),
             'list.addMusicLocationType': formData.get('list.addMusicLocationType'),
             'proxy.enabled': formData.get('proxy.enabled') === 'on',
@@ -3325,14 +3430,14 @@ class App {
             'user.enableLoginCacheRestriction': formData.get('user.enableLoginCacheRestriction') === 'on',
             'user.enableCacheSizeLimit': formData.get('user.enableCacheSizeLimit') === 'on',
             'user.cacheSizeLimit': parseInt(formData.get('user.cacheSizeLimit')) || 2000,
-            'admin.password': formData.get('admin.password'),
+            ...(adminPasswordInput ? { 'admin.password': adminPasswordInput } : {}),
             'player.name': (formData.get('player.name') || '').trim() || 'LX Music Web',
             'player.enableAuth': formData.get('player.enableAuth') === 'on',
-            'player.password': formData.get('player.password'),
+            ...(playerPasswordInput ? { 'player.password': playerPasswordInput } : {}),
             'webdav.enable': formData.get('webdav.enable') === 'on',
             'webdav.url': formData.get('webdav.url'),
             'webdav.username': formData.get('webdav.username'),
-            'webdav.password': formData.get('webdav.password'),
+            ...(webdavPasswordInput ? { 'webdav.password': webdavPasswordInput } : {}),
             'webdav.syncPath': (formData.get('webdav.syncPath') || '').trim() || '/lx-sync',
             'webdav.backupPath': (formData.get('webdav.backupPath') || '').trim() || '/lx-sync-backups',
             'sync.interval': parseInt(formData.get('sync.interval')) || 60,
@@ -3344,7 +3449,7 @@ class App {
             'configBackup.dir': (formData.get('configBackup.dir') || '').trim(),
             'snapshot.backupPath': (formData.get('snapshot.backupPath') || '').trim(),
             'customSource.probe.enabled': formData.get('customSource.probe.enabled') === 'on',
-            'customSource.probe.intervalMinutes': parseInt(formData.get('customSource.probe.intervalMinutes')) || 180,
+            'customSource.probe.intervalMinutes': parseInt(formData.get('customSource.probe.intervalMinutes')) || 360,
             'customSource.probe.concurrency': parseInt(formData.get('customSource.probe.concurrency')) || 6,
             'customSource.probe.failThreshold': parseInt(formData.get('customSource.probe.failThreshold')) || 2,
             'customSource.probe.autoDisablePlatform': formData.get('customSource.probe.autoDisablePlatform') === 'on',
@@ -3354,7 +3459,6 @@ class App {
             'player.path': playerPath,
             'subsonic.enable': formData.get('subsonic.enable') === 'on',
             'subsonic.path': (formData.get('subsonic.path') || '').trim() || '/rest',
-            'subsonic.enableDebug': formData.get('subsonic.enableDebug') === 'on',
             'subsonic.port': parseInt(formData.get('subsonic.port')) || 0,
             'subsonic.onlineSearch': formData.get('subsonic.onlineSearch') === 'on',
             'subsonic.onlineSearchMode': formData.get('subsonic.onlineSearchMode') || 'fallback',
@@ -3402,6 +3506,15 @@ class App {
                 body: JSON.stringify(config)
             });
 
+            // 保存成功：清掉上一次的目录校验错误
+            ['config-backup-dir-error', 'snapshot-path-error'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.textContent = '';
+                    el.classList.add('hidden');
+                }
+            });
+
             // 如果密码改了，更新本地存储
             if (config['admin.password'] && config['admin.password'] !== this.password) {
                 this.password = config['admin.password'];
@@ -3445,7 +3558,26 @@ class App {
                 }
             }
         } catch (err) {
-            if (!silent) showError('配置保存失败: ' + err.message);
+            const msg = (err && err.message) ? err.message : '未知错误';
+            // 后端对目录类配置做了「自动创建 + 写权限」校验，失败返回 422。
+            // 把错误贴到对应输入框下方，避免只在弹窗里一闪而过。
+            let hitEl = null;
+            [['配置备份目录', 'config-backup-dir-error'],
+             ['歌单快照备份路径', 'snapshot-path-error']].forEach(([keyword, id]) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                const hit = msg.indexOf(keyword) !== -1;
+                if (hit) {
+                    el.textContent = '⚠️ ' + msg;
+                    el.classList.remove('hidden');
+                    hitEl = el;
+                } else {
+                    el.textContent = '';
+                    el.classList.add('hidden');
+                }
+            });
+            if (hitEl) hitEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            if (!silent) showError('配置保存失败: ' + msg);
             throw err;
         }
     }

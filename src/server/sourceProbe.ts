@@ -280,7 +280,7 @@ const configOf = (): ProbeConfig => {
   const rawTestSongs = c['customSource.probe.testSongs']
   return {
     enabled: c['customSource.probe.enabled'] !== false,
-    intervalMinutes: positiveNumber(c['customSource.probe.intervalMinutes'], 180),
+    intervalMinutes: positiveNumber(c['customSource.probe.intervalMinutes'], 360),
     failThreshold: Math.max(1, Math.round(positiveNumber(c['customSource.probe.failThreshold'], 2))),
     timeoutMs: positiveNumber(c['customSource.probe.timeoutMs'], 15000),
     // 并发默认 6：实测 40 音源 × 152 平台在并发 2 下要跑 356 秒，

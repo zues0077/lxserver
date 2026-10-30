@@ -147,7 +147,7 @@ const config: LX.Config = {
   // 平台连续 failThreshold 次失败 → 自动写入 states.json 的 disabledSources 关闭该平台解析；
   // 某音源全部平台都不可用 → 按 removeMode 自动移除该音源（默认移入 .trash，可恢复）。
   'customSource.probe.enabled': true, // 巡检总开关
-  'customSource.probe.intervalMinutes': 180, // 复检间隔（分钟）
+  'customSource.probe.intervalMinutes': 360, // 复检间隔（分钟，默认 6 小时；平台多时别调太小，避免持续探测第三方）
   'customSource.probe.failThreshold': 2, // 连续失败多少次判定不可用
   'customSource.probe.timeoutMs': 15000, // 单平台单次探测超时（毫秒）
   // 必须与 sourceProbe.ts 里 positiveNumber(..., 6) 的兜底值保持一致：
