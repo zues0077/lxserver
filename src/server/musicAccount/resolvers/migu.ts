@@ -21,6 +21,10 @@ import { getPlatform } from '../platforms'
 import type { AccountResolveResult, AccountInfo } from '../types'
 
 const LISTEN_URL = 'https://c.musicapp.migu.cn/MIGUM2.0/v2.0/content/listen-url'
+// 登录态查询（GitHub 实证：Domdkw/miguMusic-api-enhanced user_queryInfo.ts，2026-10-30）。
+// 网页 Cookie 里的 pacmtoken 就是凭证；匿名请求回 299999「uid不能为空」，登录后回 000000 + 用户信息。
+const USER_INFO_URL = 'https://app.c.nf.migu.cn/pc/user/h5/queryUserInfo/v1.0'
+const USER_INFO_CHANNEL = '014X031'
 const MIGU_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 const CHANNEL = '0146921'
 const VERSION = '7.41.13'
@@ -126,7 +130,7 @@ async function probeTone(cookie: string, tone: string, ms: number): Promise<{ ok
  *   - HQ 也空、仅 PQ 出链：账号没有任何音频会员权益（咪咕会回 cannotCode=440008「需开通会员」）。
  * 三档全空：探针曲本次不可用，不要误报。
  */
-async function probeVip(cookie: string): Promise<{ vip: boolean | null; tier: string; note: string }> {
+async function probeVip(cookie: string): Promise<{ vip: boolean | null; tier: string; note: string; cannotCode?: string }> {
   const sq = await probeTone(cookie, 'SQ', 4500)
   if (sq.ok) {
     return { vip: true, tier: 'SQ', note: '会员权益生效，实测可取 SQ 无损' }
@@ -150,15 +154,44 @@ async function probeVip(cookie: string): Promise<{ vip: boolean | null; tier: st
       vip: false,
       tier: 'PQ',
       note: `账号没有可用音频会员权益（或试用不含音频特权），实测最高只到 PQ 128k${extra}`,
+      ...(reason ? { cannotCode: reason } : {}),
     }
   }
   return { vip: null, tier: 'unknown', note: '探针曲本次不可用，会员状态以实际播放音质为准' }
 }
 
+/**
+ * 登录态查询：官方 H5 用户信息接口（GitHub 实证：Domdkw/miguMusic-api-enhanced）。
+ * 匿名请求回 299999「uid不能为空」；带有效登录 Cookie 回 000000 + 用户信息。
+ * 这是咪咕第一个能**直接**区分「真登录」和「服务端当你是匿名」的接口 ——
+ * 之前只有结构校验 + 取链探针（440006 与匿名一致时无法排除「已登录非会员」的歧义）。
+ */
+async function queryUserInfo(cookie: string): Promise<{ online: boolean; nickname?: string }> {
+  try {
+    const resp = await withTimeout(request(USER_INFO_URL, {
+      headers: {
+        'User-Agent': MIGU_UA,
+        Referer: 'https://music.migu.cn/',
+        channel: USER_INFO_CHANNEL,
+        Cookie: cookie,
+        ...authHeaders(cookie),
+      },
+    }), 8000, '咪咕用户信息')
+    const body: any = resp.body
+    if (String(body?.code ?? '') !== '000000' || !body?.data) return { online: false }
+    const data = body.data
+    const nickname = String(
+      data.nickname || data.nickName || data.userNickName ||
+      data.userInfo?.nickname || data.userInfo?.nickName ||
+      data.user?.nickname || data.user?.nickName || '',
+    ).trim()
+    return { online: true, ...(nickname ? { nickname } : {}) }
+  } catch {
+    return { online: false }
+  }
+}
+
 export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
-  // 咪咕同样没有可靠的「查当前登录用户」接口（试过的 userInfo.do 返回「路由请求不支持」）。
-  // 用公开接口试探无效 —— 不登录也 200。如实只做结构校验。
-  //
   // 字段清单必须读平台定义，不能在这里另写一份：
   // 网页版登录后的字段是 idmpauth / pacmtoken / migu-utoken-sessionid / LTToken，
   // 早先这里写死成 migu_music / USERTICKET / pusk，结果登录了也一律判「没找到登录字段」。
@@ -166,14 +199,36 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   if (!hasLoginKey(cookie, keys)) {
     return { ok: false, verified: 'structural', message: `Cookie 里没有找到登录字段（${keys.join(' / ')}），请确认已登录咪咕后再复制` }
   }
-  // 结构校验通过后再实测一次会员：用户真正想知道的是「能不能拿到会员音质」，
-  // 而不是「Cookie 里有没有那几个字段」。判不出来时如实说判不出来。
+  // 两步实测：
+  // ① queryUserInfo —— 登录态是否被服务端承认（权威信号）；
+  // ② 取链探针 —— 实测会员档位（用户真正关心的）。
   const probe = await probeVip(cookie)
+  const user = await queryUserInfo(cookie)
+  if (user.online) {
+    return {
+      ok: true,
+      verified: 'online',
+      ...(user.nickname ? { nickname: user.nickname } : {}),
+      ...(probe.vip === null ? {} : { isVip: probe.vip }),
+      message: `登录态有效${user.nickname ? `（昵称：${user.nickname}）` : ''}；${probe.note}`,
+    }
+  }
+  // 查不到登录态。若探针表现与匿名请求一致（VIP 曲同样回 440006「请先登录」），
+  // 说明服务端没把我们当登录用户 —— Cookie 疑似失效，用 ok:false 让健康度亮「待确认」。
+  if (probe.tier === 'PQ' && probe.cannotCode === '440006') {
+    return {
+      ok: false,
+      verified: 'structural',
+      ...(probe.vip === null ? {} : { isVip: probe.vip }),
+      message: '结构校验通过；但服务端未识别登录态（取链表现与匿名请求一致，咪咕回 440006「请先登录」），Cookie 疑似已失效，请重新获取',
+    }
+  }
+  // 探针也判不出来（如探针曲不可用）：如实只说结构校验，不妄下结论。
   return {
     ok: true,
     verified: 'structural',
     ...(probe.vip === null ? {} : { isVip: probe.vip }),
-    message: `结构校验通过；${probe.note}`,
+    message: `结构校验通过；登录态查询不可用，${probe.note}`,
   }
 }
 
