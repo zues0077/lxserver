@@ -5378,6 +5378,8 @@ class App {
                 <div class="music-acc-actions music-acc-actions--main">
                     ${loginBtns}
                     <button type="button" class="btn-secondary" onclick="app.editMusicAccount('${a.id}')">填写 Cookie</button>
+                    <button type="button" class="btn-secondary music-acc-guide-link" title="这些按钮的作用"
+                        onclick="app.showMusicAccountActionsHelp(this)">?</button>
                     ${isKglite ? '' : `<button type="button" class="btn-secondary" onclick="app.verifyMusicAccount('${a.id}')">验证</button>`}
                     ${a.configured ? `<button type="button" class="btn-secondary" onclick="app.clearMusicAccount('${a.id}')">清除</button>` : ''}
                 </div>
@@ -5447,6 +5449,14 @@ class App {
         const pop = document.createElement('div');
         pop.className = 'music-acc-pop';
         items.forEach(it => {
+            // plain 条目渲染成纯文本说明（用于「?」帮助气泡），不响应点击
+            if (it.plain) {
+                const d = document.createElement('div');
+                d.className = 'music-acc-pop-item music-acc-pop-plain';
+                d.textContent = it.label;
+                pop.appendChild(d);
+                return;
+            }
             const b = document.createElement('button');
             b.type = 'button';
             b.className = 'music-acc-pop-item' + (it.danger ? ' is-danger' : '');
@@ -5519,6 +5529,19 @@ class App {
         items.push({ label: '删除这个号', danger: true, onClick: () => this.removeMusicAccountItem(platform, itemId) });
 
         this._openAccPop(btn, items);
+    }
+
+    /** 底部按钮行的「?」：解释这排按钮和「＋ 账号」的区别，防止操作错目标 */
+    showMusicAccountActionsHelp(btn) {
+        if (btn) { btn.blur(); }
+        this._openAccPop(btn, [
+            { plain: true, label: '这一排按钮操作的是「当前主账号」：' },
+            { plain: true, label: '· 扫码/手机号登录 → 重新登录并替换主账号的 Cookie（号失效时用）' },
+            { plain: true, label: '· 填写 Cookie → 手工粘贴覆盖主账号的 Cookie' },
+            { plain: true, label: '· 验证 → 校验 Cookie 是否有效、是否会员' },
+            { plain: true, label: '· 清除 → 删除该平台账号，停止用它取链' },
+            { plain: true, label: '想再挂一个号（冷备/家人号）请用账号列表里的「＋ 账号」，不会动主账号。' },
+        ]);
     }
 
     /** 「＋ 账号 ▾」：扫码 / 手机号 / 粘贴 Cookie 都从这里进，卡片不再占两行大按钮 */

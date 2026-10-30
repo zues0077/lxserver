@@ -6636,6 +6636,18 @@ input:-webkit-autofill:active {
     color: #f87171;
 }
 
+/* 「?」帮助气泡里的纯文本说明行：不响应点击、允许换行 */
+.music-acc-pop-plain {
+    cursor: default;
+    white-space: normal;
+    max-width: 300px;
+    line-height: 1.5;
+    opacity: 0.92;
+}
+.music-acc-pop-plain:hover {
+    background: transparent;
+}
+
 /* ---- 概念版小节容器：账号列表 / 自动领会员 各自成块，和卡片其余内容拉开层次 ---- */
 .music-acc-section {
     margin-top: 0.7rem;
