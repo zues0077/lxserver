@@ -553,6 +553,31 @@ export function addCookie(
 }
 
 /**
+ * 刷新某账号的 Cookie，**不动校验结果**。
+ *
+ * 与 addCookie 的分工（2026-10-31 踩过）：
+ *   - addCookie = 用户重新登录 / 重新导入，按「新登录态」把 lastVerify 清掉是合理的；
+ *   - 本函数只用于**平台下发的短期凭证轮换**（咪咕 pacmtoken、响应头里轮换的会话字段），
+ *     账号还是那个账号、校验结果依旧有效。用 addCookie 写回会把 lastVerify 抹掉，
+ *     表现就是：保温心跳每 60 分钟跑一次，账号在界面上每小时变回「未校验」，
+ *     健康统计里多出一个 unchecked —— 咪咕实测就是这样。
+ */
+export function refreshCookie(id: string, cookie: string, itemId?: string): { success: boolean; error?: string } {
+  if (!getPlatform(id)) return { success: false, error: `不支持的平台：${id}` }
+  const text = String(cookie || '').trim()
+  if (!text) return { success: false, error: 'Cookie 内容为空' }
+  const store = readStore()
+  const acc = normalize(store.accounts[id])
+  if (!acc?.items?.length) return { success: false, error: '该平台没有账号' }
+  const target = itemId ? acc.items.find(i => i.id === itemId) : primaryItem(acc)
+  if (!target) return { success: false, error: '要刷新的账号不存在（可能已被删除）' }
+  target.cookie = encrypt(text)
+  target.addedAt = Date.now()
+  writeStore(store)
+  return { success: true }
+}
+
+/**
  * 按「账号身份」找已有条目：先 uid（同一个号），再 cookie 指纹（同一份 Cookie）。
  * 找不到返回 null —— 调用方据此决定「新增」还是「覆盖主账号」。
  */

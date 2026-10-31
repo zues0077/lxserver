@@ -372,8 +372,8 @@ export async function verifyAccount(id: string, itemId?: string): Promise<Accoun
   // 平台在校验过程中顺带续了新证（目前只有咪咕 pacmtoken）：必须立刻落库，
   // 否则这次续期等于白续 —— 下次请求还在用旧票，3 小时后照样失效。
   if (info.refreshedCookie && info.refreshedCookie !== cookie) {
-    if (itemId) store.addCookie(id, info.refreshedCookie, { itemId })
-    else store.setCookie(id, info.refreshedCookie)
+    // 同上：这是平台续的票，不是重新登录，不能把校验结果清掉
+    store.refreshCookie(id, info.refreshedCookie, itemId)
     console.log(`[平台账号] ${platform.name} 短期凭证已自动续期并写回（${platform.name}账号「${itemId || '主账号'}」）`)
   }
   // 平台顺带把「这是哪个号」也答了（咪咕 queryUserInfo 的 userId）：
@@ -1056,8 +1056,9 @@ async function keepaliveOne(id: string, itemId?: string): Promise<void> {
   try {
     const r = await resolver.keepalive(cookie)
     if (r.renewed && r.cookie !== cookie) {
-      if (itemId) store.addCookie(id, r.cookie, { itemId })
-      else store.setCookie(id, r.cookie)
+      // 必须用 refreshCookie 而不是 addCookie：后者按「重新登录」语义会清掉 lastVerify，
+      // 一清就会让账号在界面上每小时变回「未校验」（实测踩过）。
+      store.refreshCookie(id, r.cookie, itemId)
       console.log(`[平台账号] ${name}短期凭证已主动保温续期（${itemId ? '子账号 ' + itemId : '主账号'}）`)
     }
   } catch (e: any) {
