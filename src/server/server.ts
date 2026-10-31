@@ -12081,11 +12081,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
     } catch (e: any) {
       console.warn('[平台账号] 账号巡检启动失败（不影响服务运行）:', e?.message || e)
     }
-    // 咪咕 pacmtoken 主动保温：2h 有效期的票靠 72h 巡检保不住，单独做 60 分钟心跳
+    // 短期凭证主动保温：咪咕 pacmtoken 只有 2h，72h 巡检保不住，按表做 60 分钟心跳
     try {
-      musicAccount.startMiguKeepalive()
+      musicAccount.startAccountKeepalive()
     } catch (e: any) {
-      console.warn('[平台账号] 咪咕保温启动失败（不影响服务运行）:', e?.message || e)
+      console.warn('[平台账号] 短期凭证保温启动失败（不影响服务运行）:', e?.message || e)
     }
     // 酷狗概念版 VIP 自动补领：剩余不足阈值才领，避免把每日额度攒成「会员到 2027 年」
     try {

@@ -57,6 +57,16 @@ export interface AccountInfo {
   uid?: string
 }
 
+/** 主动保温（保活）结果 */
+export interface CookieKeepaliveResult {
+  /** 平台是否下发了新的短期凭证 */
+  renewed: boolean
+  /** 合并后的 Cookie（renewed=false 时原样返回） */
+  cookie: string
+  /** 平台是否仍认为该账号在线（问不出来时为 undefined） */
+  online?: boolean
+}
+
 /** 各平台解析器需要实现的接口 */
 export interface PlatformResolver {
   /** 取播放链接 */
@@ -71,4 +81,12 @@ export interface PlatformResolver {
    * 实现各自控制超时，调用方还会再套一层总预算。
    */
   resolveUid?(cookie: string): Promise<string>
+  /**
+   * 轻量保温：只做一次「身份查询 + 接住平台顺带下发的新票」，不跑会员探针。
+   *
+   * 只有**短期凭证会过期**的平台才实现（目前只有咪咕 pacmtoken，约 2 小时）。
+   * 其余平台登录态是长效 Cookie、平台也没有换票接口，实现它只是白打接口 + 增加风控暴露。
+   * 编排层按 KEEPALIVE_PLAN 的表定时调用，见 index.ts。
+   */
+  keepalive?(cookie: string): Promise<CookieKeepaliveResult>
 }

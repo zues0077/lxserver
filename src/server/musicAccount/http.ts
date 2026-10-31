@@ -5,6 +5,7 @@
  * 对账号取链同样生效，不会出现「自定义源走了代理、账号取链没走」的割裂。
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import needle from 'needle'
 import { getProxyAgent } from '@/modules/utils/proxy.js'
 import { encodeRequestUrl } from '@/utils/urlEncode'
@@ -51,6 +52,125 @@ export function hasLoginKey(cookie: string, loginKeys: string[]): boolean {
     }
     return keys.includes(k)
   })
+}
+
+// ---- 平台轮换 Cookie 的「被动保活」 ----
+//
+// 用户 2026-10-31 提出「除了咪咕是否还有平台需要保活」。逐个平台核过：
+//   咪咕 mg    —— pacmtoken 仅约 2 小时，且平台**每次响应都下发新票** → 必须主动心跳（见 index.ts）。
+//   网易 wy    —— MUSIC_U 是长效登录态（月级），平台不换票；
+//   QQ tx      —— qm_keyst 长效；酷我 kw —— kw_token 长效；
+//   酷狗 kg / 概念版 kglite —— App token 长效，无换票接口；
+//   汽水 soda  —— 客户端 Cookie 长效；B站 bili —— SESSDATA 半年。
+// 后七个平台都**没有换票接口**，主动打接口不会延长寿命，只会白白增加风控暴露，所以不排心跳。
+// 但有一类风险是共通的：平台若在响应里 Set-Cookie 下发了新值（会话/设备标识轮换），
+// 我们只存导入那一刻的快照，轮换一次就永久落后。这里统一接住，零额外请求。
+//
+// 收的口子很紧，宁可漏接也不写坏账号：
+//   ① 只认与平台**同一注册域**的响应（防第三方/CDN 的 Set-Cookie 混进来）；
+//   ② 只更新存储里**已经存在**的同名字段（平台新加的埋点/AB 标记不进 Cookie 串）；
+//   ③ 忽略删除语义（Max-Age=0）与空值；
+//   ④ 编排层**只在这次请求成功时**才落库（见 index.ts），失败时不写回，
+//      避免把「降级成游客」的 Cookie 覆盖掉还能用的账号。
+
+interface CookieRotationCtx {
+  /** 平台注册域，用于同源判断 */
+  domain: string
+  /** 当前 Cookie 的键值快照 */
+  current: Record<string, string>
+  /** 本轮收到的轮换字段 */
+  updates: Record<string, string>
+}
+
+const cookieRotationCtx = new AsyncLocalStorage<CookieRotationCtx>()
+
+/** 注册域（最后两段），music.163.com 与 interface.music.163.com 视为同域 */
+function regDomainOf(host: string): string {
+  const parts = String(host || '').toLowerCase().split('.').filter(Boolean)
+  return parts.length >= 2 ? parts.slice(-2).join('.') : parts.join('.')
+}
+
+/**
+ * 从一条 set-cookie（或数组）里挑出「存储里已有同名字段」的新值。
+ * 纯函数，便于单测。
+ */
+export function pickRotatedFromSetCookie(raw: any, current: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!raw) return out
+  const list = Array.isArray(raw) ? raw : [raw]
+  for (const item of list) {
+    const text = String(item || '')
+    if (!text) continue
+    // 删除语义（Max-Age=0 / Expires 过去）不是新值，接了等于把账号清空
+    if (/max-age\s*=\s*0\b/i.test(text)) continue
+    const first = text.split(';')[0]
+    const idx = first.indexOf('=')
+    if (idx <= 0) continue
+    const k = first.slice(0, idx).trim()
+    const v = first.slice(idx + 1).trim()
+    if (!k || !v) continue
+    if (!(k in current)) continue
+    out[k] = v
+  }
+  return out
+}
+
+/** 把轮换后的字段并回 Cookie 串：只替换值，顺序与其余字段原样保留 */
+export function mergeRotatedCookie(cookie: string, updates: Record<string, string>): string {
+  if (!Object.keys(updates).length) return cookie
+  let changed = false
+  const parts = String(cookie || '').split(';').map(part => {
+    const idx = part.indexOf('=')
+    if (idx <= 0) return part
+    const k = part.slice(0, idx).trim()
+    if (!(k in updates)) return part
+    const keepSpace = part.slice(idx + 1).startsWith(' ') ? ' ' : ''
+    if (part.slice(idx + 1).trim() === updates[k]) return part
+    changed = true
+    return `${part.slice(0, idx)}=${keepSpace}${updates[k]}`
+  })
+  return changed ? parts.join(';') : cookie
+}
+
+export interface CookieRotation<T> {
+  result: T
+  /** 本次调用期间平台轮换字段后的 Cookie；没轮换时原样返回 */
+  cookie: string
+  /** 被轮换的字段名（只报字段名，绝不带值） */
+  changed: string[]
+}
+
+/**
+ * 在 fn 执行期间开启「轮换 Cookie 采集」。
+ * fn 内部所有走 request() 的请求都会被检查响应头，命中就收进上下文。
+ */
+export async function withCookieRotation<T>(
+  cookie: string,
+  domain: string,
+  fn: () => Promise<T>,
+): Promise<CookieRotation<T>> {
+  const ctx: CookieRotationCtx = { domain, current: parseCookie(cookie), updates: {} }
+  const result = await cookieRotationCtx.run(ctx, fn)
+  const changed = Object.keys(ctx.updates)
+  if (!changed.length) return { result, cookie, changed: [] }
+  return { result, cookie: mergeRotatedCookie(cookie, ctx.updates), changed }
+}
+
+/** 每个响应都过一遍；不在采集上下文里（如手动校验之外）直接返回 */
+function absorbSetCookie(url: string, headers: Record<string, any>): void {
+  const ctx = cookieRotationCtx.getStore()
+  if (!ctx) return
+  try {
+    const host = new URL(url).hostname
+    if (ctx.domain && regDomainOf(host) !== regDomainOf(ctx.domain)) return
+  } catch {
+    return
+  }
+  const raw = headers?.['set-cookie'] ?? headers?.['Set-Cookie']
+  const picked = pickRotatedFromSetCookie(raw, ctx.current)
+  for (const k of Object.keys(picked)) {
+    ctx.updates[k] = picked[k]
+  }
 }
 
 export interface RequestOpts {
@@ -106,6 +226,9 @@ export async function request<T = any>(url: string, opts: RequestOpts = {}): Pro
   // 平台接口 URL 基本是纯 ASCII，但咪咕/酷我 会把昵称或 UA 片段拼进查询串，
   // 统一在这里编码，避免 needle（url.parse）抛 unescaped characters。
   const resp = await needle(method, encodeRequestUrl(url), payload, options)
+
+  // 平台若在响应里下发了轮换后的 Cookie 字段，就地收下（见上方 withCookieRotation）
+  absorbSetCookie(url, resp.headers || {})
 
   let body: any = resp.body
   // 不少音乐平台的接口用 text/html 返回 JSON（实测酷狗 getSongInfo 就是），
