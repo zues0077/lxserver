@@ -962,6 +962,60 @@ export function startAccountHealthCheck(): void {
   )
 }
 
+// ---- 咪咕短期凭证主动保温 ----
+//
+// 根因（2026-10-31 实测）：咪咕 pacmtoken 有效期仅约 2 小时（平台每次响应续一张、签发 +2h），
+// 而平台账号巡检默认 72 小时，保温（写回新 pacmtoken）只在「取链成功」或「72h 巡检」时发生。
+// 账号只要空闲超过 2 小时（没在听歌 / 随机测试没抽到 mg），票就过期，下次取链回 440006「请先登录」，
+// 被误判为账号失效 —— 即便用户刚登录过。
+// 修复：对咪咕账号单独做低频心跳，每 60 分钟用一次 queryUserInfo（顺带下发新 pacmtoken）写回，
+// 让票永远停在「最近 1 小时内签发」，永不到期。
+// 独立于 72h 巡检开关：72h 的巡检根本保不住 2h 的票，两者职责不同；本心跳只认音乐账号总开关，
+// 避免「关掉巡检」反而让咪咕静默失效（用户关巡检是为了少打接口，不是为了放任账号掉线）。
+const MIGU_KEEPALIVE_MS = 60 * 60_000
+let miguKeepaliveTimer: ReturnType<typeof setTimeout> | null = null
+
+export function startMiguKeepalive(): void {
+  if (miguKeepaliveTimer) return
+  const tick = (): void => {
+    void runMiguKeepalive()
+      .catch(e => console.log(`[平台账号] 咪咕保温心跳出错（忽略）：${e?.message || e}`))
+      .finally(() => {
+        miguKeepaliveTimer = setTimeout(tick, MIGU_KEEPALIVE_MS)
+        if (miguKeepaliveTimer && typeof miguKeepaliveTimer.unref === 'function') miguKeepaliveTimer.unref()
+      })
+  }
+  // 启动后 2 分钟先跑一次（避开启动期的网络抢占），之后每 60 分钟一次
+  miguKeepaliveTimer = setTimeout(tick, 2 * 60_000)
+  if (miguKeepaliveTimer && typeof miguKeepaliveTimer.unref === 'function') miguKeepaliveTimer.unref()
+  console.log('[平台账号] 咪咕 pacmtoken 主动保温已排程：每 60 分钟一次轻量心跳（独立于 72h 巡检）')
+}
+
+async function runMiguKeepalive(): Promise<void> {
+  if (!isEnabled()) return
+  const row = store.listAccounts().find(a => a.id === 'mg')
+  if (!row || !row.configured) return
+  await keepaliveOneMigu('mg')
+  for (const it of row.accounts) {
+    if (it.configured) await keepaliveOneMigu('mg', it.id)
+  }
+}
+
+async function keepaliveOneMigu(id: string, itemId?: string): Promise<void> {
+  const cookie = itemId ? store.getCookieOf(id, itemId) : store.getCookie(id)
+  if (!cookie || !cookie.trim()) return
+  try {
+    const r = await migu.keepalive(cookie)
+    if (r.renewed && r.cookie !== cookie) {
+      if (itemId) store.addCookie(id, r.cookie, { itemId })
+      else store.setCookie(id, r.cookie)
+      console.log(`[平台账号] 咪咕短期凭证已主动保温续期（${itemId ? '子账号 ' + itemId : '主账号'}）`)
+    }
+  } catch (e: any) {
+    console.log(`[平台账号] 咪咕保温续期请求失败（忽略）：${e?.message || e}`)
+  }
+}
+
 // ---- 供接口层使用的 store 再导出，避免 API 直接依赖内部文件 ----
 export const getAccounts = store.listAccounts
 export const removeAccount = store.removeCookie

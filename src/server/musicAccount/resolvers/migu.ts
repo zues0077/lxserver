@@ -478,6 +478,29 @@ export async function getAccountInfo(cookie: string): Promise<AccountInfo> {
   })
 }
 
+/**
+ * 咪咕短期凭证主动保温（轻量心跳）：用一次 queryUserInfo 把平台顺带下发的新 pacmtoken 续回。
+ *
+ * 为什么单独抽一个、不复用 getAccountInfo（它还会跑三档 VIP 探针）：
+ * 保温是「心跳」级调用（每 60 分钟一次），不该顺手打 3 次 listen-url 探针 ——
+ * 那既增加风控暴露面，也对「保持在线」毫无帮助（探针只为校验时判断会员档位）。
+ * 这里只取「登录态 + 新票」两件事，1 个请求完成保温。
+ *
+ * 返回合并后的新 Cookie；若没拿到新票（如已离线、回 440006）则 renewed=false，调用方不落库。
+ *
+ * 背景（2026-10-31 实测根因）：咪咕 pacmtoken 有效期仅约 2 小时（平台每次响应续一张、签发 +2h），
+ * 而平台账号巡检默认 72 小时，保温（写回新 pacmtoken）只在「取链成功」或「72h 巡检」时发生。
+ * 账号只要空闲超过 2 小时（没在听歌 / 随机测试没抽到 mg），票就过期，下次取链回 440006「请先登录」，
+ * 被误判为账号失效 —— 即便用户刚登录过。主动心跳让票永远停在「最近 1 小时内签发」，永不到期。
+ */
+export async function keepalive(cookie: string): Promise<{ renewed: boolean; cookie: string; online: boolean }> {
+  const info = await queryUserInfo(cookie, 8000)
+  if (info.newPacmToken) {
+    return { renewed: true, cookie: mergePacmToken(cookie, info.newPacmToken), online: info.online }
+  }
+  return { renewed: false, cookie, online: info.online }
+}
+
 /** 单轮取链（不刷新）。抽出来是为了让外层「票过期 → 换票 → 重试一次」的逻辑干净。 */
 async function resolveOnce(songInfo: any, quality: string, cookie: string): Promise<AccountResolveResult> {
   const { contentId } = pickIds(songInfo)
