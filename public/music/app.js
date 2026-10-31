@@ -3119,7 +3119,9 @@ function renderAlbumResults(list) {
                     <i class="far fa-user text-[10px] opacity-70"></i>
                     ${item.artistName || '未知歌手'}
                 </span>
-                ${publishDate ? `<span class="text-[11px] text-gray-400 flex-shrink-0">${publishDate}</span>` : ''}
+                ${publishDate
+                    ? `<span class="text-[11px] text-gray-400 flex-shrink-0">${publishDate}</span>`
+                    : (item.songCount ? `<span class="text-[11px] text-gray-400 flex-shrink-0">${item.songCount} 首</span>` : '')}
             </div>
         `;
         grid.appendChild(div);

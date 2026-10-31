@@ -700,6 +700,101 @@ export function titleSimilarity(a: string, b: string): number {
   return Math.min(1, (2 * inter) / total)
 }
 
+/**
+ * 关键词字符**按顺序**被候选覆盖的比例（0~1）。
+ *
+ * 为什么要这个：中文标题里漏字/多字很常见，用户搜「神仙诗班」，
+ * 真合集叫「神仙**唱**诗班」，bigram 相似度只有 0.2（差一个字就跨了两个 bigram），
+ * 但「神仙诗班」四个字按顺序都出现在「神仙唱诗班」里 → 覆盖率 1.0。
+ * 只用它判定太松（长标题里总能凑出子序列），所以和 bigram 相似度一起加权。
+ */
+export function subsequenceCoverage(short: string, long: string): number {
+  const s = normalizeTitle(short)
+  const l = normalizeTitle(long)
+  if (!s || !l) return 0
+  if (l.includes(s)) return 1
+  let i = 0
+  for (let j = 0; j < l.length && i < s.length; j++) {
+    if (l[j] === s[i]) i++
+  }
+  return i / s.length
+}
+
+/**
+ * 从视频标题里抽出「系列 / 合集名前缀」。
+ *
+ * B站 UP 主的系列视频几乎都写成「【合集名】丨本期标题」「《合集名》- 本期」，
+ * 这个前缀往往**和合集名一字不差**，是「搜视频 → 找合集」之间唯一的桥：
+ * 实测少吆的 7 条投稿前缀都是「【神仙唱诗班】」，而他名下的合集就叫
+ * 「合集·【神仙唱诗班】丨神仙唱歌给你听还不够你拽的」。
+ */
+export function extractTitlePrefix(title: string): string {
+  const raw = String(title || '').replace(/<[^>]+>/g, '').trim()
+  if (!raw) return ''
+  // 1) 方括号/书名号里的内容（取第一个有实义且不太短的）
+  const brackets = raw.match(/【([^】]{2,40})】|「([^」]{2,40})」|『([^』]{2,40})』|《([^》]{2,40})》/g)
+  if (brackets) {
+    for (const item of brackets) {
+      const text = item.replace(/^[【「『《]|[】」』》]$/g, '').trim()
+      if (text.length >= 2) return text
+    }
+  }
+  // 2) 没有括号：按分隔符取第一段（「神仙诗班 丨 某某」→「神仙诗班」）
+  const seg = raw.split(/[丨｜|｜/\\:：,，、\-—–~～!！?？]+/).map(s => s.trim()).find(s => s.length >= 2)
+  return seg || raw.slice(0, 30)
+}
+
+/**
+ * 专辑搜索关键词清洗。
+ *
+ * 用户经常把 B站 的**整行合集标题**粘进搜索框（截图里就是
+ * 「合集：『神仙诗班』｜『神仙唱歌给你听还不够你拽的」），
+ * 直接拿这串去搜视频，B站的召回会被拆得七零八落，返回一堆无关视频
+ * （实测搜出「中国唱诗班--《相思》」）。这里剥掉标记、按分隔符取最靠前的一段。
+ */
+export function cleanAlbumKeyword(raw: string): string {
+  let text = String(raw || '').replace(/<[^>]+>/g, '').trim()
+  if (!text) return ''
+  text = text.replace(/^[\s　]*(合集|系列|专辑|合辑|歌单)\s*[·:：\-—]?\s*/u, '')
+  // 包裹符一律当分隔符：`【周杰伦】范特西` → `周杰伦 | 范特西`
+  const parts = text
+    .replace(/[【「『《\[(（"'“”]/g, ' ')
+    .replace(/[】」』》\])）"'“”]/g, ' | ')
+    .split(/[丨｜|/\\:：,，、;；!！?？~～|]+/)
+    .map(seg => seg.trim())
+    .filter(seg => seg.length >= 2)
+  if (!parts.length) return text.replace(/[^\p{L}\p{N}]+/gu, '').trim()
+  return parts[0]
+}
+
+/**
+ * 合集名与关键词的匹配分（0~1）。
+ *
+ * 合集名常带一串包装（「合集·【神仙唱诗班】丨神仙唱歌给你听还不够你拽的」），
+ * 直接和「神仙诗班」比 bigram 只有 0.2。所以两边都先归一化成「系列名」再比：
+ * 合集名取方括号里的核心名（神仙唱诗班），关键词先清洗；
+ * 分值取「bigram 相似度」与「字符覆盖率（带长度惩罚）」的较大值 ——
+ * 前者管一字不差，后者管漏字/错字（神仙诗班 ↔ 神仙唱诗班）。
+ */
+export function albumMatchScore(keyword: string, albumName: string): number {
+  const raw = String(albumName || '')
+  const kw = cleanAlbumKeyword(keyword) || String(keyword || '')
+  const nk = normalizeTitle(kw)
+  const names = [raw, extractTitlePrefix(raw) || raw]
+    .map(s => normalizeTitle(s))
+    .filter(Boolean)
+  if (!nk || !names.length) return 0
+  let best = 0
+  for (const nm of names) {
+    const dice = titleSimilarity(nm, nk)
+    const cov = subsequenceCoverage(nk, nm)
+    // 合集名通常比关键词长（带「合集·」「丨后半句」），长太多就按比例衰减覆盖率
+    const ratio = Math.min(1, (nk.length + 4) / Math.max(nk.length + 4, nm.length))
+    best = Math.max(best, dice, cov * ratio)
+  }
+  return best
+}
+
 /** 挑最贴近关键词的一条；同分保留靠前的（B站综合排序本身就是从相关到不相关） */
 export function pickClosestVideo<T extends { name?: string }>(hits: T[], keyword: string): { item: T | null, score: number } {
   let item: T | null = null
@@ -822,6 +917,7 @@ async function spaceArcPage(
   pn: number,
   ps: number,
   order: 'click' | 'pubdate',
+  uname = '',
 ): Promise<{ list: any[]; total: number }> {
   if (Date.now() < arcBlockedUntil) throw new Error('B站投稿接口冷却中')
   const account = store.getCookie('bili') || ''
@@ -851,10 +947,11 @@ async function spaceArcPage(
     .map(item => toBiliSong({
       bvid: item?.bvid,
       title: item?.title,
-      author: item?.author,
+      // 投稿列表（x/space/arc/search）的 vlist 里**没有 author 字段**，
+      // 以前直接取 item.author 导致歌手列整列是「-」；用 UP 主名兜底
+      author: item?.author || uname,
       pic: item?.pic,
       duration: item?.length,
-      // 投稿列表里的 author 就是 UP 主名，mid 用查询参数里的那个
       mid,
     }))
     .filter(Boolean) as any[]
@@ -1017,6 +1114,10 @@ export async function getUserCard(mid: string): Promise<any> {
     throw new Error(`B站 UP 主信息获取失败（code=${body.code ?? '-'}，${body.message || '无返回'}）`)
   }
   const card: any = body.data?.card || {}
+  // 「专辑数」= 该 UP 的合集 + 系列数。以前硬编码 0，歌手页头部永远显示「0 专辑」，
+  // 而专辑 tab 里明明有内容（同一个 UP 的 collectionCache 已经查过一次，这里基本不额外耗时）
+  const cols = await listCollections(id).catch(() => null)
+  const albumSize = cols ? cols.seasons.length + cols.series.length : 0
   return {
     source: 'bili',
     id,
@@ -1025,7 +1126,7 @@ export async function getUserCard(mid: string): Promise<any> {
     picUrl: normalizeCover(card.face),
     desc: decodeEntities(card.sign) || '',
     musicSize: Number(body.data?.archive_count) || 0,
-    albumSize: 0,
+    albumSize,
     // 粉丝数借 alias 透出，卡片上不额外占位
     alias: Number(card.fans) ? [`${Number(card.fans)} 粉丝`] : [],
   }
@@ -1074,7 +1175,7 @@ export async function getUserVideos(mid: string, uname: string, page = 1, pageSi
   // 1) 官方投稿接口（最准）。风控失败就静默降级，不打扰用户
   try {
     for (const pn of [1, 2]) {
-      const r = await spaceArcPage(id, pn, 50, 'pubdate')
+      const r = await spaceArcPage(id, pn, 50, 'pubdate', name)
       total = r.total || total
       fromArc += r.list.length
       push(r.list)
@@ -1237,43 +1338,181 @@ export async function getAlbumSongs(id: string): Promise<{
   }
 }
 
+/** 专辑搜索结果缓存（关键词级）。合集侧有 10 分钟缓存，这里再包一层省掉视频搜索 */
+const albumSearchCache = new Map<string, { at: number; data: { list: any[]; total: number; allPage: number } }>()
+const ALBUM_SEARCH_TTL = 10 * 60 * 1000
+const ALBUM_SEARCH_CACHE_MAX = 200
+/** 整次专辑搜索的时间预算：1 次视频搜索 + 最多 6 次合集列表，超了就用手上已有的结果 */
+const ALBUM_SEARCH_BUDGET_MS = 9000
+/** 最多反查几个 UP 主的合集（每个 UP 一次 seasons_series_list） */
+const ALBUM_UP_LIMIT = 6
+const ALBUM_RESULT_LIMIT = 10
+/** 合集名与关键词的匹配门槛（低于它宁可不给，也不拿无关合集凑数） */
+const ALBUM_MATCH_MIN = 0.4
 /**
- * 专辑维度：关键词包装成一条「视频合集」。
- * 门槛放到 1 条：B站本来就没有专辑实体，之前要求「至少 3 条视频」才给结果，
- * 导致搜冷门专辑名时「专辑」tab 常常整页空白（用户反馈的「搜专辑点开没有列表」）。
+ * 「视频标题前缀」这条通道的启用门槛：前缀本身得和关键词沾边。
+ * 不设这道闸门的话，某个 UP 的前缀（比如「Playlist」）会和他自己名下**所有**合集对上，
+ * 于是搜「纯音乐」把「合集·【Playlist】充电专属」也拉了进来 —— 实测踩过。
+ */
+const ALBUM_PREFIX_MIN = 0.5
+
+/** 写专辑搜索缓存（带容量上限，防止长期运行时按关键词无限累积） */
+function putAlbumCache(kw: string, data: { list: any[]; total: number; allPage: number }): void {
+  if (albumSearchCache.size >= ALBUM_SEARCH_CACHE_MAX && !albumSearchCache.has(kw)) {
+    const oldest = albumSearchCache.keys().next().value
+    if (oldest !== undefined) albumSearchCache.delete(oldest)
+  }
+  albumSearchCache.set(kw, { at: Date.now(), data })
+}
+
+/**
+ * 专辑维度。
+ *
+ * B站没有专辑实体，真正能当「专辑」用的只有 UP 主的**合集(season) / 系列(series)**。
+ * 老实现是「拿关键词搜视频，把最像的一条包装成一张虚拟专辑」——点进去其实还是视频列表，
+ * 而且搜「合集：『神仙诗班』｜『神仙唱歌…」这种整行标题时，B站会召回一堆「唱诗班」，
+ * 门面视频选成「中国唱诗班--《相思》」，用户看到的完全不是自己搜的东西。
+ *
+ * 现在的做法（2026-10-31 实测可行）：
+ *   1) 先把关键词洗干净（剥「合集·」「丨后半句」「【】」）；
+ *   2) 搜 50 条视频 → 按「同一 UP 出现的次数 + 标题前缀与关键词的相似度」给 UP 打分；
+ *      少吆搜「神仙诗班」时排行 19，但同一个 UP 有 3 条、标题前缀都是「【神仙唱诗班】」，
+ *      加权后稳稳进前几名；
+ *   3) 只对前 6 个 UP 查一次 seasons_series_list（匿名稳定 200、10 分钟缓存），
+ *      用「合集名 ≈ 关键词」或「合集名 ≈ 视频标题前缀」判定命中 → 返回**真合集**当专辑，
+ *      点进去就是合集里的稿件（getAlbumSongs 已认 bili-season| / bili-series|）；
+ *   4) 一个都没匹配上才退回「关键词虚拟专辑」，且标题改用清洗后的关键词，
+ *      不再拿那条不相关的视频标题冒充专辑名。
  */
 export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): Promise<{
   list: any[]
   total: number
   allPage: number
 }> {
-  if (Math.max(1, page) > 1) return { list: [], total: 0, allPage: 1 }
-  const data = await searchSongs(keyword, 1, 50).catch(() => ({ list: [] as any[], total: 0, allPage: 1 }))
-  const hits = data.list || []
-  if (!hits.length) return { list: [], total: 0, allPage: 1 }
+  const empty = { list: [] as any[], total: 0, allPage: 1 }
+  if (Math.max(1, page) > 1) return empty
+  const raw = String(keyword || '').trim()
+  if (!raw) return empty
+  const kw = cleanAlbumKeyword(raw) || raw
 
-  // 拿最贴近关键词的那条视频当门面（封面 / 标题 / UP 主），而不是无脑取第一条
-  const { item: hit, score } = pickClosestVideo(hits, keyword)
+  const cachedAlbum = albumSearchCache.get(kw)
+  if (cachedAlbum && Date.now() - cachedAlbum.at < ALBUM_SEARCH_TTL) return cachedAlbum.data
+
+  const deadline = Date.now() + ALBUM_SEARCH_BUDGET_MS
+  const data = await searchSongs(kw, 1, 50).catch(() => ({ list: [] as any[], total: 0, allPage: 1 }))
+  const hits = data.list || []
+  if (!hits.length) return empty
+
+  // ---- 1) 给候选 UP 打分：同「系列前缀」出现次数 + 前缀与关键词的相似度 ----
+  // 按 (UP, 标题前缀) 两维统计：同一个 UP 有 3 条「【神仙唱诗班】」说明那是个真系列，
+  // 而某个 UP 只发过 1 条带某前缀的视频时，前缀大概率只是这期标题的一部分（噪声）。
+  type UpAgg = { mid: string; name: string; prefixes: Map<string, number> }
+  const upAgg = new Map<string, UpAgg>()
+  for (const hit of hits) {
+    const mid = String(hit?.meta?.mid || '').trim()
+    if (!/^\d+$/.test(mid)) continue
+    let agg = upAgg.get(mid)
+    if (!agg) {
+      agg = { mid, name: String(hit?.singer || ''), prefixes: new Map() }
+      upAgg.set(mid, agg)
+    }
+    const prefix = extractTitlePrefix(String(hit?.name || ''))
+    if (prefix) agg.prefixes.set(prefix, (agg.prefixes.get(prefix) || 0) + 1)
+  }
+  const candidates = [...upAgg.values()]
+    .map((agg) => {
+      let best = { prefix: '', prefixCount: 0, sim: 0, score: 0 }
+      for (const [prefix, count] of agg.prefixes) {
+        const sim = albumMatchScore(kw, prefix)
+        const score = Math.min(5, count) * 0.4 + sim
+        if (score > best.score) best = { prefix, prefixCount: count, sim, score }
+      }
+      return { mid: agg.mid, name: agg.name, ...best }
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, ALBUM_UP_LIMIT)
+
+  // ---- 2) 反查这些 UP 的合集/系列，挑名字对得上的当专辑 ----
+  type AlbumHit = { score: number; album: any }
+  const found: AlbumHit[] = []
+  const seenAlbum = new Set<string>()
+  await Promise.all(candidates.map(async (up) => {
+    if (Date.now() > deadline) return
+    const cols = await listCollections(up.mid).catch(() => null)
+    if (!cols) return
+    const groups: Array<[string, any[], string]> = [
+      ['season', cols.seasons, SEASON_ID_PREFIX],
+      ['series', cols.series, SERIES_ID_PREFIX],
+    ]
+    for (const [kind, arr, prefixId] of groups) {
+      for (const item of arr) {
+        const meta = item?.meta || {}
+        const cid = String(kind === 'season' ? meta.season_id : meta.series_id)
+        if (!cid) continue
+        const name = decodeEntities(String(meta.name || ''))
+        // 两条通道取高分：用户搜的词本身，或该 UP 视频标题里的系列前缀。
+        // 前缀通道要同时满足：前缀与关键词相关、且该前缀在搜索结果里出现 ≥2 次（是真系列）
+        const kwScore = albumMatchScore(kw, name)
+        const prefixScore = up.prefixCount >= 2 && up.sim >= ALBUM_PREFIX_MIN
+          ? albumMatchScore(up.prefix, name)
+          : 0
+        const score = Math.max(kwScore, prefixScore)
+        if (score < ALBUM_MATCH_MIN) continue
+        const id = `${prefixId}${up.mid}|${cid}`
+        if (seenAlbum.has(id)) continue
+        seenAlbum.add(id)
+        found.push({
+          score,
+          album: {
+            source: 'bili',
+            id,
+            name,
+            picUrl: normalizeCover(String(meta.cover || '')),
+            singer: up.name,
+            artistName: up.name,
+            artistId: up.mid,
+            songCount: Number(meta.total) || (Array.isArray(item?.archives) ? item.archives.length : 0) || 0,
+            publishTime: '',
+            // 真合集：点进去是合集里的稿件，不再是「关键词视频列表」
+            meta: { mid: up.mid, kind, collectionId: cid, collection: true, matchScore: Number(score.toFixed(3)) },
+          },
+        })
+      }
+    }
+  }))
+
+  if (found.length) {
+    found.sort((a, b) => b.score - a.score)
+    const list = found.slice(0, ALBUM_RESULT_LIMIT).map(h => h.album)
+    const result = { list, total: list.length, allPage: 1 }
+    putAlbumCache(kw, result)
+    console.log(`[B站] 专辑搜索「${raw}」→ 清洗「${kw}」，命中 ${list.length} 个合集/系列`)
+    return result
+  }
+
+  // ---- 3) 兜底：关键词虚拟专辑（点进去是关键词视频列表） ----
+  const { item: hit, score } = pickClosestVideo(hits, kw)
   const represent = hit || hits[0]
   const mid = String(represent?.meta?.mid || '')
-  return {
+  console.log(`[B站] 专辑搜索「${raw}」→ 清洗「${kw}」，无合集命中，回落关键词视频（相似度 ${score.toFixed(2)}）`)
+  const fallback = {
     list: [{
       source: 'bili',
-      id: encodeKeywordId(keyword),
-      // 标题直接用命中视频的真实标题，不再套「（B站视频合集）」后缀——
-      // 用户就是照 B站这个标题搜的，改过名字反而对不上
-      name: String(represent?.name || keyword),
+      id: encodeKeywordId(kw),
+      // 标题用清洗后的关键词，不再拿那条不相关视频的标题冒充专辑名
+      // （以前搜整行合集标题会显示成「中国唱诗班--《相思》」，用户以为搜错了）
+      name: kw,
       picUrl: represent?.img || '',
-      // 歌手 = UP 主。前端专辑卡片读 artistName，详情页读 singer + artistId，三处都填
       singer: String(represent?.singer || 'B站'),
       artistName: String(represent?.singer || 'B站'),
       artistId: mid,
-      // 这里放视频数，专辑卡片会显示成「N 首」
       songCount: hits.length,
       publishTime: '',
-      meta: { keyword, virtual: true, mid, bvid: represent?.id, matchScore: Number(score.toFixed(3)) },
+      meta: { keyword: kw, virtual: true, mid, bvid: represent?.id, matchScore: Number(score.toFixed(3)) },
     }],
     total: 1,
     allPage: 1,
   }
+  putAlbumCache(kw, fallback)
+  return fallback
 }
