@@ -3432,6 +3432,29 @@ function expandArtistDetailHeader() {
 }
 window.expandArtistDetailHeader = expandArtistDetailHeader;
 
+/** 立即收成紧凑头部（不动画、不等滚动）：歌手页首屏直接给列表 */
+function collapseArtistHeaderImmediate() {
+    const header = document.getElementById('artist-detail-header');
+    const miniBar = document.getElementById('artist-mini-bar');
+    if (header) {
+        header.classList.add('artist-hero-collapsed');
+        header.style.maxHeight = '0px';
+        header.style.opacity = '0';
+        header.style.paddingTop = '0px';
+        header.style.paddingBottom = '0px';
+        header.style.borderBottomWidth = '0px';
+        header.style.overflow = 'hidden';
+        header.style.transform = 'translateY(-10px)';
+        header.style.pointerEvents = 'none';
+    }
+    if (miniBar) {
+        miniBar.classList.remove('hidden', 'opacity-0', '-translate-y-2', 'pointer-events-none');
+        miniBar.classList.add('opacity-100', 'translate-y-0', 'pointer-events-auto');
+    }
+    updateArtistMiniExpandButton(0);
+}
+window.collapseArtistHeaderImmediate = collapseArtistHeaderImmediate;
+
 function initArtistScrollListener() {
     const searchResults = document.getElementById('search-results');
     const artistContent = document.getElementById('artist-detail-content');
@@ -3736,6 +3759,10 @@ function renderArtistHeader(info, activeTab, order) {
 
     renderArtistMiniBar(info, activeTab, order);
     initArtistScrollListener();
+    // 进入即紧凑：首屏直接给歌曲列表。
+    // 老做法是「大卡片展开态」，列表被挤到最底下只露一行，要滚一下才折叠成紧凑头部（用户 2026-10-31 反馈很难用）。
+    // 现在默认就是折叠态，想要大头像/简介点 mini bar 的「展开」。
+    collapseArtistHeaderImmediate();
 }
 
 async function loadArtistSongs(id, source, order, forceFetch = false) {
@@ -4306,6 +4333,25 @@ function expandAlbumDetailHeader() {
 }
 window.expandAlbumDetailHeader = expandAlbumDetailHeader;
 
+/** 立即收成紧凑头部（不动画、不等滚动）：专辑页首屏直接给歌曲列表 */
+function collapseAlbumDetailHeaderImmediate() {
+    const albumHeader = document.getElementById('album-detail-header');
+    const miniBar = document.getElementById('album-mini-bar');
+    if (albumHeader) {
+        albumHeader.classList.add('album-hero-collapsed');
+        albumHeader.style.maxHeight = '0px';
+        albumHeader.style.opacity = '0';
+        albumHeader.style.transform = 'translateY(-10px)';
+        albumHeader.style.pointerEvents = 'none';
+    }
+    if (miniBar) {
+        miniBar.classList.remove('hidden', 'opacity-0', '-translate-y-2', 'pointer-events-none');
+        miniBar.classList.add('opacity-100', 'translate-y-0', 'pointer-events-auto');
+    }
+    updateAlbumMiniExpandButton(0);
+}
+window.collapseAlbumDetailHeaderImmediate = collapseAlbumDetailHeaderImmediate;
+
 function initAlbumScrollListener() {
     const container = document.getElementById('search-results');
     if (!container || albumScrollHandlerBound) return;
@@ -4606,6 +4652,8 @@ function renderAlbumDetailHeader(info) {
 
     renderAlbumMiniBar(info);
     initAlbumScrollListener();
+    // 同歌手页：进来就紧凑，列表占首屏；要看大封面/简介点「展开」
+    collapseAlbumDetailHeaderImmediate();
 }
 window.renderAlbumDetailHeader = renderAlbumDetailHeader;
 

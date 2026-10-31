@@ -7598,7 +7598,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             let fetchedPages = startPage
             let stopReason = 'all-pages'
             for (let p = startPage + 1; p <= capPages; p++) {
-              if (Date.now() - startedAt > SEARCH_MAX_MS) { stopReason = 'time-budget'; break }
+              // 留 800ms 余量再判断：这个检查在「发请求之前」，若只剩不到 800ms 还发一页，
+              // 单页 0.7~2.5s（mg 的 jadeite 实测）就会把总耗时拖到预算之外（实测首屏 3.5~8s）。
+              if (Date.now() - startedAt > SEARCH_MAX_MS - 800) { stopReason = 'time-budget'; break }
               if (allSongs.length >= SEARCH_MAX_ITEMS) { stopReason = 'item-budget'; break }
               let pageData: any
               try {
