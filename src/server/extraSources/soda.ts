@@ -1212,10 +1212,18 @@ export async function searchSingers(keyword: string, page = 1, pageSize = 20): P
   const artists: any[] = (group.data || [])
     .map((item: any) => item?.entity?.artist)
     .filter((a: any) => a?.id)
-  // 官方排序里同名 UGC 号经常压过真身，这里按「曲目数优先、收藏数次之」重排
-  artists.sort((a: any, b: any) =>
-    ((Number(b.count_tracks) || 0) * 1_000_000 + Math.min(Number(b.stats?.count_collected) || 0, 999_999))
-    - ((Number(a.count_tracks) || 0) * 1_000_000 + Math.min(Number(a.stats?.count_collected) || 0, 999_999)))
+  // 官方排序里同名 UGC 号经常压过真身：搜「周杰伦」排第一的是「哇欣」（曲目数多），
+  // 所以先按「艺人名与关键词的吻合度」分档（完全一致 > 包含 > 其它），档内再按曲目数/收藏数
+  const normName = (value: any) => String(value || '').toLowerCase().replace(/[\s\-_·・()（）[\]【】]/g, '')
+  const kw = normName(keyword)
+  const rankOf = (a: any) => {
+    const name = normName(a.name)
+    const nameTier = name === kw ? 2 : (kw && (name.includes(kw) || kw.includes(name)) ? 1 : 0)
+    return nameTier * 1e15
+      + (Number(a.count_tracks) || 0) * 1e6
+      + Math.min(Number(a.stats?.count_collected) || 0, 999_999)
+  }
+  artists.sort((a: any, b: any) => rankOf(b) - rankOf(a))
   const list = artists.map((a: any) => ({
     id: String(a.id),
     name: String(a.name || '').trim(),

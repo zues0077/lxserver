@@ -3126,6 +3126,10 @@ function searchBySinger(name) {
 }
 window.searchBySinger = searchBySinger;
 
+// 歌手「所有专辑」维度的能力表。咪咕没有艺人专辑接口（mg/extendDetail 有意未接），
+// 界面上一律显示这个 tab、点了只会吃 400「暂不支持歌手专辑列表」，所以直接不渲染。
+const ARTIST_ALBUM_SOURCES = ['wy', 'tx', 'kg', 'kw', 'kglite', 'soda', 'bili'];
+
 let currentArtistId = null;
 let currentArtistSource = 'wy';
 let currentArtistInfo = null;
@@ -3134,6 +3138,8 @@ window.currentArtistSource = 'wy';
 window.currentArtistOrder = 'hot';
 
 async function enterArtist(id, source = 'wy', order = 'hot', tab = 'songs', isBack = false) {
+    // 该源没有「所有专辑」维度（目前只有咪咕）时回落到歌曲页，别让用户点进去只看到 400
+    if (tab === 'albums' && !ARTIST_ALBUM_SOURCES.includes(source)) tab = 'songs';
     const typeEl = document.getElementById('search-type');
 
     // 记录返回状态 (仅当从非歌手列表进入 且 不是从子页面返回时)
@@ -3497,6 +3503,7 @@ function renderArtistHeader(info, activeTab, order) {
     const container = document.getElementById('search-results');
     const header = document.getElementById('search-results-header');
     if (!artistHeader || !container || !info) return;
+    const canShowAlbums = ARTIST_ALBUM_SOURCES.includes(info.source);
 
     if (activeTab === 'songs') {
         if (header) header.classList.remove('hidden');
@@ -3578,11 +3585,11 @@ function renderArtistHeader(info, activeTab, order) {
                         所有歌曲
                         ${activeTab === 'songs' ? '<div class="absolute bottom-0 left-0 right-0 h-1 bg-emerald-500 rounded-full"></div>' : ''}
                     </button>
-                    <button onclick="enterArtist('${info.id}', '${info.source}', '${order}', 'albums')" 
+                    ${canShowAlbums ? `<button onclick="enterArtist('${info.id}', '${info.source}', '${order}', 'albums')" 
                             class="pb-2 text-sm font-bold transition-all relative ${activeTab === 'albums' ? 't-text-main' : 't-text-muted hover:t-text-main'}">
                         所有专辑
                         ${activeTab === 'albums' ? '<div class="absolute bottom-0 left-0 right-0 h-1 bg-emerald-500 rounded-full"></div>' : ''}
-                    </button>
+                    </button>` : ''}
                 </div>
                 
                 ${activeTab === 'songs' ? `

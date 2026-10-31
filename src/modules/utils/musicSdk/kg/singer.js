@@ -76,7 +76,9 @@ export default {
         info: {
           name: item.albumname,
           author: item.singername,
-          img: item.replaceAll('{size}', '1000'),
+          // 酷狗这里给的字段是 imgurl（带 {size} 占位）；原来误写成 item.replaceAll，
+          // item 是对象没有 replaceAll → 歌手页「专辑」tab 整个 500（item.replaceAll is not a function）
+          img: String(item.imgurl || '').replaceAll('{size}', '1000'),
           desc: item.intro,
         },
       }
