@@ -84,10 +84,10 @@ export async function getArtistSongs(source: string, artistId: string, page = 1,
   return unsupported(source, '歌手歌曲列表')
 }
 
-export async function getArtistAlbums(source: string, artistId: string, page = 1, pageSize = 30) {
+export async function getArtistAlbums(source: string, artistId: string, page = 1, pageSize = 30, name = '') {
   if (source === 'soda') return soda.getArtistAlbums(artistId, page, pageSize)
-  // B站 UP 主没有专辑，返回空列表让前端走「暂无专辑」空态，而不是报错
-  if (source === 'bili') return { source: 'bili', list: [] as any[], total: 0 }
+  // B站 UP 主没有「专辑」，但有「合集(season)/系列(series)」，当专辑返回
+  if (source === 'bili') return bilibili.getArtistAlbums(artistId, page, name)
   return unsupported(source, '歌手专辑列表')
 }
 

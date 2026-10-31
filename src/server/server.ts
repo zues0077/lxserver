@@ -7503,34 +7503,40 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             }
           } else if (type === 'singer') {
             if (!musicSdk[source].extendSearch || !musicSdk[source].extendSearch.searchSinger) {
-              throw new Error(`Source ${source} does not support singer search`)
+              // 能力缺失属客户端问题：返回 400 + 中文提示，别用 500 让界面弹出「服务器错误」
+              throw Object.assign(new Error(`音源 ${source} 暂不支持歌手搜索`), { statusCode: 400 })
             }
             const searchData = await musicSdk[source].extendSearch.searchSinger(name, page, limit)
             result = { list: searchData.list || [], total: searchData.total || 0, allPage: searchData.allPage || 1, pageSize: limit, fetchedPages: page, source }
           } else if (type === 'album') {
             if (!musicSdk[source].extendSearch || !musicSdk[source].extendSearch.searchAlbum) {
-              throw new Error(`Source ${source} does not support album search`)
+              throw Object.assign(new Error(`音源 ${source} 暂不支持专辑搜索`), { statusCode: 400 })
             }
             const searchData = await musicSdk[source].extendSearch.searchAlbum(name, page, limit)
             result = { list: searchData.list || [], total: searchData.total || 0, allPage: searchData.allPage || 1, pageSize: limit, fetchedPages: page, source }
           } else if (type === 'playlist') {
             if (!musicSdk[source].extendSearch || !musicSdk[source].extendSearch.searchPlaylist) {
-              throw new Error(`Source ${source} does not support playlist search`)
+              throw Object.assign(new Error(`音源 ${source} 暂不支持歌单搜索`), { statusCode: 400 })
             }
             const searchData = await musicSdk[source].extendSearch.searchPlaylist(name, page, limit)
             result = { list: searchData.list || [], total: searchData.total || 0, allPage: searchData.allPage || 1, pageSize: limit, fetchedPages: page, source }
           } else {
-            throw new Error(`Invalid search type: ${type}`)
+            throw Object.assign(new Error(`搜索类型不合法：${type}`), { statusCode: 400 })
           }
 
           fs.appendFileSync(path.join(process.cwd(), 'debug.txt'), `[Search] Source: ${source}, Type: ${type}, Query: ${name}, FetchedPages: ${result.fetchedPages}, Returned: ${result.list.length}, PlatformTotal: ${result.total}\n`)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err: any) {
-          fs.appendFileSync(path.join(process.cwd(), 'debug.txt'), `[Search Error] ${err.message}\n${err.stack}\n`)
-          console.error(err)
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err.message, code: 500 }))
+          const status = Number(err?.statusCode) === 400 ? 400 : 500
+          if (status === 500) {
+            fs.appendFileSync(path.join(process.cwd(), 'debug.txt'), `[Search Error] ${err.message}\n${err.stack}\n`)
+            console.error(err)
+          } else {
+            console.warn(`[搜索] 请求被拒绝（${status}）：${err.message}`)
+          }
+          res.writeHead(status, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: err.message, code: status }))
         }
         return
       }
@@ -7600,6 +7606,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         const id = urlObj.searchParams.get('id')
         const source = urlObj.searchParams.get('source') || 'wy'
         const page = parseInt(urlObj.searchParams.get('page') || '1')
+        // B站只有 UP 主，没有 artist id 索引；带上名称可以直接用于展示/兜底
+        const artistNameParam = urlObj.searchParams.get('name') || ''
         if (!id) {
           res.writeHead(400); res.end('Missing id'); return
         }
@@ -7610,7 +7618,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             return
           }
           try {
-            const data = await extraSources.getArtistAlbums(source, id, Math.max(1, page))
+            const data = await extraSources.getArtistAlbums(source, id, Math.max(1, page), 30, artistNameParam)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(data))
           } catch (err: any) {

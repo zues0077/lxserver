@@ -3870,7 +3870,9 @@ async function fetchAllArtistAlbums(id, source, signal, onProgress) {
     let total = 0;
 
     for (let page = 1; page <= ARTIST_ALBUM_MAX_PAGES; page++) {
-        const query = new URLSearchParams({ id: String(id), source, page: String(page) });
+        // name 只有 B站 用得上（它没有艺人 id 索引，专辑就是 UP 主的合集/系列）
+        const artistName = (currentArtistInfo && currentArtistInfo.name) || '';
+        const query = new URLSearchParams({ id: String(id), source, page: String(page), name: artistName });
         const res = await fetch(API_BASE + '/artistAlbums?' + query.toString(), { signal });
         if (!res.ok) throw new Error(await extractApiError(res, 'Failed to fetch artist albums page ' + page));
 

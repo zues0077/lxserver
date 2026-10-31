@@ -641,6 +641,216 @@ export const decodeKeywordId = (id: string): string => {
 
 export const isKeywordAlbumId = (id: string): boolean => String(id || '').startsWith(KW_ALBUM_PREFIX)
 
+// ---- UP 主投稿 / 合集 / 系列（B站「歌手 / 专辑」维度的真实数据源） ----
+//
+// 背景（2026-10-31 实测，用户反馈「B站搜歌手点开没有列表」）：
+// 早先的实现是「拿 UP 主名当关键词搜视频、再按 mid 过滤」，名字越通用越惨 ——
+// 「全球热门音乐推荐」（258 个投稿）、「热门音乐秀」（196 个）前 3 页一条都匹配不上，
+// 用户点开歌手就是空列表。而且「专辑」tab 直接返回空列表，永远没有内容。
+//
+// 现在按可靠度排三层取数，任何一层拿到东西就不会是空列表：
+//   1) 官方投稿接口 x/space/arc/search —— 最准（真实分页 + 总数），但风控极严：
+//      匿名请求 412、连刷几次就 -799「请求过于频繁」（同一个出口 IP 会长时间被限）。
+//      所以：必须带账号 Cookie、加熔断（连续失败冷却 30 分钟）和 10 分钟缓存，失败静默降级。
+//   2) 名搜兜底：搜 3 页（150 条）按 mid 过滤，即原来的做法。
+//   3) 合集兜底：UP 主的「合集(season) / 系列(series)」里的稿件并进来 —— 这两条接口实测
+//      匿名稳定 200，是最保底的内容来源，也正好是「专辑」维度的数据源。
+//
+// 专辑维度：B站没有专辑实体，但 UP 主确实有「合集/系列」，那就是他的一张专辑，
+// 直接把合集/系列当专辑返回（id 编成 bili-season|<mid>|<id> / bili-series|<mid>|<id>）。
+
+const SPACE_ARC_API = 'https://api.bilibili.com/x/space/arc/search'
+const SEASONS_API = 'https://api.bilibili.com/x/polymer/web-space/seasons_series_list'
+const SEASON_ARCHIVES_API = 'https://api.bilibili.com/x/polymer/web-space/seasons_archives_list'
+const SERIES_ARCHIVES_API = 'https://api.bilibili.com/x/series/archives'
+const SEASON_ID_PREFIX = 'bili-season|'
+const SERIES_ID_PREFIX = 'bili-series|'
+
+/** 投稿接口熔断：连续失败就冷却，避免每次点歌手白等一次 412/-799 */
+let arcFailStreak = 0
+let arcBlockedUntil = 0
+const ARC_COOLDOWN_MS = 30 * 60 * 1000
+
+const videoCache = new Map<string, { at: number; list: any[]; total: number }>()
+const VIDEO_TTL = 10 * 60 * 1000
+
+/** 合集/系列列表缓存（按 mid） */
+const collectionCache = new Map<string, { at: number; seasons: any[]; series: any[] }>()
+const COLLECTION_TTL = 10 * 60 * 1000
+
+export function parseBiliVideoId(id: string): { kind: 'season' | 'series'; mid: string; cid: string } | null {
+  const text = String(id || '')
+  for (const [prefix, kind] of [[SEASON_ID_PREFIX, 'season'], [SERIES_ID_PREFIX, 'series']] as const) {
+    if (!text.startsWith(prefix)) continue
+    const rest = text.slice(prefix.length)
+    const idx = rest.indexOf('|')
+    if (idx <= 0) return null
+    const mid = rest.slice(0, idx)
+    const cid = rest.slice(idx + 1)
+    if (!/^\d+$/.test(mid) || !/^\d+$/.test(cid)) return null
+    return { kind, mid, cid }
+  }
+  return null
+}
+
+/** 统一的「稿件 → 歌曲」结构，字段与 searchSongs 的返回保持一致 */
+function toBiliSong(o: {
+  bvid?: string
+  title?: string
+  author?: string
+  pic?: string
+  duration?: number | string
+}): any | null {
+  const bvid = String(o.bvid || '').trim()
+  if (!bvid) return null
+  // 两个接口的时长格式不一样：投稿列表给 "MM:SS"/"H:MM:SS" 字符串，合集给秒数
+  let sec = 0
+  const raw = o.duration
+  if (typeof raw === 'string' && raw.includes(':')) {
+    sec = raw.split(':').map(Number).reduce((acc, n) => acc * 60 + (Number.isFinite(n) ? n : 0), 0)
+  } else {
+    sec = Number(raw) || 0
+  }
+  return {
+    source: 'bili',
+    id: bvid,
+    songmid: bvid,
+    name: decodeEntities(String(o.title || '')) || bvid,
+    singer: decodeEntities(String(o.author || '')),
+    albumName: '',
+    albumId: '',
+    interval: secToInterval(sec),
+    img: normalizeCover(String(o.pic || '')),
+    types: [{ type: '128k' }, { type: '320k' }, { type: 'flac' }, { type: 'flac24bit' }],
+    _types: {},
+    typeUrl: {},
+    meta: { bvid },
+  }
+}
+
+/** 官方 UP 主投稿接口（一页）。失败时抛错，由调用方决定降级 */
+async function spaceArcPage(
+  mid: string,
+  pn: number,
+  ps: number,
+  order: 'click' | 'pubdate',
+): Promise<{ list: any[]; total: number }> {
+  if (Date.now() < arcBlockedUntil) throw new Error('B站投稿接口冷却中')
+  const account = store.getCookie('bili') || ''
+  const resp = await request<any>(
+    `${SPACE_ARC_API}?mid=${encodeURIComponent(mid)}&pn=${pn}&ps=${ps}&order=${order}`,
+    { headers: await headersWithCookie(account), timeout: 12000 },
+  )
+  const body: any = resp.body || {}
+  if (resp.statusCode === 412) {
+    arcFailStreak += 1
+    if (arcFailStreak >= 2) arcBlockedUntil = Date.now() + ARC_COOLDOWN_MS
+    throw new Error('B站投稿接口被风控（HTTP 412）')
+  }
+  const code = Number(body.code)
+  if (code !== 0) {
+    // -799 请求过于频繁 / -352 风控：都算接口不可用，直接熔断免得每次点都白等
+    if (code === -799 || code === -352 || code === -412) {
+      arcFailStreak += 1
+      if (arcFailStreak >= 2) arcBlockedUntil = Date.now() + ARC_COOLDOWN_MS
+    }
+    throw new Error(`B站投稿接口失败（code=${code}，${body.message || '无返回'}）`)
+  }
+  arcFailStreak = 0
+  const vlist: any[] = Array.isArray(body.data?.list?.vlist) ? body.data.list.vlist : []
+  const total = Number(body.data?.page?.count) || 0
+  const list = vlist
+    .map(item => toBiliSong({
+      bvid: item?.bvid,
+      title: item?.title,
+      author: item?.author,
+      pic: item?.pic,
+      duration: item?.length,
+    }))
+    .filter(Boolean) as any[]
+  return { list, total }
+}
+
+/** UP 主的合集(season) + 系列(series)。匿名可用的稳定接口 */
+async function listCollections(mid: string): Promise<{ seasons: any[]; series: any[] }> {
+  const cached = collectionCache.get(mid)
+  if (cached && Date.now() - cached.at < COLLECTION_TTL) return { seasons: cached.seasons, series: cached.series }
+  const resp = await request<any>(
+    `${SEASONS_API}?mid=${encodeURIComponent(mid)}&page_num=1&page_size=10`,
+    { headers: await headersWithCookie(''), timeout: 12000 },
+  )
+  const body: any = resp.body || {}
+  if (Number(body.code) !== 0) {
+    const empty = { seasons: [] as any[], series: [] as any[] }
+    collectionCache.set(mid, { at: Date.now(), ...empty })
+    return empty
+  }
+  const lists: any = body.data?.items_lists || {}
+  const seasons: any[] = Array.isArray(lists.seasons_list) ? lists.seasons_list : []
+  const series: any[] = Array.isArray(lists.series_list) ? lists.series_list : []
+  collectionCache.set(mid, { at: Date.now(), seasons, series })
+  return { seasons, series }
+}
+
+/** 合集 / 系列 里的稿件（一页） */
+async function listCollectionArchives(
+  kind: 'season' | 'series',
+  mid: string,
+  cid: string,
+  pageNum = 1,
+  pageSize = 50,
+): Promise<{ list: any[]; total: number }> {
+  const url = kind === 'season'
+    ? `${SEASON_ARCHIVES_API}?mid=${encodeURIComponent(mid)}&season_id=${encodeURIComponent(cid)}&page_num=${pageNum}&page_size=${pageSize}`
+    : `${SERIES_ARCHIVES_API}?mid=${encodeURIComponent(mid)}&series_id=${encodeURIComponent(cid)}&only_normal=true&sort=desc&pn=${pageNum}&ps=${pageSize}`
+  const resp = await request<any>(url, { headers: await headersWithCookie(''), timeout: 12000 })
+  const body: any = resp.body || {}
+  if (Number(body.code) !== 0) return { list: [], total: 0 }
+  const archives: any[] = Array.isArray(body.data?.archives) ? body.data.archives : []
+  const total = Number(body.data?.page?.total) || archives.length
+  const list = archives
+    .map(item => toBiliSong({
+      bvid: item?.bvid,
+      title: item?.title,
+      pic: item?.pic,
+      duration: item?.duration,
+    }))
+    .filter(Boolean) as any[]
+  return { list, total }
+}
+
+/** 把合集/系列里的稿件摊平成歌单（用于「点开歌手但没有投稿列表」的兜底） */
+async function collectFromCollections(mid: string): Promise<any[]> {
+  let cols: { seasons: any[]; series: any[] }
+  try {
+    cols = await listCollections(mid)
+  } catch {
+    return []
+  }
+  const out: any[] = []
+  const tasks: Array<Promise<{ list: any[]; total: number }>> = []
+  for (const s of cols.seasons.slice(0, 3)) {
+    const sid = String(s?.meta?.season_id || '')
+    if (sid) tasks.push(listCollectionArchives('season', mid, sid, 1, 50))
+  }
+  for (const s of cols.series.slice(0, 3)) {
+    const sid = String(s?.meta?.series_id || '')
+    if (sid) tasks.push(listCollectionArchives('series', mid, sid, 1, 50))
+  }
+  const results = await Promise.all(tasks.map(t => t.catch(() => ({ list: [], total: 0 }))))
+  const seen = new Set<string>()
+  for (const r of results) {
+    for (const item of r.list) {
+      const key = String(item.id)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(item)
+    }
+  }
+  return out
+}
+
+
 /** 搜 UP 主（= 歌手维度）。返回结构与其它平台的 extendSearch.searchSinger 对齐 */
 export async function searchUsers(keyword: string, page = 1, pageSize = 20): Promise<{
   list: any[]
@@ -719,50 +929,154 @@ export async function getUserCard(mid: string): Promise<any> {
 /**
  * UP 主作品列表（= 歌手歌曲维度）。
  *
- * 说明：B站「按 UP 主取投稿」的官方接口要 WBI 签名（w_rid + img_key），服务端没实现，
- * 硬上很容易 412。这里用「UP 主名搜视频 + 按 mid 过滤」，结果同样只包含该 UP 主的投稿。
- * 代价是受搜索分页限制（最多前 3 页），不是全量投稿；对「听这个 UP 主发的歌」足够。
+ * 三层取数（见上方注释）：官方投稿 → 名搜过滤 → 合集兜底。
+ * 只返回一页：服务端 artistSongs 会按页循环拉；这里第一页给满 100 条，
+ * 后续页返回空让循环立刻收敛（否则一个接口要打十几次上游，必被风控）。
  */
-export async function getUserVideos(mid: string, uname: string, page = 1, pageSize = 50): Promise<{
+export async function getUserVideos(mid: string, uname: string, page = 1, pageSize = 100): Promise<{
   source: string
   list: any[]
   total: number
 }> {
   const id = String(mid || '').trim()
   const name = String(uname || '').trim()
-  if (!name) return { source: 'bili', list: [], total: 0 }
-  // 服务端 artistSongs 会按页循环拉全量；这里一次把前 3 页搜完、只在第 1 页返回，
-  // 后续页返回空让循环尽快收敛（否则每页都重搜一遍，一轮下来十几个请求）。
+  if (!/^\d+$/.test(id)) return { source: 'bili', list: [], total: 0 }
   if (Math.max(1, page) > 1) return { source: 'bili', list: [], total: 0 }
+
+  const cached = videoCache.get(id)
+  if (cached && Date.now() - cached.at < VIDEO_TTL) {
+    return { source: 'bili', list: cached.list, total: cached.total }
+  }
 
   const collected: any[] = []
   const seen = new Set<string>()
-  for (let p = 1; p <= 3; p++) {
-    let data: { list: any[] }
-    try {
-      data = await searchSongs(name, p, 50)
-    } catch {
-      break
-    }
-    for (const item of data.list) {
-      const itemMid = String(item?.meta?.mid || '')
-      // 只留这个 UP 主自己的投稿；个别条目没有 mid 时退化为「作者名字相同」
-      const sameAuthor = itemMid ? itemMid === id : String(item.singer || '').trim() === name
-      if (!sameAuthor) continue
-      const key = String(item.id)
-      if (seen.has(key)) continue
+  const push = (items: any[]): void => {
+    for (const item of items) {
+      const key = String(item?.id || '')
+      if (!key || seen.has(key)) continue
       seen.add(key)
       collected.push(item)
     }
-    if (data.list.length < 50) break
   }
 
-  return { source: 'bili', list: collected.slice(0, pageSize), total: collected.length }
+  let total = 0
+  // 1) 官方投稿接口（最准）。风控失败就静默降级，不打扰用户
+  try {
+    for (const pn of [1, 2]) {
+      const r = await spaceArcPage(id, pn, 50, 'pubdate')
+      total = r.total || total
+      push(r.list)
+      if (r.list.length < 50) break
+    }
+  } catch {
+    /* 落第 2 层 */
+  }
+
+  // 2) 名搜兜底：名字越通用命中越差，所以多扫几页
+  if (collected.length === 0 && name) {
+    for (let p = 1; p <= 3; p++) {
+      let data: { list: any[] }
+      try {
+        data = await searchSongs(name, p, 50)
+      } catch {
+        break
+      }
+      for (const item of data.list) {
+        const itemMid = String(item?.meta?.mid || '')
+        const sameAuthor = itemMid ? itemMid === id : String(item.singer || '').trim() === name
+        if (sameAuthor) push([item])
+      }
+      if (data.list.length < 50) break
+    }
+  }
+
+  // 3) 合集兜底：名搜也空（通用名 UP 主常见），把合集/系列里的稿件并进来，
+  //    保证「点开歌手」至少能看到他合集里的歌，而不是一片空白
+  if (collected.length === 0) {
+    push(await collectFromCollections(id))
+  }
+
+  const list = collected.slice(0, Math.max(1, pageSize))
+  videoCache.set(id, { at: Date.now(), list, total: total || collected.length })
+  return { source: 'bili', list, total: total || collected.length }
 }
 
 /**
- * 专辑维度：包装成一条「视频合集」。
- * 只有命中足够多的视频才给这条，避免搜「VIP曲2」这种给出一个空合集。
+ * 歌手 → 专辑列表：用 UP 主的「合集(season) / 系列(series)」当专辑。
+ * 以前这里恒返回空数组，界面上点「专辑」永远是空白。
+ */
+export async function getArtistAlbums(mid: string, page = 1, upName = ''): Promise<{
+  source: string
+  list: any[]
+  total: number
+}> {
+  const id = String(mid || '').trim()
+  if (!/^\d+$/.test(id) || Math.max(1, page) > 1) return { source: 'bili', list: [], total: 0 }
+  let cols: { seasons: any[]; series: any[] }
+  try {
+    cols = await listCollections(id)
+  } catch {
+    return { source: 'bili', list: [], total: 0 }
+  }
+  const name = upName || (await getUserCard(id).catch(() => null))?.name || ''
+  const list: any[] = []
+  for (const s of cols.seasons) {
+    const meta = s?.meta || {}
+    const sid = String(meta.season_id || '')
+    if (!sid) continue
+    list.push({
+      source: 'bili',
+      id: `${SEASON_ID_PREFIX}${id}|${sid}`,
+      name: decodeEntities(meta.name) || '合集',
+      picUrl: normalizeCover(meta.cover),
+      singer: name,
+      songCount: Number(meta.total) || (Array.isArray(s.archives) ? s.archives.length : 0),
+      publishTime: '',
+      meta: { mid: id, kind: 'season', collectionId: sid },
+    })
+  }
+  for (const s of cols.series) {
+    const meta = s?.meta || {}
+    const sid = String(meta.series_id || '')
+    if (!sid) continue
+    list.push({
+      source: 'bili',
+      id: `${SERIES_ID_PREFIX}${id}|${sid}`,
+      name: decodeEntities(meta.name) || '系列',
+      picUrl: normalizeCover(meta.cover),
+      singer: name,
+      songCount: Number(meta.total) || (Array.isArray(s.archives) ? s.archives.length : 0),
+      publishTime: '',
+      meta: { mid: id, kind: 'series', collectionId: sid },
+    })
+  }
+  return { source: 'bili', list, total: list.length }
+}
+
+/** 虚拟专辑的歌曲列表 / 合集与系列的歌曲列表 */
+export async function getAlbumSongs(id: string): Promise<{ source: string, list: any[], total: number }> {
+  const parsed = parseBiliVideoId(id)
+  if (parsed) {
+    const first = await listCollectionArchives(parsed.kind, parsed.mid, parsed.cid, 1, 50)
+    let list = first.list
+    let total = first.total
+    if (list.length >= 50 && total > list.length) {
+      const second = await listCollectionArchives(parsed.kind, parsed.mid, parsed.cid, 2, 50)
+        .catch(() => ({ list: [] as any[], total: 0 }))
+      list = list.concat(second.list)
+    }
+    return { source: 'bili', list, total }
+  }
+  const keyword = decodeKeywordId(id)
+  if (!keyword) throw new Error('B站没有专辑实体；这里只支持「UP 主合集/系列」或「关键词视频合集」')
+  const data = await searchSongs(keyword, 1, 50)
+  return { source: 'bili', list: data.list, total: data.list.length }
+}
+
+/**
+ * 专辑维度：关键词包装成一条「视频合集」。
+ * 门槛放到 1 条：B站本来就没有专辑实体，之前要求「至少 3 条视频」才给结果，
+ * 导致搜冷门专辑名时「专辑」tab 常常整页空白（用户反馈的「搜专辑点开没有列表」）。
  */
 export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): Promise<{
   list: any[]
@@ -772,7 +1086,7 @@ export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): P
   if (Math.max(1, page) > 1) return { list: [], total: 0, allPage: 1 }
   const data = await searchSongs(keyword, 1, 50).catch(() => ({ list: [] as any[], total: 0 }))
   const hits = data.list || []
-  if (hits.length < 3) return { list: [], total: 0, allPage: 1 }
+  if (!hits.length) return { list: [], total: 0, allPage: 1 }
   const first = hits[0]
   return {
     list: [{
@@ -789,12 +1103,4 @@ export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): P
     total: 1,
     allPage: 1,
   }
-}
-
-/** 虚拟专辑的歌曲列表 */
-export async function getAlbumSongs(id: string): Promise<{ source: string, list: any[], total: number }> {
-  const keyword = decodeKeywordId(id)
-  if (!keyword) throw new Error('B站没有专辑实体；这里只支持「关键词视频合集」')
-  const data = await searchSongs(keyword, 1, 50)
-  return { source: 'bili', list: data.list, total: data.list.length }
 }
