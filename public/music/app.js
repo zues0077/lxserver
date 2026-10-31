@@ -2392,20 +2392,25 @@ function handleSearchTypeChange() {
     const sourceSelect = document.getElementById('search-source');
     if (!typeSelect || !sourceSelect) return;
 
-    if (typeSelect.value === 'singer' || typeSelect.value === 'album') {
-        // 能力表：wy/tx/kg/kw/mg/kglite/soda 支持歌手/专辑搜索（后端 extendSearch / kglite / 汽水 extraSources 通道）
-        // bili 也支持，但语义不同：歌手=UP主，专辑=关键词视频合集（B站没有这两个实体，卡片上带 BILI 来源标）
-        // all 聚合按 type 分派后同样支持，这里一起放开
-        const supported = ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda', 'bili', 'all'];
+    // 能力表（和后端实际实现保持一致，做不到的类型直接把源禁掉，别等用户点了才报错）
+    // singer / album：wy/tx/kg/kw/mg/kglite/soda 有实体；bili 语义不同（歌手=UP主，专辑=关键词视频合集）；
+    //   all 聚合按 type 分派后同样支持
+    // playlist：只有网易云实现了 searchPlaylist，其余源一律 400 → 只留 wy 与聚合
+    const CAPABLE_SOURCES = {
+        singer: ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda', 'bili', 'all'],
+        album: ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda', 'bili', 'all'],
+        playlist: ['wy', 'all'],
+    };
+    const supported = CAPABLE_SOURCES[typeSelect.value];
+    if (!supported) {
+        Array.from(sourceSelect.options).forEach(opt => { opt.disabled = false; });
+    } else {
         if (!supported.includes(sourceSelect.value)) {
             sourceSelect.value = 'wy';
         }
-        // 禁用不支持的选项
         Array.from(sourceSelect.options).forEach(opt => {
             opt.disabled = !supported.includes(opt.value);
         });
-    } else {
-        Array.from(sourceSelect.options).forEach(opt => { opt.disabled = false; });
     }
     doSearch();
 }

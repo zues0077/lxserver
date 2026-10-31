@@ -7357,6 +7357,16 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const cookie = musicAccount.getCookie('kglite') || ''
             const sources = ['wy', 'tx', 'kw', 'kg', 'mg', 'bili', 'soda', 'kglite']
             const settled = await Promise.allSettled(sources.map(async (src) => {
+              // 歌单维度：只有实现了 searchPlaylist 的源（目前仅网易云）能参与聚合。
+              // 没有实现的源必须在这里直接跳过——以前掉进下面的歌曲搜索，
+              // 结果「聚合 + 歌单」返回的其实是一堆歌曲，歌单卡片上全是歌名当歌单名。
+              if (type === 'playlist') {
+                const ext = musicSdk[src]?.extendSearch
+                const fn = ext?.searchPlaylist
+                if (typeof fn !== 'function') return []
+                const d = await fn.call(ext, name, pageNo, pageSize)
+                return (d.list || []).map((it: any) => ({ ...it, source: src }))
+              }
               // 歌手/专辑维度：musicSdk 源走 extendSearch，kglite 走专用实现，soda 走 extraSources；bili 无此维度
               if (type === 'singer' || type === 'album') {
                 if (extraSources.isExtraSource(src)) {
