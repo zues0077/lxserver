@@ -109,7 +109,7 @@ export default {
       list.push({
         singer: formatSingerName(item.singer, 'name'),
         // 歌手 mid：前端点作者名 → 歌手主页
-        artistId: item.singer?.[0]?.mid || undefined,
+        artistId: Array.isArray(item.singer) && item.singer[0]?.mid ? String(item.singer[0].mid) : undefined,
         artistName: item.singer?.[0]?.name || undefined,
         name: item.name + (item.title_extra ?? ''),
         albumName,

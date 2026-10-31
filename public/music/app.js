@@ -3210,11 +3210,13 @@ async function openArtistForSong(song) {
     }
 
     // 1) 歌里自带 ID：B站是 UP 主 mid，汽水/其它源若有 artistId 同样能用
-    const inlineId = (target === singers[0])
+    const rawInlineId = (target === singers[0])
         ? (song.artistId || song.singerId || song.artistMid || song.meta?.artistId || song.meta?.singerId || song.meta?.mid)
         : null;
+    // 只要形态像 ID 的（长度 ≥2 的数字/字母），杜绝把歌手名的第一个字符当 ID
+    const inlineId = rawInlineId && /^[0-9a-zA-Z]{2,}$/.test(String(rawInlineId)) ? String(rawInlineId) : null;
     if (inlineId && ARTIST_DETAIL_SOURCES.includes(source) && typeof enterArtist === 'function') {
-        enterArtist(String(inlineId), source);
+        enterArtist(inlineId, source);
         return;
     }
 
