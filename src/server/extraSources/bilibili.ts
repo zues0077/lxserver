@@ -990,9 +990,9 @@ export async function getUserVideos(mid: string, uname: string, page = 1, pageSi
     }
   }
 
-  // 3) 合集兜底：名搜也空（通用名 UP 主常见），把合集/系列里的稿件并进来，
-  //    保证「点开歌手」至少能看到他合集里的歌，而不是一片空白
-  if (collected.length === 0) {
+  // 3) 合集兜底：名搜只捞到零星几条（通用名 UP 主常见）或一条没有时，
+  //    把合集/系列里的稿件并进来 —— 保证「点开歌手」看到的是他那批歌，而不是三五条
+  if (collected.length < 20) {
     push(await collectFromCollections(id))
   }
 
