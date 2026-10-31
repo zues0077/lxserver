@@ -641,6 +641,73 @@ export const decodeKeywordId = (id: string): string => {
 
 export const isKeywordAlbumId = (id: string): boolean => String(id || '').startsWith(KW_ALBUM_PREFIX)
 
+// ---- 搜索结果与关键词的贴近度（决定「这张合集」用哪条视频当门面） ----
+//
+// 一次 B站视频搜索会回 50 条，标题相关度差别很大，而且**第一条往往不是最相关的**：
+// 实测搜「【推荐歌单】2026年最火的热门歌曲合集，好听的流行音乐合集」，
+// 第一条是「2026网络最好听100首热门歌曲」（相似度 0.44），
+// 真正那条一模一样的标题排在第二位（相似度 1.0）。
+// 原来直接取 hits[0] 当封面和歌单名，用户看到的就是「搜出来的和 B站对不上」。
+
+/** 归一化：剥高亮标签、全角转半角、只留字母数字与汉字 */
+const normalizeTitle = (text: string): string =>
+  String(text || '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+
+function bigramCount(text: string): Map<string, number> {
+  const map = new Map<string, number>()
+  if (text.length < 2) {
+    if (text) map.set(text, 1)
+    return map
+  }
+  for (let i = 0; i < text.length - 1; i++) {
+    const gram = text.slice(i, i + 2)
+    map.set(gram, (map.get(gram) || 0) + 1)
+  }
+  return map
+}
+
+/** 0~1，1 表示归一化后完全一致；包含关系（「标题｜分P版」）给 0.8 以上 */
+export function titleSimilarity(a: string, b: string): number {
+  const x = normalizeTitle(a)
+  const y = normalizeTitle(b)
+  if (!x || !y) return 0
+  if (x === y) return 1
+  if (x.includes(y) || y.includes(x)) {
+    const shortRatio = Math.min(x.length, y.length) / Math.max(x.length, y.length)
+    return 0.8 + 0.19 * shortRatio
+  }
+  const bx = bigramCount(x)
+  const by = bigramCount(y)
+  let inter = 0
+  let total = 0
+  bx.forEach((n, gram) => {
+    total += n
+    const m = by.get(gram)
+    if (m) inter += Math.min(n, m)
+  })
+  by.forEach(n => { total += n })
+  if (!total) return 0
+  return Math.min(1, (2 * inter) / total)
+}
+
+/** 挑最贴近关键词的一条；同分保留靠前的（B站综合排序本身就是从相关到不相关） */
+export function pickClosestVideo<T extends { name?: string }>(hits: T[], keyword: string): { item: T | null, score: number } {
+  let item: T | null = null
+  let best = -1
+  for (const hit of hits || []) {
+    const score = titleSimilarity(String(hit?.name || ''), keyword)
+    if (score > best) {
+      best = score
+      item = hit
+    }
+  }
+  return { item, score: best < 0 ? 0 : best }
+}
+
 // ---- UP 主投稿 / 合集 / 系列（B站「歌手 / 专辑」维度的真实数据源） ----
 //
 // 背景（2026-10-31 实测，用户反馈「B站搜歌手点开没有列表」）：
@@ -1054,7 +1121,15 @@ export async function getArtistAlbums(mid: string, page = 1, upName = ''): Promi
 }
 
 /** 虚拟专辑的歌曲列表 / 合集与系列的歌曲列表 */
-export async function getAlbumSongs(id: string): Promise<{ source: string, list: any[], total: number }> {
+export async function getAlbumSongs(id: string): Promise<{
+  source: string
+  list: any[]
+  total: number
+  name?: string
+  singer?: string
+  artistId?: string
+  picUrl?: string
+}> {
   const parsed = parseBiliVideoId(id)
   if (parsed) {
     const first = await listCollectionArchives(parsed.kind, parsed.mid, parsed.cid, 1, 50)
@@ -1070,7 +1145,21 @@ export async function getAlbumSongs(id: string): Promise<{ source: string, list:
   const keyword = decodeKeywordId(id)
   if (!keyword) throw new Error('B站没有专辑实体；这里只支持「UP 主合集/系列」或「关键词视频合集」')
   const data = await searchSongs(keyword, 1, 50)
-  return { source: 'bili', list: data.list, total: data.list.length }
+  const { item: hit } = pickClosestVideo(data.list, keyword)
+  const represent = hit || data.list[0]
+  // 用户是冲着这个标题来的，把命中的那条排到首位（其余保持 B站综合排序）
+  const list = represent ? [represent, ...data.list.filter(s => s !== represent)] : data.list
+  return {
+    source: 'bili',
+    list,
+    total: list.length,
+    // 头部信息一并带回去：不填的话前端会掉进「未知歌手 / 未知专辑」分支，
+    // 歌手也没法点（没有 artistId 只能降级成搜索）
+    name: String(represent?.name || keyword),
+    singer: String(represent?.singer || 'B站'),
+    artistId: String(represent?.meta?.mid || ''),
+    picUrl: represent?.img || '',
+  }
 }
 
 /**
@@ -1084,21 +1173,30 @@ export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): P
   allPage: number
 }> {
   if (Math.max(1, page) > 1) return { list: [], total: 0, allPage: 1 }
-  const data = await searchSongs(keyword, 1, 50).catch(() => ({ list: [] as any[], total: 0 }))
+  const data = await searchSongs(keyword, 1, 50).catch(() => ({ list: [] as any[], total: 0, allPage: 1 }))
   const hits = data.list || []
   if (!hits.length) return { list: [], total: 0, allPage: 1 }
-  const first = hits[0]
+
+  // 拿最贴近关键词的那条视频当门面（封面 / 标题 / UP 主），而不是无脑取第一条
+  const { item: hit, score } = pickClosestVideo(hits, keyword)
+  const represent = hit || hits[0]
+  const mid = String(represent?.meta?.mid || '')
   return {
     list: [{
       source: 'bili',
       id: encodeKeywordId(keyword),
-      name: `${keyword}（B站视频合集）`,
-      picUrl: first?.img || '',
-      singer: 'B站',
+      // 标题直接用命中视频的真实标题，不再套「（B站视频合集）」后缀——
+      // 用户就是照 B站这个标题搜的，改过名字反而对不上
+      name: String(represent?.name || keyword),
+      picUrl: represent?.img || '',
+      // 歌手 = UP 主。前端专辑卡片读 artistName，详情页读 singer + artistId，三处都填
+      singer: String(represent?.singer || 'B站'),
+      artistName: String(represent?.singer || 'B站'),
+      artistId: mid,
       // 这里放视频数，专辑卡片会显示成「N 首」
       songCount: hits.length,
       publishTime: '',
-      meta: { keyword, virtual: true },
+      meta: { keyword, virtual: true, mid, bvid: represent?.id, matchScore: Number(score.toFixed(3)) },
     }],
     total: 1,
     allPage: 1,
