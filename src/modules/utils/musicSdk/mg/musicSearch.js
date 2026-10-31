@@ -178,6 +178,9 @@ export default {
 
         list.push({
           singer: formatSingerName(data.singerList),
+          // 歌手 id：点作者名 → 歌手主页
+          artistId: data.singerList?.[0]?.id == null ? undefined : String(data.singerList[0].id),
+          artistName: data.singerList?.[0]?.name || undefined,
           name: data.name,
           albumName: data.album,
           albumId: data.albumId,

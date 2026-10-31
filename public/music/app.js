@@ -2350,8 +2350,11 @@ function handleSearchKeyPress(e) {
  * 快速跳转到搜索页并执行查询
  * @param {string} query 搜索关键词
  * @param {string} source 可选，切换到指定搜索源
+ * @param {string} type 可选，强制搜索类型（song/singer/album/playlist）。
+ *   不传就沿用当前下拉框选中的类型 —— 以前点歌手名会沿用上一次的类型，
+ *   上一次搜的是专辑就变成「搜专辑」，看起来像走进了奇怪的结果页。
  */
-function performSearch(query, source = null) {
+function performSearch(query, source = null, type = null) {
     if (!query || query === '暂无播放' || query === '选择一首歌曲播放') return;
 
     // 预处理：移除括号及其内容 (支持中英文括号)，通常用于移除“歌曲名 (DJ版)”中的补充信息
@@ -2362,11 +2365,18 @@ function performSearch(query, source = null) {
     // 切换到搜索页
     switchTab('search');
 
-    // 如果指定了源且属于支持的源，则更新选择框
+    // 指定了类型就先把类型切过去（并同步源的能力过滤），再落源
+    const typeEl = document.getElementById('search-type');
+    if (type && typeEl && typeEl.value !== type) {
+        typeEl.value = type;
+        applySearchCapabilities(type);
+    }
+
+    // 如果指定了源且下拉框里有这一项（且没被类型过滤禁用），则更新选择框
     const sourceEl = document.getElementById('search-source');
-    const validSources = ['kw', 'kg', 'tx', 'wy', 'mg'];
-    if (source && sourceEl && validSources.includes(source)) {
-        sourceEl.value = source;
+    if (source && sourceEl) {
+        const opt = Array.from(sourceEl.options).find(o => o.value === source);
+        if (opt && !opt.disabled) sourceEl.value = source;
     }
 
     // 重置搜索范围到全网搜索
@@ -2384,34 +2394,42 @@ function performSearch(query, source = null) {
 }
 window.performSearch = performSearch;
 
+/**
+ * 搜索维度能力表：和后端实际实现保持一致。
+ * singer/album：wy/tx/kg/kw/mg/kglite/soda 有实体；bili 语义不同（歌手=UP主、专辑=关键词视频合集）
+ * playlist：只有网易云实现了 searchPlaylist，其余源一律 400 → 只留 wy 与聚合
+ */
+const SEARCH_CAPABLE_SOURCES = {
+    song: ['all', 'wy', 'tx', 'kw', 'kg', 'mg', 'kglite', 'bili', 'soda'],
+    singer: ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda', 'bili', 'all'],
+    album: ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda', 'bili', 'all'],
+    playlist: ['wy', 'all'],
+};
+
+/** 按当前搜索类型禁用不支持的源（只改 UI，不发请求） */
+function applySearchCapabilities(typeValue) {
+    const typeSelect = document.getElementById('search-type');
+    const sourceSelect = document.getElementById('search-source');
+    if (!typeSelect || !sourceSelect) return;
+    const type = typeValue || typeSelect.value;
+    const supported = SEARCH_CAPABLE_SOURCES[type];
+    if (!supported) {
+        Array.from(sourceSelect.options).forEach(opt => { opt.disabled = false; });
+        return;
+    }
+    if (!supported.includes(sourceSelect.value)) sourceSelect.value = 'wy';
+    Array.from(sourceSelect.options).forEach(opt => {
+        opt.disabled = !supported.includes(opt.value);
+    });
+}
+window.applySearchCapabilities = applySearchCapabilities;
+
 let lastSearchResultList = null;
 let lastSearchType = null;
 
 function handleSearchTypeChange() {
-    const typeSelect = document.getElementById('search-type');
-    const sourceSelect = document.getElementById('search-source');
-    if (!typeSelect || !sourceSelect) return;
-
-    // 能力表（和后端实际实现保持一致，做不到的类型直接把源禁掉，别等用户点了才报错）
-    // singer / album：wy/tx/kg/kw/mg/kglite/soda 有实体；bili 语义不同（歌手=UP主，专辑=关键词视频合集）；
-    //   all 聚合按 type 分派后同样支持
-    // playlist：只有网易云实现了 searchPlaylist，其余源一律 400 → 只留 wy 与聚合
-    const CAPABLE_SOURCES = {
-        singer: ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda', 'bili', 'all'],
-        album: ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'soda', 'bili', 'all'],
-        playlist: ['wy', 'all'],
-    };
-    const supported = CAPABLE_SOURCES[typeSelect.value];
-    if (!supported) {
-        Array.from(sourceSelect.options).forEach(opt => { opt.disabled = false; });
-    } else {
-        if (!supported.includes(sourceSelect.value)) {
-            sourceSelect.value = 'wy';
-        }
-        Array.from(sourceSelect.options).forEach(opt => {
-            opt.disabled = !supported.includes(opt.value);
-        });
-    }
+    // 能力过滤见 SEARCH_CAPABLE_SOURCES：切换类型时把不支持的源直接禁用，别等用户点了才报 400
+    applySearchCapabilities();
     doSearch();
 }
 window.handleSearchTypeChange = handleSearchTypeChange;
@@ -3126,6 +3144,101 @@ function searchBySinger(name) {
 }
 window.searchBySinger = searchBySinger;
 
+// ===== 点作者 → 进歌手主页 =====
+// 以前点歌曲行/播放器里的作者名，只是把名字塞进搜索框再 doSearch()：
+//   ① 永远进不了歌手主页；② 还会沿用上一次的搜索类型（上一次搜专辑就变成「搜专辑」）。
+// 现在统一走这里：歌自带 artistId（B站的 meta.mid 就是 UP 主 mid）就直接进歌手页；
+// 没有 ID 就用该平台的歌手搜索按名字反查一次；还查不到才退化成「歌手」类型的搜索。
+const ARTIST_DETAIL_SOURCES = ['wy', 'tx', 'kw', 'kg', 'mg', 'kglite', 'soda', 'bili'];
+const artistIdResolveCache = new Map();
+
+function normalizeArtistKey(name) {
+    return String(name || '')
+        .replace(/[\s\u3000]+/g, '')
+        .replace(/[·•.．\-_、,，&/／|]+/g, '')
+        .toLowerCase();
+}
+
+/**
+ * 按名字反查歌手 ID（同平台歌手搜索，只认名字对得上的那条）。
+ * 结果按 source|名字 缓存，点同一个歌手不会反复请求。
+ */
+async function resolveArtistId(name, source) {
+    const clean = String(name || '').trim();
+    if (!clean || !ARTIST_DETAIL_SOURCES.includes(source)) return null;
+    const key = `${source}|${normalizeArtistKey(clean)}`;
+    if (artistIdResolveCache.has(key)) return artistIdResolveCache.get(key);
+    try {
+        const res = await fetch(`${API_BASE}/search?name=${encodeURIComponent(clean)}&source=${source}&type=singer&page=1&limit=10`);
+        if (!res.ok) {
+            artistIdResolveCache.set(key, null);
+            return null;
+        }
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : (data.list || []);
+        const target = normalizeArtistKey(clean);
+        let hit = list.find(s => normalizeArtistKey(s.name) === target);
+        if (!hit) {
+            // 没有完全同名时，只接受「包含关系」这种明显的同一个名字（如「少吆」与「少吆Official」）
+            hit = list.find(s => {
+                const n = normalizeArtistKey(s.name);
+                return target.length >= 2 && n.length >= 2 && (n.includes(target) || target.includes(n));
+            });
+        }
+        const id = hit && (hit.id ?? hit.singerId ?? hit.mid);
+        const info = id ? { id: String(id), name: hit.name } : null;
+        artistIdResolveCache.set(key, info);
+        return info;
+    } catch (e) {
+        return null;
+    }
+}
+
+/** 打开一首歌的作者：优先歌手主页，实在找不到才降级成歌手搜索 */
+async function openArtistForSong(song) {
+    if (!song) return;
+    const source = song.source || (window.currentSong && window.currentSong.source) || 'wy';
+    const rawSinger = String(song.singer || '').trim();
+    if (!rawSinger || rawSinger === '未知歌手') return;
+
+    const singers = rawSinger.split(/[、&,，]| \/ /).map(s => s.trim()).filter(Boolean);
+    let target = singers[0];
+    if (singers.length > 1) {
+        const selected = await showOptions('打开歌手', '识别到多个歌手，请选择要查看的对象：', singers);
+        if (!selected) return;
+        target = selected;
+    }
+
+    // 1) 歌里自带 ID：B站是 UP 主 mid，汽水/其它源若有 artistId 同样能用
+    const inlineId = (target === singers[0])
+        ? (song.artistId || song.singerId || song.artistMid || song.meta?.artistId || song.meta?.singerId || song.meta?.mid)
+        : null;
+    if (inlineId && ARTIST_DETAIL_SOURCES.includes(source) && typeof enterArtist === 'function') {
+        enterArtist(String(inlineId), source);
+        return;
+    }
+
+    // 2) 用歌手搜索反查 ID
+    const hit = await resolveArtistId(target, source);
+    if (hit && typeof enterArtist === 'function') {
+        enterArtist(hit.id, source);
+        return;
+    }
+
+    // 3) 兜底：搜「歌手」类型，别沿用上一次的搜索类型
+    performSearch(target, source, 'singer');
+}
+window.openArtistForSong = openArtistForSong;
+
+/** 列表行里点作者：用下标取原始对象，避免把歌手名拼进 HTML 造成转义问题 */
+function openArtistFromList(index) {
+    const list = window.viewingPlaylist || [];
+    const song = list[index];
+    openArtistForSong(song || null);
+}
+window.openArtistFromList = openArtistFromList;
+
+
 // 歌手「所有专辑」维度的能力表。咪咕没有艺人专辑接口（mg/extendDetail 有意未接），
 // 界面上一律显示这个 tab、点了只会吃 400「暂不支持歌手专辑列表」，所以直接不渲染。
 const ARTIST_ALBUM_SOURCES = ['wy', 'tx', 'kg', 'kw', 'kglite', 'soda', 'bili'];
@@ -3756,7 +3869,9 @@ function renderArtistSongsUI(list, page) {
                     </div>
 
                     <!-- Artist -->
-                    <div class="hidden sm:flex sm:col-span-3 md:col-span-3 lg:col-span-2 text-xs md:text-sm t-text-muted items-center truncate min-w-0">
+                    <div class="hidden sm:flex sm:col-span-3 md:col-span-3 lg:col-span-2 text-xs md:text-sm t-text-muted items-center truncate min-w-0 hover:text-emerald-600 transition-colors cursor-pointer"
+                         title="${item.singer}"
+                         onclick="event.stopPropagation(); openArtistFromList(${index});">
                         ${item.singer}
                     </div>
 
@@ -4544,6 +4659,12 @@ async function navigateToAlbumArtist(singerName, source, artistId) {
         }
     }
 
+    // 仍然没有 ID：同平台歌手搜索反查一次（酷狗/概念版/咪咕的专辑卡片常常只给歌手名）
+    if (!targetArtistId) {
+        const hit = await resolveArtistId(singerName, targetSource);
+        if (hit) targetArtistId = hit.id;
+    }
+
     if (targetArtistId && typeof enterArtist === 'function') {
         // 暂存当前专辑上下文，以便从歌手页点击返回时能恢复专辑
         window.tempAlbumContext = {
@@ -5097,7 +5218,7 @@ function renderResults(list) {
             <!-- Artist (Hidden on Mobile) -->
             <div class="hidden sm:flex sm:col-span-3 md:col-span-3 lg:col-span-2 t-text-muted text-xs md:text-sm items-center hover:text-emerald-600 transition-colors cursor-pointer overflow-hidden min-w-0"
                  title="${item.singer}"
-                 onclick="event.stopPropagation(); document.getElementById('search-input').value = '${item.singer.replace(/'/g, "\\'")}'; doSearch();">
+                 onclick="event.stopPropagation(); openArtistFromList(${actualIndexInOriginal});">
                 ${createMarqueeHtml(item.singer)}
             </div>
 
@@ -7910,7 +8031,7 @@ function updatePlayerInfo(song, actualQuality) {
         // 点击搜索此歌曲
         titleEl.onclick = (e) => {
             e.stopPropagation();
-            performSearch(song.name, song.source);
+            performSearch(song.name, song.source, 'song');
         };
         titleEl.classList.add('hover:text-emerald-500', 'cursor-pointer', 'transition-colors');
     }
@@ -7941,16 +8062,10 @@ function updatePlayerInfo(song, actualQuality) {
         artistEl.classList.add('truncate');
         artistEl.classList.remove('overflow-hidden');
 
-        // 点击搜索此歌手
-        artistEl.onclick = async (e) => {
+        // 点击打开歌手主页（找不到 ID 时再退化成歌手搜索）
+        artistEl.onclick = (e) => {
             e.stopPropagation();
-            const singers = song.singer.split(/[、&,，]| \/ /).map(s => s.trim()).filter(s => s);
-            if (singers.length > 1) {
-                const selected = await showOptions('搜索歌手', '识别到多个歌手，请选择要搜索的对象：', singers);
-                if (selected) performSearch(selected, song.source);
-            } else {
-                performSearch(song.singer, song.source);
-            }
+            openArtistForSong(song);
         };
         artistEl.classList.add('hover:text-emerald-500', 'cursor-pointer', 'transition-colors');
     }
@@ -7971,7 +8086,7 @@ function updatePlayerInfo(song, actualQuality) {
         sideSongName.innerText = song.name;
         sideSongName.onclick = (e) => {
             e.stopPropagation();
-            performSearch(song.name, song.source);
+            performSearch(song.name, song.source, 'song');
         };
         sideSongName.classList.add('hover:text-emerald-500', 'cursor-pointer', 'transition-colors');
     }
@@ -7980,7 +8095,7 @@ function updatePlayerInfo(song, actualQuality) {
         sideSinger.innerText = song.singer;
         sideSinger.onclick = (e) => {
             e.stopPropagation();
-            performSearch(song.singer, song.source);
+            openArtistForSong(song);
         };
         sideSinger.classList.add('hover:text-emerald-500', 'cursor-pointer', 'transition-colors');
     }
@@ -7998,7 +8113,7 @@ function updatePlayerInfo(song, actualQuality) {
             if (window.innerWidth < 1025) {
                 toggleDetailCover();
             } else {
-                performSearch(song.name, song.source);
+                performSearch(song.name, song.source, 'song');
             }
         };
         detailTitle.classList.add('hover:text-emerald-500', 'cursor-pointer', 'transition-colors');
@@ -8007,19 +8122,12 @@ function updatePlayerInfo(song, actualQuality) {
     const detailArtist = document.getElementById('detail-artist');
     if (detailArtist) {
         detailArtist.innerText = song.singer;
-        detailArtist.onclick = async (e) => {
+        detailArtist.onclick = (e) => {
             e.stopPropagation();
             if (window.innerWidth < 1025) {
                 toggleDetailCover();
             } else {
-                // 处理多个歌手的情况
-                const singers = song.singer.split(/[、&,，]| \/ /).map(s => s.trim()).filter(s => s);
-                if (singers.length > 1) {
-                    const selected = await showOptions('搜索歌手', '识别到多个歌手，请选择要搜索的对象：', singers);
-                    if (selected) performSearch(selected, song.source);
-                } else {
-                    performSearch(song.singer, song.source);
-                }
+                openArtistForSong(song);
             }
         };
         detailArtist.classList.add('hover:text-emerald-500', 'cursor-pointer', 'transition-colors');

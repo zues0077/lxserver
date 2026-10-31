@@ -84,6 +84,8 @@ export default {
       result.push({
         name: decodeName(info.SONGNAME),
         singer: formatSinger(decodeName(info.ARTIST)),
+        // 歌手 rid（酷我搜索里的 ARTISTID，逗号分隔）：点作者名 → 歌手主页
+        artistId: decodeName(String(info.ARTISTID || '')).split(',')[0].trim() || undefined,
         source: 'kw',
         // img = (info.album.name === '' || info.album.name === '空')
         //   ? `http://player.kuwo.cn/webmusic/sj/dtflagdate?flag=6&rid=MUSIC_160911.jpg`

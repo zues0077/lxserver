@@ -54,6 +54,8 @@ export default {
     }
     return {
       singer: decodeName(formatSingerName(rawData.Singers, 'name')),
+      // 歌手 id：点作者名 → 歌手主页
+      artistId: rawData.Singers?.[0]?.id == null ? undefined : String(rawData.Singers[0].id),
       name: decodeName(rawData.SongName),
       albumName: decodeName(rawData.AlbumName),
       albumId: rawData.AlbumID,

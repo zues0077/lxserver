@@ -171,6 +171,9 @@ export async function searchSongs(keyword: string, page = 1, pageSize = 20): Pro
         songmid: id,
         name: String(track.name || id).trim(),
         singer: pickArtists(track),
+        // 汽水有真实艺人实体：带上 artistId 后前端点作者名能直接进歌手主页
+        artistId: track.artists?.[0]?.id ? String(track.artists[0].id) : undefined,
+        artistName: track.artists?.[0]?.name ? String(track.artists[0].name) : undefined,
         albumName: String(track.album?.name || ''),
         albumId: String(track.album?.id || ''),
         interval: secToInterval(track.duration),
@@ -1271,6 +1274,8 @@ function mapTrackNode(track: any): any {
     songmid: id,
     name: String(track.name || id).trim(),
     singer: pickArtists(track),
+    artistId: track.artists?.[0]?.id ? String(track.artists[0].id) : undefined,
+    artistName: track.artists?.[0]?.name ? String(track.artists[0].name) : undefined,
     albumName: String(track.album?.name || ''),
     albumId: String(track.album?.id || ''),
     interval: secToInterval(track.duration),

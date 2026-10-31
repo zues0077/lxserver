@@ -810,6 +810,26 @@ const withHardBudget = async <T>(p: Promise<T>, ms: number, label: string): Prom
 }
 
 /**
+ * 搜索首页请求的重试壳：平台偶发超时（如咪咕 jadeite 在并发下偶发 Request Timeout）
+ * 会让整次搜索直接 500。重试一次成本很低，成功率提升明显。
+ */
+const searchWithRetry = async <T>(label: string, fn: () => Promise<T>, retries = 1): Promise<T> => {
+  let lastErr: any
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn()
+    } catch (e: any) {
+      lastErr = e
+      if (i < retries) {
+        console.warn(`[搜索] ${label} 第 ${i + 1} 次失败，200ms 后重试：${e?.message || e}`)
+        await new Promise(resolve => setTimeout(resolve, 200))
+      }
+    }
+  }
+  throw lastErr
+}
+
+/**
  * 投送前确定音频来源，优先级：
  *   本地缓存 → 客户端直链 → 预解析地址（需探测） → 现解析（换源 + 探测）
  * 开了「先缓存再投送」且缓存未命中时，会先把整首下载到本地再投送。
@@ -7536,7 +7556,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               ? Math.min(requestedLimit, api.limit || 20)
               : (api.limit || 20)
             const startedAt = Date.now()
-            const first: any = await api.search(name, startPage, pageSize)
+            const first: any = await searchWithRetry(`${source} 搜索`, () => api.search(name, startPage, pageSize))
             const firstList: any[] = (first && first.list) || []
             const rawTotal = first && typeof first.total === 'number' && first.total > 0 ? first.total : firstList.length
             const rawAllPage = first && typeof first.allPage === 'number' && first.allPage > 0
@@ -7613,13 +7633,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               // 能力缺失属客户端问题：返回 400 + 中文提示，别用 500 让界面弹出「服务器错误」
               throw Object.assign(new Error(`音源 ${source} 暂不支持歌手搜索`), { statusCode: 400 })
             }
-            const searchData = await musicSdk[source].extendSearch.searchSinger(name, page, limit)
+            const searchData: any = await searchWithRetry(`${source} 歌手搜索`, () => musicSdk[source].extendSearch.searchSinger(name, page, limit))
             result = { list: searchData.list || [], total: searchData.total || 0, allPage: searchData.allPage || 1, pageSize: limit, fetchedPages: page, source }
           } else if (type === 'album') {
             if (!musicSdk[source].extendSearch || !musicSdk[source].extendSearch.searchAlbum) {
               throw Object.assign(new Error(`音源 ${source} 暂不支持专辑搜索`), { statusCode: 400 })
             }
-            const searchData = await musicSdk[source].extendSearch.searchAlbum(name, page, limit)
+            const searchData: any = await searchWithRetry(`${source} 专辑搜索`, () => musicSdk[source].extendSearch.searchAlbum(name, page, limit))
             result = { list: searchData.list || [], total: searchData.total || 0, allPage: searchData.allPage || 1, pageSize: limit, fetchedPages: page, source }
           } else if (type === 'playlist') {
             if (!musicSdk[source].extendSearch || !musicSdk[source].extendSearch.searchPlaylist) {
@@ -7635,15 +7655,19 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err: any) {
-          const status = Number(err?.statusCode) === 400 ? 400 : 500
-          if (status === 500) {
-            fs.appendFileSync(path.join(process.cwd(), 'debug.txt'), `[Search Error] ${err.message}\n${err.stack}\n`)
+          const msg = String(err?.message || '')
+          // 平台侧超时不是「服务器错误」：给 504 + 能看懂的提示，别让界面弹红色 500
+          const isTimeout = /timeout|timed out|ETIMEDOUT|请求超时|socket hang up/i.test(msg)
+          const status = Number(err?.statusCode) === 400 ? 400 : (isTimeout ? 504 : 500)
+          const friendly = isTimeout ? `搜索超时（${source} 暂时没有响应），请稍后重试或换个音源` : msg
+          if (status >= 500) {
+            fs.appendFileSync(path.join(process.cwd(), 'debug.txt'), `[Search Error] ${msg}\n${err.stack}\n`)
             console.error(err)
           } else {
-            console.warn(`[搜索] 请求被拒绝（${status}）：${err.message}`)
+            console.warn(`[搜索] 请求被拒绝（${status}）：${friendly}`)
           }
           res.writeHead(status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err.message, code: status }))
+          res.end(JSON.stringify({ error: friendly, code: status }))
         }
         return
       }
@@ -7776,7 +7800,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           }
           try {
             let allSongs: any[] = []
+            // 时间预算：kw/kg 的热门歌手有 1000+ 首，逐页拉完要 4~5 秒，界面一直转圈。
+            // 前端本来就是本地分页，给 5 秒/最多这么多页已经够用，超了就带着已有结果返回。
+            const songsStartedAt = Date.now()
+            const ARTIST_SONGS_BUDGET_MS = 5000
             for (let p = 1; p <= MAX_PAGES; p++) {
+              if (Date.now() - songsStartedAt > ARTIST_SONGS_BUDGET_MS) {
+                console.log(`[歌手歌曲] ${source}/${id} 已取 ${allSongs.length} 首，超出时间预算提前返回`)
+                break
+              }
               const data = useExtra
                 ? await extraSources.getArtistSongs(source, id, p, PAGE_SIZE, artistName)
                 : await musicSdk[detailSource].extendDetail.getArtistSongs(id, p, PAGE_SIZE, order)
@@ -7793,7 +7825,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
         let allSongs: any[] = []
+        const songsStartedAt = Date.now()
+        const ARTIST_SONGS_BUDGET_MS = 5000
         for (let p = 1; p <= MAX_PAGES; p++) {
+          if (Date.now() - songsStartedAt > ARTIST_SONGS_BUDGET_MS) {
+            console.log(`[歌手歌曲] ${source}/${id} 已取 ${allSongs.length} 首，超出时间预算提前返回`)
+            break
+          }
           const data = await musicSdk[source].extendDetail.getArtistSongs(id, p, PAGE_SIZE, order)
           const pageList: any[] = data.list || []
           allSongs = allSongs.concat(pageList)
@@ -7827,7 +7865,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(data))
           } catch (err: any) {
-            res.writeHead(500); res.end(err.message)
+            const raw = String(err?.message || '')
+            const notFound = /不存在|已下架|not found|no such|get album list error/i.test(raw)
+            res.writeHead(notFound ? 404 : 500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: notFound ? `这个专辑暂时取不到歌曲（${extraSources.displayName(source)} 可能已下架或不是标准专辑）` : raw }))
           }
           return
         }
@@ -7842,7 +7883,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(data))
         } catch (err: any) {
-          res.writeHead(500); res.end(err.message)
+          // 上游「专辑不存在/已下架」按 404 返回，别让界面弹出 500 + 英文原文（咪咕会报 Get album list error.）
+          const raw = String(err?.message || '')
+          const notFound = /不存在|已下架|not found|no such|get album list error|album not exist/i.test(raw)
+          res.writeHead(notFound ? 404 : 500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: notFound ? `这个专辑暂时取不到歌曲（${source} 可能已下架或不是标准专辑）` : raw }))
         }
         return
       }
@@ -8692,7 +8737,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     source, songInfo, quality || '128k', verifiedUsername,
                     (attempt) => { void pushProgress(attempt) },
                     enableAutoSwitchApiSource !== false,
-                    excludeApiSources
+                    excludeApiSources,
+                    // 留 400ms 给响应收尾：复核环节按这个截止点收缩自己的超时，
+                    // 避免「链接已拿到、却被整体预算掐断」变成假的取链超时
+                    Date.now() + budgetMs - 400,
                   ),
                   budgetMs,
                   '自定义源取链',

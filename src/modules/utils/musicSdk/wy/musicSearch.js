@@ -48,6 +48,9 @@ export default {
 
       return {
         singer: this.getSinger(item.ar),
+        // 歌手 id：前端点作者名可以直接进歌手主页（老接口的 ar 数组里就带 id）
+        artistId: item.ar?.[0]?.id == null ? undefined : String(item.ar[0].id),
+        artistName: item.ar?.[0]?.name || undefined,
         name: item.name,
         albumName: item.al.name,
         albumId: item.al.id,

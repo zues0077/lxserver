@@ -1138,7 +1138,7 @@ export const withTimeout = <T>(promise: Promise<T>, ms: number, message: string)
  * 403 / 401 / 405 更可能是防盗链或 upstream 不支持 HEAD，一律放行，绝不误杀可用的源。
  * 网络错误与超时同样放行 —— 我们只是在做一次尽力的复核。
  */
-export const verifyUrlPlayable = async (url: string, sourceName: string): Promise<string | null> => {
+export const verifyUrlPlayable = async (url: string, sourceName: string, timeoutMs?: number): Promise<string | null> => {
     if ((global.lx && global.lx.config as any) && (global.lx.config as any)['customSource.verifyPlayable'] === false) {
         return null
     }
@@ -1152,11 +1152,14 @@ export const verifyUrlPlayable = async (url: string, sourceName: string): Promis
     // 音源直链里带中文文件名时，needle（url.parse）会抛 unescaped characters，
     // 被当成「链接不可播」误杀——这里统一编码后再探测（已编码的 %XX 不受影响）。
     const safeUrl = encodeRequestUrl(url)
+    // 复核自身可用的时间预算：取链整体有硬预算，前面的源已经耗掉大部分时，
+    // 这里若仍按满额 3s×2 去校验，就会出现「链接已经拿到、却因为复核超时而整条请求判失败」。
+    const verifyTimeout = Math.max(500, Math.min(VERIFY_TIMEOUT_MS, Math.round(timeoutMs ?? VERIFY_TIMEOUT_MS)))
     const request = async (method: 'head' | 'get'): Promise<number | undefined> => {
         const resp: any = await needle(method, safeUrl, null, {
             follow_max: 2,
-            response_timeout: VERIFY_TIMEOUT_MS,
-            read_timeout: VERIFY_TIMEOUT_MS,
+            response_timeout: verifyTimeout,
+            read_timeout: verifyTimeout,
             agent,
             headers: method === 'get' ? { ...headers, Range: 'bytes=0-0' } : headers,
         })
@@ -1189,8 +1192,24 @@ export async function callUserApiGetMusicUrl(
     clientUsername?: string,
     onProgress?: (attempt: any) => Promise<void> | void,
     enableAutoSwitchApiSource?: boolean,
-    excludeApiSources?: string[]
+    excludeApiSources?: string[],
+    deadlineAt?: number
 ): Promise<{ url: string, type: string, sourceName?: string, sourceId?: string, attempts?: any[], hasMoreSources?: boolean }> {
+    /**
+     * 取到链接后的「可播性复核」要按剩余预算收缩。
+     * 复核满额是 HEAD 3s + Range GET 3s = 6s，而调用方（/api/music/url）整体只有 25s 硬预算：
+     * 前面若干源串行失败耗掉 20s 后，最后一个源成功、复核却把总时长顶过 25s，
+     * 调用方拿到 null → 用户看到「取链超时」500，可实际上链接已经拿到了（2026-10-31 实测复现）。
+     */
+    const verifyWithBudget = async (url: string, sourceName: string): Promise<string | null> => {
+        if (!deadlineAt) return verifyUrlPlayable(url, sourceName)
+        const left = deadlineAt - Date.now()
+        if (left <= 1200) {
+            console.warn(`[自定义源] ${sourceName} 已取到链接，但剩余预算仅 ${Math.max(0, Math.round(left))}ms，跳过可播性复核直接返回`)
+            return null
+        }
+        return verifyUrlPlayable(url, sourceName, Math.min(VERIFY_TIMEOUT_MS, left - 700))
+    }
     // 使用权限：后台「平台账号 → 使用权限」名单外的用户不消费账号 Cookie（名单为空=所有人可用）
     const accountAllowed = isUserAllowed(clientUsername)
     // 标准化 songInfo 格式：将 meta 中的字段提升到顶层
@@ -1523,7 +1542,7 @@ export async function callUserApiGetMusicUrl(
                 const url = validateReturnedMusicUrl(rawUrl, api.info.name)
                 // 字符串校验挡不住「URL 正常但请求下来是 404」——实测某源对不存在的歌
                 // 照样返回可解析的链接，宿主判成功后停止轮询，用户点开就是播放失败。
-                const unplayable = await verifyUrlPlayable(url, api.info.name)
+                const unplayable = await verifyWithBudget(url, api.info.name)
                 if (unplayable) throw new Error(unplayable)
 
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
@@ -1567,7 +1586,7 @@ export async function callUserApiGetMusicUrl(
                 const url = validateReturnedMusicUrl(rawUrl, api.info.name)
                 // 同上：链接长得正常但请求下来是 404，必须判失败并继续试下一个源，
                 // 否则「第一个源假成功」会把后面几十个真能播的源全挡住。
-                const unplayable = await verifyUrlPlayable(url, api.info.name)
+                const unplayable = await verifyWithBudget(url, api.info.name)
                 if (unplayable) throw new Error(unplayable)
 
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
