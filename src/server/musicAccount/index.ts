@@ -728,10 +728,9 @@ export async function runAccountHealthCheck(opts: { force?: boolean; manual?: bo
   const checkedAt = Date.now()
 
   if (!rows.length) return { ...getAccountHealth(), checkedAt, checked: 0 }
-  if (!opts.force && !isEnabled()) {
-    // 账号通道整体关着时不做无谓请求，但把现状照常报出去
-    return { ...getAccountHealth(), checkedAt, checked: 0 }
-  }
+  // 失活检测与「启用账号取链」解耦（用户 2026-10-31 明确）：
+  // 关掉账号取链只是「不用账号去取链播放」，不代表不关心账号死没死 —— 账号失效了没人知道，
+  // 等哪天重新打开取链就是一片红。所以巡检不再看 isEnabled，只由「定时巡检」开关与手动 force 决定。
   // 非手动（启动/定时）且巡检开关关着：什么都不做。手动走 force，用户点了就该真查。
   if (!opts.force && !isHealthCheckEnabled()) {
     return { ...getAccountHealth(), checkedAt, checked: 0 }
@@ -992,7 +991,9 @@ export function startMiguKeepalive(): void {
 }
 
 async function runMiguKeepalive(): Promise<void> {
-  if (!isEnabled()) return
+  // 保温与「启用账号取链」无关（用户 2026-10-31 明确）：咪咕 pacmtoken 2h 就过期，
+  // 关掉账号取链不等于想让咪咕掉线 —— 只要已配置 mg 账号就保活；
+  // 也同样不受「定时巡检」开关影响（巡检能等，2h 的票等不了）。没配 mg 自然什么都不做。
   const row = store.listAccounts().find(a => a.id === 'mg')
   if (!row || !row.configured) return
   await keepaliveOneMigu('mg')
