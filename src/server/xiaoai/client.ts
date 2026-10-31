@@ -11,6 +11,7 @@ import {
 import type { TokenInfo } from './auth'
 import { generateRequestId } from './crypto'
 import { encodeForm, httpRequest, parseJson } from './http'
+import { buildSearchQueries, pickMusicCandidate, type MusicCandidate } from './musicMatch'
 
 /** 小爱设备 */
 export interface MinaDevice {
@@ -344,67 +345,89 @@ export class MinaClient {
 
   /**
    * 搜小米曲库，命中真实 audioID（触屏音箱据此拉取封面与歌词）。
-   * 精确命中要求歌名完全相等 + 歌手双向包含；未命中时按相关度取首条。
-   * 参考 songloft-plugin-miot 的 searchAudioId 与 miair-next 的 search_audio_id。
+   *
+   * 屏幕上的封面/歌名/滚动歌词全部来自曲库（payload 只能带 audio_id 和 stream.url），
+   * 所以这里是投送观感的唯一开关：命中就有真封面和歌词，落空只能显示占位曲目。
+   * 参考实现（songloft-plugin-miot / xiaomusic）是「有结果就用第一条」，命中率高但会错配；
+   * 原实现只认「歌名完全相等 + 歌手对得上」，本地歌名带 (Live)/feat 后缀时会大量落空。
+   * 现在按 musicMatch.ts 的分档择优：多条 query 逐级放宽，宁可占位也不错配。
    */
   async searchAudioId(title: string, artist = '', options: { fuzzyFallback?: boolean; fallbackAudioId?: string } = {}): Promise<string> {
     const fallback = options.fallbackAudioId || DEFAULT_MUSIC_AUDIO_ID
     const songTitle = String(title || '').trim()
     if (!songTitle) return fallback
     const songArtist = String(artist || '').trim()
-    const query = songArtist ? `${songTitle}-${songArtist}` : songTitle
+    // 多条 query 逐级放宽：本地歌手写法/歌名后缀常与曲库不一致，只发一条很容易整轮落空
+    const queries = buildSearchQueries(songTitle, songArtist)
+    if (!queries.length) return fallback
+
+    const seen = new Set<string>()
+    const candidates: MusicCandidate[] = []
+    let tried = 0
+    for (const query of queries) {
+      let songList: MusicSearchSong[]
+      try {
+        songList = await this.searchMusicList(query)
+      } catch (e: any) {
+        // 单条 query 失败不该让整次匹配报废，换下一条更宽的继续试
+        console.warn(`[XiaoAi] 曲库搜索失败（${query}）：${e?.message || e}`)
+        continue
+      }
+      tried++
+      for (const song of songList) {
+        const audioId = String(song?.audioID || '')
+        if (!audioId || seen.has(audioId)) continue
+        seen.add(audioId)
+        candidates.push({
+          name: String(song?.name || ''),
+          artist: String(song?.artist?.name || ''),
+          audioId,
+        })
+      }
+      // 最理想档（同名 + 歌手匹配）已经到手，不必再用更宽的 query 追问
+      const decisive = pickMusicCandidate(candidates, songTitle, songArtist)
+      if (decisive && decisive.score >= 100) return decisive.candidate.audioId
+    }
+
+    const best = pickMusicCandidate(candidates, songTitle, songArtist)
+    if (best) return best.candidate.audioId
+
+    // 兼容旧的模糊兜底开关：只有在没有任何可信候选时才拿第一条（可能错配，默认关闭）
+    if (options.fuzzyFallback === true) {
+      const first = candidates.find(c => c.audioId)
+      if (first) return first.audioId
+    }
+    // 未命中会退占位封面（屏幕显示 Theme Of Loft），留一行可对账的日志便于排查命中率
+    console.log(
+      `[XiaoAi] 曲库未命中：${songTitle}${songArtist ? ` - ${songArtist}` : ''}（试 ${tried} 个查询 / ${candidates.length} 条候选）`
+    )
+    return fallback
+  }
+
+  /**
+   * 曲库搜索单次请求。
+   *
+   * audioID / songID 是超出 JS 安全整数范围的大整数，必须先把纯数字转成字符串再解析，
+   * 否则会被 JSON.parse 截成浮点数，拿去投送就变成别的歌。
+   */
+  private async searchMusicList(query: string): Promise<MusicSearchSong[]> {
     const body = encodeForm({
       query,
       queryType: '1',
       offset: '0',
-      count: '6',
+      count: '12',
       timestamp: String(Date.now()),
       requestId: generateRequestId(),
     })
-
     const result = await this.request<{ code?: number; data?: { songList?: MusicSearchSong[] } }>(
       'POST',
       `${MINA_API_BASE_URL}/music/search`,
       body,
       false,
-      // audioID / songID 是超出 JS 安全整数范围的大整数，必须先把纯数字转成字符串再解析
       text => text.replace(/"(audioID|songID)"\s*:\s*(-?\d+)/g, '"$1":"$2"')
     )
     const songList = result?.data?.songList
-    if (!Array.isArray(songList) || !songList.length) return fallback
-
-    const firstArtist = songArtist.split(/[;；,，&、/·—]/)[0].trim().toLowerCase()
-    const titleLower = songTitle.toLowerCase()
-    for (const song of songList) {
-      const name = String(song?.name || '').toLowerCase()
-      if (name !== titleLower) continue
-      const songArtistName = String(song?.artist?.name || '').toLowerCase()
-      if (firstArtist && songArtistName && !songArtistName.includes(firstArtist) && !firstArtist.includes(songArtistName)) continue
-      const audioId = String(song?.audioID || '')
-      if (audioId) return audioId
-    }
-
-    // 严格匹配（歌名完全相等）没命中时，再放宽到「歌名互相包含 + 歌手对得上」：
-    // 曲库里的名字常带 (Live)/(伴奏)/Remastered 后缀，严格相等会漏掉；
-    // 一旦漏掉就退到占位 audioID，触屏上会一直显示占位曲名（Theme Of Loft）。
-    // 仍然要求歌手匹配，避免拿别的歌顶替（那会让音箱去播云端另一首）。
-    for (const song of songList) {
-      const name = String(song?.name || '').toLowerCase()
-      if (!name) continue
-      if (!name.includes(titleLower) && !titleLower.includes(name)) continue
-      const songArtistName = String(song?.artist?.name || '').toLowerCase()
-      if (firstArtist && songArtistName && !songArtistName.includes(firstArtist) && !firstArtist.includes(songArtistName)) continue
-      const audioId = String(song?.audioID || '')
-      if (audioId) return audioId
-    }
-
-    // 默认不做模糊兜底：搜不到宁可返回默认 audioID 播我们的直链，
-    // 也不要拿第一条不相干的结果——那会让音箱去播小米云端的另一首歌（往往还是试听片段）。
-    if (options.fuzzyFallback === true) {
-      const audioId = String(songList[0]?.audioID || '')
-      if (audioId) return audioId
-    }
-    return fallback
+    return Array.isArray(songList) ? songList : []
   }
 
   /**

@@ -560,8 +560,11 @@ class XiaoAiService {
       console.warn('[XiaoAi] 曲库搜索失败，回退默认封面:', error?.message || error)
     }
 
-    // 只缓存有效结果，并限制条目数避免长期运行内存增长
-    if (audioId) {
+    // 只缓存**真实命中**：占位 audioID 也是非空字符串，一旦缓存住，
+    // 同一首歌在 30 分钟内都不会再试 —— 命中策略改进、曲库后来收录、搜索临时失败
+    // 都会被这个缓存按死，屏幕于是一直停在占位封面。
+    // 命中结果限制了条目数，避免长期运行内存增长。
+    if (audioId && audioId !== DEFAULT_MUSIC_AUDIO_ID) {
       if (this.audioIdCache.size >= AUDIO_ID_CACHE_MAX) {
         const oldest = this.audioIdCache.keys().next().value
         if (oldest) this.audioIdCache.delete(oldest)
