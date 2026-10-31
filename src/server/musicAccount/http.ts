@@ -110,6 +110,9 @@ export function pickRotatedFromSetCookie(raw: any, current: Record<string, strin
     const v = first.slice(idx + 1).trim()
     if (!k || !v) continue
     if (!(k in current)) continue
+    // 值没变就不算轮换：绝大多数平台每次响应都会回显同一份 Cookie，
+    // 不做这个比较的话每次取链都会触发一次「写回」，纯粹是磁盘抖动。
+    if (current[k] === v) continue
     out[k] = v
   }
   return out

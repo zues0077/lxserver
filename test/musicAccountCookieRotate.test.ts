@@ -42,6 +42,11 @@ test('pickRotatedFromSetCookie：单条字符串与数组两种形态都要兼�
   assert.deepEqual(pickRotatedFromSetCookie('kw_token=k1; Path=/', current), { kw_token: 'k1' })
 })
 
+test('pickRotatedFromSetCookie：值没变时不算轮换（否则每次取链都会无谓写库）', () => {
+  const current = { MUSIC_U: 'same', __csrf: 'cs' }
+  assert.deepEqual(pickRotatedFromSetCookie('MUSIC_U=same; Path=/', current), {})
+})
+
 test('mergeRotatedCookie：只替换值，字段顺序与其余字段原样保留', () => {
   const cookie = 'MUSIC_U=old; __csrf=cs; NMTID=n1'
   const merged = mergeRotatedCookie(cookie, { MUSIC_U: 'newu' })
