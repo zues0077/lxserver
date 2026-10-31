@@ -53,6 +53,7 @@ import { encodeRequestUrl } from '../utils/urlEncode'
 import * as musicAccount from './musicAccount'
 import { isUserAllowed, getAllowedUsers } from './musicAccount/permission'
 import * as extraSources from './extraSources'
+import { hasPlatformSongId } from './songIdMatch'
 import {
   xiaoAiService,
   buildStreamUrl,
@@ -1969,6 +1970,88 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
   return promise
 }
 
+// ===== 平台 ID 补全（缺 ID 的请求先按「歌名 + 歌手」补出真实 ID） =====
+/**
+ * 自定义源和平台账号都是「按 ID 取链」：没有 songmid/hash/rid，它们会各自报
+ * 「缺少 songId」「歌曲缺少网易 songmid」「歌曲ID无效，请检查歌单导入来源」……
+ * 日志上一片红，看起来像所有音源集体失效，实际是请求本身没带 ID ——
+ * 歌单导入、本地文件、第三方同步、旧收藏都可能是这种只有名字的 song。
+ *
+ * 这里在取链入口补一次：同平台搜「歌名 + 歌手」，严格吻合（歌名包含 + 歌手匹配 + 时长接近）
+ * 才认，补上该平台的 ID 字段再往下走；公开源和账号通道因此都能正常取链。
+ * 认不出来就什么都不改，保持原有「换源」行为。
+ */
+
+const songIdBackfillCache = new Map<string, { expiresAt: number; song: any | null }>()
+const SONG_ID_BACKFILL_TTL = 30 * 60 * 1000
+const SONG_ID_BACKFILL_FAIL_TTL = 5 * 60 * 1000
+/** 补 ID 只是一次搜索，给 6 秒足够；超时就当没补到，别把点播拖成 30 秒 */
+const SONG_ID_BACKFILL_BUDGET_MS = 6000
+
+const searchByPlatform = async (source: string, query: string): Promise<any[]> => {
+  const page = 1
+  const limit = 15
+  if (source === 'kglite') {
+    const cookie = musicAccount.getCookie('kglite') || ''
+    const data: any = await musicAccount.kglite.searchSongs(query, page, limit, cookie)
+    return Array.isArray(data?.list) ? data.list : []
+  }
+  const sdk = (musicSdk as any)[source]
+  if (!sdk?.musicSearch?.search) return []
+  const data: any = await sdk.musicSearch.search(query, page, limit)
+  return Array.isArray(data?.list) ? data.list : []
+}
+
+/**
+ * 缺 ID 时按名字补一次。命中返回补好的 song（可直接用于取链），认不出来返回 null。
+ * 结果带缓存：同一首歌（尤其失败短缓存反复重试时）不再重复打搜索接口。
+ */
+const backfillPlatformSongId = async (songInfo: any, username: string): Promise<any | null> => {
+  const source = String(songInfo?.source || '')
+  if (!source) return null
+  if (hasPlatformSongId(songInfo)) return songInfo
+  const name = String(songInfo?.name || '').trim()
+  if (!name) return null
+
+  const cacheKey = [source, normalizeSongMatchText(name), normalizeSongMatchText(songInfo?.singer)].join('|')
+  const now = Date.now()
+  const cached = songIdBackfillCache.get(cacheKey)
+  if (cached && cached.expiresAt > now) return cached.song ? { ...cached.song } : null
+  for (const [key, value] of songIdBackfillCache) {
+    if (value.expiresAt <= now) songIdBackfillCache.delete(key)
+  }
+
+  const remember = (song: any | null, ttl: number) => {
+    songIdBackfillCache.set(cacheKey, { expiresAt: now + ttl, song })
+    return song
+  }
+
+  try {
+    const query = songInfo?.singer ? `${name} ${songInfo.singer}` : name
+    const list = await searchByPlatform(source, query)
+    let best: any = null
+    let bestScore = -1
+    for (const item of list) {
+      const normalized = normalizeSongInfo({ ...item, source })
+      if (!hasPlatformSongId(normalized)) continue
+      // 严格匹配：歌名要能对上、歌手要吻合，时长差 >8 秒直接判不是同一首
+      const score = getSongMatchScore(item, songInfo)
+      if (score > bestScore) {
+        bestScore = score
+        best = normalized
+      }
+    }
+    if (!best || bestScore < 10) {
+      console.warn(`[歌曲ID补全] ${source} 未匹配到「${query}」的可用 ID，继续按无 ID 处理`)
+      return remember(null, SONG_ID_BACKFILL_FAIL_TTL)
+    }
+    return remember(best, SONG_ID_BACKFILL_TTL)
+  } catch (e: any) {
+    console.warn(`[歌曲ID补全] ${source} 搜索失败: ${e?.message || e}`)
+    return remember(null, SONG_ID_BACKFILL_FAIL_TTL)
+  }
+}
+
 interface ServerSongResolveResult {
   url: string
   quality: string
@@ -2020,8 +2103,22 @@ const resolveServerSong = async (
   username: string,
   allowQualityFallback: boolean,
 ): Promise<ServerSongResolveResult> => {
-  const originalSong = normalizeSongInfo({ ...rawSongInfo })
+  let originalSong = normalizeSongInfo({ ...rawSongInfo })
   if (!originalSong?.source) throw new Error('Missing song source')
+
+  // 缺平台 ID（歌单导入 / 本地文件 / 第三方同步常见）先按名字补一次，
+  // 否则下载与缓存走的也是「按 ID 取链」的音源，必定全军覆没。
+  if (!extraSources.isExtraSource(originalSong.source) && !hasPlatformSongId(originalSong)) {
+    const patched = await withHardBudget(
+      backfillPlatformSongId(originalSong, username),
+      SONG_ID_BACKFILL_BUDGET_MS,
+      '歌曲ID补全',
+    ).catch(() => null)
+    if (patched) {
+      originalSong = { ...patched, name: originalSong.name || patched.name, singer: originalSong.singer || patched.singer }
+      console.log(`[歌曲ID补全] 下载/缓存: ${originalSong.name} / ${originalSong.singer} → ${originalSong.source} id=${originalSong.songmid || originalSong.hash || ''}`)
+    }
+  }
 
   // 额外音源（Bilibili / 汽水）优先走自己的通道：让缓存、下载、音质探测也能走通这条链路。
   // 但取链失败不再直接抛错 —— 汽水很多曲目「已下架 / 仅客户端可播」，直接失败等于让歌彻底没声。
@@ -8394,6 +8491,26 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               throw new Error('Invalid songInfo')
             }
             const source = songInfo.source
+
+            // 缺平台 ID 先补一次（歌单导入 / 本地文件 / 第三方同步的曲子只有名字）。
+            // 不补的话，公开自定义源和平台账号都会报「缺少 songId/songmid/rid」，
+            // 日志看起来像音源全挂了，其实是请求里根本没有 ID 可给。
+            // 补不到就照旧走下去（换源那条路还能救），只是最终报错会点明原因。
+            let songIdMissing = false
+            if (!extraSources.isExtraSource(source) && !hasPlatformSongId(songInfo)) {
+              songIdMissing = true
+              const patched = await withHardBudget(
+                backfillPlatformSongId(songInfo, verifiedUsername),
+                SONG_ID_BACKFILL_BUDGET_MS,
+                '歌曲ID补全',
+              ).catch(() => null)
+              if (patched) {
+                songIdMissing = false
+                songInfo = { ...patched, name: songInfo.name || patched.name, singer: songInfo.singer || patched.singer }
+                console.log(`[歌曲ID补全] ${songInfo.name} / ${songInfo.singer} → ${source} id=${songInfo.songmid || songInfo.hash || songInfo.copyrightId || ''}`)
+              }
+            }
+
             let result: any
             // 失败短缓存用的键：平台 + 曲目标识 + 音质（换音质/换平台视为新请求）
             const failKey = buildMusicUrlFailKey(songInfo, quality || '', verifiedUsername)
@@ -8612,7 +8729,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 : accountBlockedByPermission
                   ? `${sourceName} 只能通过平台账号取链，但当前用户「${verifiedUsername}」不在使用权限名单内；请联系管理员在「平台账号 → 使用权限」里加入该用户`
                   : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
-              const errMsg = customSourceError || extraSourceError || fallbackMsg
+              const rawMsg = customSourceError || extraSourceError || fallbackMsg
+              // 缺 ID 的请求必须点名原因：日志里那一排「缺少 songId」不是音源坏了，
+              // 而是这首歌没带平台 ID，用户照提示去换音源只会白折腾。
+              const errMsg = songIdMissing
+                ? `这首歌没有携带 ${sourceName} 平台的歌曲 ID（多来自歌单导入 / 本地文件 / 第三方同步），按「${songInfo.name} ${songInfo.singer || ''}」重新匹配也没找到，因此所有音源都取不到链。原始原因：${rawMsg}`
+                : rawMsg
               const err: any = new Error(errMsg)
               err.attempts = attempts
               rememberMusicUrlFailure(failKey, errMsg, attempts)
