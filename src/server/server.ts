@@ -7565,8 +7565,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 平台自报的 total/allPage 不可全信（tx 报 45206 条 = 754 页，实测取不到那么多），
             // 所以取数上限是「allPage 推算 + 页数墙 + 条数预算 + 时间预算」四重收紧，而不是照 total 硬翻页。
             const SEARCH_PAGE_CAP = 60
-            const SEARCH_MAX_ITEMS = 4000
-            const SEARCH_MAX_MS = 15000
+            const SEARCH_MAX_ITEMS = 1200
+            // 首屏搜索的时间预算。原来是 15000ms，实测「晴天」这种大词要串行翻十几到几十页：
+            // wy 300 条 5.9s、tx 1000 条 8.0s、kw 3556 条 5.7s、mg 437 条 8.7s，
+            // 而平台单页只要 0.1~0.7s —— 用户干等 6~9 秒才看到第一屏，代价太大。
+            // 压到 3s 后各平台能拿 150~1800 条（前端本地分页每页 20~100 条，够翻很多页），
+            // 没取完的部分按 hasMore 提示，功能语义不变。
+            const SEARCH_MAX_MS = 3000
             const capPages = singlePage ? startPage : Math.max(1, Math.min(
               Number.isFinite(rawAllPage) ? rawAllPage : 1,
               SEARCH_PAGE_CAP
