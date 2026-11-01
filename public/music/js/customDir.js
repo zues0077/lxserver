@@ -669,15 +669,7 @@ window.CustomDirManager = {
 
         // 目录层级过滤（dirFilterAll 为 true 时不限制；否则严格匹配选中的目录或其子目录）
         if (!this.dirFilterAll && this.selectedDirPaths && this.selectedDirPaths.size > 0) {
-            current = current.filter(item => {
-                const itemSubPath = (item.subPath || '').trim();
-                for (const selDir of this.selectedDirPaths) {
-                    if (itemSubPath === selDir || itemSubPath.startsWith(selDir + '/')) {
-                        return true;
-                    }
-                }
-                return false;
-            });
+            current = current.filter(item => this.matchSelectedDir(item.subPath, this.selectedDirPaths));
         }
 
         // 更新筛选面板活跃小红点指示器
@@ -1516,11 +1508,11 @@ window.CustomDirManager = {
         } else {
             const sortedDirs = Array.from(this.selectedDirPaths).sort();
             const tagsHtml = sortedDirs.map(d => {
-                const safeD = this.escapeHtml(d);
+                const safeD = this.escapeHtml(d === '/' ? '根目录' : d);
                 return `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-[9px] font-bold border border-emerald-500/30 whitespace-nowrap"><i class="far fa-folder text-[8px] opacity-70"></i>${safeD}</span>`;
             }).join('');
             textEl.innerHTML = `<div class="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-full">${tagsHtml}</div>`;
-            textEl.title = sortedDirs.join(', ');
+            textEl.title = sortedDirs.map(d => d === '/' ? '根目录' : d).join(', ');
             if (btnEl) btnEl.classList.remove('active'); // 移除整体全绿背景，让内部每个tag清晰独立
         }
     },
@@ -1658,6 +1650,19 @@ window.CustomDirManager = {
         return false;
     },
 
+    // 判断某首歌的子路径是否命中已选目录：'/' 表示「仅根目录直属」，不包含任何子目录
+    matchSelectedDir(itemSubPath, selectedDirPaths) {
+        const sub = (itemSubPath || '').trim();
+        for (const selDir of selectedDirPaths) {
+            if (selDir === '/') {
+                if (!sub) return true;
+                continue;
+            }
+            if (sub === selDir || sub.startsWith(selDir + '/')) return true;
+        }
+        return false;
+    },
+
     // 渲染目录树 DOM
     renderDirTree() {
         const container = document.getElementById('cd-dir-tree-container');
@@ -1730,6 +1735,26 @@ window.CustomDirManager = {
         };
 
         let finalHtml = '';
+        // 「根目录」节点：只匹配直属本目录的歌曲（subPath 为空），不含任何子目录
+        const rootChecked = this.pendingDirPaths.has('/');
+        const rootAllMode = this.pendingDirFilterAll;
+        const rootSongCount = (this.originalData || []).filter(it => !(it.subPath || '').trim()).length;
+        const rootCheckboxHtml = rootAllMode
+            ? `<span class="w-4 h-4 shrink-0 flex items-center justify-center text-gray-300 dark:text-gray-600 text-xs">·</span>`
+            : `<input type="checkbox" data-cd-dir-path="/" ${rootChecked ? 'checked' : ''}
+                        onchange="window.CustomDirManager.toggleDirCheck(this.dataset.cdDirPath, this.checked)"
+                        class="w-4 h-4 rounded border-gray-300 text-emerald-500 focus:ring-emerald-500 cursor-pointer shrink-0 transition-transform group-hover:scale-105">`;
+        finalHtml += `
+                <div class="flex flex-col select-none">
+                    <div class="flex items-center gap-2.5 py-1.5 px-2 rounded-xl transition-all group ${rootChecked ? 'bg-emerald-500/10 border border-emerald-500/30' : 'hover:bg-black/5 dark:hover:bg-white/5'}">
+                        ${rootCheckboxHtml}
+                        <i class="fas fa-folder ${rootChecked ? 'text-emerald-500' : 'text-amber-500'} text-xs shrink-0 transition-colors"></i>
+                        <span class="text-xs t-text-main truncate flex-1 ${rootChecked ? 'font-bold text-emerald-600 dark:text-emerald-400' : 'font-medium'}"
+                            title="仅显示根目录直属歌曲，不含子目录">根目录</span>
+                        <span class="text-[10px] t-text-muted shrink-0 mr-1">${rootSongCount}</span>
+                        ${rootChecked ? '<span class="text-[9px] font-bold text-emerald-500 bg-emerald-500/10 px-1.5 py-0.2 rounded shrink-0 mr-1"><i class="fas fa-check mr-0.5"></i>已选</span>' : ''}
+                    </div>
+                </div>`;
         treeData.forEach(rootNode => {
             finalHtml += renderNode(rootNode, 0);
         });
