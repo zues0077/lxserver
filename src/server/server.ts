@@ -30,7 +30,7 @@ const musicSdk = musicSdkRaw as any
 import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, describeError } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation } from './sourceGuard'
-import { getSourceProbeStatus } from './sourceProbe'
+import { getSourceProbeStatus, runSourceProbe } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
 import { getAppVersion } from '@/utils/version'
@@ -9808,6 +9808,50 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       }
       if (pathname === '/api/custom-source/update-platforms' && req.method === 'POST') {
         return customSourceHandlers.handleUpdatePlatforms(req, res)
+      }
+
+      // ===== 手动触发一轮音源巡检 =====
+      // 巡检默认 6 小时一轮，改完音源想立刻确认平台的真实可用性时没法等。
+      // 这个入口只「触发一次已有巡检」，不增加任何处置能力（关闭/移除仍由巡检自身判据决定），
+      // 因此只要管理员权限；同步等待会挂几分钟（实测 90~225 秒）把 HTTP 拖超时，
+      // 所以后台起轮次、立刻返回 202，由前端轮询 /health 的 sourceProbe.running 收尾。
+      if (pathname === '/api/custom-source/probe-now' && req.method === 'POST') {
+        void (async () => {
+          try {
+            if (req.headers['x-frontend-auth'] !== global.lx.config['admin.password']) {
+              res.writeHead(403, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, error: '权限不足：手动巡检需要管理员身份。' }))
+              return
+            }
+            const status = getSourceProbeStatus()
+            if (!status.enabled) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, error: '音源巡检当前是关闭状态，请先开启 customSource.probe.enabled。' }))
+              return
+            }
+            if (status.running) {
+              res.writeHead(409, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, error: '上一轮巡检仍在进行，请等它结束后再触发。' }))
+              return
+            }
+            const raw = await readBody(req)
+            const body = raw ? JSON.parse(raw) : {}
+            const owner = body && body.owner && body.owner !== 'default' ? String(body.owner) : undefined
+            void runSourceProbe(owner ? { owner } : {}).catch((e: any) => {
+              console.error(`[音源巡检] 手动触发失败: ${(e && e.message) || e}`)
+            })
+            res.writeHead(202, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              success: true,
+              started: true,
+              message: owner ? `已开始巡检 ${owner} 空间的音源，约需 1~4 分钟` : '已开始巡检全部音源，约需 1~4 分钟',
+            }))
+          } catch (e: any) {
+            if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: (e && e.message) || '手动巡检失败' }))
+          }
+        })()
+        return
       }
 
       // ===== 自检护栏：可疑音源的手动处置 =====

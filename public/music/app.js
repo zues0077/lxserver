@@ -14903,6 +14903,63 @@ function togglePublicSourcesSetting() {
     updateSetting('enablePublicSources', !settings.enablePublicSources);
 }
 
+/**
+ * 手动触发一轮音源巡检。
+ *
+ * 巡检默认 6 小时一轮，改完音源想确认平台真实可用性时根本等不到。后端接口是「后台起轮次，
+ * 立刻返回 202」——同步等会把 HTTP 拖超时（实测一轮 90~225 秒），所以这里只轮询 /health
+ * 的 sourceProbe.running 等它收尾，再报本轮数字。
+ */
+async function triggerSourceProbe(btn) {
+    const pwd = localStorage.getItem('lx_admin_password');
+    if (!pwd) { showError('手动巡检需要管理员身份，请先登录'); return; }
+    const originalHTML = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-2"></i>巡检中…';
+    }
+    const startedAt = Date.now();
+    try {
+        const res = await fetch('/api/custom-source/probe-now', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-frontend-auth': pwd },
+            body: JSON.stringify({})
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.success === false) throw new Error(data.error || ('HTTP ' + res.status));
+
+        showSuccess('已开始巡检，约需 1~4 分钟');
+        // 最多等 8 分钟（覆盖 6 并发下最慢的一轮），期间每 4 秒问一次状态
+        while (Date.now() - startedAt < 8 * 60 * 1000) {
+            await new Promise(r => setTimeout(r, 4000));
+            let sp = null;
+            try {
+                const health = await (await fetch('/health')).json();
+                sp = health && health.sourceProbe;
+            } catch { continue; }
+            if (!sp || sp.running) continue;
+            const lr = sp.lastRun;
+            // 只认「本次触发的这一轮」：lastRun 的 startedAt 要晚于点击时刻
+            if (!lr || (lr.startedAt || 0) < startedAt - 5000) continue;
+            const extra = [
+                lr.newlyDisabled && lr.newlyDisabled.length ? `，新关闭 ${lr.newlyDisabled.length}` : '',
+                lr.restored && lr.restored.length ? `，恢复 ${lr.restored.length}` : ''
+            ].join('');
+            showSuccess(`巡检完成：探 ${lr.platformsChecked} 个平台，可用 ${lr.platformsOk}，不可用 ${lr.platformsDown}${extra}`);
+            await renderCustomSources();
+            return;
+        }
+        showSuccess('巡检仍在后台运行，稍后刷新列表查看结果');
+    } catch (e) {
+        showError('巡检失败：' + (e && e.message ? e.message : e));
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = originalHTML;
+        }
+    }
+}
+
 async function renderCustomSources() {
     let list = await fetchCustomSources();
 

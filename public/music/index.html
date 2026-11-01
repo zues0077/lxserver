@@ -4836,6 +4836,11 @@
                     class="flex items-center gap-2 px-4 py-2.5 bg-purple-50 text-purple-600 dark:bg-purple-500/15 dark:text-purple-400 border border-purple-100 dark:border-purple-500/30 rounded-xl hover:bg-purple-100 dark:hover:bg-purple-500/25 transition-colors font-medium whitespace-nowrap">
                     <i class="fas fa-tasks"></i>批量
                 </button>
+                <button onclick="triggerSourceProbe(this)" id="btn-source-probe-now"
+                    title="立刻跑一轮音源可用性巡检（约 1~4 分钟），不用等 6 小时的周期"
+                    class="flex items-center gap-2 px-4 py-2.5 bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400 border border-amber-100 dark:border-amber-500/30 rounded-xl hover:bg-amber-100 dark:hover:bg-amber-500/25 transition-colors font-medium whitespace-nowrap">
+                    <i class="fas fa-stethoscope"></i>立即巡检
+                </button>
             </div>
 
             <!-- 批量操作工具栏 (Modal) -->

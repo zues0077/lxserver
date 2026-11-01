@@ -77,7 +77,7 @@ export interface SourceProbeState {
   removedReason?: string
 }
 
-interface ProbeStatusFile {
+export interface ProbeStatusFile {
   version: number
   updatedAt: number
   sources: Record<string, SourceProbeState>
@@ -322,13 +322,46 @@ const emptyStatus = (): ProbeStatusFile => ({ version: 1, updatedAt: 0, sources:
 
 const statusPath = (owner: string) => path.join(ownerDir(owner), STATUS_FILE)
 
+/**
+ * 修复旧版本留下的「半截禁用态」。
+ *
+ * 旧代码关闭平台时只写 `autoDisabled=true`，既不写 `disabledAt`，也不写 `disabledFailCount`，
+ * 而且 `failCount` 不归零（会一路涨到 99）。新版写入路径修了，但**只补写不回溯**，
+ * 于是历史条目永远对不上，表现成两种假象：
+ *   - `/health` 的 `since` 退化成 `lastCheckAt`：看起来像「今天刚关」，其实只是今天巡检过；
+ *   - `failCount` 显示 99 而 `disabledAt=0`：像是「连续失败 99 次还在涨」，实际早已关闭。
+ * 这里按「关闭时刻 = 最后一次巡检时刻」「归档值 = 当时的连续失败次数」补全，与新版同构。
+ * 返回修复条数，调用方负责落盘（不落盘则每次读都会重算）。
+ */
+export const normalizeStatus = (status: ProbeStatusFile): number => {
+  let fixed = 0
+  for (const source of Object.values(status.sources) || []) {
+    const platforms = (source && (source as SourceProbeState).platforms) || {}
+    for (const ps of Object.values(platforms)) {
+      if (!ps || !ps.autoDisabled) continue
+      if (!ps.disabledAt) {
+        ps.disabledAt = ps.lastCheckAt || status.updatedAt || Date.now()
+        fixed++
+      }
+      if (typeof ps.disabledFailCount !== 'number') {
+        ps.disabledFailCount = ps.failCount || 0
+        ps.failCount = 0
+        fixed++
+      }
+    }
+  }
+  return fixed
+}
+
 const readStatus = (owner: string): ProbeStatusFile => {
   try {
     const file = statusPath(owner)
     if (!fs.existsSync(file)) return emptyStatus()
     const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'))
     if (!parsed || typeof parsed !== 'object' || typeof parsed.sources !== 'object') return emptyStatus()
-    return { version: 1, updatedAt: Number(parsed.updatedAt) || 0, sources: parsed.sources || {} }
+    const status: ProbeStatusFile = { version: 1, updatedAt: Number(parsed.updatedAt) || 0, sources: parsed.sources || {} }
+    normalizeStatus(status)
+    return status
   } catch (e: any) {
     syncLog.warn(`[音源巡检] 读取巡检状态失败 (${owner}):`, e?.message || e)
     return emptyStatus()
@@ -1059,7 +1092,15 @@ export async function runSourceProbe(
         const platformState = sourceState.platforms[platform]
 
         // 用户在面板上手动关闭的平台：尊重用户选择，永不参与自动复检
-        const manuallyDisabled = readPlatformFlags(ownerDirName(target.owner), target.id).disabled.has(platform) && !platformState.autoDisabled
+        const flags = readPlatformFlags(ownerDirName(target.owner), target.id)
+        // 幽灵禁用：巡检状态记着 autoDisabled=true，但 states.json 里这个平台的开关其实是开着的
+        // （旧版本「写状态成功、写开关失败」，或用户从面板手动把它开回来了）。
+        // 这时面板显示「已关闭」而实际仍在参与取链，属于最难排查的一类不一致——
+        // 以已有证据为准补写开关：该平台已经被判定连续失败达阈值，宁可多禁，也不放开。
+        if (platformState.autoDisabled && !flags.disabled.has(platform)) {
+          if (setPlatformDisabled(target.owner, target.id, platform, true)) flags.disabled.add(platform)
+        }
+        const manuallyDisabled = flags.disabled.has(platform) && !platformState.autoDisabled
         if (manuallyDisabled) {
           platformState.status = 'skipped'
           result.platformsSkipped++
@@ -1378,9 +1419,48 @@ export function probeNewSource(owner: string, sourceId: string): void {
   armNewSourceTimer(NEW_SOURCE_DEBOUNCE_MS)
 }
 
+let healedOnce = false
+/**
+ * 启动自愈：把旧版本留下的「半截禁用态」补齐并落盘。
+ *
+ * 巡检默认 6 小时一轮，指望它自然落盘意味着脏数据要在面板上挂几个小时；
+ * 容器起来就修一次最省事。只碰 probe-status.json，**不动** states.json 的平台开关，
+ * 也就是不会因为「修数据」而意外放行被关闭的平台。
+ */
+export function healProbeStatus(): { owners: number; fields: number } {
+  if (healedOnce) return { owners: 0, fields: 0 }
+  healedOnce = true
+  const owners = new Set<string>(['open', ...registeredUsers()])
+  for (const target of depsRef ? depsRef.listTargets() : []) owners.add(target.owner)
+  const touched: string[] = []
+  let fields = 0
+  for (const owner of owners) {
+    try {
+      const file = statusPath(owner)
+      if (!fs.existsSync(file)) continue
+      const raw = JSON.parse(fs.readFileSync(file, 'utf-8'))
+      if (!raw || typeof raw !== 'object' || typeof raw.sources !== 'object') continue
+      const status: ProbeStatusFile = { version: 1, updatedAt: Number(raw.updatedAt) || 0, sources: raw.sources || {} }
+      const fixed = normalizeStatus(status)
+      if (fixed > 0) {
+        writeStatus(owner, status)
+        touched.push(`${owner}(${fixed})`)
+        fields += fixed
+      }
+    } catch { /* 单个空间读失败不影响其它空间 */ }
+  }
+  if (touched.length) {
+    const msg = `[音源巡检] 启动自愈：补齐旧版本的禁用态字段 ${touched.join('、')}`
+    console.log(msg)
+    syncLog.info(msg)
+  }
+  return { owners: touched.length, fields }
+}
+
 /** 注册到后台任务调度器 */
 export function createSourceProbeTask(): ScheduledTask {
   const conf = configOf()
+  try { healProbeStatus() } catch { /* 自愈失败不影响巡检本身 */ }
   const task: ScheduledTask = {
     id: PROBE_TASK_ID,
     name: '自定义源平台可用性巡检',

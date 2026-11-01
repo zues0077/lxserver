@@ -103,6 +103,27 @@ test('请求前字面量预检：IP 写死的内网地址直接拒，域名放�
     assert.equal(checkLiteralTarget('not-a-url').ok, true)
 })
 
+test('NAS 管理口 / 云元数据 / 局域网其它主机在 URL 层就被拦（不靠真去探测）', () => {
+    // 报告里「未验证 169.254.169.254 与 NAS 5666 管理口」那两条，用护栏判定即可覆盖：
+    // 真发请求只会在 NAS 管理口留探测记录，而拦截逻辑是否生效完全可以在本地断言。
+    const blocked = [
+        'http://192.168.1.246:5666/',            // fnOS NAS 管理口
+        'http://192.168.1.246:5670/',            // trim 管理端口
+        'http://169.254.169.254/latest/meta-data/iam/security-credentials/', // 云 metadata
+        'http://172.16.0.1/', 'http://10.1.2.3:8080/', 'http://192.168.0.10/',
+        'http://[fe80::1]/', 'http://[fd00::1]:80/',
+    ]
+    for (const u of blocked) {
+        const r = checkLiteralTarget(u)
+        if (r.ok) assert.fail(`${u} 应被拦却放行了`)
+        else assert.ok(r.reason, `${u} 应给出拦截原因`)
+    }
+    // 反例：公网 CDN 与域名不能被误伤（误伤会把所有音的取链全掐断）
+    for (const u of ['https://music.163.com/', 'http://fs.youthandroid2.kugou.com/x.mp3', 'http://223.5.5.5/']) {
+        assert.equal(checkLiteralTarget(u).ok, true, `${u} 不应被拦`)
+    }
+})
+
 test('userApi 的 lx.request 与链接复核都挂了护栏', () => {
     const file = path.join(process.cwd(), 'src/server/userApi.ts')
     const src = fs.readFileSync(file, 'utf-8')
