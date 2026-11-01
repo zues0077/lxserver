@@ -14307,7 +14307,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // [New] Switch to the user's default entry tab on load
-    const defaultTab = settings.defaultEntry || 'favorites';
+    // [修复] 默认入口加白名单兜底：历史版本/远端同步可能残留非法值（例如 'about'），
+    // 会让每次刷新都停在「关于」页；这里一律回落到搜索，并确保目标视图真实存在。
+    const VALID_ENTRY_TABS = ['search', 'songlist', 'leaderboard', 'favorites', 'localmusic'];
+    let defaultTab = String(settings.defaultEntry || '').trim();
+    if (!VALID_ENTRY_TABS.includes(defaultTab)) {
+        console.warn('[Tab] 默认入口非法，已回落 search:', settings.defaultEntry);
+        defaultTab = 'search';
+    }
+    if (defaultTab !== 'favorites' && !document.getElementById(`view-${defaultTab}`)) {
+        defaultTab = 'search';
+    }
     switchTab(defaultTab);
 
     // 2. Auto-reconnect or auto-login

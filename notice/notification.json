@@ -40,9 +40,9 @@
         }
     },
     {
-        "comment": "=== 版本更新 v1.5.3 ===",
+        "comment": "=== 已归档：本 fork 更新检查改由 notice/latest.json 驱动，此条目标版本（v1.5.3）低于当前版本且 release 页不存在 ===",
         "id": "update_v1_5_3",
-        "status": "active",
+        "status": "archived",
         "type": "version",
         "logic": {
             "target_version": "v1.5.3",
@@ -62,9 +62,9 @@
         }
     },
     {
-        "comment": "=== 版本更新 v1.5.4 ===",
+        "comment": "=== 已归档：本 fork 更新检查改由 notice/latest.json 驱动，此条目标版本（v1.5.4）低于当前版本且 release 页不存在 ===",
         "id": "update_v1_5_4",
-        "status": "active",
+        "status": "archived",
         "type": "version",
         "logic": {
             "target_version": "v1.5.4",
@@ -84,9 +84,9 @@
         }
     },
     {
-        "comment": "=== 版本更新 v1.5.5 ===",
+        "comment": "=== 已归档：本 fork 更新检查改由 notice/latest.json 驱动，此条目标版本（v1.5.5）低于当前版本且 release 页不存在 ===",
         "id": "update_v1_5_5",
-        "status": "active",
+        "status": "archived",
         "type": "version",
         "logic": {
             "target_version": "v1.5.5",

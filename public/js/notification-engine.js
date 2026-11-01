@@ -640,21 +640,90 @@
         });
     }
 
-    async function checkUpdates(isManual = false) {
-        // [本地优先] 先读镜像自带的 /notice/notification.json（本 fork 的版本线与上游分叉后
-        // 各自发布，在线 flag 源仍指向上游项目，会对低版本号误报「发现新版本」；
-        // 本地源读取成功即以其为准，失败或为空时才回落在线源）。
+    // ================= 本 fork 自有版本线 =================
+    // 我们的版本号（1.5.x）与上游（2.x）早已分叉，PostHog 在线源永远认为我们「过期」：
+    // 每次打开页面都会弹一次「发现新版本 v2.x」，并把下载链接指向上游仓库。
+    // 因此更新检查只认镜像自带的两个本地文件，**有本地源就绝不回落在线源**：
+    //   /notice/latest.json        —— 本仓库最新版本（发版时由 scripts/set-version.js 同步）
+    //   /notice/notification.json  —— 通用通知（欢迎语 / 公告 / 可选的新版本条目）
+    function buildLocalVersionItem(info) {
+        const ver = String((info && info.version) || '').trim();
+        if (!ver) return null;
+        return {
+            id: 'local_version_check',
+            status: 'active',
+            type: 'version',
+            logic: { target_version: ver, operator: '<', interval_hours: 24 },
+            ui: {
+                title: `发现新版本 ${ver}`,
+                message: (info && info.notes) || `新版本 ${ver} 已发布，建议更新以获得更好的体验。`,
+                confirm_text: '前往查看',
+                cancel_text: '稍后提醒'
+            },
+            action: {
+                type: 'link',
+                url: (info && info.url) || 'https://github.com/zues0077/lxserver/releases'
+            }
+        };
+    }
+
+    async function loadForkLocalPayloads(isManual = false) {
+        const items = [];
+        let available = false;
+
         try {
-            const localRes = await fetch('/notice/notification.json?t=' + Date.now(), { cache: 'no-store' });
-            if (localRes.ok) {
-                const localData = await localRes.json();
-                const hasItems = Array.isArray(localData) ? localData.some(x => x && x.type) : !!(localData && localData.type);
-                if (hasItems) {
-                    await handlePayload(localData, 'local_notice', isManual);
-                    return;
+            const res = await fetch('/notice/latest.json?t=' + Date.now(), { cache: 'no-store' });
+            if (res.ok) {
+                available = true;
+                const info = await res.json();
+                const item = buildLocalVersionItem(info);
+                if (item) items.push(item);
+            }
+        } catch (e) { /* latest.json 不存在（老镜像）→ 继续看通用通知文件 */ }
+
+        try {
+            const res = await fetch('/notice/notification.json?t=' + Date.now(), { cache: 'no-store' });
+            if (res.ok) {
+                available = true;
+                const data = await res.json();
+                const arr = Array.isArray(data) ? data : (data && data.type ? [data] : []);
+                for (const it of arr) {
+                    if (!it || !it.type) continue;
+                    // 手动检查只回答「有没有新版本」，避免同时弹公告
+                    if (isManual && it.type !== 'version') continue;
+                    items.push(it);
                 }
             }
-        } catch (e) { /* 本地源不可用或不是合法 JSON，继续走在线源 */ }
+        } catch (e) { /* 两个文件都取不到才走在线源（老部署兜底） */ }
+
+        return { available, items };
+    }
+
+    function showUpToDateModal(message) {
+        if (document.getElementById('ph-notification-overlay')) return;
+        renderModal({
+            id: 'manual_check_uptodate',
+            type: 'info',
+            ui: {
+                title: '当前已是最新版本',
+                message: message || `当前版本 ${CONFIG.getLocalVersion()} 已是最新（更新源：zues0077/lxserver）。`,
+                confirm_text: '确定',
+                cancel_text: ''
+            },
+            action: { type: 'close' },
+            logic: { interval_hours: 0 }
+        }, 'temp_manual_check', null);
+    }
+
+    async function checkUpdates(isManual = false) {
+        // 本 fork 自带版本线：本地源只要可用就以其为唯一依据。
+        // 这样既不会每次打开都误报上游新版本，也不会把用户引到上游仓库。
+        const local = await loadForkLocalPayloads(isManual);
+        if (local.available) {
+            if (local.items.length) await handlePayload(local.items, 'local', isManual);
+            else if (isManual) showUpToDateModal();
+            return;
+        }
 
         // 如果是手动检查，增加一个主动探测逻辑来判断 PostHog 是否被拦截
         let adBlocked = !!window._ph_blocked;

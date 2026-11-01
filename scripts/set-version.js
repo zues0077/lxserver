@@ -67,6 +67,24 @@ for (const file of configPaths) {
   console.log(`✓ ${path.relative(root, file).padEnd(24)} v${oldVersion} → v${version}`);
 }
 
+// ---- 同步前端「检查版本更新」用的版本线文件 ----
+// 前端 /js/notification-engine.js 只认镜像自带的 /notice/latest.json 判断有没有新版本
+//（本 fork 不回落到上游 PostHog，否则永远误报上游 2.x）。漏同步会让检查更新显示旧版本号。
+const latestPath = path.join(root, 'notice', 'latest.json');
+try {
+  if (fs.existsSync(latestPath)) {
+    const info = JSON.parse(fs.readFileSync(latestPath, 'utf-8'));
+    const prev = info.version || '(空)';
+    info.version = `v${version}`;
+    fs.writeFileSync(latestPath, JSON.stringify(info, null, 4) + '\n', 'utf-8');
+    console.log(`✓ notice/latest.json      ${prev} → v${version}`);
+  } else {
+    console.warn('⚠ notice/latest.json 不存在：前端「检查版本更新」将没有版本依据，请补上');
+  }
+} catch (e) {
+  console.warn(`⚠ notice/latest.json 同步失败: ${e.message}`);
+}
+
 // ---- 同步文档里跟着版本号走的示例（消除「文档写旧版本」漂移）----
 // 文档中版本号有三类形态，都随发版漂移，这里一次性替换掉：
 //   1) 镜像 tag：        ghcr.io/zues0077/lxserver:1.5.4 / ghcr.nju.edu.cn/...:1.5.4
