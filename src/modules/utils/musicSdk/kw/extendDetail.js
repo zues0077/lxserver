@@ -92,10 +92,19 @@ async function kwWwwGet(path) {
 export default {
   async getAlbumSongs(id) {
     const data = await album.getAlbumListDetail(id, 1)
+    const list = data.list || []
+    const albumImg = data.info?.img || ''
+    // 酷我专辑曲目接口不返回单曲封面（item.pic 为空），整张专辑本来就共用一张封面。
+    // 后端补掉，前端各列表就不用再各自兜底（实测 0/13、0/28 全空）。
+    if (albumImg) {
+      for (const s of list) {
+        if (!s.img) s.img = albumImg
+      }
+    }
     return {
       source: 'kw',
-      list: data.list || [],
-      total: data.total || (data.list || []).length,
+      list,
+      total: data.total || list.length,
       name: data.info?.name,
       artistName: data.info?.author,
       desc: data.info?.desc,

@@ -199,6 +199,7 @@ let currentRecoveryState = null; // 播放失败自动恢复状态管理
 let currentPlaybackErrorHandler = null; // 当前音频地址的错误恢复监听器
 let shouldAutoRecoverPlayback = false;
 let playbackRecoveryTriggeredForRequestId = 0;
+let lastSwitchNoticeKey = ''; // 上一次「已自动换源」提示的 key，防同一首歌重复弹
 
 let lastAudioDeviceChangeTime = 0;
 let lastKnownAudioDevices = null;
@@ -3039,7 +3040,7 @@ function renderSingerResults(list) {
             <!-- Avatar Container -->
             <div class="relative mb-3 md:mb-4">
                 <div class="w-20 h-20 sm:w-24 sm:h-24 md:w-28 md:h-28 rounded-full overflow-hidden shadow-md ring-4 ring-black/5 dark:ring-white/5 group-hover:ring-emerald-500/40 group-hover:shadow-emerald-500/20 transition-all duration-500">
-                    <img src="${singer.picUrl || singer.avatar || singer.img || '/music/assets/logo.svg'}"
+                    <img src="${singerCover(singer)}"
                          onerror="this.src='/music/assets/logo.svg'"
                          class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500">
                 </div>
@@ -3571,7 +3572,7 @@ function renderArtistMiniBar(info, activeTab, order) {
             <!-- Left: Mini Avatar + Name + Stats -->
             <div class="flex items-center gap-2.5 min-w-0 flex-1">
                 <div class="relative w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10 rounded-full overflow-hidden shadow-md flex-shrink-0 ring-2 ring-emerald-500/30">
-                    <img src="${info.avatar || '/music/assets/logo.svg'}" 
+                    <img src="${singerCover(info)}" 
                          onerror="this.src='/music/assets/logo.svg'"
                          class="w-full h-full object-cover" 
                          alt="${escapeHtmlText(info.name)}">
@@ -3718,7 +3719,7 @@ function renderArtistHeader(info, activeTab, order) {
 
             <div id="artist-main-layout" class="flex flex-col md:flex-row gap-6 md:gap-8 items-center md:items-start text-center md:text-left transition-all duration-500">
                 <div id="artist-avatar-container" class="w-32 h-32 md:w-40 md:h-40 rounded-full overflow-hidden shadow-2xl ring-4 ring-emerald-500/20 flex-shrink-0 transition-all duration-500 origin-center">
-                    <img src="${info.avatar || '/music/assets/logo.svg'}" 
+                    <img src="${singerCover(info)}" 
                          onerror="this.src='/music/assets/logo.svg'"
                          class="w-full h-full object-cover">
                 </div>
@@ -4975,6 +4976,37 @@ window.goBackToSearch = goBackToSearch;
 window.enterArtist = enterArtist;
 
 // Helper for loose image paths
+/** 平台在用户没设头像时会返回一张默认灰图（B站 noface.gif），视觉上等同「没封面」 */
+function isDefaultCover(url) {
+    const s = String(url || '').trim();
+    if (!s) return true;
+    return /hdslb\.com\/images\/member\/noface/i.test(s) ||
+        /\/noface\.(gif|png)/i.test(s) ||
+        /default_?avatar/i.test(s);
+}
+
+/** 用名字首字生成占位头像：纯 data URI，不依赖 CSS；只取一个字母/数字/汉字，避免注入 */
+function avatarPlaceholder(name) {
+    const src = String(name || '').trim();
+    const m = src.match(/[\p{L}\p{N}]/u);
+    const ch = m ? m[0].toUpperCase() : '♪';
+    let hash = 0;
+    for (let i = 0; i < src.length; i++) hash = (hash * 31 + src.charCodeAt(i)) & 0xffff;
+    const hue = hash % 360;
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120">'
+        + `<rect width="120" height="120" fill="hsl(${hue},42%,52%)"/>`
+        + `<text x="60" y="62" font-size="54" font-weight="600" fill="#ffffff" text-anchor="middle" dominant-baseline="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif">${ch}</text>`
+        + '</svg>';
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+/** 歌手封面：优先真头像，没有/是默认灰图就用名字首字占位块 */
+function singerCover(singer) {
+    const raw = (singer && (singer.picUrl || singer.avatar || singer.img || singer.cover)) || '';
+    if (isDefaultCover(raw)) return avatarPlaceholder((singer && (singer.name || singer.title || singer.singer)) || '');
+    return raw;
+}
+
 function getImgUrl(item) {
     if (!item) return '/music/assets/logo.svg';
     const s = item;
@@ -4984,6 +5016,9 @@ function getImgUrl(item) {
         (s.album && (s.album.picUrl || s.album.img || s.album.pic)) ||
         (s.al && (s.al.picUrl || s.al.img)) ||
         (s.meta && (s.meta.img || s.meta.pic));
+
+    // 平台默认灰图（B站 noface.gif）等同没有封面，继续往下走兜底
+    if (rawUrl && isDefaultCover(rawUrl)) rawUrl = '';
 
     // 本地或缓存歌曲若未提前注入 pic，根据 filename 动态拼接服务端封面接口
     if (!rawUrl && (s.filename || s._localFilename)) {
@@ -6500,6 +6535,9 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, op
                 requestedSource: result.requestedSource || song.source,
                 downloadSource: result.downloadSource || song.source,
                 songInfo: song,
+                // 后端自动换源时的说明（from/to/reason）。这里是白名单重建返回值，
+                // 不显式带出来前端永远收不到，用户就只会看到音源莫名变了。
+                switched: result.switched || null,
                 errorMsg: result.errorMsg
             };
         }
@@ -7616,6 +7654,19 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
         // Display attempts / success message
         const sourceText = getSourceTypeText(urlResult.sourceType, urlResult.folder);
         const sourceName = urlResult.sourceName || '';
+
+        // 后端自动换源（典型：汽水只给 60 秒试听 → 换到咪咕）必须说清楚，
+        // 否则用户只是缓冲完发现音源变了，完全不知道中间发生了什么。
+        // 预读阶段先不提示，等真正开播再说，避免没点播放就先弹一条。
+        if (!urlResult.isPrefetch && urlResult.switched && urlResult.switched.to) {
+            const sw = urlResult.switched;
+            const noticeKey = `${song.id || song.name}|${sw.from || ''}|${sw.to}`;
+            if (lastSwitchNoticeKey !== noticeKey) {
+                lastSwitchNoticeKey = noticeKey;
+                const why = sw.reason ? `（${sw.reason}）` : '';
+                showToast('info', `已自动换源：${sw.from || '原平台'} → ${sw.to}${why}`, 5000);
+            }
+        }
 
         if (urlResult.isPrefetch) {
             let detail = '解析成功';
@@ -11992,7 +12043,7 @@ function renderLibraryArtists(list, isDislike = false) {
         div.innerHTML = `
             <div class="relative mb-2 md:mb-3">
                 <div class="w-16 h-16 sm:w-24 sm:h-24 md:w-32 md:h-32 rounded-full overflow-hidden shadow-sm">
-                    <img src="${singer.picUrl || singer.avatar || singer.img || '/music/assets/logo.svg'}"
+                    <img src="${singerCover(singer)}"
                          onerror="this.src='/music/assets/logo.svg'"
                          class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500">
                 </div>

@@ -2131,6 +2131,8 @@ interface ServerSongResolveResult {
   requestedSource?: string
   downloadSource?: string
   sourceName?: string
+  /** 自动换源说明：让前端能明确告诉用户「为什么换了、换到哪」 */
+  switched?: { from?: string; to?: string; reason?: string }
 }
 
 /**
@@ -2251,7 +2253,16 @@ const resolveServerSong = async (
     // 换源成功 → 原曲其实能听（只是这个平台不给），把它从待补清单摘掉，
     // 否则清单会被「其实能播」的曲子长期污染，自动补传也会一直撞它。
     removePendingAfterSwitch(originalSong)
-    return switchedResult
+    return {
+      ...switchedResult,
+      // 换源对用户是「看不见的跳转」：不打标记，用户只会看到播放器音源莫名变了。
+      // 带上 from/to/reason，前端就能明确告诉用户「为什么换了、换到哪」。
+      switched: {
+        from: sourceDisplayName(originalSong?.source),
+        to: switchedResult.sourceName || sourceDisplayName(switchedResult.songInfo?.source),
+        reason: shortSwitchReason(extraError || errors[0]),
+      },
+    }
   }
 
   for (const quality of qualities.slice(1)) {
@@ -2265,6 +2276,24 @@ const resolveServerSong = async (
   throw new Error(extraError
     ? `No downloadable source found (${extraError})`
     : `No downloadable source found (${errors.join('; ')})`)
+}
+
+/** 平台 id → 给用户看的平台名（换源提示用，别再让前端自己维护一份映射表） */
+const sourceDisplayName = (id: any): string => {
+  const key = String(id || '')
+  if (!key) return ''
+  try {
+    return musicAccount.getPlatform(key)?.name || extraSources.displayName(key) || key
+  } catch {
+    return key
+  }
+}
+
+/** 换源原因给用户看，别把整段技术报错原样贴出去 */
+const shortSwitchReason = (raw: any): string => {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim()
+  if (!s) return ''
+  return s.length > 80 ? `${s.slice(0, 78)}…` : s
 }
 
 /** 换源成功后清掉这条待补记录（只有汽水会进清单；key 与 pending.add 保持一致） */
@@ -8851,6 +8880,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     sourceName: switched.sourceName,
                     sourceId: `extra-switch:${switched.songInfo?.source || ''}`,
                     attempts: [{ name: switched.sourceName, status: 'success' }],
+                    // 汽水「仅 60 秒试听」这类降级会静默换到别的平台，必须让用户知情，
+                    // 否则只是缓冲完发现音源变了，根本不知道发生了什么。
+                    switched: {
+                      from: sourceDisplayName(source),
+                      to: switched.sourceName,
+                      reason: shortSwitchReason(extraSourceError),
+                    },
                   }
                   void pushProgress({ name: switched.sourceName, status: 'success' })
                   console.log(`[换源] ${extraSources.displayName(source)} 失败后已换到 ${switched.sourceName}：${songInfo.name}`)
