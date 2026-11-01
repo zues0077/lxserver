@@ -1,4 +1,5 @@
 import { spawnSync } from 'child_process'
+import https from 'https'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
@@ -84,22 +85,47 @@ export async function lookupSong(fingerprint: string, duration: number): Promise
         meta: 'recordings releasegroups releases tracks'
     }
 
-    try {
-        const response = await needle('post', API_URL, params, {
-            json: false,
-            multipart: false,
-            // AcoustID 识别属于应用类出站请求
-            agent: await getProxyAgent(API_URL, 'app'),
-        })
+    /**
+     * 出网策略（2026-11-01 实机教训）：
+     * 246 这类没有 IPv6 路由的机器上，api.acoustid.org（Cloudflare）的 AAAA 记录会让
+     * Node 先试 IPv6 再超时，表现为「unknown error / message 为空」，而 `curl -4` 是通的。
+     * 所以先强制 IPv4 打一发，失败再退回默认解析顺序（保留有 IPv6 出口的机器/代理场景）。
+     */
+    const proxyAgent = await getProxyAgent(API_URL, 'app')
+    const attempts: Array<{ label: string, agent: any }> = proxyAgent
+        ? [{ label: 'proxy', agent: proxyAgent }]
+        : [
+            { label: 'IPv4', agent: new https.Agent({ family: 4, keepAlive: false }) },
+            { label: '默认', agent: undefined },
+        ]
 
-        if (response.statusCode !== 200) {
-            throw new Error(`AcoustID API 返回状态码 ${response.statusCode}`)
+    const failures: string[] = []
+    for (const attempt of attempts) {
+        try {
+            const response = await needle('post', API_URL, params, {
+                json: false,
+                multipart: false,
+                agent: attempt.agent,
+                // 识别单曲最多等 15s，避免批量识别时把连接挂死
+                open_timeout: 15000,
+                response_timeout: 20000,
+            })
+            const body: any = response.body
+            // AcoustID 用 200 + status:'error' 也要当失败处理，否则上层只会拿到空结果
+            if (response.statusCode !== 200 || (body && typeof body === 'object' && body.status === 'error')) {
+                const apiMsg = body && typeof body === 'object' && body.error
+                    ? `code=${body.error.code} ${body.error.message || ''}`.trim()
+                    : `状态码 ${response.statusCode}`
+                throw new Error(`AcoustID API 返回 ${apiMsg}`)
+            }
+            return body
+        } catch (error: any) {
+            const reason = error?.code || error?.errno || error?.message || 'error 无描述'
+            failures.push(`[${attempt.label}] ${reason}`)
         }
-
-        return response.body
-    } catch (error: any) {
-        throw new Error(`AcoustID 查询失败: ${error.message}`)
     }
+
+    throw new Error(`AcoustID 查询失败: ${failures.join('；')}`)
 }
 
 /**

@@ -455,8 +455,16 @@ function escapeHtmlText(value) {
 
 function jsArg(value) {
     // 将任意值序列化为 JSON 字符串字面量，安全用于 onclick 等 HTML 属性上下文，
-    // 防止值内含引号/尖括号逃逸属性或注入脚本（对齐上游 #451 安全加固）
-    return JSON.stringify(String(value ?? ''));
+    // 防止值内含引号/尖括号逃逸属性或注入脚本（对齐上游 #451 安全加固）。
+    // 注意：JSON.stringify 只转义 JS 语义，JS 里的 `"` 在 HTML 属性里照样会结束属性，
+    // 所以这里再把 & < > " ' 全部实体化——浏览器解析属性时解码回原字符，JS 侧仍是合法字面量。
+    return JSON.stringify(String(value ?? '')).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    })[ch]);
 }
 
 function parseNetworkListAutoCheckInterval(value) {
@@ -2805,7 +2813,7 @@ function renderHotSearch(data) {
                 <!-- Platform Tabs -->
                 <div class="flex items-center gap-1.5 overflow-x-auto hide-scrollbar pb-1">
                     ${tabs.map(tab => `
-                        <button onclick="switchHotSearchTab('${tab.id}')"
+                        <button onclick="switchHotSearchTab(${jsArg(tab.id)})"
                                 class="px-3 py-1.5 rounded-xl text-xs font-semibold transition-all whitespace-nowrap ${currentSource === tab.id ? 'bg-emerald-500 text-white shadow-sm' : 't-bg-panel hover:t-bg-main t-text-muted border t-border-main'}">
                             ${tab.name}
                         </button>
@@ -2814,7 +2822,7 @@ function renderHotSearch(data) {
             </div>
             <div class="hot-search-list grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 md:gap-3.5">
                 ${keywords.map((keyword, index) => `
-                    <button onclick="handleHotSearchClick('${keyword.replace(/'/g, "\\'")}')" 
+                    <button onclick="handleHotSearchClick(${jsArg(keyword)})" 
                             class="hot-search-item group flex items-center px-3 py-3 md:p-3.5 t-bg-panel hover:border-emerald-500/50 border t-border-main rounded-xl transition-all shadow-sm hover:shadow-md hover:-translate-y-0.5 overflow-hidden h-14">
                         <span class="rank flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full text-xs font-bold mr-3 ${index < 3 ? 'bg-gradient-to-r from-orange-400 to-red-500 text-white shadow-sm' : 'bg-gray-100 dark:bg-gray-800 text-gray-500'
         }">
@@ -2828,7 +2836,7 @@ function renderHotSearch(data) {
                 `).join('')}
             </div>
             <div class="mt-6 text-center">
-                <button onclick="fetchHotSearch('${currentSource}', true).then(renderHotSearch)" 
+                <button onclick="fetchHotSearch(${jsArg(currentSource)}, true).then(renderHotSearch)" 
                         class="text-sm t-text-muted hover:text-emerald-500 transition-colors">
                     <i class="fas fa-sync-alt mr-1"></i>
                     刷新热搜
@@ -3037,12 +3045,12 @@ function renderSingerResults(list) {
                 </div>
                 <button id="singer-fav-${singer.id}" class="absolute -top-1 -right-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ${isArtistFavorited(singer.id, singer.source || 'wy') ? 'bg-rose-500 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-rose-500'}"
                         title="${isArtistFavorited(singer.id, singer.source || 'wy') ? '取消收藏' : '收藏歌手'}"
-                        onclick="event.stopPropagation(); (async () => { const favd = await toggleArtistFavorite('${singer.id}', '${singer.source || 'wy'}', '${singer.name.replace(/'/g, "\\'")}', '${(singer.picUrl || '').replace(/'/g, "\\'")}'); const btn = document.getElementById('singer-fav-${singer.id}'); if(btn){ btn.className = 'absolute -top-1 -right-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ' + (favd ? 'bg-rose-500 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-rose-500'); btn.title = favd ? '取消收藏' : '收藏歌手'; } const dBtn = document.getElementById('singer-dislike-${singer.id}'); if(dBtn && favd){ dBtn.className = 'absolute -top-1 -left-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100'; dBtn.title = '不喜欢'; } })()">
+                        onclick="event.stopPropagation(); (async () => { const favd = await toggleArtistFavorite('${singer.id}', '${singer.source || 'wy'}', ${jsArg(singer.name)}, ${jsArg((singer.picUrl || ''))}); const btn = document.getElementById('singer-fav-${singer.id}'); if(btn){ btn.className = 'absolute -top-1 -right-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ' + (favd ? 'bg-rose-500 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-rose-500'); btn.title = favd ? '取消收藏' : '收藏歌手'; } const dBtn = document.getElementById('singer-dislike-${singer.id}'); if(dBtn && favd){ dBtn.className = 'absolute -top-1 -left-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100'; dBtn.title = '不喜欢'; } })()">
                     <i class="fas fa-heart text-[11px]"></i>
                 </button>
                 <button id="singer-dislike-${singer.id}" class="absolute -top-1 -left-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ${isArtistDisliked(singer.id, singer.source || 'wy') ? 'bg-gray-800 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-gray-800'}"
                         title="${isArtistDisliked(singer.id, singer.source || 'wy') ? '取消不喜欢' : '不喜欢'}"
-                        onclick="event.stopPropagation(); (async () => { const disd = await toggleArtistDislike('${singer.id}', '${singer.source || 'wy'}', '${singer.name.replace(/'/g, "\\'")}', '${(singer.picUrl || '').replace(/'/g, "\\'")}'); const btn = document.getElementById('singer-dislike-${singer.id}'); if(btn){ btn.className = 'absolute -top-1 -left-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ' + (disd ? 'bg-gray-800 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-gray-800'); btn.title = disd ? '取消不喜欢' : '不喜欢'; } const fBtn = document.getElementById('singer-fav-${singer.id}'); if(fBtn && disd){ fBtn.className = 'absolute -top-1 -right-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100'; fBtn.title = '收藏歌手'; } })()">
+                        onclick="event.stopPropagation(); (async () => { const disd = await toggleArtistDislike('${singer.id}', '${singer.source || 'wy'}', ${jsArg(singer.name)}, ${jsArg((singer.picUrl || ''))}); const btn = document.getElementById('singer-dislike-${singer.id}'); if(btn){ btn.className = 'absolute -top-1 -left-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ' + (disd ? 'bg-gray-800 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-gray-800'); btn.title = disd ? '取消不喜欢' : '不喜欢'; } const fBtn = document.getElementById('singer-fav-${singer.id}'); if(fBtn && disd){ fBtn.className = 'absolute -top-1 -right-1 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100'; fBtn.title = '收藏歌手'; } })()">
                     <i class="fas fa-ban text-[11px]"></i>
                 </button>
             </div>
@@ -3110,13 +3118,13 @@ function renderAlbumResults(list) {
                 <!-- Favorite Button -->
                 <button id="album-fav-${item.id}" class="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ${isAlbumFavorited(item.id, itemSource) ? 'bg-rose-500 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-rose-500'}"
                         title="${isAlbumFavorited(item.id, itemSource) ? '取消收藏' : '收藏专辑'}"
-                        onclick="event.stopPropagation(); (async () => { const favd = await toggleAlbumFavorite('${item.id}', '${itemSource}', '${item.name.replace(/'/g, "\\'")}', '${(item.picUrl || '').replace(/'/g, "\\'")}', '${(item.artistName || '').replace(/'/g, "\\'")}'); const btn = document.getElementById('album-fav-${item.id}'); if(btn){ btn.className = 'absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ' + (favd ? 'bg-rose-500 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-rose-500'); btn.title = favd ? '取消收藏' : '收藏专辑'; } const dBtn = document.getElementById('album-dislike-${item.id}'); if(dBtn && favd){ dBtn.className = 'absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100'; dBtn.title = '不喜欢'; } })()">
+                        onclick="event.stopPropagation(); (async () => { const favd = await toggleAlbumFavorite('${item.id}', '${itemSource}', ${jsArg(item.name)}, ${jsArg((item.picUrl || ''))}, ${jsArg((item.artistName || ''))}); const btn = document.getElementById('album-fav-${item.id}'); if(btn){ btn.className = 'absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ' + (favd ? 'bg-rose-500 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-rose-500'); btn.title = favd ? '取消收藏' : '收藏专辑'; } const dBtn = document.getElementById('album-dislike-${item.id}'); if(dBtn && favd){ dBtn.className = 'absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100'; dBtn.title = '不喜欢'; } })()">
                     <i class="fas fa-heart text-xs"></i>
                 </button>
                 <!-- Dislike Button -->
                 <button id="album-dislike-${item.id}" class="absolute top-2 right-10 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ${isAlbumDisliked(item.id, itemSource) ? 'bg-gray-800 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-gray-800'}"
                         title="${isAlbumDisliked(item.id, itemSource) ? '取消不喜欢' : '不喜欢'}"
-                        onclick="event.stopPropagation(); (async () => { const disd = await toggleAlbumDislike('${item.id}', '${itemSource}', '${item.name.replace(/'/g, "\\'")}', '${(item.picUrl || '').replace(/'/g, "\\'")}', '${(item.artistName || '').replace(/'/g, "\\'")}'); const btn = document.getElementById('album-dislike-${item.id}'); if(btn){ btn.className = 'absolute top-2 right-10 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ' + (disd ? 'bg-gray-800 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-gray-800'); btn.title = disd ? '取消不喜欢' : '不喜欢'; } const fBtn = document.getElementById('album-fav-${item.id}'); if(fBtn && disd){ fBtn.className = 'absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100'; fBtn.title = '收藏专辑'; } })()">
+                        onclick="event.stopPropagation(); (async () => { const disd = await toggleAlbumDislike('${item.id}', '${itemSource}', ${jsArg(item.name)}, ${jsArg((item.picUrl || ''))}, ${jsArg((item.artistName || ''))}); const btn = document.getElementById('album-dislike-${item.id}'); if(btn){ btn.className = 'absolute top-2 right-10 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 ' + (disd ? 'bg-gray-800 text-white opacity-100' : 'bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100 hover:bg-gray-800'); btn.title = disd ? '取消不喜欢' : '不喜欢'; } const fBtn = document.getElementById('album-fav-${item.id}'); if(fBtn && disd){ fBtn.className = 'absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center transition-all shadow-md z-10 bg-black/40 backdrop-blur-md text-white opacity-0 group-hover:opacity-100'; fBtn.title = '收藏专辑'; } })()">
                     <i class="fas fa-ban text-xs"></i>
                 </button>
             </div>
@@ -3624,7 +3632,7 @@ function renderArtistMiniBar(info, activeTab, order) {
                 <!-- Mini Favorite -->
                 <button id="artist-mini-fav-btn"
                         onclick="(async () => {
-                            const f = await toggleArtistFavorite('${info.id}', '${info.source}', '${info.name.replace(/'/g, "\\'")}', '${(info.avatar || '').replace(/'/g, "\\'")}');
+                            const f = await toggleArtistFavorite('${info.id}', '${info.source}', ${jsArg(info.name)}, ${jsArg((info.avatar || ''))});
                             updateArtistFavButtons(f);
                         })()"
                         class="w-7 h-7 md:w-8 md:h-8 rounded-lg border flex items-center justify-center transition-all shadow-sm active:scale-95 ${favd ? 'border-rose-500 bg-rose-500 text-white shadow-rose-500/20' : 't-border-main t-bg-main hover:t-bg-track text-rose-500'}"
@@ -3635,7 +3643,7 @@ function renderArtistMiniBar(info, activeTab, order) {
                 <!-- Mini Dislike -->
                 <button id="artist-mini-dislike-btn"
                         onclick="(async () => {
-                            const d = await toggleArtistDislike('${info.id}', '${info.source}', '${info.name.replace(/'/g, "\\'")}', '${(info.avatar || '').replace(/'/g, "\\'")}');
+                            const d = await toggleArtistDislike('${info.id}', '${info.source}', ${jsArg(info.name)}, ${jsArg((info.avatar || ''))});
                             updateArtistDislikeButtons(d);
                         })()"
                         class="w-7 h-7 md:w-8 md:h-8 rounded-lg border t-border-main flex items-center justify-center transition-all shadow-sm active:scale-95 ${disd ? 'bg-gray-800 text-white' : 't-bg-main hover:t-bg-track t-text-muted hover:t-text-main'}"
@@ -3689,7 +3697,7 @@ function renderArtistHeader(info, activeTab, order) {
             <!-- Favorite Button (Artist) -->
             <button id="artist-header-fav-btn"
                 onclick="(async () => { 
-                    const favd = await toggleArtistFavorite('${info.id}', '${info.source}', '${info.name.replace(/'/g, "\\'")}', '${(info.avatar || '').replace(/'/g, "\\'")}'); 
+                    const favd = await toggleArtistFavorite('${info.id}', '${info.source}', ${jsArg(info.name)}, ${jsArg((info.avatar || ''))}); 
                     updateArtistFavButtons(favd);
                 })()"
                 class="absolute top-2 right-12 md:top-4 md:right-16 w-8 h-8 md:w-10 md:h-10 flex items-center justify-center rounded-full ${isArtistFavorited(info.id, info.source) ? 'bg-rose-500 text-white shadow-md shadow-rose-500/20' : 'bg-black/10 hover:bg-black/20 dark:bg-white/10 dark:hover:bg-white/20 t-text-main'} transition-all z-30 shadow-sm active:scale-90"
@@ -3700,7 +3708,7 @@ function renderArtistHeader(info, activeTab, order) {
             <!-- Dislike Button (Artist) -->
             <button id="artist-header-dislike-btn"
                 onclick="(async () => { 
-                    const disd = await toggleArtistDislike('${info.id}', '${info.source}', '${info.name.replace(/'/g, "\\'")}', '${(info.avatar || '').replace(/'/g, "\\'")}'); 
+                    const disd = await toggleArtistDislike('${info.id}', '${info.source}', ${jsArg(info.name)}, ${jsArg((info.avatar || ''))}); 
                     updateArtistDislikeButtons(disd);
                 })()"
                 class="absolute top-2 right-22 md:top-4 md:right-28 w-8 h-8 md:w-10 md:h-10 flex items-center justify-center rounded-full ${isArtistDisliked(info.id, info.source) ? 'bg-gray-800 text-white' : 'bg-black/10 hover:bg-black/20 dark:bg-white/10 dark:hover:bg-white/20 t-text-main'} transition-all z-30 shadow-sm active:scale-90"
@@ -15009,7 +15017,7 @@ async function renderCustomSources() {
             const isBatchContainer = window._sourceBatchMode === containerId;
             div.innerHTML = `
             ${isBatchContainer ? `
-            <div class="flex items-center self-stretch pr-2 md:pr-4 -ml-1 md:-ml-2 touch-none" onclick="toggleSourceBatchSelect('${source.id}', '${containerId}')">
+            <div class="flex items-center self-stretch pr-2 md:pr-4 -ml-1 md:-ml-2 touch-none" onclick="toggleSourceBatchSelect(${jsArg(source.id)}, ${jsArg(containerId)})">
                 <div class="w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all cursor-pointer
                     ${window._sourceBatchSelected?.has(source.id)
                         ? 'bg-blue-500 border-blue-500 text-white'
@@ -15042,7 +15050,7 @@ async function renderCustomSources() {
                 </div>
                 
                 <div class="flex flex-col items-end gap-1.5 md:gap-2 shrink-0">
-                    <button onclick="${isBatchContainer ? '' : `toggleSource('${source.id}', ${source.enabled})`}" 
+                    <button onclick="${isBatchContainer ? '' : `toggleSource(${jsArg(source.id)}, ${source.enabled})`}" 
                             class="px-2 md:px-3 py-1 rounded-lg text-[11px] md:text-xs font-medium transition-colors whitespace-nowrap w-16 md:w-20 flex justify-center items-center ${source.enabled
                     ? (source.status === 'failed'
                         ? (isBatchContainer ? 'bg-red-100/50 text-red-400 dark:bg-red-500/10 dark:text-red-600 opacity-50 cursor-not-allowed' : 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-500/30')
@@ -15053,7 +15061,7 @@ async function renderCustomSources() {
                     
                     <div class="flex items-center gap-1">
                         ${source.enabled && source.status === 'failed' && canManageSource ? `
-                        <button ${isBatchContainer ? 'disabled' : `onclick="reloadSource('${source.id}')"`}
+                        <button ${isBatchContainer ? 'disabled' : `onclick="reloadSource(${jsArg(source.id)})"`}
                                 class="p-1 md:p-1.5 ${isBatchContainer ? 'text-gray-300 dark:text-neutral-700 cursor-not-allowed' : 'text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/40'} rounded-lg transition-colors"
                                 title="${isBatchContainer ? '' : '尝试重新加载'}">
                             <i class="fas fa-sync-alt text-xs md:text-sm"></i>
@@ -15066,7 +15074,7 @@ async function renderCustomSources() {
                         </button>
                         
                         ${canManageSource ? `
-                        <button ${isBatchContainer ? 'disabled' : `onclick="deleteSource('${source.id}')"`}
+                        <button ${isBatchContainer ? 'disabled' : `onclick="deleteSource(${jsArg(source.id)})"`}
                                 class="p-1 md:p-1.5 ${isBatchContainer ? 'text-gray-300 dark:text-neutral-700 cursor-not-allowed' : 't-text-muted hover:text-red-500 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/40'} rounded-lg transition-colors"
                                 title="${isBatchContainer ? '' : '删除'}">
                             <i class="fas fa-trash-alt text-xs md:text-sm"></i>
@@ -18326,11 +18334,11 @@ function renderTokenList(tokens) {
                     </div>
                     
                     <div class="flex items-center gap-1">
-                        <button onclick="openTokenLogsModal('${masked}', '${t.name}')" 
+                        <button onclick="openTokenLogsModal(${jsArg(masked)}, ${jsArg(t.name)})" 
                             class="p-2 md:p-2.5 rounded-xl t-bg-track hover:t-bg-primary hover:text-white transition-all group/btn" title="查看日志">
                             <i class="fas fa-list-ul text-[13px] md:text-[14px]"></i>
                         </button>
-                        <button onclick="openEditTokenModal('${masked}', '${t.name}', ${t.expiresAt})" 
+                        <button onclick="openEditTokenModal(${jsArg(masked)}, ${jsArg(t.name)}, ${t.expiresAt})" 
                             class="p-2 md:p-2.5 rounded-xl t-bg-track hover:t-bg-primary hover:text-white transition-all group/btn" title="编辑信息">
                             <i class="fas fa-pencil-alt text-[13px] md:text-[14px]"></i>
                         </button>
