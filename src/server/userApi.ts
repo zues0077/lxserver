@@ -123,6 +123,24 @@ function decontextify(obj: any): any {
     }
 }
 
+// 出站响应「decontextify + 回调」串行化队列。
+// 根治主线程卡顿（手册 P-1046）：一批自定义源响应同时回来时，若每个回调都同步做 vm2 边界深拷贝，
+// 会叠成数秒阻塞。这里把这段工作收进队列，逐批执行、批间让出事件循环，
+// 最长连续阻塞被切成约等于「单次 decontextify 耗时」的小段，事件循环不再被长时间卡死。
+// 语义保持不变：回调仍会执行，槽位仍等回调结束才归还。
+let dqTail: Promise<void> = Promise.resolve()
+function dqEnqueue(task: () => void): void {
+    dqTail = dqTail
+        .then(async () => {
+            // 让出事件循环，确保本批 decontextify 不与其它响应回调挤在同一个同步长块里
+            await new Promise<void>(r => setImmediate(r))
+            task()
+        })
+        .catch(() => {
+            /* 单任务异常不影响后续入队任务 */
+        })
+}
+
 // 用户API信息接口
 interface UserApiInfo {
     id: string
@@ -486,10 +504,16 @@ async function createLxRequest(
                     // 响应回来的时刻是卡顿归因的关键锚点，必须抢在任何同步处理之前记下
                     if (tracked) noteCallback(owner, id, name)
                     if (abortHolder.fn) pendingAborts?.delete(abortHolder.fn)
-                    try {
-                        if (err) {
-                            callback.call(null, decontextify(err), null, null)
-                        } else {
+                    // 把「decontextify + 回调」收进串行化队列（根治主线程卡顿，见手册 P-1046）：
+                    // 一批响应同时回来时，逐个同步深拷贝会叠成数秒阻塞；入队后本回调立即返回，
+                    // 队列逐批处理、批间让出事件循环，最长连续阻塞被切成约等于单次 decontextify 的小段。
+                    dqEnqueue(() => {
+                        if (isDisposed?.()) { releaseSlotOnce(); return }
+                        try {
+                            if (err) {
+                                callback.call(null, decontextify(err), null, null)
+                                return
+                            }
                             let parsedBody = body
                             if (typeof body === 'string') {
                                 try {
@@ -532,14 +556,14 @@ async function createLxRequest(
                             }
 
                             callback.call(null, null, safeResp, safeResp.body)
+                        } catch (error: any) {
+                            callback.call(null, decontextify(error), null, null)
+                        } finally {
+                            // 槽位在回调彻底结束后才归还：回调体内的 decontextify/JSON.parse
+                            // 才是真正的同步开销，提前还槽会让下一路请求挤进同一个阻塞段
+                            releaseSlotOnce()
                         }
-                    } catch (error: any) {
-                        callback.call(null, decontextify(error), null, null)
-                    } finally {
-                        // 槽位在回调彻底结束后才归还：回调体内的 decontextify/JSON.parse
-                        // 才是真正的同步开销，提前还槽会让下一路请求挤进同一个阻塞段
-                        releaseSlotOnce()
-                    }
+                    })
                 }
 
             // 自己跟随跳转：needle 的自动跳转（follow_max）是内部直接请求新地址，目标不经校验——
