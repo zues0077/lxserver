@@ -74,14 +74,22 @@ test('版本线：只有目标版本更高时才提示，且 1.5.50 不被 1.5.5
   assert.strictEqual(shouldPromptVersion('v1.5.50', 'v2.1.5'), true, '上游号更高时算法上仍会提示（所以必须切断在线源）')
 })
 
-test('检查更新只认本地源：checkUpdates 有本地源就直接返回，不回落在线', () => {
+test('更新检查只在手动触发时执行，只读本机版本线，不弹窗不连上游', () => {
   const src = read('public/js/notification-engine.js')
   const body = src.slice(src.indexOf('async function checkUpdates'))
-  const head = body.slice(0, 1200)
-  assert.match(head, /loadForkLocalPayloads/, 'checkUpdates 应改用本地源加载')
-  assert.match(head, /if \(local\.available\)[\s\S]{0,200}return/, '本地源可用时必须直接返回，禁止走 PostHog')
+  const head = body.slice(0, 900)
+  assert.match(head, /if \(!isManual\) return/, '自动调用（isManual=false）必须直接返回')
   assert.match(src, /notice\/latest\.json/, '应读取本仓库的版本线文件')
-  assert.match(src, /zues0077\/lxserver/, '更新链接应指向本仓库')
+  assert.match(src, /update-check-status/, '检查结果应内联显示在按钮下方')
+  assert.doesNotMatch(head, /renderModal/, '更新检查不得再弹窗')
+  assert.doesNotMatch(head, /posthog/, '更新检查不得连 PostHog / 上游版本线')
+
+  // 页面加载时不能再触发更新检查
+  const initBody = src.slice(src.indexOf('function init()'), src.indexOf('async function showLocalAnnouncements'))
+  assert.doesNotMatch(initBody, /checkUpdates\(/, 'init() 不应调用 checkUpdates')
+
+  // 版本类通知永远不自动弹（只出公告）
+  assert.match(src, /if \(item\.type === 'version'\) continue/, '自动公告必须跳过版本类条目')
 })
 
 test('通知文件里不再有会误报的 active 版本条目', () => {

@@ -105,9 +105,13 @@ const mrcTools = {
     return this.getText(url)
   },
   async getMusicInfo(songInfo) {
-    return songInfo.mrcUrl == null
-      ? getMusicInfo(songInfo.copyrightId)
-      : songInfo
+    // [修复] 原来判的是 `songInfo.mrcUrl == null`，但前端把 URL 参数原样带过来时
+    // 缺省会传空字符串（'' == null 为 false），于是永远不查接口、直接拿空 URL 去取词，
+    // 结果所有走「歌单/专辑/榜单」进来的咪咕歌都报「获取歌词失败」（实测 0/10）。
+    // 真正的判据是「两个歌词地址都没有」。
+    if (songInfo.mrcUrl || songInfo.lrcUrl) return songInfo
+    if (!songInfo.copyrightId) return songInfo
+    return getMusicInfo(songInfo.copyrightId).then(info => info || songInfo)
   },
   getLyric(songInfo) {
     return {

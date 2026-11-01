@@ -38,6 +38,7 @@ import { getActiveHostActivities } from './sourceActivity'
 import { setUserAuthVerifier } from './userAuth'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
+import { getFallbackLyric, hasLyric } from './lyricFallback'
 import { withCacheBrowseLocation } from './cacheBrowseLocation'
 import { checkPersistentVolumes } from './volumeCheck'
 import { ensureWritableDir } from '@/utils/fsSafePath'
@@ -6795,36 +6796,61 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
 
+        // Construct complete songInfo object for SDK compatibility
+        // KuGou (kg) needs: name, hash, interval
+        // MiGu (mg) needs: copyrightId, lrcUrl, mrcUrl, trcUrl (优先，避免调用getMusicInfo API)
+        // 放在 try 外面：catch 里的兜底与「平台报错后重试」也要用它。
+        const songInfo = {
+          songmid,
+          name: urlObj.searchParams.get('name') || '',
+          singer: urlObj.searchParams.get('singer') || '',
+          hash: urlObj.searchParams.get('hash') || '',
+          interval: urlObj.searchParams.get('interval') || '',
+          copyrightId: urlObj.searchParams.get('copyrightId') || '',
+          albumId: urlObj.searchParams.get('albumId') || '',
+          lrcUrl: urlObj.searchParams.get('lrcUrl') || '',
+          mrcUrl: urlObj.searchParams.get('mrcUrl') || '',
+          trcUrl: urlObj.searchParams.get('trcUrl') || ''
+        }
+
         try {
-          if (!musicSdk[source]) {
-            // [Fix] 本地音乐（local）、B站兜底（bili）、汽水（soda）等来源没有内置在线歌词接口。
-            // 本地 .lrc 已在上面查过，未命中就返回空歌词让前端显示「暂无歌词」——
-            // 这是设计如此，不是故障，不该按 ERROR 打印（旧版会刷 "Source not supported"）。
+          // 先把目标信息攒成兜底链路认识的形状（平台接口失败/给空时要用）
+          const lyricTarget = {
+            source,
+            songmid,
+            name: songInfo.name,
+            singer: songInfo.singer,
+            interval: songInfo.interval,
+            hash: songInfo.hash,
+            albumId: songInfo.albumId,
+            copyrightId: songInfo.copyrightId,
+            lrcUrl: songInfo.lrcUrl,
+            mrcUrl: songInfo.mrcUrl,
+            trcUrl: songInfo.trcUrl,
+          }
+          let lyricInfo: any = null
+          // 本地音乐（local）、B站兜底（bili）、汽水（soda）等来源没有内置在线歌词接口，
+          // 直接交给兜底链路（汽水在兜底里读曲目详情自带的歌词）。
+          if (musicSdk[source] && typeof musicSdk[source].getLyric === 'function') {
+            const requestObj = musicSdk[source].getLyric(songInfo)
+            lyricInfo = await requestObj.promise
+          }
+
+          if (!hasLyric(lyricInfo)) {
+            const fallback = await getFallbackLyric(lyricTarget)
+            if (fallback) {
+              lyricInfo = fallback
+              console.log(`[歌词服务] 平台无词，兜底命中 ${fallback._fallbackFrom}: ${source}_${songmid} ${songInfo.name}`)
+            }
+          }
+
+          if (!hasLyric(lyricInfo)) {
+            // 「没有歌词」不是故障：返回 200 + 空词，前端显示「暂无歌词」即可。
+            // 旧版这里对不支持的音源也返回空词，对失败返回 500，前端会弹错误提示。
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
             res.end(JSON.stringify({ lyric: '', tlyric: '', rlyric: '', klyric: '', lxlyric: '', _noOnlineLyric: true }))
             return
           }
-
-          // console.log('[歌词服务] 正在从音源获取歌词:', source, songmid)
-
-          // Construct complete songInfo object for SDK compatibility
-          // KuGou (kg) needs: name, hash, interval
-          // MiGu (mg) needs: copyrightId, lrcUrl, mrcUrl, trcUrl (优先，避免调用getMusicInfo API)
-          const songInfo = {
-            songmid,
-            name: urlObj.searchParams.get('name') || '',
-            singer: urlObj.searchParams.get('singer') || '',
-            hash: urlObj.searchParams.get('hash') || '',
-            interval: urlObj.searchParams.get('interval') || '',
-            copyrightId: urlObj.searchParams.get('copyrightId') || '',
-            albumId: urlObj.searchParams.get('albumId') || '',
-            lrcUrl: urlObj.searchParams.get('lrcUrl') || '',
-            mrcUrl: urlObj.searchParams.get('mrcUrl') || '',
-            trcUrl: urlObj.searchParams.get('trcUrl') || ''
-          }
-
-          const requestObj = musicSdk[source].getLyric(songInfo)
-          const lyricInfo = await requestObj.promise
 
           res.writeHead(200, {
             'Content-Type': 'application/json',
@@ -6843,9 +6869,32 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             return
           }
 
-          // Avoid circular structure error - only send message
-          res.writeHead(500, { 'Content-Type': 'text/plain' })
-          res.end(err.message || 'Failed to fetch lyric')
+          // 跨平台兜底再试一次（抛错多半是单个平台抽风，别人家往往有词）
+          try {
+            const fb = await getFallbackLyric({
+              source,
+              songmid,
+              name: songInfo.name,
+              singer: songInfo.singer,
+              interval: songInfo.interval,
+              hash: songInfo.hash,
+              albumId: songInfo.albumId,
+              copyrightId: songInfo.copyrightId,
+              lrcUrl: songInfo.lrcUrl,
+              mrcUrl: songInfo.mrcUrl,
+              trcUrl: songInfo.trcUrl,
+            })
+            if (fb && fb.lyric) {
+              console.log(`[歌词服务] 平台报错后兜底命中 ${fb._fallbackFrom}: ${source}_${songmid}`)
+              res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' })
+              res.end(JSON.stringify(fb))
+              return
+            }
+          } catch { /* 兜底也失败，走下面返回空词 */ }
+
+          // 依然没有：同样按「暂无歌词」返回，不再把 500 抛给前端弹错误
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+          res.end(JSON.stringify({ lyric: '', tlyric: '', rlyric: '', klyric: '', lxlyric: '', _noOnlineLyric: true }))
         }
         return
       }

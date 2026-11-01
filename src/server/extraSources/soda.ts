@@ -28,6 +28,7 @@ import * as signer from './signer'
 import { registerSodaKey, getSodaKey, resolveAudioKey, isHexKey, sodaTrackIdOf } from '../utils/sodaDecrypt'
 import { isEncryptedRemoteStream } from '../utils/streamEncryption'
 import { extractSodaKey } from './sodaKey'
+import { parseSodaQrc } from '@/utils/lyricMatch'
 
 const SEARCH_UA = 'com.luna.music/100198030 (Linux; U; Android 15; zh_CN_#Hans; ABR-AL80; Build/V417IR;tt-ok/3.12.13.19)'
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36'
@@ -1541,5 +1542,54 @@ export async function getAlbumSongs(albumId: string): Promise<any> {
     img: imageOf(info.url_cover),
     picUrl: imageOf(info.url_cover),
     source_id: String(info.id),
+  }
+}
+
+/* ============================ 歌词 ============================ */
+
+/** 汽水逐字歌词解析见 @/utils/lyricMatch（纯函数，可单测） */
+export { parseSodaQrc } from '@/utils/lyricMatch'
+
+/**
+ * 取汽水曲目的在线歌词。h5 端点拿不到就退 SEO 端点（与取流同一条兜底思路）。
+ *
+ * 注意：这里刻意不走 `fetchH5Track` —— 那个函数会顺带补 `track_player`
+ * （需要额外请求 + 登记密钥），只为歌词没必要。
+ */
+export async function getTrackLyric(trackId: string, cookie = ''): Promise<{ lyric: string; lxlyric: string } | null> {
+  const id = sodaTrackIdOf({ songmid: String(trackId || '') }) || String(trackId || '').trim()
+  if (!id) return null
+  const read = (node: any) => {
+    const content = String(node?.lyric?.content || '')
+    return content ? parseSodaQrc(content) : null
+  }
+  try {
+    const params = new URLSearchParams({
+      track_id: id,
+      media_type: 'track',
+      aid: '386088',
+      device_platform: 'web',
+      channel: 'pc_web',
+    })
+    const parsed = parseJsonBody(await request<any>(`${H5_TRACK_API}?${params.toString()}`, {
+      headers: { 'User-Agent': WEB_UA, ...(cookie ? { Cookie: cookie } : {}) },
+      timeout: 12000,
+    }))
+    const hit = read(parsed)
+    if (hit && hit.lyric) return hit
+  } catch { /* 落到 SEO 端点 */ }
+  try {
+    const url = `${SEO_TRACK_API}?${new URLSearchParams({ track_id: id, device_platform: 'web' }).toString()}`
+    const parsed = parseJsonBody(await request<any>(url, {
+      headers: {
+        'User-Agent': SEO_UA,
+        'X-Requested-With': 'XMLHttpRequest',
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      timeout: 12000,
+    }))
+    return read(parsed)
+  } catch {
+    return null
   }
 }
