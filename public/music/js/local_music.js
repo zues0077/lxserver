@@ -726,6 +726,44 @@ window.LocalMusicManager = {
         });
     },
 
+    /**
+     * 按实际数据动态渲染「来源」筛选标签。
+     *
+     * 旧实现（index.html 里硬编码的 5 个按钮）只覆盖 wy/tx/kg/kw/mg，
+     * 导致酷狗概念版(kglite)/B站(bili)/汽水(soda) 与「未知/本地」源在高级筛选里选不到。
+     * 这里改用 originalData 里真实出现的 `downloadSource || source` 值生成标签，
+     * 与 applyFilters 的匹配键（displayedSource = item.downloadSource || item.source）保持一致。
+     */
+    renderSourceTags() {
+        const container = document.getElementById('lm-source-tags');
+        if (!container) return;
+        const sources = new Set();
+        for (const item of (this.originalData || [])) {
+            const s = item.downloadSource || item.source;
+            if (s) sources.add(s);
+        }
+        const LABEL = {
+            wy: '网易', tx: '腾讯', kg: '酷狗', kw: '酷我', mg: '咪咕',
+            kglite: '酷狗概念版', bili: 'B站', soda: '汽水', qsvip: '汽水',
+            local: '本地', unknown: '未知',
+        };
+        const preferred = ['wy', 'tx', 'kg', 'kw', 'mg', 'kglite', 'bili', 'soda', 'qsvip'];
+        const known = preferred.filter(s => sources.has(s));
+        const rest = [...sources].filter(s => !preferred.includes(s)).sort();
+        const list = [...known, ...rest];
+        container.innerHTML = '';
+        for (const val of list) {
+            const label = LABEL[val] || (val === 'unknown' || val === 'local' || !val ? '未知' : val);
+            const btn = document.createElement('button');
+            btn.className = 'lm-filter-tag shrink-0 !text-[9px] !px-1.5 !py-0.5 md:!px-2 md:!py-1';
+            btn.dataset.filterValue = val;
+            btn.textContent = label;
+            btn.onclick = () => window.LocalMusicManager.toggleFilterTag('source', val);
+            container.appendChild(btn);
+        }
+        this._syncTagUI('lm-source-tags', this.filterSource);
+    },
+
     // 切换某个筛选标签的选中状态
     toggleFilterTag(filterKey, value) {
         const setMap = {
@@ -1087,6 +1125,7 @@ window.LocalMusicManager = {
                 this.originalData = result.data || [];
                 // Sort by mtime initially descending
                 this.originalData.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+                this.renderSourceTags();
                 this.applyFilters();
                 this.pruneRemasterSelection();
                 if (document.getElementById('lm-remaster-modal')?.classList.contains('flex')) {
