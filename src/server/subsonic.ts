@@ -5371,7 +5371,11 @@ class SubsonicHandler {
         if (existing) return existing
         const promise = this._resolveStreamUrl(source, songmid, id, musicInfo, requestedQuality, maxBitrate, username)
         this.resolveStreamInFlight.set(inflightKey, promise)
-        promise.finally(() => this.resolveStreamInFlight.delete(inflightKey))
+        // [修复] 这里不能用 promise.finally()：它返回的派生 Promise 会继承拒绝状态，
+        // 而返回值被丢弃，导致每次取链失败都额外抛一条「未捕获异常: Could not resolve music URL」。
+        // 用 then 的成功/失败双分支做清理，派生出的 Promise 恒为 resolve，不污染全局 unhandledRejection。
+        const cleanupInflight = () => { this.resolveStreamInFlight.delete(inflightKey) }
+        promise.then(cleanupInflight, cleanupInflight)
         return promise
     }
 

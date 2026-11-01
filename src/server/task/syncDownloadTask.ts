@@ -1298,9 +1298,14 @@ export const triggerUserSync = async (username: string, playlistId?: string): Pr
   const controller = new AbortController()
   activeAbortControllers.set(username, controller)
   // 异步执行，不阻塞请求
-  void syncUserPlaylists(username, controller.signal, playlistId).finally(() => {
-    activeAbortControllers.delete(username)
-  })
+  // [修复] 补 catch：原先 void x.finally() 会丢掉拒绝，同步失败时抛全局未捕获异常。
+  void syncUserPlaylists(username, controller.signal, playlistId)
+    .catch((e: any) => {
+      console.log(`[同步下载] 歌单同步任务失败（忽略）：${e?.message || e}`)
+    })
+    .finally(() => {
+      activeAbortControllers.delete(username)
+    })
   return { queued: true, message: playlistId ? '歌单同步任务已启动' : '同步任务已启动' }
 }
 
