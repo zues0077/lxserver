@@ -3,6 +3,14 @@
  * 处理在本地音乐Tab下的列表加载、刷选、删除功能
  */
 
+// HTML 转义：优先复用 app.js 的全局 escapeHtmlText，缺失时本地兜底（防 XSS）
+function lmEscapeHtml(value) {
+    if (typeof window.escapeHtmlText === 'function') return window.escapeHtmlText(value);
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+    })[ch]);
+}
+
 window.LocalMusicManager = {
     originalData: [],
     displayData: [],
@@ -2387,6 +2395,154 @@ window.LocalMusicManager = {
                 btn.innerHTML = '<i class="fas fa-fingerprint text-xl"></i>';
                 btn.classList.remove('opacity-50', 'cursor-not-allowed');
             }
+        }
+    },
+
+    // ===== 批量声学指纹识别 =====
+    batchIdentifyState: { running: false, stopped: false, offset: 0, total: 0, matched: 0, failed: 0 },
+
+    openBatchIdentifyModal() {
+        const modal = document.getElementById('modal-batch-identify');
+        if (!modal) return;
+        modal.classList.remove('hidden');
+        const threadsEl = document.getElementById('batch-identify-threads');
+        if (threadsEl) {
+            const saved = localStorage.getItem('lx_local_identify_threads');
+            if (saved && ['1', '2', '3', '4'].includes(saved)) threadsEl.value = saved;
+        }
+        const results = document.getElementById('batch-identify-results');
+        if (results) {
+            results.innerHTML = `<div class="flex flex-col items-center justify-center h-full opacity-30">
+                <i class="fas fa-wave-square text-5xl mb-3"></i>
+                <p class="text-sm font-bold tracking-wider">点击「开始识别」扫描本地曲库</p>
+            </div>`;
+        }
+        this.setBatchIdentifyStatus('尚未开始');
+        const counter = document.getElementById('batch-identify-counter');
+        if (counter) counter.textContent = '0 / 0';
+        const bar = document.getElementById('batch-identify-progress-bar');
+        if (bar) bar.style.width = '0%';
+    },
+
+    closeBatchIdentifyModal() {
+        if (this.batchIdentifyState.running) this.batchIdentifyState.stopped = true;
+        const modal = document.getElementById('modal-batch-identify');
+        if (modal) modal.classList.add('hidden');
+    },
+
+    stopBatchIdentify() {
+        this.batchIdentifyState.stopped = true;
+        this.setBatchIdentifyStatus('正在停止…');
+    },
+
+    setBatchIdentifyStatus(text) {
+        const el = document.getElementById('batch-identify-status');
+        if (el) el.textContent = text;
+    },
+
+    updateBatchIdentifyProgress(done, total) {
+        const bar = document.getElementById('batch-identify-progress-bar');
+        const counter = document.getElementById('batch-identify-counter');
+        const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+        if (bar) bar.style.width = pct + '%';
+        if (counter) counter.textContent = `${done} / ${total}`;
+    },
+
+    renderBatchIdentifyRow(entry) {
+        const container = document.getElementById('batch-identify-results');
+        if (!container) return;
+        const placeholder = container.querySelector('.fa-wave-square');
+        if (placeholder) container.innerHTML = '';
+
+        let tone = 't-text-muted', icon = 'fa-minus', summary = '未匹配';
+        if (entry.error) {
+            tone = 'text-rose-500'; icon = 'fa-triangle-exclamation';
+            summary = '识别失败: ' + entry.error;
+        } else if (entry.matched && entry.results && entry.results.length) {
+            const best = entry.results[0];
+            const pct = Math.round((best.score || 0) * 100);
+            tone = pct >= 70 ? 'text-emerald-500' : 'text-amber-500';
+            icon = 'fa-circle-check';
+            summary = `${best.singer || '未知'} - ${best.name || '未知'} (${pct}%)`;
+        }
+
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2 px-3 py-2 t-bg-track rounded-xl text-[11px]';
+        row.innerHTML = `<i class="fas ${icon} ${tone} shrink-0"></i>
+            <span class="font-mono truncate max-w-[45%]" title="${lmEscapeHtml(entry.filename || '')}">${lmEscapeHtml(entry.filename || '')}</span>
+            <span class="ml-auto truncate ${tone}" title="${lmEscapeHtml(summary)}">${lmEscapeHtml(summary)}</span>`;
+        container.appendChild(row);
+        container.scrollTop = container.scrollHeight;
+    },
+
+    async startBatchIdentify() {
+        if (this.batchIdentifyState.running) return;
+
+        const folderEl = document.getElementById('batch-identify-folder');
+        const threadsEl = document.getElementById('batch-identify-threads');
+        const folder = folderEl ? folderEl.value : 'music';
+        const threads = threadsEl ? Number(threadsEl.value) || 2 : 2;
+
+        const startBtn = document.getElementById('btn-batch-identify-start');
+        const stopBtn = document.getElementById('btn-batch-identify-stop');
+        if (startBtn) { startBtn.disabled = true; startBtn.textContent = '识别中…'; }
+        if (stopBtn) stopBtn.classList.remove('hidden');
+
+        // 记住线程数偏好
+        try { localStorage.setItem('lx_local_identify_threads', String(threads)); } catch (e) { }
+
+        const state = this.batchIdentifyState = {
+            running: true, stopped: false, offset: 0, total: 0, matched: 0, failed: 0
+        };
+        this.setBatchIdentifyStatus('正在识别…');
+
+        const username = this.getCurrentUsername();
+        const authToken = (window.getUserAuthHeaders ? window.getUserAuthHeaders()['x-user-token'] : null) || localStorage.getItem('lx_user_token') || '';
+        const pageSize = 10;
+
+        try {
+            while (!state.stopped) {
+                const resp = await fetch('/api/music/identify/batch', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-user-name': username,
+                        'x-user-token': authToken
+                    },
+                    body: JSON.stringify({
+                        folder,
+                        custom: folder === 'custom',
+                        offset: state.offset,
+                        limit: pageSize,
+                        threads
+                    })
+                });
+                const data = await resp.json();
+                if (!data.success) throw new Error(data.message || '批量识别失败');
+
+                state.total = data.total;
+                (data.results || []).forEach(entry => {
+                    if (entry.error) state.failed++;
+                    else if (entry.matched) state.matched++;
+                    this.renderBatchIdentifyRow(entry);
+                });
+
+                state.offset = data.done;
+                this.updateBatchIdentifyProgress(state.offset, state.total);
+
+                if (state.offset >= state.total || !(data.results || []).length) break;
+            }
+
+            this.setBatchIdentifyStatus(state.stopped
+                ? `已停止（匹配 ${state.matched} / 失败 ${state.failed}）`
+                : `完成（匹配 ${state.matched} / 失败 ${state.failed}）`);
+        } catch (e) {
+            console.error('[BatchIdentify] failed:', e);
+            this.setBatchIdentifyStatus('出错: ' + e.message);
+        } finally {
+            state.running = false;
+            if (startBtn) { startBtn.disabled = false; startBtn.textContent = '开始识别'; }
+            if (stopBtn) stopBtn.classList.add('hidden');
         }
     },
 

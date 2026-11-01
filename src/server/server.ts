@@ -6,6 +6,7 @@ import url from 'node:url'
 import { WebSocketServer, WebSocket } from 'ws'
 import { registerLocalSyncEvent, callObj, sync } from './sync'
 import { authCode, authConnect } from './auth'
+import { resolveCollectionUser } from './collectionAccess'
 import { getAddress, sendStatus, decryptMsg, encryptMsg, getIP } from '@/utils/tools'
 import { accessLog, startupLog, syncLog, loginLog, tokenLog } from '@/utils/log4js'
 import {
@@ -1633,6 +1634,57 @@ const authConnection = (req: http.IncomingMessage, callback: (err: string | null
 }
 
 let wss: LX.SocketServer | null
+
+/**
+ * 在线指示（presence）专用通道
+ * 与 lx 同步 WS 完全隔离：走独立路径 /ws/presence，用一次性 ticket 鉴权，
+ * 避免与同步协议的握手/心跳互相干扰。
+ */
+let presenceWss: WebSocketServer | null = null
+/** ticket -> { user, exp }，一次性、60 秒有效 */
+const presenceTickets = new Map<string, { user: string, exp: number }>()
+/** 连接 -> 用户名 */
+const presenceClients = new Map<WebSocket, string>()
+
+const PRESENCE_TICKET_TTL = 60 * 1000
+
+const issuePresenceTicket = (user: string) => {
+  const now = Date.now()
+  // 顺手清理过期票据，避免 Map 无限增长
+  for (const [k, v] of presenceTickets) {
+    if (v.exp <= now) presenceTickets.delete(k)
+  }
+  const ticket = crypto.randomBytes(24).toString('hex')
+  presenceTickets.set(ticket, { user, exp: now + PRESENCE_TICKET_TTL })
+  return ticket
+}
+
+const consumePresenceTicket = (ticket: string) => {
+  const rec = presenceTickets.get(ticket)
+  if (!rec) return null
+  presenceTickets.delete(ticket) // 一次性
+  if (rec.exp <= Date.now()) return null
+  return rec.user
+}
+
+/** 在线用户统计（按用户名去重，附连接数） */
+const getPresenceSnapshot = () => {
+  const counts = new Map<string, number>()
+  for (const user of presenceClients.values()) {
+    counts.set(user, (counts.get(user) || 0) + 1)
+  }
+  return [...counts.entries()].map(([user, connections]) => ({ user, connections }))
+}
+
+const broadcastPresence = () => {
+  if (!presenceWss) return
+  const payload = JSON.stringify({ type: 'presence', data: getPresenceSnapshot() })
+  for (const client of presenceWss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      try { client.send(payload) } catch { /* 忽略单连接发送失败 */ }
+    }
+  }
+}
 
 function noop() { }
 function onSocketError(err: Error) {
@@ -3524,23 +3576,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         const reqUsername = (req.headers['x-user-name'] as string) || targetUserParam || ''
         const auth = req.headers['x-frontend-auth']
         const isAdmin = !!(auth && auth === global.lx.config['admin.password'])
-        let username: string | null = null
-
-        const canAccessOpen = global.lx.config['user.enablePublicFavorites'] && (
-          global.lx.config['user.enablePublicNonAdminAccess'] || isAdmin || !!verifyUserAuth(req)
+        const verified = verifyUserAuth(req)
+        const canAccessOpen = !!global.lx.config['user.enablePublicFavorites'] && (
+          global.lx.config['user.enablePublicNonAdminAccess'] || isAdmin || !!verified
         )
-        if (targetUserParam === '_open' || reqUsername === '_open' || (!reqUsername && !verifyUserAuth(req))) {
-          if (canAccessOpen) {
-            username = '_open'
-          }
-        }
-        if (!username) {
-          username = verifyUserAuth(req)
-        }
-        if (!username && reqUsername && reqUsername !== '_open') {
-          username = reqUsername
-        }
-
+        const requested = targetUserParam === '_open' ? '_open' : reqUsername
+        const username = resolveCollectionUser(requested, verified, isAdmin, canAccessOpen, false)
 
         if (!username) {
           res.writeHead(401, { 'Content-Type': 'application/json' })
@@ -3568,30 +3609,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         const reqUsername = (req.headers['x-user-name'] as string) || targetUserParam || ''
         const auth = req.headers['x-frontend-auth']
         const isAdmin = !!(auth && auth === global.lx.config['admin.password'])
-        let username: string | null = null
-
-        const canAccessOpen = global.lx.config['user.enablePublicFavorites'] && (
-          global.lx.config['user.enablePublicNonAdminAccess'] || isAdmin || !!verifyUserAuth(req)
+        const verified = verifyUserAuth(req)
+        const canAccessOpen = !!global.lx.config['user.enablePublicFavorites'] && (
+          global.lx.config['user.enablePublicNonAdminAccess'] || isAdmin || !!verified
         )
-        if (targetUserParam === '_open' || reqUsername === '_open' || (!reqUsername && !verifyUserAuth(req))) {
-          if (!canAccessOpen) {
-            res.writeHead(403, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: false, error: '权限不足：未开启公开访问。' }))
-            return
-          }
-          if (auth !== global.lx.config['admin.password']) {
-            res.writeHead(403, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: false, error: '权限不足：公共歌单修改受限，请先验证管理员身份。' }))
-            return
-          }
-          username = '_open'
-        }
-        if (!username) {
-          username = verifyUserAuth(req)
-        }
-        if (!username && reqUsername && reqUsername !== '_open') {
-          username = reqUsername
-        }
+        const requested = targetUserParam === '_open' ? '_open' : reqUsername
+        const username = resolveCollectionUser(requested, verified, isAdmin, canAccessOpen, true)
 
 
         if (!username) {
@@ -3627,18 +3650,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         const auth = req.headers['x-frontend-auth']
         const isAdmin = !!(auth && auth === global.lx.config['admin.password'])
 
-        const canAccessOpen = global.lx.config['user.enablePublicFavorites'] && (
-          global.lx.config['user.enablePublicNonAdminAccess'] || isAdmin || !!verifyUserAuth(req)
+        const verified = verifyUserAuth(req)
+        const canAccessOpen = !!global.lx.config['user.enablePublicFavorites'] && (
+          global.lx.config['user.enablePublicNonAdminAccess'] || isAdmin || !!verified
         )
-        if ((reqUsername === '_open' || userParam === '_open' || (!reqUsername && !verifyUserAuth(req))) && canAccessOpen) {
-          return '_open'
-        }
-
-        let username = verifyUserAuth(req)
-        if (!username && reqUsername && reqUsername !== '_open') {
-          username = reqUsername
-        }
-        return username || '_open'
+        const requested = userParam === '_open' ? '_open' : reqUsername
+        return resolveCollectionUser(requested, verified, isAdmin, canAccessOpen, req.method !== 'GET')
       }
 
       // GET /api/user/library/artists  — 读取收藏歌手列表（自动补全缺失头像 picUrl）
@@ -6530,7 +6547,121 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
-      // 12. Identify Local File (AcoustID)
+      // 12. 在线指示（presence）：换取 WS 一次性票据 + 读取在线快照
+      if (pathname === '/api/music/presence/ticket' && req.method === 'POST') {
+        const verified = verifyUserAuth(req)
+        if (!verified) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ success: true, ticket: issuePresenceTicket(verified), ttl: PRESENCE_TICKET_TTL }))
+        return
+      }
+
+      if (pathname === '/api/music/presence') {
+        const verified = verifyUserAuth(req)
+        const auth = req.headers['x-frontend-auth']
+        const isAdmin = !!(auth && auth === global.lx.config['admin.password'])
+        if (!verified && !isAdmin) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ success: true, users: getPresenceSnapshot() }))
+        return
+      }
+
+      // 13. Identify Local File (AcoustID)
+      if (pathname === '/api/music/identify/batch' && req.method === 'POST') {        const verified = verifyUserAuth(req)
+        if (!verified) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+
+        void readBody(req).then(async body => {
+          try {
+            const { folder, custom, offset, limit, threads: bodyThreads } = JSON.parse(body)
+            const { identifyLocalSong } = require('./utils/identify')
+
+            const dir = custom
+              ? customMusicManager.getCustomMusicDir(verified)
+              : fileCache.getCacheDir(verified, folder === 'music')
+            if (!dir || !fs.existsSync(dir)) {
+              res.writeHead(404, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, message: 'Directory not found' }))
+              return
+            }
+
+            const exts = new Set(['.mp3', '.flac', '.m4a', '.wav', '.ogg', '.wma', '.ape'])
+            // 递归收集音频文件（跳过隐藏目录，深度上限 4，防止软链环）
+            const allFiles: { name: string, full: string }[] = []
+            const walk = (d: string, depth: number) => {
+              if (depth > 4) return
+              let entries: fs.Dirent[]
+              try {
+                entries = fs.readdirSync(d, { withFileTypes: true })
+              } catch {
+                return
+              }
+              for (const ent of entries) {
+                if (ent.name.startsWith('.')) continue
+                const full = path.join(d, ent.name)
+                if (ent.isDirectory()) walk(full, depth + 1)
+                else if (exts.has(path.extname(ent.name).toLowerCase())) {
+                  allFiles.push({ name: path.relative(dir, full).split(path.sep).join('/'), full })
+                }
+              }
+            }
+            walk(dir, 0)
+            allFiles.sort((a, b) => a.name.localeCompare(b.name))
+
+            // 分页：单次最多 50 首，避免长耗时请求把连接挂死
+            const start = Math.max(0, Number(offset) || 0)
+            const take = Math.min(50, Math.max(1, Number(limit) || 20))
+            const batch = allFiles.slice(start, start + take)
+
+            // 并发线程数（1~4，优先用请求体，其次落库配置，默认 2），对应上游 #462 的「识别并发线程」配置
+            const threads = Math.min(4, Math.max(1, Number(bodyThreads) || Number(global.lx.config['localMusicIdentifyThreads']) || 2))
+
+            const results: any[] = new Array(batch.length)
+            let idx = 0
+            async function worker() {
+              while (idx < batch.length) {
+                const i = idx++
+                const f = batch[i]
+                try {
+                  const r = await identifyLocalSong(f.full)
+                  results[i] = { filename: f.name, matched: !!(r && (r as any).length), results: r }
+                } catch (e: any) {
+                  results[i] = { filename: f.name, error: e.message }
+                }
+              }
+            }
+            await Promise.all(Array.from({ length: Math.min(threads, batch.length) }, () => worker()))
+
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              success: true,
+              total: allFiles.length,
+              offset: start,
+              limit: take,
+              done: start + batch.length,
+              threads,
+              results,
+            }))
+          } catch (e: any) {
+            console.error('[歌曲识别] 批量识别发生异常:', e.message)
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, message: e.message || 'Batch identification failed' }))
+          }
+        })
+        return
+      }
+
       if (pathname === '/api/music/identify' && req.method === 'POST') {
         const verified = verifyUserAuth(req)
         if (!verified) {
@@ -9844,6 +9975,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'musicAccount.kglite.gapMaxSeconds': musicAccount.getKugouLiteAutoClaimConfig().gapMaxSeconds,
             'musicAccount.kglite.minRemainHours': global.lx.config['musicAccount.kglite.minRemainHours'] ?? 24,
             subsonicPortConflict: global.lx.subsonicPortConflict || null,
+            localMusicIdentifyThreads: global.lx.config['localMusicIdentifyThreads'] ?? 2,
             configFilePath: global.lx.configPath || process.env.CONFIG_PATH || path.join(global.lx.dataPath, 'config.js'),
           }
           res.writeHead(200, {
@@ -9879,6 +10011,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (newConfig['user.cacheSizeLimit'] !== undefined) global.lx.config['user.cacheSizeLimit'] = parseInt(newConfig['user.cacheSizeLimit']) || 2000
               if (newConfig['cache.maxAgeDays'] !== undefined) global.lx.config['cache.maxAgeDays'] = Math.max(0, parseInt(newConfig['cache.maxAgeDays']) || 0)
               if (newConfig['system.allowUnsafeVM'] !== undefined) global.lx.config['system.allowUnsafeVM'] = newConfig['system.allowUnsafeVM']
+              // 本地音乐识别并发线程数（1~4，默认 2），对应上游 #462
+              if (newConfig['localMusicIdentifyThreads'] !== undefined) global.lx.config['localMusicIdentifyThreads'] = Math.min(4, Math.max(1, parseInt(newConfig['localMusicIdentifyThreads']) || 2))
 
               // 音源平台可用性巡检
               if (newConfig['customSource.probe.enabled'] !== undefined) {
@@ -12058,6 +12192,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
     perMessageDeflate: false,
   }) as unknown as LX.SocketServer
 
+  // 在线指示通道：独立 WebSocketServer，不参与同步协议
+  presenceWss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: false,
+  })
+
   // WebDAV Sync Progress & Log Broadcast
   if (global.lx.webdavSync) {
     // 移除旧的监听器以防重复添加
@@ -12199,6 +12339,38 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
   })
 
   httpServer.on('upgrade', function upgrade(request, socket, head) {
+    // ── 在线指示通道（独立于 lx 同步协议）──
+    if ((request.url || '').startsWith('/ws/presence')) {
+      const ticket = new URL(request.url || '/', 'http://localhost').searchParams.get('ticket') || ''
+      const user = consumePresenceTicket(ticket)
+      if (!user) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
+        socket.destroy()
+        return
+      }
+      delete request.headers['sec-websocket-extensions']
+      presenceWss?.handleUpgrade(request, socket, head, ws => {
+        presenceClients.set(ws, user)
+        ws.on('close', () => {
+          presenceClients.delete(ws)
+          broadcastPresence()
+        })
+        ws.on('error', () => {
+          presenceClients.delete(ws)
+          try { ws.terminate() } catch { /* ignore */ }
+        })
+        // 客户端保活：收到任意消息回 pong 文本，忽略内容
+        ws.on('message', () => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'presence', data: getPresenceSnapshot() }))
+        })
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'presence', data: getPresenceSnapshot() }))
+        }
+        broadcastPresence()
+      })
+      return
+    }
+
     socket.addListener('error', onSocketError)
 
     // 调用全局定义的 authConnection (在文件顶部约113行已经定义过)

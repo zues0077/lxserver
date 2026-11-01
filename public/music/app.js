@@ -154,6 +154,7 @@ const DEFAULT_SETTINGS = {
     enableLyricGlow: true, // 歌词荧光效果 (默认开启)
     enablePersistentToken: false, // 启用持久化 Token 验证
     playerBackground: 'blur', // 播放页背景: 'blur', 'solid', 'dark'
+    playerBackgroundEffect: 'none', // 动态背景特效: 'none', 'snow', 'sakura', 'particles', 'bubbles'
     saveAccountSettingsToFile: true, // 同步账号设置到文件 (默认开启)
     autoUpdateNetworkList: false, // 自动更新网络歌单 (默认关闭)
     networkListAutoCheckInterval: '6h', // 网络歌单自动检测间隔
@@ -450,6 +451,12 @@ function escapeHtmlText(value) {
         '"': '&quot;',
         "'": '&#039;'
     })[ch]);
+}
+
+function jsArg(value) {
+    // 将任意值序列化为 JSON 字符串字面量，安全用于 onclick 等 HTML 属性上下文，
+    // 防止值内含引号/尖括号逃逸属性或注入脚本（对齐上游 #451 安全加固）
+    return JSON.stringify(String(value ?? ''));
 }
 
 function parseNetworkListAutoCheckInterval(value) {
@@ -812,7 +819,7 @@ async function refreshTaskScheduleStatus() {
                 lastRunTextEl.innerHTML = '<span class="text-emerald-500 animate-pulse font-medium"><i class="fas fa-spinner fa-spin mr-1"></i>正在执行后台检测...</span>';
             } else if (task.lastRunTime) {
                 const bjTime = formatToBeijingTime(task.lastRunTime);
-                lastRunTextEl.innerHTML = `上次执行: <span class="text-emerald-600 dark:text-emerald-400 font-semibold">${bjTime}</span>`;
+                lastRunTextEl.innerHTML = `上次执行: <span class="text-emerald-600 dark:text-emerald-400 font-semibold">${escapeHtmlText(bjTime)}</span>`;
             } else {
                 lastRunTextEl.innerHTML = '上次执行: <span class="text-gray-400">尚未执行</span>';
             }
@@ -823,7 +830,7 @@ async function refreshTaskScheduleStatus() {
                 nextRunTextEl.innerHTML = '下次执行: <span class="text-gray-400">自动检测已关闭</span>';
             } else if (task.nextRunTime) {
                 const bjTime = formatToBeijingTime(task.nextRunTime);
-                nextRunTextEl.innerHTML = `下次执行: <span class="text-emerald-600 dark:text-emerald-400 font-semibold">${bjTime}</span>`;
+                nextRunTextEl.innerHTML = `下次执行: <span class="text-emerald-600 dark:text-emerald-400 font-semibold">${escapeHtmlText(bjTime)}</span>`;
             } else {
                 nextRunTextEl.innerHTML = '下次执行: <span class="text-gray-400">等待调度</span>';
             }
@@ -1275,6 +1282,11 @@ function updateUserUI() {
     if (typeof checkAndUpdateCustomDirUI === 'function') {
         checkAndUpdateCustomDirUI();
     }
+
+    // 通知在线指示模块（presence.js）重新建立连接
+    try {
+        window.dispatchEvent(new CustomEvent('lx-auth-changed'));
+    } catch (e) { /* ignore */ }
 }
 window.updateUserUI = updateUserUI;
 
@@ -1885,6 +1897,7 @@ function switchTab(tabId) {
     if (tabId === 'settings') {
         if (typeof syncSettingsUI === 'function') syncSettingsUI();
         else if (typeof updateAdminUI === 'function') updateAdminUI();
+        if (typeof loadSubsonicSettings === 'function') loadSubsonicSettings();
     }
 
     // Reset Sidebar Highlight
@@ -2678,7 +2691,7 @@ async function doSearch(page = 1, append = false) {
                 showError(`搜索追加出错: ${e.message}`);
             }
         } else {
-            resultsContainer.innerHTML = `<div class="text-center text-red-500 p-8">搜索出错: ${e.message}</div>`;
+            resultsContainer.innerHTML = `<div class="text-center text-red-500 p-8">搜索出错: ${escapeHtmlText(e.message)}</div>`;
         }
     }
 }
@@ -7844,7 +7857,7 @@ function setPlayerStatus(status, isPlaying = null, isLoading = false) {
 
     // 如果指定了加载状态，自动应用跳动动画
     if (isLoading && typeof status === 'string') {
-        statusEl.innerHTML = `<span class="animate-loading-dots">${status}<span>.</span><span>.</span><span>.</span></span>`;
+        statusEl.innerHTML = `<span class="animate-loading-dots">${escapeHtmlText(status)}<span>.</span><span>.</span><span>.</span></span>`;
         return;
     }
 
@@ -9395,6 +9408,10 @@ async function updateSetting(key, value) {
         applyPlayerBackground(value);
     }
 
+    if (key === 'playerBackgroundEffect') {
+        if (window.DynamicBackground) window.DynamicBackground.setEffect(value);
+    }
+
     if (key === 'enablePublicSources') {
         if (typeof updateSourceScopeUI === 'function') updateSourceScopeUI();
         if (typeof renderCustomSources === 'function') renderCustomSources();
@@ -9507,6 +9524,11 @@ const SETTINGS_UI_MAP = {
         id: 'setting-player-background',
         type: 'value',
         action: (v) => applyPlayerBackground(v)
+    },
+    playerBackgroundEffect: {
+        id: 'setting-player-bg-effect',
+        type: 'value',
+        action: (v) => { if (window.DynamicBackground) window.DynamicBackground.setEffect(v); }
     },
     lyricFontSize: {
         id: 'lyric-font-size-slider',
@@ -9957,7 +9979,7 @@ async function refreshCacheList() {
             throw new Error(data.message || '加载列表失败');
         }
     } catch (e) {
-        container.innerHTML = `<div class="p-10 text-center t-text-muted text-sm">${e.message}</div>`;
+        container.innerHTML = `<div class="p-10 text-center t-text-muted text-sm">${escapeHtmlText(e.message)}</div>`;
     }
 }
 
@@ -11205,7 +11227,7 @@ function renderLyric(lines, emptyMsg = '暂无歌词') {
     container.innerHTML = '';
 
     if (lines.length === 0) {
-        container.innerHTML = `<p class="t-text-muted text-lg font-medium">${emptyMsg}</p>`;
+        container.innerHTML = `<p class="t-text-muted text-lg font-medium">${escapeHtmlText(emptyMsg)}</p>`;
         return;
     }
 
@@ -12515,7 +12537,7 @@ function updateSyncStatus(html, showLogout = true) {
         // Add "Sync from Remote" button if in LOCAL mode
         if (localStorage.getItem('lx_sync_mode') === 'local') {
             const username = localStorage.getItem('lx_sync_user') || '该用户';
-            fullHtml += ` <button onclick="showRemoteOverwriteModal('${username}')" class="ml-2 text-emerald-500 hover:text-emerald-600 text-[10px] md:text-xs font-bold px-2 py-0.5 rounded border border-emerald-200 hover:bg-emerald-300/10 transition-all inline-flex items-center gap-1" title="连接远程服务器"><i class="fas fa-satellite-dish"></i><span class="hidden sm:inline">连接远程服务器</span></button>`;
+            fullHtml += ` <button onclick="showRemoteOverwriteModal(${jsArg(username)})" class="ml-2 text-emerald-500 hover:text-emerald-600 text-[10px] md:text-xs font-bold px-2 py-0.5 rounded border border-emerald-200 hover:bg-emerald-300/10 transition-all inline-flex items-center gap-1" title="连接远程服务器"><i class="fas fa-satellite-dish"></i><span class="hidden sm:inline">连接远程服务器</span></button>`;
         }
     }
     statusEl.innerHTML = fullHtml;
@@ -12719,7 +12741,7 @@ async function handleLocalLogin() {
             if (statusEl) statusEl.innerHTML = '<i class="fas fa-times-circle text-red-500"></i> 登录失败: 用户名或密码错误/凭证已失效';
         }
     } catch (e) {
-        if (statusEl) statusEl.innerHTML = `<i class="fas fa-exclamation-circle text-red-500"></i> 错误: ${e.message}`;
+        if (statusEl) statusEl.innerHTML = `<i class="fas fa-exclamation-circle text-red-500"></i> 错误: ${escapeHtmlText(e.message)}`;
     }
 }
 
@@ -12861,14 +12883,14 @@ function handleRemoteConnect() {
                     console.log('[Cache] WS认证信息已保存');
                 }
             } else {
-                statusEl.innerHTML = `<i class="fas fa-times-circle text-red-500"></i> 连接失败: ${msg || '未知错误'}`;
+                statusEl.innerHTML = `<i class="fas fa-times-circle text-red-500"></i> 连接失败: ${escapeHtmlText(msg || '未知错误')}`;
             }
         };
 
         syncManager.client.connect();
 
     } catch (e) {
-        statusEl.innerHTML = `<i class="fas fa-exclamation-circle text-red-500"></i> 错误: ${e.message}`;
+        statusEl.innerHTML = `<i class="fas fa-exclamation-circle text-red-500"></i> 错误: ${escapeHtmlText(e.message)}`;
     }
 }
 
@@ -16241,7 +16263,7 @@ function updateGridItemVisuals(btn, isIncluded) {
         btn.className = "relative h-14 rounded-lg text-sm font-bold transition-all duration-200 flex items-center justify-center gap-1 shadow-sm overflow-hidden bg-emerald-50 text-emerald-500 hover:bg-emerald-100 hover:shadow";
         const textSpan = btn.querySelector('span');
         const text = textSpan ? textSpan.innerText : btn.innerText;
-        btn.innerHTML = `<span class="truncate max-w-[80%]">${text}</span>`;
+        btn.innerHTML = `<span class="truncate max-w-[80%]">${escapeHtmlText(text)}</span>`;
     }
 }
 
@@ -16442,7 +16464,7 @@ async function fetchComments() {
 
     } catch (e) {
         console.error('Fetch comments failed:', e);
-        if (list) list.innerHTML = `<div class="text-center py-10 text-red-400 font-bold">加载失败: ${e.message}</div>`;
+        if (list) list.innerHTML = `<div class="text-center py-10 text-red-400 font-bold">加载失败: ${escapeHtmlText(e.message)}</div>`;
     } finally {
         if (loader) loader.classList.add('hidden');
         isCommentLoading = false;
@@ -18185,7 +18207,7 @@ function renderSearchTips(tips) {
     tips.forEach((tip, index) => {
         const div = document.createElement('div');
         div.className = 'search-tip-item px-4 py-2.5 hover:t-bg-muted cursor-pointer transition-colors text-sm flex items-center gap-3';
-        div.innerHTML = `<i class="fas fa-search t-text-muted text-xs"></i><span class="truncate">${tip}</span>`;
+        div.innerHTML = `<i class="fas fa-search t-text-muted text-xs"></i><span class="truncate">${escapeHtmlText(tip)}</span>`;
         div.onclick = (e) => {
             e.stopPropagation(); // 防止触发 document click
             input.value = tip;
@@ -18668,7 +18690,7 @@ async function handleRefreshTokenLogs() {
         }
     } catch (e) {
         console.error('[TokenLog] Error:', e);
-        list.innerHTML = `<div class="py-12 text-center text-red-500 italic opacity-50">拉取日志失败: ${e.message}</div>`;
+        list.innerHTML = `<div class="py-12 text-center text-red-500 italic opacity-50">拉取日志失败: ${escapeHtmlText(e.message)}</div>`;
     } finally {
         if (refreshBtn) {
             setTimeout(() => {
@@ -18837,7 +18859,7 @@ window.CustomSelectManager = {
             if (opt.disabled) return;
             const li = document.createElement('li');
             li.className = 'cs-option' + (opt.selected ? ' selected' : '');
-            li.innerHTML = `<span>${opt.text}</span><i class="fas fa-check"></i>`;
+            li.innerHTML = `<span>${escapeHtmlText(opt.text)}</span><i class="fas fa-check"></i>`;
 
             li.onclick = (e) => {
                 e.stopPropagation();
@@ -18933,3 +18955,108 @@ document.addEventListener('click', (e) => {
 document.addEventListener('DOMContentLoaded', () => {
     window.CustomSelectManager.initAll();
 });
+
+/**
+ * ===== Subsonic 服务配置（管理员可见）=====
+ * 复用既有 /api/config（GET/POST）。后端早已支持 subsonic.enable / .path / .port，
+ * 这里只补一个可直接操作的配置入口，省得进 config.js 手改。
+ */
+function getSubsonicAdminAuth() {
+    return localStorage.getItem('lx_admin_password') || '';
+}
+
+function renderSubsonicEndpoint() {
+    const pathEl = document.getElementById('setting-subsonic-path');
+    const portEl = document.getElementById('setting-subsonic-port');
+    const enableEl = document.getElementById('setting-subsonic-enable');
+    const endpointEl = document.getElementById('subsonic-endpoint');
+    if (!endpointEl) return;
+
+    const apiPath = (pathEl && pathEl.value.trim()) || '/rest';
+    const port = portEl ? parseInt(portEl.value, 10) || 0 : 0;
+    const enabled = !!(enableEl && enableEl.checked);
+    const host = location.hostname;
+    const scheme = location.protocol === 'https:' ? 'https' : 'http';
+    const base = port > 0 ? `${scheme}://${host}:${port}` : `${scheme}://${location.host}`;
+
+    endpointEl.textContent = enabled
+        ? `${base}${apiPath}  （用户名/密码与播放器账号一致）`
+        : '未启用';
+}
+
+async function loadSubsonicSettings() {
+    const card = document.getElementById('subsonic-card');
+    if (!card) return;
+
+    const adminPass = getSubsonicAdminAuth();
+    if (!adminPass) {
+        card.classList.add('hidden');
+        return;
+    }
+
+    try {
+        const resp = await fetch('/api/config', { headers: { 'x-frontend-auth': adminPass } });
+        if (!resp.ok) {
+            card.classList.add('hidden');
+            return;
+        }
+        const cfg = await resp.json();
+
+        card.classList.remove('hidden');
+        const enableEl = document.getElementById('setting-subsonic-enable');
+        const pathEl = document.getElementById('setting-subsonic-path');
+        const portEl = document.getElementById('setting-subsonic-port');
+        if (enableEl) enableEl.checked = cfg['subsonic.enable'] !== false;
+        if (pathEl) pathEl.value = cfg['subsonic.path'] || '/rest';
+        if (portEl) portEl.value = cfg['subsonic.port'] || 0;
+        renderSubsonicEndpoint();
+    } catch (e) {
+        card.classList.add('hidden');
+    }
+}
+
+async function saveSubsonicSettings() {
+    const adminPass = getSubsonicAdminAuth();
+    const statusEl = document.getElementById('subsonic-status');
+    if (!adminPass) {
+        if (typeof showError === 'function') showError('需要管理员身份才能修改 Subsonic 配置');
+        return;
+    }
+
+    const enableEl = document.getElementById('setting-subsonic-enable');
+    const pathEl = document.getElementById('setting-subsonic-path');
+    const portEl = document.getElementById('setting-subsonic-port');
+
+    const port = portEl ? parseInt(portEl.value, 10) || 0 : 0;
+    if (port < 0 || port > 65535) {
+        if (typeof showError === 'function') showError('端口需在 0~65535 之间');
+        return;
+    }
+
+    const payload = {
+        'subsonic.enable': !!(enableEl && enableEl.checked),
+        'subsonic.path': (pathEl && pathEl.value.trim()) || '/rest',
+        'subsonic.port': port,
+    };
+
+    if (statusEl) statusEl.textContent = '保存中…';
+    try {
+        const resp = await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-frontend-auth': adminPass },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        if (statusEl) {
+            statusEl.textContent = port > 0 ? '已保存，端口变更需重启容器生效' : '已保存';
+        }
+        renderSubsonicEndpoint();
+        if (typeof showInfo === 'function') showInfo('Subsonic 配置已保存');
+    } catch (e) {
+        if (statusEl) statusEl.textContent = '保存失败: ' + e.message;
+        if (typeof showError === 'function') showError('保存失败: ' + e.message);
+    }
+}
+
+window.loadSubsonicSettings = loadSubsonicSettings;
+window.saveSubsonicSettings = saveSubsonicSettings;

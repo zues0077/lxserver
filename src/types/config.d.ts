@@ -679,5 +679,11 @@ declare namespace LX {
      * 只影响尝试顺序: 不写 states.json、不禁用平台、不删音源, 任意一次成功即恢复原位。
      */
     'customSource.playSink.enabled'?: boolean
+    /**
+     * 本地音乐批量指纹识别的并发线程数 (1~4, 默认 2)。
+     *
+     * 每首都要跑 fpcalc + AcoustID 网络查询, 并发过高会触发上游限流。
+     */
+    'localMusicIdentifyThreads'?: number
   }
 }
