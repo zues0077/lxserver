@@ -7,7 +7,7 @@ import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
 import { encodeRequestUrl } from '../utils/urlEncode'
 import { verifyUser } from './userAuth'
-import { getFlagFor } from './sourceGuard'
+import { getFlagFor, getIsolationFor } from './sourceGuard'
 
 // 读取请求体
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -509,6 +509,20 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
         try {
             const flag = getFlagFor(source.owner, source.id)
             if (flag) source.guard = flag
+        } catch (e) { }
+
+        // 已隔离的音源必须能被看见：它被卸载后状态看起来只是「没生效」，
+        // 不显示出来用户既不知道原因，也找不到恢复入口。
+        try {
+            const isolation = getIsolationFor(source.owner, source.id)
+            if (isolation) {
+                source.isolated = {
+                    reason: isolation.reason,
+                    level: isolation.level,
+                    at: isolation.at,
+                    source: isolation.source,
+                }
+            }
         } catch (e) { }
 
         return source

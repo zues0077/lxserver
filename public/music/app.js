@@ -15075,6 +15075,21 @@ async function renderCustomSources() {
                         title="自检护栏：命中可疑特征 ${escapeHtmlText(reasons)}（点击处置）"><i class="fas fa-shield-alt mr-0.5"></i>${isA ? '高危' : '可疑'}</span>`;
             })() : '';
 
+            // 已隔离标记：隔离会被卸载源脚本，界面上原本只表现为「这个源好像没生效」，
+            // 用户既看不到原因也找不到恢复入口。这里给出显式标记 + 一键解除。
+            const isolationTag = source.isolated ? (() => {
+                const isoReason = source.isolated.reason || '未知原因';
+                const isoAt = source.isolated.at ? new Date(source.isolated.at).toLocaleString() : '';
+                return `<span data-guard-id="${escapeHtmlText(encodeURIComponent(source.id))}"
+                        data-guard-owner="${escapeHtmlText(source.owner || 'open')}"
+                        data-guard-name="${escapeHtmlText(source.name)}"
+                        data-guard-level="isolated"
+                        data-guard-reasons="${escapeHtmlText(isoReason)}"
+                        onclick="showSourceGuardMenu(this)"
+                        class="cursor-pointer px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold whitespace-nowrap bg-red-500 text-white hover:bg-red-600 transition-colors"
+                        title="自检护栏已隔离该音源：${escapeHtmlText(isoReason)}${isoAt ? '（' + escapeHtmlText(isoAt) + '）' : ''}（点击解除）"><i class="fas fa-lock mr-0.5"></i>已隔离</span>`;
+            })() : '';
+
             // 权限判断：管理员有所有权限；登录用户对公开源只有查看使用（Toggle）权限，无法刷新或删除
             const isPublic = source.owner === 'open';
             const canManageSource = isAdmin || (!isPublic && isUser);
@@ -15101,6 +15116,7 @@ async function renderCustomSources() {
                          ${createMarqueeHtml(source.name, "font-bold t-text-main text-xs md:text-sm")}
                         ${ownerTag}
                         ${vmTag}
+                        ${isolationTag}
                         ${guardTag}
                     </div>
                     ${errorMsg}
@@ -15318,6 +15334,7 @@ async function toggleSource(sourceId, currentEnabled, allowUnsafeVM = false) {
 // 静态特征只是「可疑迹象」而非「恶意证据」——46 个真实音源里 10 个带 while(!![]) 且完全正常，
 // 所以这里不自动禁用，只把结论摆出来让用户自己决定。
 function showGuardDialog(name, level, reasons) {
+    const isIsolated = level === 'isolated';
     return new Promise((resolve) => {
         const modal = document.createElement('div');
         modal.className = "fixed inset-0 z-[200] flex items-center justify-center p-4 animate-fade-in";
@@ -15325,26 +15342,29 @@ function showGuardDialog(name, level, reasons) {
             <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
             <div class="t-bg-panel rounded-2xl shadow-2xl w-full max-w-md overflow-hidden transform transition-all animate-slide-up relative z-10 border t-border-main">
                 <div class="px-5 py-4 border-b border-amber-100/50 flex justify-between items-center bg-amber-50/50">
-                    <h3 class="text-sm font-bold t-text-main">可疑音源处置</h3>
+                    <h3 class="text-sm font-bold t-text-main">${isIsolated ? '已隔离的音源' : '可疑音源处置'}</h3>
                     <button id="guard-close-x" class="t-text-muted hover:text-amber-500 transition-colors"><i class="fas fa-times text-lg"></i></button>
                 </div>
                 <div class="p-6">
                     <div class="flex items-start gap-4">
-                        <div class="w-10 h-10 rounded-full ${level === 'A' ? 'bg-red-50 text-red-500' : 'bg-amber-50 text-amber-500'} flex items-center justify-center shrink-0">
-                            <i class="fas fa-shield-alt text-lg"></i>
+                        <div class="w-10 h-10 rounded-full ${isIsolated ? 'bg-red-500 text-white' : (level === 'A' ? 'bg-red-50 text-red-500' : 'bg-amber-50 text-amber-500')} flex items-center justify-center shrink-0">
+                            <i class="fas fa-${isIsolated ? 'lock' : 'shield-alt'} text-lg"></i>
                         </div>
                         <div class="flex-1">
                             <p class="text-sm t-text-main font-bold mb-1">${escapeHtmlText(name)}</p>
-                            <p class="text-xs t-text-muted leading-relaxed">命中特征：<span class="font-mono">${escapeHtmlText(reasons || '未知')}</span>（${level === 'A' ? '高危级' : '可疑级'}）</p>
-                            <p class="text-xs t-text-muted leading-relaxed mt-2">${level === 'A'
-                                ? '这类特征基本只在真正危险的脚本里出现，建议直接隔离。'
-                                : '这类特征绝大多数是代码混淆、压缩的副产物，不代表恶意。若该音源一直用着正常，选「信任并忽略」即可。'}</p>
+                            <p class="text-xs t-text-muted leading-relaxed">${isIsolated ? '隔离原因' : '命中特征'}：<span class="font-mono">${escapeHtmlText(reasons || '未知')}</span>${isIsolated ? '' : `（${level === 'A' ? '高危级' : '可疑级'}）`}</p>
+                            <p class="text-xs t-text-muted leading-relaxed mt-2">${isIsolated
+                                ? '该音源已被自检护栏隔离并卸载，取链时不会被使用。若确认它没有问题，可以解除隔离恢复使用；脚本内容一旦更新也会自动解除。'
+                                : (level === 'A'
+                                    ? '这类特征基本只在真正危险的脚本里出现，建议直接隔离。'
+                                    : '这类特征绝大多数是代码混淆、压缩的副产物，不代表恶意。若该音源一直用着正常，选「信任并忽略」即可。')}</p>
                         </div>
                     </div>
                 </div>
                 <div class="p-4 t-bg-main/50 border-t t-border-main/50 flex flex-col gap-2">
-                    <button id="guard-trust" class="w-full py-2.5 text-sm font-bold text-white bg-emerald-500 hover:opacity-90 rounded-xl shadow-lg transition-all active:scale-95">信任并忽略</button>
-                    <button id="guard-isolate" class="w-full py-2.5 text-sm font-bold text-white bg-red-500 hover:bg-red-600 rounded-xl shadow-lg transition-all active:scale-95">隔离该音源</button>
+                    ${isIsolated
+                        ? '<button id="guard-release" class="w-full py-2.5 text-sm font-bold text-white bg-emerald-500 hover:bg-emerald-600 rounded-xl shadow-lg transition-all active:scale-95">解除隔离，恢复使用</button>'
+                        : '<button id="guard-trust" class="w-full py-2.5 text-sm font-bold text-white bg-emerald-500 hover:opacity-90 rounded-xl shadow-lg transition-all active:scale-95">信任并忽略</button><button id="guard-isolate" class="w-full py-2.5 text-sm font-bold text-white bg-red-500 hover:bg-red-600 rounded-xl shadow-lg transition-all active:scale-95">隔离该音源</button>'}
                     <button id="guard-cancel" class="w-full py-2.5 text-sm font-bold t-text-muted hover:t-text-main hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-all">取消</button>
                 </div>
             </div>`;
@@ -15356,8 +15376,12 @@ function showGuardDialog(name, level, reasons) {
             modal.classList.add('opacity-0');
             setTimeout(() => { modal.remove(); resolve(result); }, 200);
         };
-        modal.querySelector('#guard-trust').onclick = () => close('trust');
-        modal.querySelector('#guard-isolate').onclick = () => close('isolate');
+        const trustBtn = modal.querySelector('#guard-trust');
+        if (trustBtn) trustBtn.onclick = () => close('trust');
+        const isolateBtn = modal.querySelector('#guard-isolate');
+        if (isolateBtn) isolateBtn.onclick = () => close('isolate');
+        const releaseBtn = modal.querySelector('#guard-release');
+        if (releaseBtn) releaseBtn.onclick = () => close('release');
         modal.querySelector('#guard-cancel').onclick = () => close(null);
         modal.querySelector('#guard-close-x').onclick = () => close(null);
         modal.querySelector('div:first-child').onclick = () => close(null);
@@ -15381,7 +15405,11 @@ async function postGuardAction(action, owner, id, name) {
         }
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        showSuccess(action === 'trust' ? '已标记为可信，不再提示' : '已隔离该音源');
+        showSuccess(action === 'trust' ? '已标记为可信，不再提示'
+            : action === 'release' ? '已解除隔离，正在重新加载音源…'
+                : '已隔离该音源');
+        // 解除隔离只是删掉记录，脚本还停在「未加载」状态，必须走一次强制启用才真的回来
+        if (action === 'release') await reloadSource(id);
         await renderCustomSources();
     } catch (error) {
         console.error('[Guard] 处置失败:', error);

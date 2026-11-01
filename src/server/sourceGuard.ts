@@ -488,6 +488,20 @@ export function getFlagFor(owner: string, id: string): { level: GuardLevel; reas
     return { level: flag.level, reasons: flag.reasons }
 }
 
+/**
+ * 供音源列表接口注入：该音源是否正被隔离（无隔离返回 null）。
+ *
+ * 隔离过的源会被卸载，前端只看得到「这个源好像没生效」——没有任何地方能告诉用户
+ * 「它被隔离了」以及「怎么放出来」。这个查询就是补这个缺口。
+ */
+export function getIsolationFor(owner: string, id: string): IsolateRecord | null {
+    const key = recordKey(owner, id)
+    const mem = activeIsolations.get(key)
+    if (mem) return mem
+    const store = loadStore()
+    return store.isolated.find(item => recordKey(item.owner, item.id) === key) || null
+}
+
 /** 面板上手动隔离：用户看过特征后认定这个源有问题 */
 export function isolateManually(owner: string, id: string, name: string): boolean {
     const key = recordKey(owner, id)

@@ -31,6 +31,7 @@ import * as tunnel from 'tunnel'
 import { getProxyAgent } from '../modules/utils/proxy.js'
 import { tryResolveByAccount, isEnabled, isPriority, isSupportedSource, getPlatform } from './musicAccount'
 import { isUserAllowed } from './musicAccount/permission'
+import { checkLiteralTarget, createGuardedLookup, logBlocked } from './requestGuard'
 const inflate = promisify(zlib.inflate)
 const deflate = promisify(zlib.deflate)
 
@@ -407,6 +408,11 @@ export function extractMetadata(script: string): Partial<UserApiInfo> {
 // 创建 lx.request 包装器（使用 needle）
 // pendingAborts: 由调用方传入的登记表，用于在音源卸载时中止其尚未返回的在途请求，
 // 避免脚本实例被释放后回调仍写入已失效的实例（也是定时器/请求泄漏的一部分）。
+
+// 出站护栏单例：自定义源不允许访问内网/保留地址（详见 requestGuard.ts）。
+// 开关每次请求实时读配置，改完不重载音源也能生效。
+const privateNetLookup = createGuardedLookup(() => configBool('customSource.blockPrivateNetwork', true))
+
 async function createLxRequest(
     isUnsafe: boolean = false,
     onSniffUpdate?: (alert: { name?: string, log?: string, updateUrl?: string }) => void,
@@ -442,6 +448,9 @@ async function createLxRequest(
         let requestOptions: any = {
             headers,
             follow_max: 5,
+            // 内网护栏：needle 会把这个 lookup 透传给 http.request，建连前按解析结果拦截。
+            // 放在 lookup 而不是请求前查 URL，是为了同时挡住 302 跳转与 DNS rebinding。
+            lookup: privateNetLookup,
             response_timeout: typeof timeout === 'number' && timeout > 0 ? Math.min(timeout, 60000) : 60000
         }
 
@@ -473,7 +482,7 @@ async function createLxRequest(
             // 排队期间实例可能已被卸载（禁用/重载/隔离），此时发起请求会让回调
             // 写进已释放的 VM2 沙箱——实测会直接 SIGSEGV 崩掉整个进程
             if (cancelled || isDisposed?.()) { releaseSlotOnce(); return }
-                const request = needle.request(method, encodeRequestUrl(url), data, requestOptions, (err: any, resp: any, body: any) => {
+                const handleResponse = (err: any, resp: any, body: any) => {
                     // 响应回来的时刻是卡顿归因的关键锚点，必须抢在任何同步处理之前记下
                     if (tracked) noteCallback(owner, id, name)
                     if (abortHolder.fn) pendingAborts?.delete(abortHolder.fn)
@@ -531,15 +540,60 @@ async function createLxRequest(
                         // 才是真正的同步开销，提前还槽会让下一路请求挤进同一个阻塞段
                         releaseSlotOnce()
                     }
+                }
+
+            // 自己跟随跳转：needle 的自动跳转（follow_max）是内部直接请求新地址，目标不经校验——
+            // 源只要把 Location 写成 http://127.0.0.1:9527/ 就能绕过内网护栏。
+            // 这里每跳先校验再发，needle 只负责单次请求。
+            const MAX_FOLLOW = 5
+            let currentReq: any = null
+
+            const follow = (targetUrl: string, reqMethod: string, reqData: any, hops: number): void => {
+                if (cancelled || isDisposed?.()) { releaseSlotOnce(); return }
+                const blocked = checkLiteralTarget(targetUrl)
+                if (!blocked.ok) {
+                    logBlocked(blocked.host, blocked.host, blocked.reason)
+                    releaseSlotOnce()
+                    try {
+                        callback.call(null, Object.assign(new Error(`目标地址属于内网保留网段（${blocked.reason}），已被自定义源出站护栏拦截: ${blocked.host}`), { code: 'EBLOCKEDPRIVATE' }), null, null)
+                    } catch { /* 沙箱实例可能已被释放，回调失败不影响主流程 */ }
+                    return
+                }
+
+                // follow_max 必须是 -1 而不是 0：needle 的计数从 0 开始（`count <= follow_max`），
+                // 传 0 时第一次跳转 0<=0 仍成立，会被内部悄悄跟一跳 —— 那一跳完全绕过校验。
+                currentReq = needle.request(reqMethod as any, encodeRequestUrl(targetUrl), reqData, { ...requestOptions, follow_max: -1 }, (err: any, resp: any, body: any) => {
+                    if (!err && resp && resp.statusCode >= 300 && resp.statusCode < 400 && hops < MAX_FOLLOW) {
+                        const rawLocation = Array.isArray(resp.headers?.location) ? resp.headers.location[0] : resp.headers?.location
+                        let nextUrl = ''
+                        if (rawLocation) {
+                            try { nextUrl = new URL(String(rawLocation), targetUrl).toString() } catch { /* 非法 Location 当普通响应处理 */ }
+                        }
+                        if (nextUrl) {
+                            // 303 与「非 GET 收到 301/302」按惯例改成 GET 且不带 body；
+                            // 307/308 要求原样重发，否则脚本拿到的语义就变了
+                            const keepMethod = resp.statusCode === 307 || resp.statusCode === 308
+                            const isBodyless = /^(get|head)$/i.test(reqMethod)
+                            const nextMethod = keepMethod ? reqMethod : (isBodyless ? reqMethod : 'get')
+                            const nextData = (keepMethod || isBodyless) ? reqData : null
+                            follow(nextUrl, nextMethod, nextData, hops + 1)
+                            return
+                        }
+                    }
+                    handleResponse(err, resp, body)
                 })
 
-            const abortFn = () => {
-                const reqObj = (request as any).request
-                if (reqObj && !reqObj.aborted) reqObj.abort()
+                const abortFn = () => {
+                    const reqObj = (currentReq as any).request
+                    if (reqObj && !reqObj.aborted) reqObj.abort()
+                }
+                if (pendingAborts && abortHolder.fn) pendingAborts.delete(abortHolder.fn)
+                abortHolder.fn = abortFn
+                if (cancelled) abortFn()
+                else if (pendingAborts) pendingAborts.add(abortFn)
             }
-            abortHolder.fn = abortFn
-            if (cancelled) abortFn()
-            else if (pendingAborts) pendingAborts.add(abortFn)
+
+            follow(url, method, data, 0)
         }
 
         if (tracked) {
@@ -1105,6 +1159,12 @@ const configNumber = (key: string, fallback: number): number => {
     return Number.isFinite(n) && n > 0 ? n : fallback
 }
 
+// 布尔开关：配置项缺失（老配置文件升级上来）时按默认值走
+const configBool = (key: string, fallback: boolean): boolean => {
+    const raw = (global.lx && global.lx.config) ? (global.lx.config as any)[key] : undefined
+    return typeof raw === 'boolean' ? raw : fallback
+}
+
 /**
  * 给取链调用套一层超时。
  *
@@ -1161,6 +1221,9 @@ export const verifyUrlPlayable = async (url: string, sourceName: string, timeout
             response_timeout: verifyTimeout,
             read_timeout: verifyTimeout,
             agent,
+            // 源返回的链接同样过内网护栏：脚本可以不自己发请求，只把 http://127.0.0.1:xxx
+            // 当成「直链」返回，让宿主替它去访问
+            lookup: privateNetLookup,
             headers: method === 'get' ? { ...headers, Range: 'bytes=0-0' } : headers,
         })
         return typeof resp?.statusCode === 'number' ? resp.statusCode : undefined
