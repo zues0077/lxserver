@@ -635,6 +635,10 @@ declare namespace LX {
     /**
      * 各平台探测用测试曲目覆盖,如 { wy: { songmid: '1903149553', name: '无名的人', singer: '毛不易' } }。
      * 未配置的平台会优先使用用户缓存中实际播放过的同平台歌曲,再退化为内置搜索。
+     *
+     * kg 建议显式配置:它用 32 位文件 hash 当主键,而缓存索引里只有 audio_id、没有 hash,
+     * 未配置时只能靠内置搜索现取 hash(多一次搜索,且搜索结果有版权风险)。
+     * songmid 与 hash 都填 hash 最稳,两类源脚本(读 songmid / 读 hash)都能用。
      */
     'customSource.probe.testSongs'?: Record<string, {
       songmid: string

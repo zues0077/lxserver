@@ -158,7 +158,13 @@ const config: LX.Config = {
   'customSource.probe.autoRemoveSource': true, // 全平台不可用是否自动移除音源
   'customSource.probe.removeMode': 'trash', // 移除方式：trash 移入回收站 / delete 直接删除
   'customSource.probe.probeOnNewSource': true, // 新增音源是否立即巡检
-  'customSource.probe.testSongs': {}, // 各平台测试曲目覆盖（留空则用缓存/内置搜索）
+  // 各平台测试曲目覆盖（留空则用缓存/内置搜索）。
+  // kg 必须显式配置：它的歌曲主键是 32 位文件 hash，而缓存索引只存 audio_id 且不带 hash，
+  // 内置搜索虽然能带出 hash 但要多一次搜索。这里给一首固定曲目当首选，失配时仍会走搜索兜底。
+  // songmid 与 hash 都填 hash：两类源脚本（读 songmid / 读 hash）都能拿到可用的主键。
+  'customSource.probe.testSongs': {
+    kg: { songmid: 'B3A52A7A958BF0AED0EBFBA2E9A818B7', hash: 'B3A52A7A958BF0AED0EBFBA2E9A818B7', name: '晴天', singer: '周杰伦', interval: '04:29' },
+  },
   'customSource.probe.systemicFailureRatio': 0.5, // 某平台在超过该比例的音源上同时失败 → 判定为平台侧异常，本轮只记录不自动处置
   // 判定「平台侧异常」还要求该平台成功率低于此值。有音源能播就说明曲目可播、平台没限流，
   // 此时过半失败是音源自己的后端挂了，不能整档赦免（只赦免非硬故障的失败）

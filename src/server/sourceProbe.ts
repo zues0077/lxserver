@@ -714,18 +714,54 @@ const probePlatform = async (
 let cachedSongPool: Map<string, ProbeTestSong[]> = new Map()
 let cachedSongPoolAt = 0
 
+/** kg 的歌曲主键是 32 位文件 hash（`audio_id` 那种数字 ID 源脚本用不了） */
+const KG_HASH_PATTERN = /^[0-9A-Fa-f]{32}$/
+
+/** 只有这些平台的源脚本**必须**拿到 hash 才可能出链 */
+const REQUIRES_HASH_PLATFORM = new Set(['kg'])
+
+/**
+ * 归一化一条测试曲目，不合格返回 null。
+ *
+ * 两件事，都是「把好源判成坏源」的源头：
+ *
+ * 1. **剥平台前缀**。缓存索引里的 songmid 是 `kg_205496462`（`source_songmid` 形态），
+ *    而源脚本期望的是纯 ID —— 正常取链和歌词抓取都剥过，只有巡检没剥，
+ *    于是每个平台都在探测时写成「歌曲ID不存在」。
+ * 2. **kg 必须有 hash**。缓存索引只存 songmid 不存 hash，kg 的 audio_id
+ *    发给源只会得到「缺少 songmid 或 hash」。这类曲目必须丢弃，
+ *    否则池里「有但不合格」会让 pickTestSongs 永远走不到兜底搜索
+ *    （内置搜索返回的曲目是带 hash 的），kg 平台就整轮全灭。
+ */
+export const sanitizeTestSong = (song: ProbeTestSong): ProbeTestSong | null => {
+  if (!song || !song.source || !song.songmid) return null
+  const rawMid = String(song.songmid).trim()
+  const prefix = `${song.source}_`
+  const songmid = rawMid.startsWith(prefix) ? rawMid.slice(prefix.length) : rawMid
+  if (!songmid) return null
+  const hash = song.hash ? String(song.hash).trim() : ''
+  if (REQUIRES_HASH_PLATFORM.has(song.source)) {
+    // 有些源确实把 hash 塞在 songmid 里，两种形态都认
+    const hashForUse = KG_HASH_PATTERN.test(hash) ? hash : (KG_HASH_PATTERN.test(songmid) ? songmid : '')
+    if (!hashForUse) return null
+    return { ...song, songmid, hash: hashForUse }
+  }
+  return hash ? { ...song, songmid, hash } : { ...song, songmid }
+}
+
 const buildSongPool = (deps: ProbeDeps): Map<string, ProbeTestSong[]> => {
   const conf = configOf()
   const map = new Map<string, ProbeTestSong[]>()
   const seen = new Set<string>()
   const push = (song: ProbeTestSong) => {
-    if (!song || !song.source || !song.songmid) return
-    const key = `${song.source}_${song.songmid}`
+    const clean = sanitizeTestSong(song)
+    if (!clean) return
+    const key = `${clean.source}_${clean.songmid}`
     if (seen.has(key)) return
     seen.add(key)
-    const list = map.get(song.source)
-    if (list) list.push(song)
-    else map.set(song.source, [song])
+    const list = map.get(clean.source)
+    if (list) list.push(clean)
+    else map.set(clean.source, [clean])
   }
 
   // 1) 配置里的覆盖优先
@@ -774,9 +810,11 @@ const pickTestSongs = async (platform: string, deps: ProbeDeps): Promise<ProbeTe
   searchAttempted.add(platform)
   try {
     const found = await deps.searchTestSong(platform)
-    const foundList = (Array.isArray(found) ? found : [found]).filter(
-      (it): it is ProbeTestSong => !!it && !!it.songmid
-    )
+    // 兜底搜索的结果同样要过净化：它也可能带上平台前缀或缺少必需字段，
+    // 直接塞给源脚本就又回到「曲目形态不对被判成源坏了」。
+    const foundList = (Array.isArray(found) ? found : [found])
+      .map(it => sanitizeTestSong(it as ProbeTestSong))
+      .filter((it): it is ProbeTestSong => !!it)
     if (foundList.length) {
       // 兜底搜索到的曲目也放进池子，后续轮次可直接复用
       const exist = cachedSongPool.get(platform)
