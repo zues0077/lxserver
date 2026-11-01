@@ -53,6 +53,8 @@
         trackDurationMs: 0,
         /** 下一次投送的来源标记（自动续播时由 advanceToNext 设置），仅用于日志排查 */
         nextCaller: '',
+        /** 已经提示过的拉流守门动作（placeholder / url），避免每次轮询都弹一次 */
+        guardNoticed: '',
     };
 
     /** 自动续播守望：投送成功后开始查询音箱状态，用于「自动下一首」 */
@@ -741,6 +743,16 @@
     const updateVipWarning = status => {
         const el = $('xiaoai-vip-warning');
         if (!el) return;
+        // 拉流守门已经动过手：曲库那一版不可播，服务端自动换了直链重发。
+        // 这条优先于 unplayableCode 判断——用户会看到封面退回默认，得给个解释。
+        const guard = status && status.streamGuardAction;
+        if (guard) {
+            el.textContent = guard === 'url'
+                ? 'ℹ️ 音箱曲库里的这一版是 VIP 资源、放不了，已自动改用纯直链重发（触屏会退回默认封面）。'
+                : 'ℹ️ 音箱曲库里的这一版是 VIP 资源、放不了，已自动改用默认封面并重发本机直链。';
+            el.classList.remove('hidden');
+            return;
+        }
         const raw = status && status.raw;
         const psd = (raw && raw.play_song_detail) || {};
         if (psd.unplayableCode !== 2) {
@@ -1220,6 +1232,15 @@
             };
             // 版权闸门提示：unplayableCode=2 时结合「是否已拉流」判断到底有没有声音
             updateVipWarning(data);
+            // 拉流守门动过手（曲库那版放不了 → 自动改直链重发）：提示一次，
+            // 否则用户只会看到「封面怎么突然变默认了」而不知道为什么
+            const guard = data.streamGuardAction || '';
+            if (guard && guard !== state.guardNoticed) {
+                state.guardNoticed = guard;
+                if (typeof window.showToast === 'function') {
+                    window.showToast('info', '音箱曲库里的这版是 VIP 放不了，已自动改用本机直链重发', 6000);
+                }
+            }
         } catch (e) {
             sample = { ok: false, at: Date.now() };
         } finally {
@@ -1258,6 +1279,8 @@
     const pushSong = async (song, quality, meta) => {
         const devices = selectedDevices();
         const context = queueContext(meta);
+        // 新的一次投送：上一首的守门提示作废
+        state.guardNoticed = '';
         const data = await request('/play', {
             songInfo: song,
             quality: quality || undefined,

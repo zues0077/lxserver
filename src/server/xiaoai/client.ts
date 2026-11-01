@@ -73,6 +73,13 @@ export interface PlayOptions {
    * 歌词与灯环本是两件事，这里彻底解耦。参考 songloft-plugin-miot 的 playByMusicURL(true, ...)。
    */
   lyricsMode?: boolean
+  /**
+   * 强制走 player_play_url（纯直链、完全不碰小米曲库）。
+   *
+   * 拉流守门用的最后一级兜底：带曲库 audioID 时部分固件会改播曲库那一版，
+   * 曲库版是 VIP 就只放试听、完全不来拉我们的流。此时只能彻底避开曲库。
+   */
+  forceUrlMode?: boolean
 }
 
 /** 播放结果的细节（便于上层做回退与日志） */
@@ -166,7 +173,7 @@ export class MinaClient {
       return { ok, via: 'player_play_url', error: ok ? undefined : this.deviceReason(result) }
     }
 
-    if (!useMusicApi) return playUrl()
+    if (!useMusicApi || options.forceUrlMode) return playUrl()
 
     const fallbackAudioId = options.audioId || DEFAULT_MUSIC_AUDIO_ID
     /** 逐级回退过程中最后一次失败原因，全失败时带回去 */

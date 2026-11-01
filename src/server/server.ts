@@ -83,6 +83,7 @@ import {
   sliceMp3FromFile,
   pruneSeekSlices,
 } from './xiaoai'
+import { runPullGuard } from './xiaoai/pullGuard'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
 /** 当前生效的 dislike 匹配选项，下发给前端保证前后端判定一致 */
@@ -354,6 +355,14 @@ let lastXiaoAiStreamSid = ''
 let lastXiaoAiPushAt = 0
 /** 本次这一路流「第一次被音箱请求」的时刻 */
 let lastXiaoAiStreamAt = 0
+/**
+ * 拉流守门最后一次实际执行的补救动作（'' / placeholder / url）。
+ *
+ * 触屏机型带曲库 audioID 投送时，部分固件会改播小米曲库那一版；如果是 VIP 资源，
+ * 用户只会听到一段试听、随后播报「当前歌单没有歌曲」。守门确认后会自动降级重发，
+ * 这里把结果带给前端，让用户知道「为什么封面忽然变默认了」。
+ */
+let lastXiaoAiGuardAction = ''
 /**
  * 最近一次 /play 解析好的音源与时长（拖动进度条时复用）。
  *
@@ -8426,6 +8435,43 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 } catch {
                   /* 定时器异常不能影响投送结果 */
                 }
+
+                // ---- 拉流守门 ----
+                // 带曲库 audioID 投送时，部分触屏固件会**改播小米曲库那一版**：曲库版是 VIP
+                // 就只放一段试听、压根不来拉我们的流，放完还播报「当前歌单没有歌曲」。
+                // 这时 ubus 是成功的，前端也显示「已投送」，用户却什么都听不到。
+                // 守门在后台确认「设备在播另一版」后自动降级重发，不阻塞本次响应。
+                const pushAt = lastXiaoAiPushAt
+                const okItem = (Array.isArray(result.results) ? result.results : []).find((item: any) => item?.ok)
+                const guardDeviceId = String(okItem?.deviceId || '')
+                const guardAudioId = guardDeviceId ? (result as any).audioIds?.[guardDeviceId] || '' : ''
+                if (guardDeviceId && guardAudioId) {
+                  lastXiaoAiGuardAction = ''
+                  void runPullGuard({
+                    isPulled: () => lastXiaoAiStreamAt > pushAt,
+                    // 期间切歌 / 拖动进度都会改写 lastXiaoAiPushAt，那就别插手新的一次投送
+                    isStale: () => lastXiaoAiPushAt !== pushAt,
+                    getStatus: () => xiaoAiService.getStatus(guardDeviceId),
+                    expectedDurationMs: Number(target.durationMs) || 0,
+                    retry: async mode => {
+                      if (mode === 'placeholder') {
+                        await xiaoAiService.replayWithPlaceholder({ deviceIds: [guardDeviceId], streamUrl })
+                      } else {
+                        await xiaoAiService.replayWithUrlMode({ deviceIds: [guardDeviceId], streamUrl })
+                      }
+                    },
+                    log: message => {
+                      console.warn(message)
+                      syncLog.warn(message)
+                    },
+                  })
+                    .then(action => {
+                      if (action !== 'none' && lastXiaoAiPushAt === pushAt) lastXiaoAiGuardAction = action
+                    })
+                    .catch(error => {
+                      syncLog.warn(`[XiaoAi] 拉流守门异常：${error?.message || error}`)
+                    })
+                }
               }
               // 排障盲区：以前「所有设备投送失败」只是把原因塞进响应体，服务端一条痕迹都没有，
               // 用户反馈「点了没反应」时无从查起（catch 只覆盖抛异常，这类是正常返回的失败）。
@@ -8629,6 +8675,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               lastXiaoAiSeekSec = seekSec
               lastXiaoAiPushAt = Date.now()
               lastXiaoAiStreamAt = 0
+              // 跳转是新的一次投送：上一首的守门结论作废
+              lastXiaoAiGuardAction = ''
               try {
                 const tokenStr = decodeURIComponent(streamUrl.split('token=')[1] || '')
                 lastXiaoAiStreamSid = parseStreamToken(tokenStr).sid || ''
@@ -8718,6 +8766,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 seekOffsetMs: lastXiaoAiSeekSec * 1000,
                 // 实测「投送完成 → 音箱来拉流」的延迟：前端据此把切歌提前量调到真正够用
                 startDelayMs: lastXiaoAiStreamAt && lastXiaoAiPushAt ? lastXiaoAiStreamAt - lastXiaoAiPushAt : 0,
+                // 拉流守门做过哪一级补救（'' / placeholder / url）：
+                // 非空说明「曲库那一版不可播，已自动改用直链重发」，前端据此解释封面变默认的原因
+                streamGuardAction: lastXiaoAiGuardAction,
               })
             })
             .catch((error: any) => failed(error, '查询小爱状态失败'))

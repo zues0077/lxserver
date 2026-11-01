@@ -349,6 +349,8 @@ class XiaoAiService {
     const singer = String(params.song?.singer || '').trim()
     /** 本次各设备实际下发的 audioID，用于判断「曲名不一致」是否为预期（占位封面的曲名不是这首歌） */
     const usedAudioIds: string[] = []
+    /** 设备 → 实际下发的曲库 audioID，拉流守门要知道「有没有带曲库 ID」 */
+    const audioIds: Record<string, string> = {}
     const results = await this.fanOut(params.deviceIds, 'play', async (client, deviceId, hardware) => {
       const musicApiModel = needUseMusicApi(hardware, config.disabledModels)
       // 歌词模式只在「走 player_play_music 的触屏机型 + 有歌名」时开启；
@@ -368,6 +370,7 @@ class XiaoAiService {
       })
       if (outcome.ok) {
         usedAudioIds.push(outcome.audioId || '')
+        if (outcome.audioId) audioIds[deviceId] = outcome.audioId
         const idPart = outcome.audioId ? `（）audioID=${outcome.audioId}` : ''
         const lyricPart = lyricsWanted ? '｜歌词模式' : ''
         const line = `[XiaoAi] 下发方式 ${outcome.via}${idPart}${lyricPart} → ${deviceId}`
@@ -401,7 +404,55 @@ class XiaoAiService {
           .catch(() => {})
       }, 3000)
     }
-    return { results, success: results.some(item => item.ok), song: params.song || null }
+    return { results, success: results.some(item => item.ok), song: params.song || null, audioIds }
+  }
+
+  /**
+   * 拉流守门的补救动作：换「默认封面」audioID 重发（仍然走 Music API，能出声，只是没有封面歌词）。
+   * 服务端只在这里避开曲库那一版，其余行为与正常投送一致。
+   */
+  async replayWithPlaceholder(params: { deviceIds?: string[]; streamUrl: string }) {
+    if (!String(params.streamUrl || '').trim()) throw new Error('缺少可投送的播放地址')
+    const config = loadConfig()
+    const results = await this.fanOut(params.deviceIds, 'play', async (client, deviceId, hardware) => {
+      const outcome = await client.playUrlDetailed(deviceId, params.streamUrl, hardware, {
+        keepLight: config.keepLight !== false,
+        disabledModels: config.disabledModels,
+        audioId: DEFAULT_MUSIC_AUDIO_ID,
+        lyricsMode: false,
+      })
+      if (outcome.ok) {
+        const line = `[XiaoAi] 补救重发 ${outcome.via}（）audioID=${DEFAULT_MUSIC_AUDIO_ID} → ${deviceId}`
+        console.log(line)
+        syncLog.warn(line)
+      }
+      return { ok: outcome.ok, error: outcome.error }
+    })
+    return { results, success: results.some(item => item.ok) }
+  }
+
+  /**
+   * 最后一级兜底：player_play_url 纯直链，完全不碰小米曲库。
+   * 触屏上会退回默认封面（没有封面歌词），但保证放的是我们这一路流。
+   */
+  async replayWithUrlMode(params: { deviceIds?: string[]; streamUrl: string }) {
+    if (!String(params.streamUrl || '').trim()) throw new Error('缺少可投送的播放地址')
+    const config = loadConfig()
+    const results = await this.fanOut(params.deviceIds, 'play', async (client, deviceId, hardware) => {
+      const outcome = await client.playUrlDetailed(deviceId, params.streamUrl, hardware, {
+        keepLight: config.keepLight !== false,
+        disabledModels: config.disabledModels,
+        forceUrlMode: true,
+      })
+      if (outcome.ok) {
+        // 这一条是「曲库路线彻底走不通」的铁证，必须能在日志里一眼看到
+        const line = `[XiaoAi] 补救重发 player_play_url（纯直链，放弃曲库封面） → ${deviceId}`
+        console.log(line)
+        syncLog.warn(line)
+      }
+      return { ok: outcome.ok, error: outcome.error }
+    })
+    return { results, success: results.some(item => item.ok) }
   }
 
   /** 播放内容自检：试听片段 / 播错歌 都记一条可读告警 */
