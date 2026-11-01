@@ -8453,6 +8453,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     isStale: () => lastXiaoAiPushAt !== pushAt,
                     getStatus: () => xiaoAiService.getStatus(guardDeviceId),
                     expectedDurationMs: Number(target.durationMs) || 0,
+                    // 本次实际下发的曲库 audioID：设备若还在报别的 id，说明推送没落地
+                    expectedAudioId: guardAudioId,
                     retry: async mode => {
                       if (mode === 'placeholder') {
                         await xiaoAiService.replayWithPlaceholder({ deviceIds: [guardDeviceId], streamUrl })

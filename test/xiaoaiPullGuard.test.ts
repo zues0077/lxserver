@@ -116,6 +116,71 @@ test('状态正常（不是曲库试听）时不打扰：宁可等慢启动', as
   assert.deepEqual(retried, [])
 })
 
+// ---- 2026-11-01 补判据：设备「干脆不动」类（soda 实测形态）----
+
+/** 汽水那次的真实形态：设备冻在上一首，不播不报错、时长还比本曲长 */
+const SODA_FROZEN = {
+  playing: false,
+  durationMs: 300329,
+  positionMs: 54000,
+  raw: { play_song_detail: { audio_id: 'OLDAUDIO0001', duration: 300329 } },
+}
+
+test('设备上报的 audio_id 与本次下发不一致 → 判为推送未生效', () => {
+  const r = detectLibraryPreview(
+    sample(SODA_FROZEN, false, 54000),
+    sample(SODA_FROZEN, false, 54000),
+    227000,
+    'NEWAUDIO0002',
+  )
+  assert.equal(r.hit, true)
+  assert.match(r.reason, /audio_id/)
+})
+
+test('设备上报时长明显长于本曲（在播上一首）→ 也判为在播其它曲目', () => {
+  // audio_id 拿不到（空）时，只能靠时长兜底
+  const noAudio = { playing: false, durationMs: 300329, positionMs: 54000, raw: { play_song_detail: {} } }
+  const r = detectLibraryPreview(
+    sample(noAudio, false, 54000),
+    sample(noAudio, false, 54000),
+    227000,
+    '',
+  )
+  assert.equal(r.hit, true)
+  assert.match(r.reason, /长于本曲/)
+})
+
+test('audio_id 一致且时长一致、只是还没起播 → 仍不判定（避免误伤）', () => {
+  const pending = {
+    playing: false,
+    durationMs: 227000,
+    positionMs: 0,
+    raw: { play_song_detail: { audio_id: 'SAME', duration: 227000 } },
+  }
+  const r = detectLibraryPreview(sample(pending, false), sample(pending, false), 227000, 'SAME')
+  assert.equal(r.hit, false)
+})
+
+test('设备没换曲（audio_id 不同）→ 守门触发补救重发', async () => {
+  const retried: string[] = []
+  let pulled = false
+  const action = await runPullGuard({
+    isPulled: () => pulled,
+    isStale: () => false,
+    getStatus: async () => SODA_FROZEN,
+    expectedDurationMs: 227000,
+    expectedAudioId: 'NEWAUDIO0002',
+    retry: async mode => {
+      retried.push(mode)
+      pulled = true
+    },
+    log: () => {},
+    delays: { probe: 0, gap: 0, after: 0 },
+  })
+  assert.equal(action, 'placeholder')
+  assert.deepEqual(retried, ['placeholder'])
+})
+
 test('期间已经切歌：直接放弃，不干扰新投送', async () => {
   const retried: string[] = []
   const action = await runGuard({ pulled: () => false, stale: () => true, status: VIP_STATUS, retried })

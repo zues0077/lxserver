@@ -13,7 +13,14 @@
  *   1. 设备上报时长明显短于本曲真实时长（播的是试听片段）
  *   2. 曲库把该 audioID 标成 unplayableCode=2（版权闸门拦下）
  *   3. 两次采样之间进度在推进（它确实在出声，但出的不是我们的流）
+ *   4. 设备上报的 audio_id 与本次下发的不一致（推送没落地，还在播上一首/别的曲目）
+ *   5. 设备上报时长明显**长于**本曲（在播上一首或别的版本）
  * 只有命中证据才动手，宁可慢一秒也不误伤正常播放。
+ *
+ * 2026-11-01 补 4/5：汽水（soda）投送实测「设备干脆不动」——状态一直冻在
+ * `Theme Of Loft / 300329ms / paused`，没进度、没 unplayableCode、时长也不比本曲短，
+ * 原 1~3 三类判据全拿不到证据，守门静默放弃。加 4/5 后这类「推了但设备没换曲」
+ * 也能被判出来（见手册 P-1045）。
  */
 
 const defaultSleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -52,15 +59,18 @@ export interface LibraryPreviewSignal {
  * @param first  第一次采样
  * @param second 约 1 秒后的第二次采样（没有就传第一次）
  * @param expectedDurationMs 本曲真实时长（服务端解析出来的）
+ * @param expectedAudioId 本次投送给设备的曲库 audioID（没带就传空，4/5 判据自动跳过）
  */
 export function detectLibraryPreview(
   first: StatusSample,
   second: StatusSample,
   expectedDurationMs: number,
+  expectedAudioId = '',
 ): LibraryPreviewSignal {
   if (!second || second.pulled) return { hit: false, reason: '' }
 
   const expected = Number(expectedDurationMs) || 0
+  const sent = String(expectedAudioId || '')
   // 1) 时长明显短一截 → 播的是曲库试听（留 20 秒余量，避免元数据误差误判）
   if (second.durationMs > 0 && expected > 0 && second.durationMs + 20000 < expected) {
     return {
@@ -77,6 +87,21 @@ export function detectLibraryPreview(
   if (delta >= 300) {
     return { hit: true, reason: `设备进度推进 ${delta}ms 但未拉取本机流` }
   }
+  // 4) 设备上报的 audio_id 与本次下发的不一致 → 这次推送没落地，设备还在播别的曲目。
+  //    这是「设备干脆不动」类故障最硬的证据（soda 实测：一直报上一首的 id）。
+  if (sent && second.audioId && second.audioId !== sent) {
+    return {
+      hit: true,
+      reason: `设备上报 audio_id=${second.audioId}，本次下发 ${sent}（投送未生效，仍在播其它曲目）`,
+    }
+  }
+  // 5) 时长明显**长于**本曲（30 秒余量）→ 同样是在播别的曲目（上一首往往更长/更短都算）
+  if (second.durationMs > 0 && expected > 0 && second.durationMs > expected + 30000) {
+    return {
+      hit: true,
+      reason: `设备上报 ${Math.round(second.durationMs / 1000)}s 长于本曲 ${Math.round(expected / 1000)}s（仍在播其它曲目）`,
+    }
+  }
   return { hit: false, reason: '' }
 }
 
@@ -91,6 +116,8 @@ export interface PullGuardDeps {
   getStatus: () => Promise<any>
   /** 本曲真实时长（毫秒），用于识别试听片段 */
   expectedDurationMs: number
+  /** 本次下发给设备的曲库 audioID，用于判断设备是不是还在播别的曲目（可选） */
+  expectedAudioId?: string
   /** 补救重发：placeholder=换默认封面 audioID，url=纯直链模式 */
   retry: (mode: 'placeholder' | 'url') => Promise<void>
   log: (message: string) => void
@@ -108,6 +135,8 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
   const gap = deps.delays?.gap ?? 900
   const after = deps.delays?.after ?? 5000
   const sleep = defaultSleep
+  /** 一次守门只记一行「证据不足」现场，避免三级探测刷屏 */
+  let loggedUnknown = false
 
   const readSample = async (): Promise<StatusSample | null> => {
     try {
@@ -129,8 +158,20 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
     if (deps.isStale()) return 'unknown'
     if (deps.isPulled()) return 'pulled'
     const second = (await readSample()) || first
-    const signal = detectLibraryPreview(first, second, deps.expectedDurationMs)
-    if (!signal.hit) return 'unknown'
+    const signal = detectLibraryPreview(first, second, deps.expectedDurationMs, deps.expectedAudioId)
+    if (!signal.hit) {
+      // 排障用：拿不到「在播别的曲目」的证据时留一行现场，否则这类「设备不动」永远无法复盘。
+      // 一次守门只记一行，避免三级探测把日志刷满。
+      if (!second.pulled && !loggedUnknown) {
+        loggedUnknown = true
+        deps.log(
+          `[XiaoAi] 守门未判定：未拉流但证据不足`
+          + `（playing=${second.playing} pos=${second.positionMs} dur=${second.durationMs}`
+          + ` audio=${second.audioId || '-'} 期望 audio=${deps.expectedAudioId || '-'}）`,
+        )
+      }
+      return 'unknown'
+    }
     deps.log(`[XiaoAi] 投送后未拉取本机流：${signal.reason}`)
     return 'preview'
   }
