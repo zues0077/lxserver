@@ -3259,8 +3259,12 @@ async function enterArtist(id, source = 'wy', order = 'hot', tab = 'songs', isBa
     if (tab === 'albums' && !ARTIST_ALBUM_SOURCES.includes(source)) tab = 'songs';
     const typeEl = document.getElementById('search-type');
 
-    // 记录返回状态 (仅当从非歌手列表进入 且 不是从子页面返回时)
-    if (!isBack && document.getElementById('artist-detail-header') === null) {
+    // 记录返回状态（仅当从搜索/列表进入、且不是从子页面返回时）
+    // artist-detail-header 是常驻 DOM（默认 hidden），不能靠「是否存在」判断，
+    // 要用「是否可见」——可见说明正停在歌手页（artist→artist 切换），此时不另存搜索上下文。
+    const artistHeaderEl = document.getElementById('artist-detail-header');
+    const comingFromArtist = artistHeaderEl && !artistHeaderEl.classList.contains('hidden');
+    if (!isBack && !comingFromArtist && !window.tempAlbumContext) {
         lastSearchType = typeEl ? typeEl.value : 'singer';
         lastSearchResultList = [...(window.viewingPlaylist || [])];
         currentArtistInfo = null; // 重置缓存
@@ -4745,20 +4749,26 @@ window.searchSingerByName = navigateToAlbumArtist;
 async function enterAlbum(id, source = 'wy', initialInfo = null) {
     // 保存进入专辑前的上下文，如果是从歌手页进入，则记录歌手 ID
     const artistHeader = document.getElementById('artist-detail-header');
-    if (artistHeader) {
+    // artist-detail-header 是常驻 DOM（默认 hidden）：只有「可见」时才代表我们正停在歌手页，
+    // 不能用「是否存在」判断，否则从搜索列表进专辑会被误判为来自歌手页（既错存 tempArtistContext，
+    // 又曾把常驻 DOM remove() 掉导致之后点歌手卡在转圈）。
+    const comingFromArtist = artistHeader && !artistHeader.classList.contains('hidden');
+    if (comingFromArtist) {
         window.tempArtistContext = {
             id: window.currentArtistId,
             source: window.currentArtistSource,
             tab: window.currentArtistTab || 'albums',
             order: window.currentArtistOrder || 'hot'
         };
-        artistHeader.remove(); // 进入专辑详情时移除歌手头部，保持界面整洁
+        hideArtistDetailHeader(); // 仅隐藏/清空，不要 remove()，保留常驻 DOM
     } else if (!window.tempAlbumContext) {
         window.tempArtistContext = null;
     }
 
     const typeEl = document.getElementById('search-type');
-    if (!artistHeader && !window.tempAlbumContext) {
+    // 从搜索/列表进专辑时保存搜索上下文，保证「返回」能恢复列表（含封面）；
+    // 来自歌手页（comingFromArtist）或嵌套专辑（tempAlbumContext）则不保存。
+    if (!comingFromArtist && !window.tempAlbumContext) {
         lastSearchType = typeEl ? typeEl.value : 'album';
         lastSearchResultList = [...(window.viewingPlaylist || [])];
     }
