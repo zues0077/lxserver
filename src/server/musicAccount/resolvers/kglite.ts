@@ -208,6 +208,23 @@ function pickAlbumId(songInfo: any): number {
   return Number.isFinite(n) && n > 0 ? n : 0
 }
 
+/**
+ * 概念版搜索接口的封面字段写法不统一（大驼峰 Image / 小写 img / trans_param.union_cover），
+ * 有的还带 `{size}` 占位。这里统一取一次；取不到就留空，由上层按 hash 从酷狗主站结果回填。
+ * （2026-11-01：此前这里写死 `img: ''`，导致概念版搜索结果整屏无封面）
+ */
+function pickSearchImg(it: any): string {
+  const raw = it?.Image
+    || it?.image
+    || it?.img
+    || it?.AlbumImage
+    || it?.album_image
+    || it?.trans_param?.union_cover
+    || it?.trans_param?.album_image
+    || ''
+  return String(raw).replace('/{size}/', '/240/').replace('{size}', '240')
+}
+
 /** privilege 结果缓存：同一首歌连续播放（切音质、重试）不用反复打接口 */
 interface PrivCacheEntry {
   at: number
@@ -1055,7 +1072,7 @@ export async function searchSongs(
       hash,
       songmid: hash,
       interval: dur,
-      img: '',
+      img: pickSearchImg(it),
       quality: '128k',
     }
   })

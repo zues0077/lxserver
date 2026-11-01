@@ -3039,7 +3039,7 @@ function renderSingerResults(list) {
             <!-- Avatar Container -->
             <div class="relative mb-3 md:mb-4">
                 <div class="w-20 h-20 sm:w-24 sm:h-24 md:w-28 md:h-28 rounded-full overflow-hidden shadow-md ring-4 ring-black/5 dark:ring-white/5 group-hover:ring-emerald-500/40 group-hover:shadow-emerald-500/20 transition-all duration-500">
-                    <img src="${singer.picUrl || '/music/assets/logo.svg'}"
+                    <img src="${singer.picUrl || singer.avatar || singer.img || '/music/assets/logo.svg'}"
                          onerror="this.src='/music/assets/logo.svg'"
                          class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500">
                 </div>
@@ -4837,6 +4837,10 @@ async function enterAlbum(id, source = 'wy', initialInfo = null) {
         const artistId = data.artistId || data.singerId || data.singermid || data.info?.artistId || data.info?.singerId || initialInfo?.artistId || initialInfo?.singerId || firstSong.artistId || firstSong.singerId || firstSong.meta?.artistId;
         const publishTime = data.publishTime || data.pubTime || data.aDate || data.info?.publishTime || data.info?.pubTime || initialInfo?.publishTime || firstSong.publishTime || firstSong.meta?.publishTime || '';
         const picUrl = data.picUrl || data.img || data.cover || data.info?.picUrl || data.info?.img || initialInfo?.picUrl || initialInfo?.img || getImgUrl(firstSong) || '/music/assets/logo.svg';
+        // 有的平台专辑歌曲列表压根不带封面（酷我实测 0/13）：用专辑封面兜底，避免整页无图
+        if (picUrl && picUrl !== '/music/assets/logo.svg') {
+            for (const s of songList) { if (!s.img) s.img = picUrl }
+        }
         const desc = data.desc || data.description || data.info?.desc || data.info?.description || initialInfo?.desc || '';
         const songCount = data.total || data.count || songList.length;
 
@@ -11988,7 +11992,7 @@ function renderLibraryArtists(list, isDislike = false) {
         div.innerHTML = `
             <div class="relative mb-2 md:mb-3">
                 <div class="w-16 h-16 sm:w-24 sm:h-24 md:w-32 md:h-32 rounded-full overflow-hidden shadow-sm">
-                    <img src="${singer.picUrl || '/music/assets/logo.svg'}"
+                    <img src="${singer.picUrl || singer.avatar || singer.img || '/music/assets/logo.svg'}"
                          onerror="this.src='/music/assets/logo.svg'"
                          class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500">
                 </div>

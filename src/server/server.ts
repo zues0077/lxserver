@@ -7584,6 +7584,24 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               ? await musicAccount.kglite.searchSongs(name, pageNo, pageSize, cookie)
               : await musicAccount.kglite.searchKgliteAll(name, cookie)
             const list = requestedLimit > 0 ? data.list.slice(0, requestedLimit) : data.list
+            // 概念版搜索接口本身不给封面：用同一关键词的酷狗主站搜索结果按 hash 回填
+            // （酷狗与概念版共用 FileHash，命中率高）。失败不影响搜索本身。
+            if (list.some((s: any) => !s.img)) {
+              try {
+                const kgList = await searchByPlatform('kg', name)
+                const imgByHash = new Map<string, string>()
+                for (const it of kgList) {
+                  const h = String(it?.songmid || it?.hash || '').toLowerCase()
+                  if (h && it?.img) imgByHash.set(h, String(it.img))
+                }
+                for (const s of list as any[]) {
+                  if (s.img) continue
+                  const h = String(s.hash || s.songmid || '').toLowerCase()
+                  const img = imgByHash.get(h)
+                  if (img) s.img = img
+                }
+              } catch { /* 回填失败就保持无封面，不阻塞搜索 */ }
+            }
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({
               list,
