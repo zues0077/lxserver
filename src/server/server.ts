@@ -38,6 +38,7 @@ import { getActiveHostActivities } from './sourceActivity'
 import { setUserAuthVerifier } from './userAuth'
 import * as customSourceHandlers from './customSourceHandlers'
 import * as fileCache from './fileCache'
+import { withCacheBrowseLocation } from './cacheBrowseLocation'
 import { checkPersistentVolumes } from './volumeCheck'
 import { ensureWritableDir } from '@/utils/fsSafePath'
 import * as customMusicManager from './customMusicManager'
@@ -2388,6 +2389,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
     const ip = getIP(req)
     accessLog.info(`${req.method} ${req.url} from ${ip}`)
+    // 浏览位置挂在 ALS 上（#461）：本地音乐页切换「根目录/数据目录」只看不写配置
+    return await withCacheBrowseLocation(req.url || '/', async () => {
     // console.log(req.url)
     const urlObj = new URL(req.url ?? '', `http://${req.headers.host}`)
     const pathname = urlObj.pathname
@@ -12239,6 +12242,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
     if (!code) return
     res.writeHead(code)
     res.end(msg)
+    })
   })
 
   wss = new WebSocketServer({

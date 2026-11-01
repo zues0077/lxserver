@@ -12,6 +12,7 @@ import { buildLyrics, parseLyrics } from '../utils/lrcTool'
 import { formatPlayTime } from '../utils/common'
 import { judgeAudioMismatch, judgeMetadataMismatch } from '@/utils/audioGuard'
 import { verifyTrackOrigin, canVerifyOrigin } from './sourceVerify'
+import { getCacheBrowseLocation } from './cacheBrowseLocation'
 import { buildStreamHeaders } from './utils/streamHeaders'
 import { syncLog } from '@/utils/log4js'
 import { getUserSpace } from '../user'
@@ -104,6 +105,9 @@ const CACHE_LIST_SYNC_TTL = 30 * 1000
 const cacheListSyncState: Map<string, { lastSync: number, pending?: Promise<void> }> = new Map()
 
 export const getUserCacheLocation = (username?: string): string => {
+    // 浏览态优先：本地音乐页切换「根目录/数据目录」只看不写（#461）
+    const browseLocation = getCacheBrowseLocation()
+    if (browseLocation) return browseLocation
     const normalizedUsername = normalizeUsername(username)
     if (userCacheLocationMap.has(normalizedUsername)) {
         return userCacheLocationMap.get(normalizedUsername)!
