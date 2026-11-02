@@ -358,10 +358,6 @@ export function getSodaEntitlementVerdict(): { at: number; trackId: string; leve
   return { ...lastPreviewVerdict, level: 'preview' }
 }
 
-/** 是否配置了签名器地址 / 是否在线 —— 体检时用来区分「缺签名器」和「签名器在线但权益不认」 */
-export function signerCapability(): { configured: boolean } {
-  return { configured: signer.isConfigured() }
-}
 
 const streamKeyByUrl = new Map<string, string>()
 const streamKeyByBitrate = new Map<string, string>()
