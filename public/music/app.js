@@ -6147,10 +6147,13 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
         }
         const searchSources = primarySources.filter(s => !coveredSources.has(s));
 
-        // 账号通道候选：汽水有匿名流（无账号也能出非版权曲整曲），概念版纯账号。
+        // 账号通道候选：酷狗概念版纯账号；汽水有账号才进这一档。
+        // 汽水的**匿名流**版权曲只给 60 秒试听，不能和账号通道并列 —— 单独放到 B站之后的最末档。
         const accountSources = [];
-        if (song.source !== 'soda' && capSources.soda && (capSources.soda.account || capSources.soda.anonymous)) {
-            accountSources.push('soda');
+        const anonymousOnlySources = [];
+        if (song.source !== 'soda' && capSources.soda) {
+            if (capSources.soda.account) accountSources.push('soda');
+            else if (capSources.soda.anonymous) anonymousOnlySources.push('soda');
         }
         if (song.source !== 'kglite' && capSources.kglite && capSources.kglite.account) {
             accountSources.push('kglite');
@@ -6166,7 +6169,7 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
             : [];
 
         // 4. 一个候选都没有：说明既没装支持这些平台的自定义源，也没有可用的账号通道，缓存也空
-        if (searchSources.length === 0 && accountSources.length === 0 && fallbackSources.length === 0 && cachedAll.length === 0) {
+        if (searchSources.length === 0 && accountSources.length === 0 && fallbackSources.length === 0 && anonymousOnlySources.length === 0 && cachedAll.length === 0) {
             console.log(`[AutoSource] 换源跳过：没有其他可用平台。当前源: ${song.source}`);
             if (!isSilent) showError('未找到可用平台下的对应歌曲');
             return [];
@@ -6211,6 +6214,16 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
             if (!isSilent && fallbackSources.length > 0) showInfo('仍在尝试 B站...');
             const fallbackResults = (await Promise.all(fallbackSources.map(searchOne))).flat();
             matches = rankSourceCandidates([...cachedVideo, ...fallbackResults], song, { memberSources });
+        }
+
+        // 四级（最后）：汽水匿名通道。版权曲匿名只给 60 秒试听，
+        // 宁可听 B站 的正确视频音轨，也不要听 60 秒就断的试听 —— 所以排在 B站 之后。
+        if (matches.length === 0 && anonymousOnlySources.length > 0) {
+            console.log(`[AutoSource] 前面各档全未命中，最后尝试匿名通道: ${anonymousOnlySources.join(',')}`);
+            if (!isSilent) showInfo('最后尝试汽水匿名通道（可能仅 60 秒试听）...');
+            const anonResults = (await Promise.all(anonymousOnlySources.map(searchOne))).flat();
+            const anonCached = cachedAll.filter(c => anonymousOnlySources.includes(c.source));
+            matches = rankSourceCandidates([...anonCached, ...anonResults], song, { memberSources });
         }
 
         for (const m of matches) {
@@ -7283,6 +7296,19 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
     const effectiveResumeTime = typeof savedResumeTime === 'number' ? savedResumeTime : (state.savedResumeTime || 0);
     state.savedResumeTime = effectiveResumeTime;
 
+    // 失败类型决定先做什么（只在第一次进入时重排一次，避免来回跳）：
+    //   播放中失败（已出声后卡住/解码错/断流）→ 先降音质：同曲同平台最保真，且只多一次取链；
+    //   取链阶段失败（版权/下架/未找到支持平台）→ 降音质对它没用，先换平台。
+    if (!state.stageAdjusted && Array.isArray(state.steps)) {
+        state.stageAdjusted = true;
+        if (state.failureStage === 'playback' && state.steps.includes('degrade')) {
+            state.steps = ['degrade', ...state.steps.filter(s => s !== 'degrade')];
+            console.log('[Recovery] 播放中失败 → 先降音质，再换平台');
+        } else if (state.failureStage === 'resolve') {
+            console.log('[Recovery] 取链阶段失败 → 直接换平台（降音质无效）');
+        }
+    }
+
     const currentPlatform = state.currentSong?.source || state.originalSong?.source;
 
     // 1. 记录当前失败的音源脚本
@@ -7583,6 +7609,8 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
             triedApiSourcesByPlatform: { [song.source]: [] },
             currentApiSourceName: '',
             samePlatformExhausted: false,
+            failureStage: 'resolve',
+            stageAdjusted: false,
             steps: steps,
             currentStepIndex: 0,
             thisRequestId: thisRequestId
@@ -7823,6 +7851,7 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
                 localStorage.removeItem(`lx_url_${cleanSongData(playbackSong).id}_${currentQuality || targetQuality}`);
             } catch (e) { }
             const mediaError = audio.error || new Error('媒体播放失败');
+            if (currentRecoveryState) currentRecoveryState.failureStage = 'playback';
             void runRecoveryFlow(mediaError, savedTime);
         };
         audio.addEventListener('error', currentPlaybackErrorHandler, { once: true });
@@ -7941,6 +7970,7 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
                 playbackRecoveryTriggeredForRequestId = thisRequestId;
                 console.error('[Player] Playback failed:', playError);
                 const savedTime = Math.max(audio.currentTime || 0, lastKnownPlaybackTime || 0);
+                if (currentRecoveryState) currentRecoveryState.failureStage = 'playback';
                 await runRecoveryFlow(playError, savedTime);
             }
         }
@@ -7954,6 +7984,7 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
 
         if (currentRecoveryState && currentRecoveryState.thisRequestId === thisRequestId && !noPlay) {
             const savedTime = Math.max(audio.currentTime || 0, lastKnownPlaybackTime || 0);
+            if (currentRecoveryState) currentRecoveryState.failureStage = 'resolve';
             await runRecoveryFlow(error, savedTime);
         } else {
             setPlayerStatus('播放失败');
@@ -8862,6 +8893,7 @@ function handlePlaybackStallOrWait() {
             } else if (isOnline && currentPlayingSong && shouldAutoRecoverPlayback) {
                 console.warn('[Player] 服务端在线但音频持续卡死超时，触发播放恢复重试');
                 shouldAutoRecoverPlayback = false;
+                if (currentRecoveryState) currentRecoveryState.failureStage = 'playback';
                 void runRecoveryFlow(new Error('音频缓冲超时停滞'), savedTime);
             }
         }, 4000);

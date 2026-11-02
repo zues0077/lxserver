@@ -2125,7 +2125,8 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
       },
     })
   }
-  if (songInfo.source !== 'soda' && isPlatformUsableForSwitch('soda', username, caps)) {
+  // 汽水：只有**账号**可用才进这一档。匿名通道版权曲只给 60 秒试听，放到 B站 之后的最后一档。
+  if (songInfo.source !== 'soda' && caps?.soda?.account === true) {
     switchSearchers.push({
       source: 'soda',
       run: async () => {
@@ -2208,6 +2209,28 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
         }
       } catch (err: any) {
         console.warn(`[自动换源] B站兜底搜索失败: ${err?.message || err}`)
+      }
+    }
+
+    // 最后一档：汽水匿名通道（账号不可用、且前面全都没匹配时才用）。
+    // 版权曲匿名只给 60 秒试听，所以宁可先试 B站 的正确视频音轨，再落到这里。
+    if (out.length === 0 && songInfo.source !== 'soda'
+      && caps?.soda?.anonymous === true && caps?.soda?.account !== true) {
+      try {
+        const sodaKeyword = `${songInfo.name || ''} ${songInfo.singer || ''}`.trim()
+        if (sodaKeyword) {
+          const sodaData = await extraSources.searchSongs('soda', sodaKeyword, 1, 10)
+          const bestSoda = (Array.isArray(sodaData?.list) ? sodaData.list : [])
+            .map((item: any) => ({ candidate: { ...item, source: 'soda' }, score: getSongMatchScore(item, songInfo) }))
+            .filter((it: any) => it.score >= 12)
+            .sort((a: any, b: any) => b.score - a.score)[0]
+          if (bestSoda) {
+            out.push(bestSoda.candidate)
+            console.log(`[自动换源] 仅剩匿名汽水，最后兜底：${songInfo.name} → ${bestSoda.candidate.id}（可能仅 60 秒试听）`)
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[自动换源] 汽水匿名兜底搜索失败: ${err?.message || err}`)
       }
     }
 
