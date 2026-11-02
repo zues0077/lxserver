@@ -10942,8 +10942,21 @@ function resetLyricOffset() {
     applyLyricUpdate();
 }
 
+/**
+ * 滚轮精调（0.1s 一档，Shift + 滚轮 1s 一档）。
+ * 外层歌词容器也有 onwheel（手动滚动歌词），这里必须拦住冒泡，
+ * 否则调偏移会顺带把歌词滚走。
+ */
+function handleLyricOffsetWheel(e) {
+    if (!e) return;
+    try { e.preventDefault(); e.stopPropagation(); } catch (_) { }
+    const step = e.shiftKey ? 1 : 0.1;
+    adjustLyricOffset(e.deltaY < 0 ? step : -step);
+}
+
 window.adjustLyricOffset = adjustLyricOffset;
 window.resetLyricOffset = resetLyricOffset;
+window.handleLyricOffsetWheel = handleLyricOffsetWheel;
 
 // 辅助函数：根据当前设置应用歌词更新
 function applyLyricUpdate() {

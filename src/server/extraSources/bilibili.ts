@@ -1535,13 +1535,63 @@ const normalizeAvatar = (raw: any): string => {
 }
 
 async function fetchAid(bvid: string, cookie: string): Promise<number> {
-  const resp = await request<any>(`${VIEW_API}?bvid=${encodeURIComponent(bvid)}`, {
-    headers: await headersWithCookie(cookie),
-    timeout: 10000,
-  })
-  const aid = Number(resp?.body?.data?.aid || 0)
-  if (!aid) throw new Error(`B站取 aid 失败（${bvid}）：${resp?.body?.message || '未知'}`)
-  return aid
+  // 接口优先：view 接口在机房 IP 上匿名可访问（2026-11-02 容器内实测 code=0）。
+  // ⚠️ 别以为 BV→aid 能算：2023 之后新视频的 aid 已经到 15 位（如 117493377010759），
+  // 经典 base58 换算法只覆盖老号段，算出来是错的，会把评论错接到别的视频上。
+  try {
+    const resp = await request<any>(`${VIEW_API}?bvid=${encodeURIComponent(bvid)}`, {
+      headers: await headersWithCookie(cookie),
+      timeout: 10000,
+    })
+    const aid = Number((resp?.body as any)?.data?.aid || 0)
+    if (aid > 0) return aid
+    const body: any = resp?.body
+    const snippet = typeof body === 'string' ? String(body).replace(/\s+/g, ' ').slice(0, 80) : ''
+    console.warn(
+      `[bili] view 接口未返回 aid（${bvid}）：HTTP ${resp?.statusCode || '-'}` +
+      `${body?.message ? ` ${body.message}` : ''}${snippet ? ` ${snippet}` : ''}，改用本地换算`,
+    )
+  } catch (e: any) {
+    console.warn(`[bili] view 接口异常（${bvid}）：${e?.message || e}，改用本地换算`)
+  }
+
+  // 兜底本地换算（只对老号段可信，新号段会算错，所以只当最后手段）
+  const local = bvidToAid(bvid)
+  if (local > 0 && local < 1e10) {
+    console.warn(`[bili] aid 由本地换算得到 ${local}（${bvid}），新号段视频可能不准`)
+    return local
+  }
+  throw new Error(`B站取 aid 失败（${bvid}）：接口未返回且本地换算不适用`)
+}
+
+/**
+ * BV 号 → aid（纯本地换算，零请求），**仅覆盖老号段**。
+ *
+ * BV 号是把 aid 混淆后用 base58 表重排得到的：av = (base58(BV) - add) ^ xor。
+ * 已知对：BV1xx411c7mD → 2、BV17x411w7KC → 170001。
+ *
+ * ⚠️ 2023 年后新视频的 aid 已到 15 位（BV17vHA6aEm9 的真实 aid = 117493377010759），
+ * 经典公式只对 32 位范围内有效，新号段会算出完全错误的值 —— 评论会错接到别的视频，
+ * 所以这里只当 view 接口失败时的兜底，并且调用方会再卡一道 `aid < 1e10`。
+ */
+const BVID_TABLE = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF'
+const BVID_INDEX: Record<string, number> = {}
+for (let i = 0; i < BVID_TABLE.length; i++) BVID_INDEX[BVID_TABLE[i]] = i
+const BVID_SWAP = [11, 10, 3, 8, 4, 6]
+const BVID_XOR = 177451812
+const BVID_ADD = 8728348608
+
+export function bvidToAid(bvid: string): number {
+  const id = String(bvid || '').trim()
+  if (!/^BV[0-9A-Za-z]{10}$/.test(id)) return 0
+  let sum = 0
+  for (let i = 0; i < 6; i++) {
+    const digit = BVID_INDEX[id[BVID_SWAP[i]]]
+    if (digit === undefined) return 0
+    sum += digit * Math.pow(58, i)
+  }
+  const aid = ((Math.round(sum - BVID_ADD) ^ BVID_XOR) >>> 0)
+  return aid > 0 ? aid : 0
 }
 
 /**
