@@ -6849,6 +6849,35 @@ input:-webkit-autofill:active {
     border: 1px solid rgba(127, 127, 127, 0.18);
     background: rgba(127, 127, 127, 0.05);
     padding: 0.3rem 0.5rem;
+    /* 概念版「昨日新增会员」气泡的定位基准 */
+    position: relative;
+}
+
+/* 概念版领取账本：鼠标停在这个账号行上才浮出「昨日新增 X 小时」。
+   不做常驻徽标 —— 一行里已经有名字 + 徽章 + 剩余天数 + 两个按钮，
+   再塞一个数字会把「剩 N 天」挤成两行；气泡不占高度，5 个号的卡片也不会变长。 */
+.music-acc-acct[data-gain-tip]:hover::after {
+    content: attr(data-gain-tip);
+    position: absolute;
+    right: 0.35rem;
+    bottom: calc(100% + 6px);
+    z-index: 40;
+    padding: 0.26rem 0.55rem;
+    border-radius: 6px;
+    background: #1f2937;
+    color: #f8fafc;
+    font-size: 0.72rem;
+    font-weight: 500;
+    line-height: 1.5;
+    white-space: nowrap;
+    pointer-events: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+/* 第一个号上面就是卡片标题，气泡改到下方，避免盖住标题 */
+.music-acc-acct:first-child[data-gain-tip]:hover::after {
+    bottom: auto;
+    top: calc(100% + 6px);
 }
 
 .music-acc-acct.is-primary {

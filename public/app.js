@@ -5500,7 +5500,6 @@ class App {
                            </div>
                        </div>
                        <div class="music-acc-auto-tip" id="kglite-next-run"></div>
-                       <div class="music-acc-auto-tip" id="kglite-claim-report"></div>
                    </div>`
                 : '';
 
@@ -5877,54 +5876,64 @@ class App {
     }
 
     /**
-     * 每日领取账本：第二天把「昨天一共新增了多久会员」提示出来。
+     * 每日领取账本：鼠标停在某个账号那一行时，浮出这个号「昨天新增了多久会员」。
      *
      * 领取是凌晨 6 点起定时跑的，那时候界面根本没开，用户只能在第二天从日志里翻
-     * 「获得 N 小时」。服务端把结果按天落盘（kglite-claim-ledger.json），这里只做展示：
-     *   - 有昨天的记录 → 「昨日新增会员 X 小时（日期，N 个号）」，并在当天首次进入时弹一次提示
-     *   - 昨天没记录但有今天的 → 只写「今日新增」
-     *   - 都没有 → 留空，不占位置
+     * 「获得 N 小时」。服务端把结果按天落盘（kglite-claim-ledger.json），这里按账号 id
+     * 一一对上，写进行上的 data-gain-tip，由 CSS 的 :hover::after 负责画气泡
+     * （不占常驻高度，也不用管 5 个号把卡片撑长）。
+     * 昨天没有这个号的记录、但今天有 → 退一步显示「今日」，免得当天刚领完什么都看不到。
      */
-    renderKugouLiteClaimReport(report) {
-        const el = document.getElementById('kglite-claim-report');
-        if (!el) return;
-        const hoursText = (n) => {
-            const h = Math.round((Number(n) || 0) * 10) / 10;
-            if (h <= 0) return '0 小时';
-            // 24 小时正好一天、48 小时两天，用「天」更好读；零头仍按小时写
-            if (h >= 24 && h % 24 === 0) return `${h / 24} 天（${h} 小时）`;
-            return `${h} 小时`;
+    renderKugouLiteClaimGains(report) {
+        const byId = (day) => {
+            const m = {};
+            ((day && day.accounts) || []).forEach(a => {
+                if (a && a.id) m[a.id] = a;
+            });
+            return m;
         };
-        const detail = (day) => (day.accounts || [])
-            .map(a => `${a.label}：+${a.gainedHours} 小时${a.rounds > 1 ? `（${a.rounds} 轮）` : ''}`)
-            .join('\n');
         const y = report && report.yesterday;
         const t = report && report.today;
+        const yMap = byId(y);
+        const tMap = byId(t);
+        // 24 的整数倍写「天」，其余写小时；只保留一位小数，别出现 7.999999
+        const hoursText = (n) => {
+            const h = Math.round((Number(n) || 0) * 10) / 10;
+            if (h >= 24 && h % 24 === 0) return `${h / 24} 天`;
+            return `${h} 小时`;
+        };
 
-        if (y && y.totalHours > 0) {
-            const accts = (y.accounts || []).length;
-            el.textContent = `昨日新增会员 ${hoursText(y.totalHours)}｜${String(y.date).slice(5)} · ${accts} 个号`
-                + (t && t.totalHours > 0 ? ` · 今日已新增 ${hoursText(t.totalHours)}` : '');
-            el.title = detail(y) || '';
-            this._kgliteReportToast(y, hoursText(y.totalHours));
-            return;
-        }
-        if (t && t.totalHours > 0) {
-            el.textContent = `今日新增会员 ${hoursText(t.totalHours)}｜${(t.accounts || []).length} 个号`;
-            el.title = detail(t) || '';
-            return;
-        }
-        el.textContent = '';
-        el.title = '';
+        document.querySelectorAll('.music-acc-acct').forEach(row => {
+            if (!row.dataset) return;
+            const id = row.dataset.itemId;
+            const yHit = id ? yMap[id] : null;
+            const tHit = id ? tMap[id] : null;
+            const hit = (yHit && yHit.gainedHours > 0) ? yHit : ((tHit && tHit.gainedHours > 0) ? tHit : null);
+            if (!hit) {
+                delete row.dataset.gainTip;
+                return;
+            }
+            const isToday = hit === tHit;
+            const date = String(((isToday ? t : y) || {}).date || '').slice(5);
+            row.dataset.gainTip = `${isToday ? '今日已新增' : '昨日新增'} ${hoursText(hit.gainedHours)}`
+                + (date ? ` · ${date}` : '')
+                + (hit.rounds > 1 ? ` · ${hit.rounds} 轮` : '');
+        });
+
+        const yList = (y && y.accounts || []).filter(a => a && a.gainedHours > 0);
+        if (yList.length) this._kgliteReportToast(y, yList, hoursText);
     }
 
     /** 同一天只弹一次：面板每次刷新都会重跑渲染，不拦住会一直弹 */
-    _kgliteReportToast(day, hoursLabel) {
+    _kgliteReportToast(day, list, hoursText) {
         try {
             const key = `kglite-report-${day.date}`;
             if (localStorage.getItem(key)) return;
             localStorage.setItem(key, '1');
-            showSuccess(`酷狗概念版：昨天共新增会员 ${hoursLabel}，可在账号卡片查看明细`);
+            // 逐号列出，不给总数：用户看的是「哪个号涨了多少」，不是合计
+            const parts = list.slice(0, 3).map(a => `${a.label || '账号'} +${hoursText(a.gainedHours)}`);
+            const more = list.length > 3 ? ` 等 ${list.length} 个号` : '';
+            showSuccess(`酷狗概念版 · 昨天新增：${parts.join('、')}${more}`);
         } catch (e) { /* localStorage 不可用时静默：只是少一次弹出提示 */ }
     }
 
@@ -5977,7 +5986,7 @@ class App {
             const res = await this.request('/api/music/accounts/kglite/vip');
             const d = res?.data || {};
             fillSettings(d);
-            this.renderKugouLiteClaimReport(d.claimReport);
+            this.renderKugouLiteClaimGains(d.claimReport);
 
             // 后台还在跑「全部领取」：刷新页面/切回来也能接着看结果，不用重新点
             if (d.claimAll && d.claimAll.running && !this._kgliteClaimPolling) {
