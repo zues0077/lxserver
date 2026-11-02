@@ -18,6 +18,28 @@ const CUSTOM_SOURCE_REQUEST_MAX_MS = (() => {
     const raw = Number(process.env.CUSTOM_SOURCE_REQUEST_MAX_MS)
     return Number.isFinite(raw) && raw >= 5000 ? Math.round(raw) : 30000
 })()
+
+/**
+ * 自定义源单次响应体的硬上限（字节，默认 8MB，CUSTOM_SOURCE_MAX_BODY_MB 可调）。
+ *
+ * 实测依据：246 上一轮音源巡检（40 源 / 146 平台）期间，堆内存从常态 225MB 冲到 **979MB**，
+ * 5 秒内触发 60 次 GC，事件循环连续停转 5.7s / 4.9s —— 卡顿归因给出的嫌疑都是
+ * 「响应刚回来」的音源。根源是 vm2 边界要把响应体整份 JSON.parse + decontextify 深拷贝，
+ * 一份几十 MB 的响应在 NAS 的弱 CPU 上就是数秒同步阻塞 + 双份常驻内存。
+ *
+ * 音乐接口（搜索/取链/歌词）正常响应都在几百 KB 以内，上 MB 的多半是源站错误页、
+ * 整站 JS bundle 或脚本自己拼的大对象 —— 这些内容交给脚本也只会被当成异常数据。
+ * 因此超限直接以错误回调脚本（脚本按「取链失败」处理，走它自己的重试/换源），
+ * 既保住事件循环，也把内存尖峰掐在解析之前。
+ */
+const CUSTOM_SOURCE_MAX_BODY_BYTES = (() => {
+    const raw = Number(process.env.CUSTOM_SOURCE_MAX_BODY_MB)
+    const mb = Number.isFinite(raw) && raw > 0 ? raw : 8
+    return Math.round(mb * 1024 * 1024)
+})()
+/** 超大响应告警的节流窗口：同一音源一分钟内只记一条，避免刷屏 */
+const OVERSIZE_LOG_WINDOW_MS = 60 * 1000
+const oversizeLoggedAt = new Map<string, number>()
 import {
     acquireRequestSlot,
     getActivitySnapshot,
@@ -138,12 +160,55 @@ function decontextify(obj: any): any {
 // 最长连续阻塞被切成约等于「单次 decontextify 耗时」的小段，事件循环不再被长时间卡死。
 // 语义保持不变：回调仍会执行，槽位仍等回调结束才归还。
 let dqTail: Promise<void> = Promise.resolve()
-function dqEnqueue(task: () => void): void {
+
+/** 单条响应处理（JSON.parse + decontextify + 脚本回调）超过该值即记账，用于定位剩余卡顿 */
+const SLOW_RESPONSE_TASK_MS = 400
+/** 同一音源的慢任务日志节流窗口：一轮巡检里同一个源可能连续踩中，不节流会刷屏 */
+const SLOW_TASK_LOG_WINDOW_MS = 60 * 1000
+const slowTaskLoggedAt = new Map<string, number>()
+
+interface DqTaskMeta {
+    owner?: string
+    id?: string
+    name?: string
+    /** 响应体字节数（用于区分「大包深拷贝」与「脚本自身算得慢」） */
+    bytes?: number
+}
+
+/** 人类可读的体积，日志里比裸字节好认 */
+const formatBytes = (n?: number): string => {
+    if (!n || n <= 0) return '0B'
+    if (n < 1024) return `${n}B`
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`
+    return `${(n / 1024 / 1024).toFixed(2)}MB`
+}
+
+function dqEnqueue(task: () => void, meta?: DqTaskMeta): void {
     dqTail = dqTail
         .then(async () => {
             // 让出事件循环，确保本批 decontextify 不与其它响应回调挤在同一个同步长块里
             await new Promise<void>(r => setImmediate(r))
-            task()
+            const startedAt = Date.now()
+            try {
+                task()
+            } finally {
+                // 队列把「并发回来的多份响应」拆成了一任务一 tick，但单个任务本身仍可能是
+                // 数秒的同步块（超大响应体的 JSON.parse + 深拷贝，或脚本自己的同步重活）。
+                // 这类卡顿此前只能靠事件循环监控+活动账本间接归因，命中谁全凭时间窗，
+                // 这里直接量到「哪个源、多大响应、耗时多少」，让归因从猜测变成实证。
+                const cost = Date.now() - startedAt
+                if (cost >= SLOW_RESPONSE_TASK_MS) {
+                    const key = `${meta?.owner || ''}_${meta?.id || ''}`
+                    const now = Date.now()
+                    if (now - (slowTaskLoggedAt.get(key) || 0) >= SLOW_TASK_LOG_WINDOW_MS) {
+                        slowTaskLoggedAt.set(key, now)
+                        const msg = `[响应处理] 单条响应同步耗时 ${cost}ms：${meta?.name || '未知源'}`
+                            + `（响应体 ${formatBytes(meta?.bytes)}）`
+                        console.warn(msg)
+                        syncLog.warn(msg)
+                    }
+                }
+            }
         })
         .catch(() => {
             /* 单任务异常不影响后续入队任务 */
@@ -520,6 +585,33 @@ async function createLxRequest(
                     // 响应回来的时刻是卡顿归因的关键锚点，必须抢在任何同步处理之前记下
                     if (tracked) noteCallback(owner, id, name)
                     if (abortHolder.fn) pendingAborts?.delete(abortHolder.fn)
+
+                    // 体积闸门：必须在 JSON.parse / decontextify 之前判，否则内存尖峰与同步阻塞
+                    // 已经发生（见 CUSTOM_SOURCE_MAX_BODY_BYTES 注释里的实测数据）。
+                    const bodyBytes = typeof body === 'string'
+                        ? Buffer.byteLength(body)
+                        : (Buffer.isBuffer(body) ? body.length : 0)
+                    if (!err && bodyBytes > CUSTOM_SOURCE_MAX_BODY_BYTES) {
+                        const limitMb = (CUSTOM_SOURCE_MAX_BODY_BYTES / 1024 / 1024).toFixed(0)
+                        const key = `${owner}_${id}`
+                        const now = Date.now()
+                        if (now - (oversizeLoggedAt.get(key) || 0) >= OVERSIZE_LOG_WINDOW_MS) {
+                            oversizeLoggedAt.set(key, now)
+                            const msg = `[自定义源-${name || id}] 响应体 ${formatBytes(bodyBytes)} 超过上限 ${limitMb}MB，`
+                                + `已丢弃并回调错误（避免整份深拷贝阻塞事件循环）`
+                            console.warn(msg)
+                            syncLog.warn(msg)
+                        }
+                        releaseSlotOnce()
+                        try {
+                            callback.call(null, Object.assign(
+                                new Error(`响应体过大（${formatBytes(bodyBytes)} > ${limitMb}MB），已按失败处理`),
+                                { code: 'EBODYTOOLARGE' },
+                            ), null, null)
+                        } catch { /* 沙箱实例可能已被释放，回调失败不影响主流程 */ }
+                        return
+                    }
+
                     // 把「decontextify + 回调」收进串行化队列（根治主线程卡顿，见手册 P-1046）：
                     // 一批响应同时回来时，逐个同步深拷贝会叠成数秒阻塞；入队后本回调立即返回，
                     // 队列逐批处理、批间让出事件循环，最长连续阻塞被切成约等于单次 decontextify 的小段。
@@ -579,7 +671,7 @@ async function createLxRequest(
                             // 才是真正的同步开销，提前还槽会让下一路请求挤进同一个阻塞段
                             releaseSlotOnce()
                         }
-                    })
+                    }, { owner, id, name, bytes: bodyBytes })
                 }
 
             // 自己跟随跳转：needle 的自动跳转（follow_max）是内部直接请求新地址，目标不经校验——
