@@ -21,6 +21,8 @@ import { PLATFORMS, isSupportedSource, getPlatform } from './platforms'
 import { hasLoginKey, parseCookie, withCookieRotation } from './http'
 import { normalizeCookieInput, formatLabel } from './cookieParse'
 import * as store from './store'
+import { recordKugouLiteClaim, getKugouLiteClaimReport } from './kgliteLedger'
+import type { KugouLiteClaimReport } from './kgliteLedger'
 import { extractAccountIdentity } from './identity'
 import * as qrLogin from './qrLogin'
 import { summarize, isSnapshotFromOtherVersion } from './health'
@@ -1242,6 +1244,11 @@ export type KugouLiteVipState = kglite.LiteVipInfo & {
   nextRunAt: number
   /** 手动「立即全部领取」的进度：running=true 时前端继续轮询 */
   claimAll: { running: boolean; startedAt: number; finishedAt: number; lastRound: LiteAutoClaimRound | null }
+  /**
+   * 每日领取账本（落盘）：昨天/今天各账号累计新增了多少会员时长。
+   * 领取跑在凌晨的定时任务里，第二天打开面板靠它提示「昨天新增了多久」。
+   */
+  claimReport: KugouLiteClaimReport
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1307,6 +1314,16 @@ export async function claimKugouLiteVip(
     if (res.adDone !== undefined && res.adTotal !== undefined && res.adTotal > 0 && res.adDone >= res.adTotal) {
       liteAdExhaustedAt.set(acct.id, liteDayKey())
     }
+    // 记进每日账本：领取发生在凌晨的定时任务里，第二天面板要靠这份记录告诉用户
+    // 「昨天一共新增了多少会员时长」，所以这里是唯一的落账点（手动/全部领取/定时都走它）。
+    if (res.gainedHours > 0) {
+      recordKugouLiteClaim({
+        id: acct.id,
+        label: acct.label,
+        gainedHours: res.gainedHours,
+        remainHours: res.remainHours,
+      })
+    }
     await refreshKugouLiteStatus(acct.cookie, acct.primary ? undefined : acct.id)
     return res
   } finally {
@@ -1327,6 +1344,7 @@ export async function getKugouLiteVip(): Promise<KugouLiteVipState> {
     minRemainHours: cfg.minRemainHours,
     nextRunAt: vipNextRunAt,
     claimAll: getKugouLiteClaimAllState(),
+    claimReport: getKugouLiteClaimReport(),
   }
   if (!list.length) {
     return { ok: false, isVip: false, expireAt: 0, remainHours: 0, error: '尚未配置账号', ...base, accounts: [] }

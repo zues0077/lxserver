@@ -121,6 +121,11 @@ function dataDir(): string {
   return dir
 }
 
+/** 账号数据目录（其他账号相关的旁路数据也放这里，避免各处重复推导 DATA_PATH） */
+export function getMusicAccountDataDir(): string {
+    return dataDir()
+}
+
 /** 读取（或首次生成）本机密钥。密钥文件与账号文件同目录。 */
 function loadKey(): Buffer {
   const keyPath = path.join(dataDir(), KEY_FILE)
