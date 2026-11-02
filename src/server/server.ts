@@ -2164,7 +2164,9 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
 
     const scored = resultGroups.flat()
       .map(candidate => ({ candidate, score: getSongMatchScore(candidate, songInfo) }))
-      .filter(item => item.score >= 0)
+      // 与前端 rankSourceCandidates 同一门槛：常规平台 12、B站 15。
+      // 以前是 >=0，于是「歌名仅包含 + 时长未知」的 10 分弱匹配也会去取链，容易换到同名不同版本。
+      .filter(item => item.score >= (item.candidate?.source === 'bili' ? 15 : 12))
     scored.sort((a, b) => {
       const penaltyA = hasVersionMismatch(a.candidate?.name, songInfo?.name) ? 1 : 0
       const penaltyB = hasVersionMismatch(b.candidate?.name, songInfo?.name) ? 1 : 0
@@ -2197,7 +2199,7 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
           const bestBili = (Array.isArray(biliData?.list) ? biliData.list : [])
             .map((item: any) => ({ candidate: { ...item, source: 'bili' }, score: getSongMatchScore(item, songInfo) }))
             // 阈值比常规平台更严：B站同名视频里混着剪辑/解说，宁可不换也别放错
-            .filter((it: any) => it.score >= 12)
+            .filter((it: any) => it.score >= 15)
             .sort((a: any, b: any) => b.score - a.score)[0]
           if (bestBili) {
             out.push(bestBili.candidate)

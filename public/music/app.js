@@ -5918,7 +5918,9 @@ function rankSourceCandidates(list, song, options = {}) {
     for (const item of list || []) {
         if (!item || !item.source) continue;
         const score = typeof item._matchScore === 'number' ? item._matchScore : getSongMatchScore(item, song);
-        if (score < 0) continue;
+        // 匹配分门槛：普通平台 12（歌名包含 + 时长差 ≤6s，或完全同名），B站 15（同名视频里混剪辑/解说更多）。
+        // 以前只过滤 score<0，于是「歌名仅包含 + 时长未知」的 10 分弱匹配也能进候选，容易换到同名不同版本。
+        if (score < (item.source === 'bili' ? 15 : 12)) continue;
         ranked.push({
             item,
             tier: sourceTierOf(item.source),
@@ -7414,7 +7416,10 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
         const available = matches.filter(song => !state.triedPlatforms.includes(song.source));
         // B站是视频音轨（常带对白/解说），只在其它平台都没有可用匹配时才兜底使用
         const matchedSong = available.find(s => s.source !== 'bili') || available.find(s => s.source === 'bili');
-        if (matchedSong) {            state.currentSong = matchedSong;
+        if (matchedSong) {
+            // 播放失败后换平台成功：同步把队列/列表里那条换成新平台（仅会话内存，刷新即失效）
+            commitSwitchedSong(state.originalSong, matchedSong);
+            state.currentSong = matchedSong;
             state.triedPlatforms.push(matchedSong.source);
             if (!state.triedApiSourcesByPlatform[matchedSong.source]) {
                 state.triedApiSourcesByPlatform[matchedSong.source] = [];
@@ -7474,6 +7479,43 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
         window._autoSkipTimer = setTimeout(() => playNext(), isPlatformNotSupported ? 2000 : 3000);
     }
 }
+
+/**
+ * 换源成功后，把列表里那一条也换成新平台的条目 —— **只改内存，不落盘**。
+ *
+ * 不做持久化记忆的原因：账号会失效、会员会掉、音源会挂，存下来的「这首歌用某平台」
+ * 迟早变成阻碍。这里只改本次会话的队列/列表：刷新即失效；
+ * 真失效了也一样先取链、失败就再换源，不会卡死。
+ */
+function commitSwitchedSong(oldSong, newSong) {
+    if (!oldSong || !newSong || !newSong.source) return;
+    if (oldSong.source === newSong.source) return;
+    const keyOf = (s) => String((s && (s.songmid || s.id || s.songId || s.hash)) || '');
+    const oldKey = keyOf(oldSong);
+    if (!oldKey) return;
+    let changed = 0;
+    const replaceIn = (list) => {
+        if (!Array.isArray(list)) return;
+        for (let i = 0; i < list.length; i++) {
+            const it = list[i];
+            if (!it || it.source !== oldSong.source) continue;
+            if (keyOf(it) !== oldKey) continue;
+            list[i] = { ...newSong };
+            changed++;
+        }
+    };
+    try {
+        replaceIn(currentPlaylist);
+        if (typeof viewingPlaylist !== 'undefined') replaceIn(viewingPlaylist);
+        replaceIn(window.viewingPlaylist);
+        replaceIn(lastSearchResultList);
+        replaceIn(window.savedNetworkSearchState && window.savedNetworkSearchState.list);
+    } catch (e) {
+        console.warn('[Switch] 会话内回写队列失败（忽略）:', e && e.message);
+    }
+    if (changed) console.log(`[Switch] 已在会话内替换 ${changed} 处列表条目：${oldSong.name} ${oldSong.source} → ${newSong.source}`);
+}
+window.commitSwitchedSong = commitSwitchedSong;
 
 async function playSong(song, index, forceQuality = null, noPlay = false, isRetry = false, shouldAddToDefault = null) {
     // [小爱音箱] 播放目标为小爱时，交给小爱模块把这首歌推送到音箱（本模块在 app.js 之后加载）
@@ -7711,6 +7753,8 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
         currentCacheFolder = urlResult.folder || 'cache';
         const playbackSong = (urlResult.switchedSource && urlResult.songInfo) ? urlResult.songInfo : song;
         if (playbackSong !== song) {
+            // 解析期换源成功：把队列里那条也换掉，下次点同一首不用再从原平台失败一遍
+            commitSwitchedSong(song, playbackSong);
             currentPlayingSong = playbackSong;
             window.currentPlayingSong = playbackSong;
             if (currentRecoveryState) {
