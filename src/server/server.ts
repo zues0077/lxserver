@@ -1205,9 +1205,15 @@ const resolveXiaoAiTrack = async (
     syncLog.info(`[XiaoAi] 换源后转码成功：${retryUnified.filename}（${retryUnified.via}）`)
     return retryUnified
   }
-  throw new Error(
-    `音源不可用：标准与宽容转码均失败，换源后仍失败（${String(retryUnified.transcodeError).slice(0, 120)}）`,
+  // 换源也没救回来（同一路源、同一个坏文件，例如汽水《秋酿》的 AAC 参数集损坏）。
+  // 这里退一步按原格式投送：实测这类「AAC 装在缓存文件里」的曲目设备是能播的
+  // （秋酿在 r26/r27 就是原格式直投播出来的），真播不出来的只是少数。
+  // 拒绝投送会把本来能听的歌变成报错，那才是真退步 —— 所以保留兜底，但把标记带上，
+  // 日志与前端都能看出「这首没转码成功，可能无声」。
+  syncLog.warn(
+    `[XiaoAi] 转码与换源都失败，按原格式投送（可能无声）：${retryUnified.filename}（${String(retryUnified.transcodeError).slice(0, 120)}）`,
   )
+  return { ...retryUnified, via: `${retryUnified.via}｜转码失败-原格式` }
 }
 
 // 定时关机到点时统一停掉当前选中的全部设备（只做停止播放，不承诺断电）
