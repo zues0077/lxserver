@@ -6131,17 +6131,21 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
         // 宁可多搜一次，也不能拿一个「名字只是包含」的版本顶上去
         const coveredSources = new Set(cachedPrimary.filter(c => c._matchScore >= 20).map(c => c.source));
 
-        // 过滤出自定义源支持解析的平台；直连/特殊源不走 supportedSources 白名单
+        // 账号能力要先拿到：它决定「没装自定义源、但配了账号」的平台能不能参与换源。
+        // 权限口径完全交给后端：总开关 / 是否配了号 / 该用户是否在白名单内，前端不自己猜。
+        const caps = await fetchAccountCapabilities();
+        const capSources = (caps && caps.sources) || {};
+
+        // 过滤出「此刻真的能取到链」的平台：
+        //   ① 有自定义源支持；② 或配了账号且该用户有权限（capabilities 已按白名单过滤）。
+        // 以前只看 ①，于是「账号有、源没装」的平台在前端换源里永远不参与（前后端不一致的来源之一）。
         let primarySources = primaryOrdered;
         if (supportedPlatforms && !options.ignoreSupportedFilter) {
-            primarySources = primaryOrdered.filter(s => supportedPlatforms.has(s));
+            primarySources = primaryOrdered.filter(s => supportedPlatforms.has(s) || capSources[s]?.account === true);
         }
         const searchSources = primarySources.filter(s => !coveredSources.has(s));
 
         // 账号通道候选：汽水有匿名流（无账号也能出非版权曲整曲），概念版纯账号。
-        // 权限口径完全交给后端：总开关 / 是否配了号 / 该用户是否在白名单内，前端不自己猜。
-        const caps = await fetchAccountCapabilities();
-        const capSources = (caps && caps.sources) || {};
         const accountSources = [];
         if (song.source !== 'soda' && capSources.soda && (capSources.soda.account || capSources.soda.anonymous)) {
             accountSources.push('soda');

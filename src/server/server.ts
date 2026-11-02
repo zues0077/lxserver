@@ -18,7 +18,7 @@ import { getUserSpace, releaseUserSpace, getUserName, getServerId, getUserDirnam
 import { parseDislikeRules, splitSingers } from '@/modules/dislike/match'
 import { encodeAlbumRule } from '@/modules/dislike/utils'
 import { normalizeText } from '@/server/utils/songVersion'
-import { buildStreamHeaders } from './utils/streamHeaders'
+import { buildStreamHeaders, needsBilibiliReferer, forbidsReferer } from './utils/streamHeaders'
 import { probePlayableUrl } from './utils/playableProbe'
 import { isEncryptedRemoteStream } from './utils/streamEncryption'
 import { invalidateDislikeCache } from '@/server/utils/dislikeCache'
@@ -2104,17 +2104,52 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
     if (value.expiresAt <= now) sourceMatchCache.delete(key)
   }
 
-  const searchSources = AUTO_SOURCE_ORDER.filter(source => (
-    source !== songInfo.source && isSourceSupported(source, username) && musicSdk[source]?.musicSearch?.search
-  ))
+  const caps = (() => {
+    try { return musicAccount.getSourceCapabilities(username) as any } catch { return {} as any }
+  })()
   const query = `${songInfo.name} ${songInfo.singer}`
-  const promise = Promise.all(searchSources.map(async source => {
+
+  // 候选搜索任务：常规五平台 → 汽水/概念版（账号或匿名通道）→ B站（在下面按「全无匹配」再兜底）。
+  // 与前端 findOtherSourceMatches 的三级池一致，判定统一走 isPlatformUsableForSwitch。
+  const switchSearchers: Array<{ source: string; run: () => Promise<any[]> }> = []
+  for (const source of AUTO_SOURCE_ORDER) {
+    if (source === songInfo.source) continue
+    if (!isPlatformUsableForSwitch(source, username, caps)) continue
+    const api = (musicSdk as any)[source]?.musicSearch
+    if (!api?.search) continue
+    switchSearchers.push({
+      source,
+      run: async () => {
+        const data: any = await api.search(query, 1, 20)
+        return (Array.isArray(data?.list) ? data.list : []).map((item: any) => ({ ...item, source }))
+      },
+    })
+  }
+  if (songInfo.source !== 'soda' && isPlatformUsableForSwitch('soda', username, caps)) {
+    switchSearchers.push({
+      source: 'soda',
+      run: async () => {
+        const data = await extraSources.searchSongs('soda', query, 1, 20)
+        return (data.list || []).map((item: any) => ({ ...item, source: 'soda' }))
+      },
+    })
+  }
+  if (songInfo.source !== 'kglite' && isPlatformUsableForSwitch('kglite', username, caps)) {
+    switchSearchers.push({
+      source: 'kglite',
+      run: async () => {
+        const cookie = musicAccount.getCookie('kglite') || ''
+        const data: any = await musicAccount.kglite.searchSongs(query, 1, 20, cookie)
+        return (Array.isArray(data?.list) ? data.list : []).map((item: any) => ({ ...item, source: 'kglite' }))
+      },
+    })
+  }
+
+  const promise = Promise.all(switchSearchers.map(async task => {
     try {
-      const searchData = await musicSdk[source].musicSearch.search(query, 1, 20)
-      const list = Array.isArray(searchData?.list) ? searchData.list : []
-      return list.map((item: any) => ({ ...item, source }))
+      return await task.run()
     } catch (err: any) {
-      console.warn(`[自动换源] 搜索 ${source} 失败: ${err?.message || err}`)
+      console.warn(`[自动换源] 搜索 ${task.source} 失败: ${err?.message || err}`)
       return []
     }
   })).then(async resultGroups => {
@@ -2122,7 +2157,6 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
     // 游客拿到全是 false，排序自然退化成固定平台序。
     let memberSources = new Set<string>()
     try {
-      const caps = musicAccount.getSourceCapabilities(username)
       memberSources = new Set(Object.keys(caps).filter(k => (caps as any)[k]?.member === true))
     } catch {
       memberSources = new Set()
@@ -2280,6 +2314,47 @@ interface ServerSongResolveResult {
  * 额外音源（汽水/B站）取链失败时以前是直接抛错，歌就彻底没声了；
  * 实际上很多曲子只是这个平台不下发流，别的平台有 —— 先让它响，成功再摘掉待补记录。
  */
+/**
+ * 某平台此刻能不能参与**换源**（与前端 findOtherSourceMatches 的三级候选池口径完全对齐）：
+ *  - 常规五平台：有自定义源支持，或配了账号且该用户在「使用权限」名单内；
+ *  - 汽水：配了账号，或匿名通道可用（匿名版权曲只给 60 秒，所以排在常规平台之后）；
+ *  - 酷狗概念版：纯账号源（没有匿名通道），没账号就不参与；
+ *  - B站：匿名可用，但只做最后兜底（视频音轨常带对白）。
+ *
+ * 以前服务端只认 isSourceSupported()（=有没有自定义源），于是「配了账号但没装源」的平台
+ * 在服务端换源、下载、小爱投送里永远不参与，而前端却能换过去 —— 就是用户说的前后端不一致。
+ */
+const isPlatformUsableForSwitch = (source: string, username: string, caps?: any): boolean => {
+  if (!source) return false
+  if (source === 'bili') return true
+  let all = caps
+  if (!all) {
+    try { all = musicAccount.getSourceCapabilities(username) } catch { all = {} }
+  }
+  const cap = all?.[source]
+  if (cap?.account) return true
+  if (source === 'soda') return cap?.anonymous === true
+  if (source === 'kglite') return false
+  return isSourceSupported(source, username)
+}
+
+/**
+ * 换源候选取链：常规平台走自定义源 / 账号通道，额外平台（汽水/B站）走 extraSources。
+ * 汽水的 CENC 加密流在这里直接判失败 —— 没有密钥就解不了，别把 DRM 流当可播地址返回。
+ */
+const resolveSwitchCandidate = async (candidate: any, quality: string, username: string) => {
+  const source = candidate?.source
+  if (extraSources.isExtraSource(source)) {
+    const extra = await extraSources.getMusicUrl(source, candidate, quality, username)
+    if (!extra?.url) throw new Error('额外音源未返回地址')
+    if (await isEncryptedRemoteStream(extra.url)) throw new Error('返回的是加密流，需先解密')
+    return { url: extra.url, quality: extra.type, sourceName: extra.sourceName }
+  }
+  const result = await callUserApiGetMusicUrl(source, candidate, quality, username, undefined, true)
+  if (!result?.url) throw new Error('音源未返回地址')
+  return { url: result.url, quality: result.type, sourceName: result.sourceName }
+}
+
 const switchToOtherSource = async (
   originalSong: any,
   requestedQuality: string,
@@ -2292,13 +2367,13 @@ const switchToOtherSource = async (
   for (const rawCandidate of matches) {
     const candidate = normalizeSongInfo({ ...rawCandidate })
     const source = candidate?.source
-    if (!source || !isSourceSupported(source, username)) continue
+    if (!source || !isPlatformUsableForSwitch(source, username)) continue
     try {
-      const result = await callUserApiGetMusicUrl(source, candidate, requestedQuality, username, undefined, true)
+      const result = await resolveSwitchCandidate(candidate, requestedQuality, username)
       if (!result?.url) continue
       return {
         url: result.url,
-        quality: result.type || requestedQuality,
+        quality: result.quality || requestedQuality,
         songInfo: candidate,
         requestedSource: originalSong.source,
         downloadSource: fileCache.detectDownloadSource(result.url, source),
@@ -2364,14 +2439,14 @@ const resolveServerSong = async (
     for (const rawCandidate of rawCandidates) {
       const candidate = normalizeSongInfo({ ...rawCandidate })
       const source = candidate?.source
-      if (!source || !isSourceSupported(source, username)) continue
+      if (!source || !isPlatformUsableForSwitch(source, username)) continue
 
       try {
-        const result = await callUserApiGetMusicUrl(source, candidate, quality, username, undefined, true)
+        const result = await resolveSwitchCandidate(candidate, quality, username)
         if (!result?.url) throw new Error('audio source returned no URL')
         return {
           url: result.url,
-          quality: result.type || quality,
+          quality: result.quality || quality,
           songInfo: candidate,
           requestedSource: originalSong.source,
           downloadSource: fileCache.detectDownloadSource(result.url, source),
@@ -9340,7 +9415,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               //    B站直链常 302 到 *.v.smtcdns.com，落地域名不带 bilibili Referer 会 403；
               //    以前把这种地址直接返给前端 → 播放失败 → 换源 → 又拿回同一条 → 界面死循环。
               //    这里只探 1 字节：明确 4xx 才判死，超时/网络错误一律放行（别误杀慢 CDN）。
-              if (MUSIC_URL_PROBE_TIMEOUT_MS > 0 && /^https?:\/\//i.test(String(result.url || ''))) {
+              //
+              //    只对「确实会返回假地址」的源开启：额外音源（B站/汽水）+ 需要特殊回源头的 CDN。
+              //    wy/tx/kw/kg/mg 的直链验签很稳，给每一首点播都加一次探测 RTT 不值得（2026-11-02 收窄）。
+              const probeUrl = String(result.url || '')
+              const fragileStream = extraSources.isExtraSource(String(source))
+                || extraSources.isExtraSource(String(result.songInfo?.source || ''))
+                || needsBilibiliReferer(probeUrl)
+                || forbidsReferer(probeUrl)
+              if (MUSIC_URL_PROBE_TIMEOUT_MS > 0 && fragileStream && /^https?:\/\//i.test(probeUrl)) {
                 const probe = await probePlayableUrl(result.url, MUSIC_URL_PROBE_TIMEOUT_MS)
                 if (!probe.ok) {
                   const failedName = result.sourceName || sourceDisplayName(source)
