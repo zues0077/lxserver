@@ -1315,6 +1315,9 @@ export const serveXiaoAiStream = async (req: IncomingMessage, res: ServerRespons
       res.writeHead(410, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify({ success: false, message: 'replay hold expired without takeover' }))
     }
+    // 这一路到此为止：再重拉直接走 retired 分支静默 410。
+    // 不做的话，音箱每 8~9 秒重试一次，每次都要等满 hold 再打两条日志，日志被刷爆。
+    if (payload.sid) retiredStreams.add(payload.sid)
     notifyReplayBlocked(payload.sid)
     return
   }
