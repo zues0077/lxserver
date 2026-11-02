@@ -74,6 +74,7 @@ import {
   setCachedTrackUrl,
   retireStreams,
   markDrainOnly,
+  setReplayBlockedHook,
   sleepTimer,
   mp3CachePath,
   isMp3File,
@@ -1173,6 +1174,28 @@ sleepTimer.setStopHandler(() => xiaoAiService.stop())
 // 曲库把某些 audioID 标成「试听资源」，但音箱只要拉了本机流就是在放我们推的音频，
 // 不能仅凭元数据就告警「正在播试听片段」把用户引去关歌词开关。
 xiaoAiService.setStreamPulledProbe(() => lastXiaoAiStreamAt > lastXiaoAiPushAt)
+
+/**
+ * 拒拉后让设备真正停下。
+ *
+ * 音箱拿旧 URL 重拉被 410 打回后不会自己转停止态：每 9 秒重试一次，
+ * 状态还一直报「播放中 / position=0」，界面就停在假的播放态（真机 2026-11-02 实测）。
+ * 这里补一次 stop，让设备落回停止态。10 秒内只发一次，避免重试风暴把云端接口刷爆。
+ */
+let lastReplayStopAt = 0
+setReplayBlockedHook(sid => {
+  // 只对「当前这一路」生效：其它旧流的重拉由 retire/drain 自己处理
+  if (sid && lastXiaoAiStreamSid && sid !== lastXiaoAiStreamSid) return
+  const now = Date.now()
+  if (now - lastReplayStopAt < 10000) return
+  lastReplayStopAt = now
+  void xiaoAiService
+    .stop()
+    .then(result => {
+      if (result.success) syncLog.info('[XiaoAi] 已拒绝重拉并让音箱停止（防空转重试）')
+    })
+    .catch(() => {})
+})
 
 /** 小爱相关接口的鉴权：管理员口令，或已通过认证的播放器会话 */
 const isXiaoAiRequestAuthorized = (req: IncomingMessage): boolean => {

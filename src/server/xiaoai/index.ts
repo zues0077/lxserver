@@ -27,6 +27,7 @@ export {
   retireStreams,
   markDrainOnly,
   isDrainOnly,
+  setReplayBlockedHook,
   hasActiveStream,
 } from './stream'
 export { detectAudioDurationMs, id3v2Size } from './audioMeta'

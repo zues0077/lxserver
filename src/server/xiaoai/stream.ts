@@ -173,6 +173,27 @@ export const markDrainOnly = (sid?: string): boolean => {
 export const isDrainOnly = (sid?: string) => (sid ? drainOnlyStreams.has(sid) : false)
 
 /**
+ * 「重拉被拒」钩子。
+ *
+ * 音箱拿旧 URL 重拉被 410 打回后，它**不会自己转入停止态**：真机实测（2026-11-02）
+ * 每 9 秒重试一次，状态还一直上报「播放中、position=0」，界面就停在假的播放态。
+ * 交给上层主动下发一次 stop，设备才真正落回停止态、屏幕与进度归位。
+ */
+let replayBlockedHook: ((sid?: string) => void) | null = null
+
+export const setReplayBlockedHook = (fn: ((sid?: string) => void) | null) => {
+  replayBlockedHook = fn
+}
+
+const notifyReplayBlocked = (sid?: string) => {
+  try {
+    replayBlockedHook?.(sid)
+  } catch {
+    /* 钩子异常不能影响这次的响应 */
+  }
+}
+
+/**
  * 当前是否还有音频正在往音箱下发。
  *
  * 音源「自检护栏」在排查空闲 CPU 异常时会逐个卸载/重载自定义源脚本，
@@ -1271,6 +1292,7 @@ export const serveXiaoAiStream = async (req: IncomingMessage, res: ServerRespons
         res.writeHead(410, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
         res.end(JSON.stringify({ success: false, message: 'stream drained' }))
       }
+      notifyReplayBlocked(payload.sid)
       return
     }
     const holdMs = replayHoldMs()
@@ -1293,6 +1315,7 @@ export const serveXiaoAiStream = async (req: IncomingMessage, res: ServerRespons
       res.writeHead(410, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify({ success: false, message: 'replay hold expired without takeover' }))
     }
+    notifyReplayBlocked(payload.sid)
     return
   }
 
