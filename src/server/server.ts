@@ -637,10 +637,15 @@ const resolvePlayableAudio = async (
   if (typeof (graceTimer as any).unref === 'function') (graceTimer as any).unref()
 
   // ---- 第 1 段：原源（独立预算，最多 RESOLVE_DIRECT_BUDGET_MS）----
+  // 必须用 withHardBudget 逐次套硬闸：attempt() 内部是 callUserApiGetMusicUrl，
+  // 它自己会串行问几十个自定义源、每个脚本各有 10~20 秒超时，只在「轮次之间」看 deadline
+  // 根本掐不住 —— 实测一首查无此歌的曲子，原源阶段一次调用就把 18 秒预算吃光，
+  // 换源阶段拿到了 B站 BV 号也没时间取链（本轮实机复现的正是这个）。
   let direct: any = null
   try {
     for (const quality of qualities) {
-      direct = await attempt(songInfo, quality)
+      const left = Math.max(800, deadline - Date.now())
+      direct = await withHardBudget(attempt(songInfo, quality), left, '原源取链')
       if (direct) break
     }
   } finally {
@@ -663,7 +668,11 @@ const resolvePlayableAudio = async (
   }
   for (const quality of qualities) {
     for (const match of matches.slice(0, 3)) {
-      const hit = await attempt(match, quality)
+      // 同样逐次套硬闸：保证「换源」这一段严格不超过 RESOLVE_SWITCH_BUDGET_MS，
+      // 而不是被第一个候选的内部串行重试吃光。
+      const left = Math.max(800, deadline - Date.now())
+      if (left <= 800 && Date.now() >= deadline) break
+      const hit = await withHardBudget(attempt(match, quality), left, `换源 ${match.source || ''}取链`)
       if (hit) {
         console.log(`[自动换源] 换源成功：${songInfo.name} → ${hit.sourceName} (${hit.quality})`)
         return { ...hit, failures }
