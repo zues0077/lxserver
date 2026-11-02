@@ -6245,12 +6245,25 @@ function getSourceName(source) {
  * 统一应用代理逻辑，处理 HTTPS 环境下的 HTTP 链接及跨域限制 (CORS) 问题
  * 增强：开启自动代理后，通过探测链接可用性（包括跨域兼容性）来自动决定是否启用服务器代理
  */
+/** 取 URL 主机名，非法地址返回空串（别让异常打断播放流程） */
+function safeHostOf(url) {
+    try { return new URL(url, window.location.href).hostname.toLowerCase(); } catch (_) { return ''; }
+}
+
 async function applyAutoProxy(url, song) {
     if (!url) return url;
 
     // 已经过代理或为本地路径的无需处理
     if (url.startsWith('/api/music/download') || url.startsWith('/') || url.includes(window.location.host)) {
         return url;
+    }
+
+    // B站系 CDN（含 302 落地域名 *.v.smtcdns.com）必须带 bilibili Referer 才给流，
+    // 浏览器 <audio> 发不出自定义 Referer，只能走服务端回源代理；直接播必然 403。
+    if (/(^|\.)(bilivideo\.(com|cn|net)|bilibili\.com|hdslb\.com|smtcdns\.com|szbdyd\.com)$/i.test(safeHostOf(url))) {
+        const filename = `${song.singer} - ${song.name}.mp3`;
+        console.log(`[Proxy] B站防盗链，强制走服务端回源代理: ${song.name}`);
+        return `/api/music/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}&inline=1`;
     }
 
     // 优先级 1：如果手动开启了“播放音乐代理”，则无条件走代理 (用于解决 IP 封锁或跨域限制)

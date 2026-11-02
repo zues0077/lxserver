@@ -19,6 +19,7 @@ import { parseDislikeRules, splitSingers } from '@/modules/dislike/match'
 import { encodeAlbumRule } from '@/modules/dislike/utils'
 import { normalizeText } from '@/server/utils/songVersion'
 import { buildStreamHeaders } from './utils/streamHeaders'
+import { probePlayableUrl } from './utils/playableProbe'
 import { isEncryptedRemoteStream } from './utils/streamEncryption'
 import { invalidateDislikeCache } from '@/server/utils/dislikeCache'
 import { createMsg2call } from 'message2call'
@@ -747,6 +748,17 @@ const MUSIC_URL_RETRY_WINDOW_MS = 90000
 const MUSIC_URL_FAIL_TTL_MS = (() => {
   const raw = Number(process.env.MUSIC_URL_FAIL_TTL_MS)
   return Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : 10000
+})()
+
+/**
+ * 取链成功后的可播性探测预算（毫秒，0 = 关闭）。
+ *
+ * 只探 1 字节；B站等 CDN 会返回「形似合法但 403」的直链，
+ * 不探就会把死链当成功交给前端，进而演成「解析成功/失败」无限换源。
+ */
+const MUSIC_URL_PROBE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.MUSIC_URL_PROBE_MS)
+  return Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : 1500
 })()
 const musicUrlFailures = new Map<string, { at: number; message: string; attempts: any[] }>()
 /** key → 最近一次失败时刻：决定这一首用紧预算还是宽预算 */
@@ -2105,7 +2117,7 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
       console.warn(`[自动换源] 搜索 ${source} 失败: ${err?.message || err}`)
       return []
     }
-  })).then(resultGroups => {
+  })).then(async resultGroups => {
     // 会员平台加权：只对「有账号权限」的用户有效（getSourceCapabilities 内部已按白名单过滤），
     // 游客拿到全是 false，排序自然退化成固定平台序。
     let memberSources = new Set<string>()
@@ -2138,6 +2150,31 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
       perSource.set(source, used + 1)
       out.push(item.candidate)
     }
+
+    // 五个常规平台都没匹配到，才把 B站 当最后一档兜底。
+    // 以前服务端换源池里只有 wy/tx/kw/kg/mg（AUTO_SOURCE_ORDER），B站 只在**前端**的手动换源里
+    // 作为兜底出现；于是「B站有、别的平台没有」的曲子（演唱会/翻唱/Live）在服务端自动换源、
+    // 下载、小爱投送这些链路上永远切不过去，看起来就像「B站没进全平台切源」。
+    if (out.length === 0 && songInfo.source !== 'bili') {
+      try {
+        const biliKeyword = `${songInfo.name || ''} ${songInfo.singer || ''}`.trim()
+        if (biliKeyword) {
+          const biliData = await extraSources.searchSongs('bili', biliKeyword, 1, 10)
+          const bestBili = (Array.isArray(biliData?.list) ? biliData.list : [])
+            .map((item: any) => ({ candidate: { ...item, source: 'bili' }, score: getSongMatchScore(item, songInfo) }))
+            // 阈值比常规平台更严：B站同名视频里混着剪辑/解说，宁可不换也别放错
+            .filter((it: any) => it.score >= 12)
+            .sort((a: any, b: any) => b.score - a.score)[0]
+          if (bestBili) {
+            out.push(bestBili.candidate)
+            console.log(`[自动换源] 五平台无匹配，B站兜底：${songInfo.name} → ${bestBili.candidate.id}`)
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[自动换源] B站兜底搜索失败: ${err?.message || err}`)
+      }
+    }
+
     return out
   })
 
@@ -7124,6 +7161,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           const https = require('https')
 
           // Manual redirect handling for maximum control and stability
+          // originUrl 固定为首个地址：B站直链常 302 到 *.v.smtcdns.com，
+          // 防盗链仍按 bilibili 来源判定，逐跳重算 Referer 会 403（见 utils/streamHeaders）。
+          const proxyOriginUrl = urlStr
           const doFetch = (targetUrl: string, attempt: number) => {
             if (attempt > 5) {
               console.error('[下载代理] 触发过多重定向，已终止')
@@ -7140,7 +7180,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 method: 'GET',
                 // Referer 必须按目标域名分流：B站 CDN 要 bilibili.com 来源，
                 // 抖音系（汽水）反而不能带。见 utils/streamHeaders。
-                headers: buildStreamHeaders(targetUrl),
+                headers: buildStreamHeaders(targetUrl, {}, proxyOriginUrl),
               }
 
               // 转发 Range 请求头，以支持播放器的快进和拖拽
@@ -9013,7 +9053,24 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 搜索由 extraSources 提供，取流同样自带（B站匿名可用，配了 Cookie 才有大会员音质）。
             // 命中本地缓存时跳过（否则会把缓存结果覆盖成一次全新的远端取链）。
             let extraSourceError: string | null = null
-            if (!result && extraSources.isExtraSource(source)) {
+
+            // 换源重试时前端会带 excludeApiSources（已经试过的源名）。额外音源（B站账号 / 汽水）
+            // 也记在这份清单里 —— 以前这里无条件先走额外音源，于是 B站「取链成功但拉流 403」时，
+            // 前端每次重试都拿回同一条死链，界面就在「解析成功 / 解析失败」之间无限循环。
+            const excludedSourceNames = Array.isArray(excludeApiSources) ? excludeApiSources.map((n: any) => String(n || '')) : []
+            const extraLabel = extraSources.displayName(source).toLowerCase()
+            const extraSourceTried = excludedSourceNames.some((name: string) => {
+              const n = name.trim().toLowerCase()
+              if (!n) return false
+              return n === `extra:${source}` || n === extraLabel || n.startsWith(extraLabel)
+            })
+
+            if (!result && extraSources.isExtraSource(source) && extraSourceTried) {
+              extraSourceError = `${extraSources.displayName(source)} 本轮已尝试过，改走换源`
+              console.warn(`[额外音源] ${extraSources.displayName(source)} 已在排除清单里，跳过并换源: ${songInfo.name}`)
+            }
+
+            if (!result && extraSources.isExtraSource(source) && !extraSourceTried) {
               try {
                 const extra = await withHardBudget(
                   extraSources.getMusicUrl(source, songInfo, quality || '128k', verifiedUsername),
@@ -9236,7 +9293,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 if (result.url.startsWith('http')) {
                   // console.log(`[歌曲播放] 正在解析重定向: ${songInfo.name} (${quality})`);
 
-                  const checkRedirect = async (u: string, depth: number = 0): Promise<string> => {
+                  const checkRedirect = async (u: string, depth: number = 0, originUrl: string = result.url): Promise<string> => {
                     if (depth > 3) return u // Max depth 3
                     try {
                       // 音源直链常把中文歌名拼进路径，needle（url.parse）遇到未编码字符直接 throw，
@@ -9247,7 +9304,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                         read_timeout: 4000,
                         // 解析的是音乐平台链接，归 music 分类
                         agent: await getProxyAgent(u, 'music'),
-                        headers: buildStreamHeaders(u),
+                        // 带上整条跳转链的首个地址：B站 302 到 smtcdns 后仍要 bilibili 来源
+                        headers: buildStreamHeaders(u, {}, originUrl),
                       })
                       if (resp.statusCode && [301, 302, 303, 307, 308].includes(resp.statusCode) && resp.headers.location) {
                         let nextUrl = resp.headers.location
@@ -9255,7 +9313,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                           try { nextUrl = new URL(nextUrl, u).href } catch (e) { }
                         }
                         // console.log(`[歌曲播放] 解析重定向 [${resp.statusCode}]: ${u.substring(0, 50)}... -> ${nextUrl.substring(0, 50)}...`)
-                        return checkRedirect(nextUrl, depth + 1)
+                        return checkRedirect(nextUrl, depth + 1, originUrl)
                       }
                       // If error status but not redirect, return original
                       if (resp.statusCode !== undefined && resp.statusCode >= 400) {
@@ -9276,6 +9334,56 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 }
               } catch (e) {
                 console.error('[歌曲播放] 解析重定向发生异常:', e)
+              }
+
+              // 3. 可播性校验：取链成功 ≠ 能播。
+              //    B站直链常 302 到 *.v.smtcdns.com，落地域名不带 bilibili Referer 会 403；
+              //    以前把这种地址直接返给前端 → 播放失败 → 换源 → 又拿回同一条 → 界面死循环。
+              //    这里只探 1 字节：明确 4xx 才判死，超时/网络错误一律放行（别误杀慢 CDN）。
+              if (MUSIC_URL_PROBE_TIMEOUT_MS > 0 && /^https?:\/\//i.test(String(result.url || ''))) {
+                const probe = await probePlayableUrl(result.url, MUSIC_URL_PROBE_TIMEOUT_MS)
+                if (!probe.ok) {
+                  const failedName = result.sourceName || sourceDisplayName(source)
+                  console.warn(`[歌曲播放] 地址拉不动（${probe.reason} ${probe.status}）：${songInfo.name} via ${failedName}`)
+                  let switchedOk = false
+                  if (enableAutoSwitchApiSource !== false) {
+                    try {
+                      const switched = await switchToOtherSource(songInfo, quality || '128k', verifiedUsername)
+                      if (switched?.url) {
+                        const verify = await probePlayableUrl(switched.url, MUSIC_URL_PROBE_TIMEOUT_MS)
+                        if (verify.ok) {
+                          removePendingAfterSwitch(songInfo)
+                          result = {
+                            url: switched.url,
+                            type: switched.quality,
+                            sourceName: switched.sourceName,
+                            sourceId: `probe-switch:${switched.songInfo?.source || ''}`,
+                            attempts: [{ name: switched.sourceName, status: 'success' }],
+                            switched: {
+                              from: failedName,
+                              to: switched.sourceName,
+                              reason: '原链接拉不动（403/已失效）',
+                            },
+                          }
+                          attempts = result.attempts
+                          switchedOk = true
+                          console.log(`[换源] ${failedName} 链接不可播，已换到 ${switched.sourceName}：${songInfo.name}`)
+                          void pushProgress({ name: switched.sourceName, status: 'success' })
+                        } else {
+                          console.warn(`[换源] 备选源 ${switched.sourceName} 也拉不动（${verify.reason} ${verify.status}）`)
+                        }
+                      }
+                    } catch (switchErr: any) {
+                      console.warn(`[换源] 地址不可播后换源失败: ${switchErr?.message || switchErr}`)
+                    }
+                  }
+                  if (!switchedOk) {
+                    // 换不到就**不判死**：探测只是「早一步发现问题并换源」的手段，
+                    // 不具备判决权（有些源单次 Range 探测会抽风，直接抛错会把能播的歌变成报错）。
+                    // 原地址照旧返回，前端若真放不出来会进入换源/跳过流程。
+                    console.warn(`[歌曲播放] 地址探测不可用但换源也没命中，仍返回原地址：${songInfo.name}（${failedName}）`)
+                  }
+                }
               }
 
               // 2. Mixed Content Handling (Optional Proxy) implementation details handled by frontend now

@@ -588,13 +588,16 @@ const NON_AUDIO_CONTENT = /^(application\/json|text\/html|text\/plain|applicatio
  */
 const fetchUpstream = async (url: string, range?: string, timeoutMs = 30000) => {
   let current = url
+  // 跳转链首个地址：B站直链 302 到 *.v.smtcdns.com 后仍按 bilibili 来源防盗链，
+  // 逐跳用落地域名重算 Referer 会 403（见 utils/streamHeaders）。
+  const originUrl = url
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     // 部分音源按 UA/Referer 防盗链，伪装成浏览器取流；
     // Referer 必须按域名分流（B站要 bilibili.com，抖音系不能带），见 utils/streamHeaders
     const headers: Record<string, string> = buildStreamHeaders(current, {
       Accept: '*/*',
       'Accept-Encoding': 'identity',
-    })
+    }, originUrl)
     if (range) headers.Range = range
 
     const agent = await getProxyAgent(current, 'music')

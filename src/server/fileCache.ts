@@ -2713,6 +2713,9 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
         if (signal) signal.addEventListener('abort', abortHandler)
 
         // 递归下载，自动跟随 3xx 重定向（浏览器会自动跟随，但 http.get 不会）
+        // originUrl 固定为首个地址：B站直链 302 到 *.v.smtcdns.com 后，
+        // 防盗链仍按 bilibili 来源判定，重算 Referer 会 403（见 utils/streamHeaders）。
+        const originUrl = url
         const downloadFrom = (currentUrl: string) => {
             if (signal?.aborted) {
                 fail(new Error('Aborted'))
@@ -2721,7 +2724,7 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
             const protocol = currentUrl.startsWith('https') ? https : http
             // 必须带 UA/Referer 回源：B站 CDN 没有 bilibili 来源会直接 403（见 utils/streamHeaders）。
             // 以前这里是裸 get（半个头都不带），所以 B站的歌「取链成功、下载必然 403」。
-            req = protocol.get(currentUrl, { headers: buildStreamHeaders(currentUrl) }, (res) => {
+            req = protocol.get(currentUrl, { headers: buildStreamHeaders(currentUrl, {}, originUrl) }, (res) => {
                 const status = res.statusCode || 0
                 // 处理重定向：301/302/303/307/308
                 if ([301, 302, 303, 307, 308].includes(status)) {
