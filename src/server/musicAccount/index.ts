@@ -1061,6 +1061,10 @@ async function keepaliveOne(id: string, itemId?: string): Promise<void> {
       store.refreshCookie(id, r.cookie, itemId)
       console.log(`[平台账号] ${name}短期凭证已主动保温续期（${itemId ? '子账号 ' + itemId : '主账号'}）`)
     }
+    // 续期请求能被平台正常应答，本身就是「这个号还活着」的证据。
+    // 单独记 lastSeenAt（不动 lastVerify 快照）：否则面板/监控只能看 72h 巡检的时间戳，
+    // 咪咕这类 2 小时票的平台会一直显示「快照很久以前」= 假掉线（实测 136 分钟误报）。
+    if (r.online !== false) store.touchAccountSeen(id, itemId)
   } catch (e: any) {
     console.log(`[平台账号] ${name}保温续期请求失败（忽略）：${e?.message || e}`)
   }

@@ -313,6 +313,56 @@ interface SodaVideoItem {
  * 避免拿 A 档的钥匙去解 B 档的流（libresoda issue #7 讨论的就是这个对应关系）。
  * 上限保护：只缓存最近若干条，避免长期运行时无界增长。
  */
+/**
+ * 「这首只有试听」的负缓存。
+ *
+ * 版权受限曲（布拉格广场 / 兰亭序 / 屋顶 / 因为爱情 …）匿名与账号通道都只给 30/60 秒，
+ * 而判定它要跑完「签名器 8s + 加密探测 + h5 12s + seo 12s」，实测一次能吃满 25 秒预算；
+ * 换源、重试、按音质档再问一遍，同一首歌能被反复判死四五次，用户看到的就是「点了没反应 / 一直缓冲」。
+ *
+ * 结论本身在几分钟内不会变（除非签名器刚上线），所以记 5 分钟：命中就立刻按同一句话判失败，
+ * 把时间省给换源，也让错误文案保持一致。
+ */
+const PREVIEW_VERDICT_TTL_MS = 5 * 60 * 1000
+const previewVerdictByTrack = new Map<string, { at: number; message: string }>()
+/** 最近一次「整曲拿不到、只有试听」的判定，供账号体检/接口展示（不参与逻辑） */
+let lastPreviewVerdict: { at: number; trackId: string; message: string } | null = null
+
+function readPreviewVerdict(trackId: string): string | null {
+  const hit = previewVerdictByTrack.get(trackId)
+  if (!hit) return null
+  if (Date.now() - hit.at >= PREVIEW_VERDICT_TTL_MS) {
+    previewVerdictByTrack.delete(trackId)
+    return null
+  }
+  return hit.message
+}
+
+function rememberPreviewVerdict(trackId: string, message: string): void {
+  if (previewVerdictByTrack.size > 300) {
+    const cutoff = Date.now() - PREVIEW_VERDICT_TTL_MS
+    for (const [k, v] of previewVerdictByTrack) if (v.at <= cutoff) previewVerdictByTrack.delete(k)
+    if (previewVerdictByTrack.size > 300) previewVerdictByTrack.clear()
+  }
+  previewVerdictByTrack.set(trackId, { at: Date.now(), message })
+  lastPreviewVerdict = { at: Date.now(), trackId, message }
+}
+
+/**
+ * 汽水账号体检结论（只读，供 `/api/music/accounts` 之类接口展示）。
+ * 返回 null 表示最近没有出现过「只有试听」的判定。
+ */
+export function getSodaEntitlementVerdict(): { at: number; trackId: string; level: 'preview'; message: string } | null {
+  if (!lastPreviewVerdict) return null
+  if (Date.now() - lastPreviewVerdict.at > 6 * 3600_000) return null
+  return { ...lastPreviewVerdict, level: 'preview' }
+}
+
+/** 是否配置了签名器地址 / 是否在线 —— 体检时用来区分「缺签名器」和「签名器在线但权益不认」 */
+export function signerCapability(): { configured: boolean } {
+  return { configured: signer.isConfigured() }
+}
+
 const streamKeyByUrl = new Map<string, string>()
 const streamKeyByBitrate = new Map<string, string>()
 const MAX_STREAM_KEY_ENTRIES = 600
@@ -839,6 +889,13 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   const trackId = sodaTrackIdOf(songInfo)
   if (!isSodaId(trackId)) throw new Error(`汽水歌曲 id 不合法（${trackId || '空'}）`)
 
+  // 5 分钟内已经判过「只有试听」：直接按同一句话失败，不再把 25 秒重花一遍
+  const cachedVerdict = readPreviewVerdict(trackId)
+  if (cachedVerdict) {
+    console.log(`[汽水取流] 命中「仅试听」判定（5 分钟内），跳过重试直接判失败：${trackId}`)
+    throw new Error(cachedVerdict)
+  }
+
   // ① 签名器在线 → App 端点：6 档音质（lossless 852k / hi_res / spatial）。
   //
   // ⚠️ 关键：PC 端点对**版权曲**下发的就是 CENC 加密流，而我们实测平台并不下发
@@ -849,12 +906,14 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   const signed = await trySignedStream(trackId, cookie, quality).catch(() => null)
   if (signed?.key) {
     pending.remove(`soda:${trackId}`)
+    previewVerdictByTrack.delete(trackId)
     return signed
   }
   if (signed) {
     const encrypted = await isEncryptedRemoteStream(signed.url).catch(() => false)
     if (!encrypted) {
       pending.remove(`soda:${trackId}`)
+      previewVerdictByTrack.delete(trackId)
       return signed
     }
     console.log('[汽水取流] 签名通道返回 CENC 加密流且无密钥 → 退回明文通道')
@@ -864,6 +923,7 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   const plain = await resolvePlainStream(trackId, cookie, quality)
   if (plain.ok) {
     pending.remove(`soda:${trackId}`)
+    previewVerdictByTrack.delete(trackId)
     return {
       url: plain.url,
       quality: plain.quality,
@@ -879,6 +939,8 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
     : '汽水未返回可用音频流（该曲可能已下架或仅支持客户端播放）'
   // 记待补：等签名器在线时自动补，不让用户凭记忆重新找歌
   pending.add(songInfo, reason, msg, username)
+  // 只有试听：记 5 分钟，后续同一首直接判失败，把时间让给换源
+  if (plain.reason === 'preview') rememberPreviewVerdict(trackId, msg)
   throw new Error(msg)
 }
 

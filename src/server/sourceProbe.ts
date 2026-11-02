@@ -68,6 +68,14 @@ export interface PlatformProbeState {
    * 平台恢复最多晚一个周期发现。
    */
   suspectSkipUntil?: number
+  /**
+   * 上一次「自动恢复」的时间戳。
+   *
+   * 用来防抖：实测某个源（Hei Music源/wy）在 3 小时里被「自动关闭 → 自动恢复」来回折腾 6 次 ——
+   * 平台本身是**间歇可用**，每轮巡检有时过阈值、有时又不失败，正反两个方向都被阈值放大成动作。
+   * 刚恢复过的平台再失败时要求双倍连续失败次数才允许再次关闭，抖动就落在计数上，不再落到开关上。
+   */
+  restoredAt?: number
 }
 
 export interface SourceProbeState {
@@ -997,6 +1005,22 @@ export interface ManualFailureReport {
 }
 
 /**
+ * 防抖窗口：刚被自动恢复过的平台，在 30 分钟内再失败要求**双倍**连续失败次数才允许再次关闭。
+ *
+ * 针对的是「间歇可用」的平台：实测 Hei Music源/wy 在 3 小时里被关了又开、开了又关 6 次。
+ * 关闭与恢复本身都要写 states.json、写审计日志、改前端开关状态，抖动一次用户就懵一次
+ * （「我的源怎么自己开了/关了」）。把抖动吸收在计数上，平台真挂时依然会在下一轮被关掉，
+ * 只是多等一轮 —— 这个代价远小于反复改开关。
+ */
+const RESTORE_DEBOUNCE_MS = 30 * 60_000
+
+function disableThresholdFor(ps: { restoredAt?: number } | undefined, threshold: number): number {
+  const restoredAt = Number(ps?.restoredAt || 0)
+  if (!restoredAt) return threshold
+  return Date.now() - restoredAt < RESTORE_DEBOUNCE_MS ? threshold * 2 : threshold
+}
+
+/**
  * 把「手动取链」遇到的硬故障记进巡检账本。
  *
  * 为什么不直接关平台：手动请求是**单首歌、单次失败**，而没有版权/已下架/这首歌在该源没资源
@@ -1032,7 +1056,7 @@ export function reportManualFailure(ev: ManualFailureReport): { counted: boolean
   ps.lastError = ev.error
 
   let disabled = false
-  if (ev.hasControlGroup && conf.autoDisablePlatform && ps.failCount >= conf.failThreshold) {
+  if (ev.hasControlGroup && conf.autoDisablePlatform && ps.failCount >= disableThresholdFor(ps, conf.failThreshold)) {
     ps.status = 'down'
     ps.autoDisabled = true
     // 关闭即归档清零：把当前连续失败次数快照下来展示，再让 failCount 归零重新计
@@ -1220,6 +1244,8 @@ export async function runSourceProbe(
             platformState.autoDisabled = false
             platformState.disabledFailCount = 0
             platformState.disabledAt = 0
+            // 记下恢复时刻：30 分钟内再失败要双倍证据才允许重新关闭（见 disableThresholdFor）
+            platformState.restoredAt = Date.now()
             setPlatformDisabled(job.target.owner, job.target.id, job.platform, false)
             result.restored.push(`${job.target.name}/${job.platform}`)
             audit(job.target.owner, 'restore-platform', { sourceId: job.target.id, sourceName: job.target.name, platform: job.platform })
@@ -1314,7 +1340,7 @@ export async function runSourceProbe(
       for (const platform of target.platforms) {
         const ps = sourceState.platforms[platform]
         if (!ps || ps.status === 'skipped' || ps.status === 'ok') continue
-        if (ps.failCount < conf.failThreshold) { ps.status = 'unknown'; continue }
+        if (ps.failCount < disableThresholdFor(ps, conf.failThreshold)) { ps.status = 'unknown'; continue }
         // 停探期：这一轮剩下的只是哨兵样本（每平台 3 个），拿它去关闭平台属于
         // 「用最少的证据做最重的处置」——哨兵的职责是观测平台是否恢复，不是定罪。
         if ((suspectSkipCounts.get(platform) ?? 0) > 0) {

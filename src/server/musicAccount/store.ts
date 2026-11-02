@@ -65,6 +65,18 @@ export interface StoredAccountItem {
   cookieHash?: string
   addedAt: number
   lastVerify?: VerifyRecord
+  /**
+   * 最近一次「确认这个号还活着」的时刻（毫秒）。
+   *
+   * 与 lastVerify 的区别：lastVerify 是**完整校验快照**（含 isVip/昵称），只有 72h 巡检与
+   * 登录态复核会写；lastSeenAt 是**轻量存活证据**，短期凭证保温（咪咕 pacmtoken）成功续期、
+   * 取链成功这类「平台刚刚接受了这个 Cookie」都会刷。
+   *
+   * 为什么要多一个字段：咪咕 pacmtoken 只有 2 小时，保温每小时续一次，但 lastVerify 要等 72h 巡检
+   * 才动 —— 实测账号活得好好的（6/6 次真取链成功、8 次保温续期），面板与监控却显示「快照 136 分钟前」，
+   * 被当成掉线误报。分开记就不会再用「巡检快照旧」冒充「账号死了」。
+   */
+  lastSeenAt?: number
 }
 
 export interface StoredAccount {
@@ -92,6 +104,8 @@ export interface AccountItemView {
   cookiePreview: string
   updatedAt: number | null
   lastVerify: VerifyRecord | null
+  /** 最近一次存活证据（保温续期/取链成功），null 表示没有记录 */
+  lastSeenAt: number | null
   health: AccountHealth
   healthText: string
   ageHours: number | null
@@ -287,6 +301,8 @@ export function listAccounts(): Array<{
   cookiePreview: string
   updatedAt: number | null
   lastVerify: VerifyRecord | null
+  /** 最近一次存活证据（保温续期/取链成功），null 表示没有记录 */
+  lastSeenAt: number | null
   health: AccountHealth
   healthText: string
   ageHours: number | null
@@ -319,6 +335,11 @@ export function listAccounts(): Array<{
       const staleByVersion = isSnapshotFromOtherVersion(raw, ver)
       // 健康分类要拿原始快照算，才能给出「待重新校验」而不是笼统的「未校验」
       const hp = classifyHealth(configured, raw, Date.now(), ver)
+      // 「超过 7 天未复查」这一档要认存活证据：咪咕这类短期票每小时都会保温续期，
+      // 平台每次都正常应答，只是完整巡检快照不刷新。只按快照判就会把一个活着的号标成待复查。
+      const seenAt = Number(it.lastSeenAt || 0)
+      const seenFresh = seenAt > 0 && Date.now() - seenAt < 7 * 24 * 3600_000
+      const health = hp.health === 'stale' && seenFresh ? 'ok' : hp.health
       return {
         id: it.id,
         label: it.label || (it.primary ? '主账号' : `账号 ${idx + 1}`),
@@ -328,8 +349,9 @@ export function listAccounts(): Array<{
         cookiePreview: preview(cookie),
         updatedAt: it.addedAt || null,
         lastVerify: staleByVersion ? null : raw,
-        health: hp.health,
-        healthText: hp.text,
+        lastSeenAt: seenAt || null,
+        health,
+        healthText: health === hp.health ? hp.text : '正常（近期凭证续期成功）',
         ageHours: hp.ageHours,
       }
     }).sort((a, b) => Number(b.primary) - Number(a.primary))
@@ -345,6 +367,7 @@ export function listAccounts(): Array<{
       cookiePreview: first?.cookiePreview || '',
       updatedAt: first?.updatedAt ?? null,
       lastVerify: first?.lastVerify ?? null,
+      lastSeenAt: first?.lastSeenAt ?? null,
       health: first?.health || 'none',
       healthText: first?.healthText || '未配置',
       ageHours: first?.ageHours ?? null,
@@ -575,6 +598,27 @@ export function refreshCookie(id: string, cookie: string, itemId?: string): { su
   target.addedAt = Date.now()
   writeStore(store)
   return { success: true }
+}
+
+/**
+ * 只记「这个号刚刚还活着」，不动 Cookie、也不动校验快照。
+ *
+ * 用途：短期凭证保温续期成功（咪咕每小时一次）时打一个存活时间戳，
+ * 让面板/监控能区分「巡检快照旧」和「账号真掉线」——见 lastSeenAt 字段注释。
+ */
+export function touchAccountSeen(id: string, itemId?: string): void {
+  if (!getPlatform(id)) return
+  try {
+    const store = readStore()
+    const acc = normalize(store.accounts[id])
+    if (!acc?.items?.length) return
+    const target = itemId ? acc.items.find(i => i.id === itemId) : primaryItem(acc)
+    if (!target) return
+    target.lastSeenAt = Date.now()
+    writeStore(store)
+  } catch {
+    /* 存活证据写失败不影响主流程 */
+  }
 }
 
 /**

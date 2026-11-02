@@ -493,6 +493,28 @@ const canResolveSource = (source: string, username: string): boolean => {
 }
 
 /**
+ * 换源解析的时间预算（毫秒）。
+ *
+ * 以前是「20 秒一整块」，实测最坏情况是原平台 30+ 个自定义源串行问到底、20 秒烧光，
+ * 之后 findServerSourceMatches() 好不容易搜到 B站 兜底候选，attempt() 一进门就
+ * `Date.now() >= deadline` 直接返回 null —— 表现为「B站兜底：搜到了 BV 号，但永远投不上」，
+ * 小爱 8/8 次全部落在「解析超时 / 落到公开源」。
+ *
+ * 现在拆成两段独立预算：原源 10 秒 + 换源 10 秒，且换源搜索原源阶段就开始跑（并行），
+ * 保证换源阶段永远有整整 10 秒可用。
+ */
+const RESOLVE_DIRECT_BUDGET_MS = (() => {
+  const raw = Number(process.env.MUSIC_RESOLVE_DIRECT_MS)
+  return Number.isFinite(raw) && raw >= 2000 ? Math.round(raw) : 10000
+})()
+const RESOLVE_SWITCH_BUDGET_MS = (() => {
+  const raw = Number(process.env.MUSIC_RESOLVE_SWITCH_MS)
+  return Number.isFinite(raw) && raw >= 2000 ? Math.round(raw) : 10000
+})()
+/** 单次解析的探测次数上限（两段共用；原源阶段不再能把配额吃光） */
+const RESOLVE_MAX_PROBES = 12
+
+/**
  * 解析出「确认真的能出音频」的播放地址。
  *
  * 音源脚本只要拼出一个字符串就算成功，它不会验证对方是否还活着
@@ -507,9 +529,8 @@ const resolvePlayableAudio = async (
 ): Promise<ResolvedPlayableAudio> => {
   const failures: string[] = []
   const tried = new Set<string>()
-  // 逐源重试要有个上限：某个平台真整体挂掉时，30 多个源全试一遍会让用户干等，
-  // 这里给 20 秒总预算 + 最多 8 次探测，超了就带着已有失败原因返回。
-  const deadline = Date.now() + 20000
+  // 两段独立预算（见上面常量注释）：原源阶段超支不会吃掉换源阶段的时间片
+  let deadline = Date.now() + RESOLVE_DIRECT_BUDGET_MS
   let probes = 0
   const qualities = [requestedQuality, ...getDownloadQualityCandidates(requestedQuality)]
     .filter((q, i, arr) => !!q && arr.indexOf(q) === i)
@@ -536,7 +557,7 @@ const resolvePlayableAudio = async (
 
     // 额外音源：单源直取（自带账号 Cookie），没有「同平台多源轮换」的概念
     if (isExtra) {
-      if (Date.now() >= deadline || probes >= 8) return null
+      if (Date.now() >= deadline || probes >= RESOLVE_MAX_PROBES) return null
       try {
         const extra = await extraSources.getMusicUrl(source, candidate, quality, username)
         const extraUrl = String(extra?.url || '').trim()
@@ -565,7 +586,7 @@ const resolvePlayableAudio = async (
 
     const exclude: string[] = []
     for (let round = 0; round < 5; round++) {
-      if (Date.now() >= deadline || probes >= 8) return null
+      if (Date.now() >= deadline || probes >= RESOLVE_MAX_PROBES) return null
       let result: any
       try {
         result = await callUserApiGetMusicUrl(source, candidate, quality, username, undefined, true, exclude)
@@ -601,20 +622,52 @@ const resolvePlayableAudio = async (
     return null
   }
 
-  for (const quality of qualities) {
-    const direct = await attempt(songInfo, quality)
-    if (direct) return { ...direct, failures }
-
-    // 同平台源全挂时，换到别的平台/别的曲库 ID 再试
-    let matches: any[] = []
-    try {
-      matches = await findServerSourceMatches(songInfo, username)
-    } catch {
-      matches = []
+  // 换源搜索与原源取链**并行**发起：搜索（五平台 + B站兜底）本身要 2~6 秒，
+  // 串在原源超时之后才开始，等于双重等待。
+  // 但不能一进门就搜 —— 绝大多数歌原源 1 秒内就能出链，那样每首歌都白搜 6 个平台。
+  // 折中：给 1.2 秒宽限，原源还没结束时才把搜索提前发出去。
+  let matchesPromise: Promise<any[]> | null = null
+  const startMatches = (): Promise<any[]> => {
+    if (!matchesPromise) {
+      matchesPromise = findServerSourceMatches(songInfo, username).catch(() => [])
     }
+    return matchesPromise
+  }
+  const graceTimer = setTimeout(startMatches, 1200)
+  if (typeof (graceTimer as any).unref === 'function') (graceTimer as any).unref()
+
+  // ---- 第 1 段：原源（独立预算，最多 RESOLVE_DIRECT_BUDGET_MS）----
+  let direct: any = null
+  try {
+    for (const quality of qualities) {
+      direct = await attempt(songInfo, quality)
+      if (direct) break
+    }
+  } finally {
+    clearTimeout(graceTimer)
+  }
+  if (direct) return { ...direct, failures }
+
+  // ---- 第 2 段：换源（重置预算与探测配额，保证这一段有完整时间片）----
+  // 预算从「候选到手之后」才开始算：搜索本身就慢时，不能连取链的时间一起吃掉。
+  let matches: any[] = []
+  try {
+    matches = await startMatches()
+  } catch {
+    matches = []
+  }
+  deadline = Date.now() + RESOLVE_SWITCH_BUDGET_MS
+  probes = 0
+  if (matches.length) {
+    console.log(`[自动换源] 原源不可用，换源候选 ${matches.length} 条：${songInfo.name} → ${matches.slice(0, 3).map(m => m.source).join(',')}`)
+  }
+  for (const quality of qualities) {
     for (const match of matches.slice(0, 3)) {
       const hit = await attempt(match, quality)
-      if (hit) return { ...hit, failures }
+      if (hit) {
+        console.log(`[自动换源] 换源成功：${songInfo.name} → ${hit.sourceName} (${hit.quality})`)
+        return { ...hit, failures }
+      }
     }
   }
 
@@ -982,7 +1035,9 @@ const resolveXiaoAiTrackRaw = async (
   }
 
   // 5. 现解析：原源 → 换源 → 音质降级，每个候选都做音频探测
-  //    两趟都套硬预算（首轮 15s + 重试 10s），最坏 25s 左右给结论，不再让用户干等两分钟。
+  //    两趟都套硬预算（首轮 18s + 重试 10s），最坏 28s 左右给结论，不再让用户干等两分钟。
+  //    首轮 15s→18s：内部已拆成「原源 10s + 换源 10s」，外层只给 15s 时换源阶段只剩 5s，
+  //    B站兜底搜到 BV 号也来不及取链（实测 8/8 次投送失败）。
   const emptyResolved: ResolvedPlayableAudio = {
     url: '',
     sourceName: '',
@@ -993,7 +1048,7 @@ const resolveXiaoAiTrackRaw = async (
   }
   let resolved = await withResolveBudget(
     resolvePlayableAudio(songInfo, quality, verifiedUsername),
-    15000,
+    18000,
     emptyResolved,
     '首轮换源',
   )
@@ -2146,6 +2201,34 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
     })
   }
 
+  // B站兜底搜索**与五平台并行**发起。
+  //
+  // 原来是「五平台全空之后」才串行去搜 B站：五平台各一次搜索要 2~6 秒，搜完 B站 再花一次，
+  // 而 resolvePlayableAudio 的换源时段只有 10 秒 —— 结果经常是 BV 号到手、时间片已经用完，
+  // 表现为「B站兜底日志有、投送永远失败」。并行之后 B站 结果随五平台一起到，不额外占时间。
+  // 采用顺序不变：仍然排在五平台之后，只有它们全没匹配才用。
+  const biliFallbackPromise: Promise<any | null> = (async () => {
+    if (songInfo.source === 'bili') return null
+    const biliKeyword = `${songInfo.name || ''} ${songInfo.singer || ''}`.trim()
+    if (!biliKeyword) return null
+    try {
+      const biliData = await extraSources.searchSongs('bili', biliKeyword, 1, 10)
+      const bestBili = (Array.isArray(biliData?.list) ? biliData.list : [])
+        .map((item: any) => ({ candidate: { ...item, source: 'bili' }, score: getSongMatchScore(item, songInfo) }))
+        // 阈值比常规平台更严：B站同名视频里混着剪辑/解说，宁可不换也别放错
+        .filter((it: any) => it.score >= 15)
+        .sort((a: any, b: any) => b.score - a.score)[0]
+      if (bestBili) {
+        console.log(`[自动换源] B站兜底候选（并行搜索）：${songInfo.name} → ${bestBili.candidate.id}`)
+        return bestBili.candidate
+      }
+      return null
+    } catch (err: any) {
+      console.warn(`[自动换源] B站兜底搜索失败: ${err?.message || err}`)
+      return null
+    }
+  })()
+
   const promise = Promise.all(switchSearchers.map(async task => {
     try {
       return await task.run()
@@ -2188,27 +2271,15 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
       out.push(item.candidate)
     }
 
-    // 五个常规平台都没匹配到，才把 B站 当最后一档兜底。
+    // 五个常规平台都没匹配到，才把 B站 当最后一档兜底（搜索结果已并行拿到，见 biliFallbackPromise）。
     // 以前服务端换源池里只有 wy/tx/kw/kg/mg（AUTO_SOURCE_ORDER），B站 只在**前端**的手动换源里
     // 作为兜底出现；于是「B站有、别的平台没有」的曲子（演唱会/翻唱/Live）在服务端自动换源、
     // 下载、小爱投送这些链路上永远切不过去，看起来就像「B站没进全平台切源」。
-    if (out.length === 0 && songInfo.source !== 'bili') {
-      try {
-        const biliKeyword = `${songInfo.name || ''} ${songInfo.singer || ''}`.trim()
-        if (biliKeyword) {
-          const biliData = await extraSources.searchSongs('bili', biliKeyword, 1, 10)
-          const bestBili = (Array.isArray(biliData?.list) ? biliData.list : [])
-            .map((item: any) => ({ candidate: { ...item, source: 'bili' }, score: getSongMatchScore(item, songInfo) }))
-            // 阈值比常规平台更严：B站同名视频里混着剪辑/解说，宁可不换也别放错
-            .filter((it: any) => it.score >= 15)
-            .sort((a: any, b: any) => b.score - a.score)[0]
-          if (bestBili) {
-            out.push(bestBili.candidate)
-            console.log(`[自动换源] 五平台无匹配，B站兜底：${songInfo.name} → ${bestBili.candidate.id}`)
-          }
-        }
-      } catch (err: any) {
-        console.warn(`[自动换源] B站兜底搜索失败: ${err?.message || err}`)
+    if (out.length === 0) {
+      const bestBili = await biliFallbackPromise
+      if (bestBili) {
+        out.push(bestBili)
+        console.log(`[自动换源] 五平台无匹配，B站兜底：${songInfo.name} → ${bestBili.id}`)
       }
     }
 
@@ -2500,7 +2571,7 @@ const resolveServerSong = async (
       switched: {
         from: sourceDisplayName(originalSong?.source),
         to: switchedResult.sourceName || sourceDisplayName(switchedResult.songInfo?.source),
-        reason: shortSwitchReason(extraError || errors[0]),
+        reason: switchReasonForUser(extraError || errors[0]),
       },
     }
   }
@@ -2534,6 +2605,21 @@ const shortSwitchReason = (raw: any): string => {
   const s = String(raw || '').replace(/\s+/g, ' ').trim()
   if (!s) return ''
   return s.length > 80 ? `${s.slice(0, 78)}…` : s
+}
+
+/**
+ * 换源原因「给用户看的那一句」。
+ *
+ * 汽水的诊断原文是「汽水该曲仅有 60 秒试听（版权限制，完整 215 秒需官方客户端签名），
+ * 签名器在线但仍只有试听，请确认签名器设备指纹与账号权益」——一百多字，塞进 toast 会被
+ * 截断在第 40 个字，用户根本看不出「为什么换」。这里对已知场景给一句人话，
+ * 完整原因仍然打在日志里（排查用），不丢信息。
+ */
+const switchReasonForUser = (raw: any): string => {
+  const s = String(raw || '')
+  if (!s.trim()) return ''
+  if (/试听/.test(s)) return '汽水仅提供试听片段（版权曲需客户端签名），已自动换到可用音源'
+  return shortSwitchReason(s)
 }
 
 /** 换源成功后清掉这条待补记录（只有汽水会进清单；key 与 pending.add 保持一致） */
@@ -9258,7 +9344,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     switched: {
                       from: sourceDisplayName(source),
                       to: switched.sourceName,
-                      reason: shortSwitchReason(extraSourceError),
+                      reason: switchReasonForUser(extraSourceError),
                     },
                   }
                   void pushProgress({ name: switched.sourceName, status: 'success' })
@@ -11251,6 +11337,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             checking: musicAccount.isHealthChecking(),
             autoSwitch: global.lx.config['musicAccount.autoSwitch'] || {},
             storePath: musicAccount.getStoreFilePath(),
+            // 汽水账号体检：最近一次「只有试听」的判定（只读、不发请求）。
+            // 面板上「账号正常」和「只能播 60 秒」是两件事——签名器在线但权益不被认可时，
+            // Cookie 校验照样是绿的，用户却听不到整曲，这里把结论透出来。
+            sodaEntitlement: extraSources.sodaEntitlementVerdict(),
           },
         }))
         return
@@ -13136,6 +13226,14 @@ export const startServer = async (port: number, ip: string) => {
   fileCache.setLyricFetcher(async (songInfo: any) => {
     try {
       const source = songInfo.source
+      // 额外音源（汽水 / B站）不在 musicSdk 里：以前一律落到下面「不支持的音源」，
+      // 汽水歌永远没有歌词。汽水自己带逐字歌词端点（H5 → SEO 兜底），这里分发过去。
+      if (source && extraSources.isExtraSource(source)) {
+        const lx = await extraSources.getLyric(source, songInfo).catch(() => null)
+        const text = lx?.lyric || null
+        console.log(`[歌词抓取] ${extraSources.displayName(source)}: ${text ? text.length + ' 字符' : '无歌词'}（${songInfo.name || ''}）`)
+        return text
+      }
       if (!source || !musicSdk[source] || !musicSdk[source].getLyric) {
         console.log(`[歌词抓取] 跳过: 不支持的音源 "${source}"`)
         return null

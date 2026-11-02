@@ -241,6 +241,30 @@ export * as signer from './signer'
 export * as pending from './pending'
 export * as prefetch from './prefetch'
 
+/**
+ * 额外音源的歌词（目前只有汽水有：`/luna/h5/track_v2` 的 `lyric.content`，逐字 QRC）。
+ *
+ * 缓存注入 USLT / 播放页歌词都走 musicSdk，而 extraSources 不在 musicSdk 里 ——
+ * 不补这个分发，汽水歌曲永远打一行「不支持的音源 "soda"」然后没有歌词。
+ * B站视频没有 LRC，返回 null 让上层照旧跳过。
+ */
+export async function getLyric(source: string, songInfo: any): Promise<{ lyric: string; lxlyric: string } | null> {
+  if (String(source || '') !== 'soda') return null
+  let id: any = songInfo?.songmid ?? songInfo?.id ?? songInfo?.meta?.trackId ?? ''
+  if (id && typeof id === 'object') id = id.songmid ?? id.id ?? ''
+  const trackId = String(id || '').replace(/^soda_/, '').trim()
+  if (!trackId) return null
+  return soda.getTrackLyric(trackId, store.getCookie('soda') || '')
+}
+
+/**
+ * 汽水账号体检结论（最近一次「只有试听」的判定）。
+ * 纯读，供 `/api/music/accounts` 展示，不做任何请求。
+ */
+export function sodaEntitlementVerdict() {
+  return soda.getSodaEntitlementVerdict()
+}
+
 /** 取流诊断：一次说清「拿到的是整曲还是试听、走的哪条通道、还缺什么」 */
 export async function diagnoseStream(source: string, songInfo: any, quality: string) {
   if (source === 'soda') return soda.diagnoseStream(songInfo, quality, store.getCookie('soda') || '')
