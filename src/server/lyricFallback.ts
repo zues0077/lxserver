@@ -21,6 +21,7 @@ import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 import * as store from './musicAccount/store'
 import { getTrackLyric as getSodaTrackLyric } from './extraSources/soda'
 import { durationSeconds, cleanTitle, pickBest, plainToLrc, scoreCandidate } from '@/utils/lyricMatch'
+import { resolveMatchTarget } from './xiaoai/musicMatch'
 
 const musicSdk: any = musicSdkRaw as any
 
@@ -307,19 +308,33 @@ function writeCache(key: string, value: LyricPayload | null) {
  */
 export async function getFallbackLyric(target: LyricTarget): Promise<LyricPayload | null> {
   if (!target || !String(target.name || '').trim()) return null
-  const key = cacheKey(target)
+
+  // 视频站/翻唱源的「歌名」其实是一整条标题：
+  //   【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天” / 歌手=西伯利亚麻雀(UP主)
+  // 原样拿去跨源搜必然 0 命中（真机实测 2026-11-02：原文 _noOnlineLyric，清洗后同一个 B站曲目
+  // 直接返回完整 LRC）。所以进来先收敛成「真歌名 + 真歌手」，匹配基准也跟着换。
+  const match = resolveMatchTarget(String(target.name || ''), String(target.singer || ''))
+  const normalized: LyricTarget = {
+    ...target,
+    name: String(match.title || target.name || '').trim(),
+    singer: String(match.artist || '').trim(),
+  }
+  if (normalized.name !== target.name || normalized.singer !== target.singer) {
+    console.log(`[歌词兜底] 标题归一：${target.name} / ${target.singer} → ${normalized.name} / ${normalized.singer}`)
+  }
+  const key = cacheKey(normalized)
   const cached = readCache(key)
   if (cached !== undefined) return cached
   const running = inflight.get(key)
   if (running) return running
 
   const task = (async (): Promise<LyricPayload | null> => {
-    const source = String(target.source || '').toLowerCase()
+    const source = String(normalized.source || '').toLowerCase()
     let hit: LyricPayload | null = null
-    if (source === 'soda') hit = await sodaLyric(target)
-    else if (source === 'kglite') hit = await kgliteLyric(target)
-    if (!hit) hit = await crossSourceLyric(target)
-    if (!hit) hit = await lrclibLyric(target)
+    if (source === 'soda') hit = await sodaLyric(normalized)
+    else if (source === 'kglite') hit = await kgliteLyric(normalized)
+    if (!hit) hit = await crossSourceLyric(normalized)
+    if (!hit) hit = await lrclibLyric(normalized)
     return hit
   })()
     .catch(() => null)
