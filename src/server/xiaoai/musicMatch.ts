@@ -57,10 +57,16 @@ const BOOK_TITLE_RE = /《([^》]{1,40})》/
 const BOOK_ARTIST_RE = /》\s*[-–—_]\s*([^\-–—_“”"「」『』《》\s]{1,20})/
 
 /** 单个括号里的短内容，可当歌手提示用（稻香（杰伦）→ 杰伦） */
-const BRACKET_HINT_RES = [/[（(]([^）)]{1,8})[）)]/, /【([^】]{1,8})】/]
+const BRACKET_HINT_RES = [/[（(]([^）)]{1,16})[）)]/, /【([^】]{1,16})】/]
 
 /** 括号里出现这些词说明是版本/音质标签，不是歌手 */
 const BRACKET_NOISE = /(无损|音质|hi-?res|高清|完整|纯音乐|伴奏|翻唱|cover|live|现场|remix|伴唱|片段|mv|官方|原唱|女声|男声|dj)/i
+
+/**
+ * 「原唱 周杰伦」「原唱：周杰伦」「翻自 某某」这类前缀只是说明，后面才是人。
+ * 网易云/汽水的翻唱曲目大量用这种命名，不剥掉就取不到歌手，白白退成占位封面。
+ */
+const ARTIST_PREFIX_RE = /^(?:原唱|原曲|翻自|翻唱|作曲|作词|演唱|歌手|feat\.?|ft\.?|cover)\s*[:：\-–—]?\s*/i
 
 /** 版本/署名类尾巴，出现在破折号之后需要整段丢掉 */
 const VERSION_TAIL =
@@ -122,7 +128,13 @@ export const extractBracketArtist = (raw: string): string => {
   for (const re of BRACKET_HINT_RES) {
     const m = re.exec(s)
     const v = (m?.[1] || '').trim()
-    if (!v || BRACKET_NOISE.test(v)) continue
+    if (!v) continue
+    // 「原唱 周杰伦」「翻自 某某」：前缀剥掉后剩下的就是歌手，哪怕原串命中噪声词也认
+    const prefixed = v.replace(ARTIST_PREFIX_RE, '').trim()
+    if (prefixed !== v && prefixed.length >= 2 && !BRACKET_NOISE.test(prefixed)) {
+      if (/^[\p{L}\p{N}\s·.、/&]+$/u.test(prefixed)) return prefixed.replace(/\s+/g, ' ').trim()
+    }
+    if (BRACKET_NOISE.test(v)) continue
     // 必须像个人名：只允许字母数字汉字
     if (!/^[\p{L}\p{N}]+$/u.test(v)) continue
     if (v.length < 2) continue

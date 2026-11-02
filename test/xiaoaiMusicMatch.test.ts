@@ -112,6 +112,21 @@ test('extractBracketArtist：括号里是歌手就取出来，是音质/版本�
   assert.equal(extractBracketArtist('夜曲'), '')
 })
 
+test('extractBracketArtist：「原唱 XXX」前缀要剥掉，取后面的人名', () => {
+  // 网易云翻唱命名的通用形态（真机踩过：晴天 (原唱 周杰伦) 取不到歌手，退成占位封面）
+  assert.equal(extractBracketArtist('晴天 (原唱 周杰伦)'), '周杰伦')
+  assert.equal(extractBracketArtist('后来（原唱：刘若英）'), '刘若英')
+  assert.equal(extractBracketArtist('演员 (翻自 薛之谦)'), '薛之谦')
+  // 只有标签没有名字时仍返回空
+  assert.equal(extractBracketArtist('晴天 (原唱)'), '')
+})
+
+test('buildSearchQueries：网易云翻唱命名能拆成干净 query', () => {
+  const qs = buildSearchQueries('晴天 (原唱 周杰伦)', 'RyaVocal')
+  assert.equal(qs[0], '晴天-周杰伦')
+  assert.equal(qs[1], '晴天')
+})
+
 test('buildSearchQueries：视频站标题不再拿 UP 主当歌手搜（真机 0 命中场景）', () => {
   const real = '【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”'
   const qs = buildSearchQueries(real, '西伯利亚麻雀')
