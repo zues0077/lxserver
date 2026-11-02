@@ -25,6 +25,39 @@ export interface DeviceActionResult {
   state?: 'paused' | 'stopped' | 'failed'
 }
 
+/**
+ * 设备上报的秒数/毫秒数换算成毫秒。
+ *
+ * 为什么不能统一按 duration 判档位：同一份 status 里 **position 和 duration 可能用不同单位**。
+ * 实测（2026-11-02，酷狗/QQ 部分歌）`position=2979`（毫秒）而 `duration=1`（秒），
+ * 旧逻辑按 duration 判出「秒」再乘到 position 上 → pos=2979000ms / dur=1000ms，
+ * progressRatio 恒为 1，watchdog 立刻判「临近结尾」自动切歌。
+ * 现在拿投送时已知的时长当标尺：position 超不过曲长，超过就是毫秒；duration 取更贴近的那个。
+ */
+export const resolvePositionMs = (raw: number, expectedMs = 0): number => {
+  const v = Number(raw)
+  if (!Number.isFinite(v) || v <= 0) return 0
+  if (expectedMs > 0) {
+    // 若按秒换算会超过曲长，说明原值本身就是毫秒
+    return Math.round(v * 1000 > expectedMs * 1.2 ? v : v * 1000)
+  }
+  return Math.round(v < 10000 ? v * 1000 : v)
+}
+
+export const resolveDurationMs = (raw: number, expectedMs = 0): number => {
+  const v = Number(raw)
+  if (!Number.isFinite(v) || v <= 0) return expectedMs > 0 ? Math.round(expectedMs) : 0
+  if (expectedMs > 0) {
+    const asMs = v
+    const asSec = v * 1000
+    const best = Math.abs(asMs - expectedMs) <= Math.abs(asSec - expectedMs) ? asMs : asSec
+    // 两个候选都离已知时长太远：设备给的是垃圾值（如 duration=1），直接用已知时长
+    if (Math.abs(best - expectedMs) > expectedMs * 0.5) return Math.round(expectedMs)
+    return Math.round(best)
+  }
+  return Math.round(v < 10000 ? v * 1000 : v)
+}
+
 /** 对外暴露的配置（含设备与登录状态，不含任何凭据） */
 export interface XiaoAiPublicConfig {
   configured: boolean
@@ -554,8 +587,16 @@ class XiaoAiService {
     return { volume: reported, requested, results, success: results.some(item => item.ok) }
   }
 
-  /** 单设备播放状态（用于界面回显与自动续播判定） */
-  async getStatus(deviceId: string) {
+  /**
+   * 单设备播放状态（用于界面回显与自动续播判定）。
+   *
+   * @param expectedDurationMs 本次投送时**我们自己知道**的时长（目标探测/转码结果）。
+   *   设备上报的 position/duration 单位随固件而异，而且两者**可能不一致**：
+   *   实测酷狗/QQ 的部分歌上报 `position=2979`（毫秒）却 `duration=1`（秒），
+   *   旧逻辑按 duration 判档位再套到 position 上，得到 pos=2979000ms / dur=1000ms，
+   *   比例恒为 100%，watchdog 立刻判「临近结尾」→ 自动切歌。有可信时长就拿它当标尺。
+   */
+  async getStatus(deviceId: string, expectedDurationMs = 0) {
     const config = loadConfig()
     const target = deviceId || config.selectedDeviceIds[0] || config.devices[0]?.deviceID || ''
     if (!target) throw new Error('没有可查询的设备')
@@ -563,11 +604,9 @@ class XiaoAiService {
     const raw = await client.getPlayerStatus(target)
     const info = client.parseStatusInfo(raw)
 
-    // 设备上报的 position/duration 单位随固件而异（多数是秒，部分上报毫秒）。
-    // 常用音频时长不会是「小于 10000 的毫秒数」，所以小于 10000 一律按秒处理。
-    const scale = info.duration > 0 && info.duration < 10000 ? 1000 : 1
-    const durationMs = info.duration > 0 ? Math.round(info.duration * scale) : 0
-    const positionMs = info.position > 0 ? Math.round(info.position * scale) : 0
+    const expected = Number(expectedDurationMs) > 0 ? Number(expectedDurationMs) : 0
+    const durationMs = resolveDurationMs(info.duration, expected)
+    const positionMs = resolvePositionMs(info.position, expected || durationMs)
 
     return {
       deviceId: target,

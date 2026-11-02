@@ -272,10 +272,15 @@ const artistLevel = (candArtist: string, targetArtist: string): ArtistLevel => {
   const target = artistFlat(firstArtistName(targetArtist))
   const cand = artistFlat(candArtist)
   if (!target || !cand) return 'unknown'
+  // 标点/下划线只是写法差异，不是不同人（实测：本地曲库写 `Yamy_郭颖`，曲库写 `Yamy郭颖`，
+  // 旧逻辑判成 mismatch，导致「问爱」明明能搜到却被拒、屏显退回占位）
+  const targetKey = normalizeArtistName(firstArtistName(targetArtist))
+  const candKey = normalizeArtistName(candArtist)
+  if (targetKey && candKey && targetKey === candKey) return 'match'
   if (containsAtBoundary(cand, target) || containsAtBoundary(target, cand)) return 'match'
   // 中文里习惯用名字后缀称呼歌手（「杰伦」= 周杰伦、「奕迅」= 陈奕迅），
   // 这类写法在视频站/翻唱标题里极常见，够长（≥2 字）就认作同一人。
-  if (target.length >= 2 && (cand.endsWith(target) || target.endsWith(cand))) return 'match'
+  if (targetKey.length >= 2 && (candKey.endsWith(targetKey) || targetKey.endsWith(candKey))) return 'match'
   return 'mismatch'
 }
 

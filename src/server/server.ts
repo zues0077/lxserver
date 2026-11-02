@@ -8757,7 +8757,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (pathname === '/api/music/xiaoai/status' && req.method === 'GET') {
           const deviceId = String(urlObj.searchParams.get('deviceId') || '')
           void xiaoAiService
-            .getStatus(deviceId)
+            .getStatus(deviceId, Number(lastXiaoAiTrack?.durationMs) || lastXiaoAiDeviceDurationMs)
             .then(result => {
               // streamFull：本次投送这一路流被完整拉了几遍。
               // 音箱播完会自己重拉同一个 URL，所以 >=2 就等于「已经放完一遍」，

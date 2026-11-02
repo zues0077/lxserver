@@ -134,6 +134,15 @@ test('pickMusicCandidate：歌手用后缀称呼也算同一人（杰伦 = 周�
   assert.equal(pick.score, 100)
 })
 
+test('pickMusicCandidate：下划线/标点差异不算不同人（Yamy_郭颖 = Yamy郭颖）', () => {
+  // 真机踩过：本地曲库歌手是 Yamy_郭颖，云端曲库是 Yamy郭颖，
+  // 旧逻辑判 mismatch + 同名多版本 → 拒绝 → 屏显退回 Theme Of Loft
+  const pick = pickMusicCandidate([cand('问爱', 'Yamy郭颖', 'A1')], '问爱', 'Yamy_郭颖')
+  assert.ok(pick)
+  assert.equal(pick.candidate.audioId, 'A1')
+  assert.equal(pick.score, 100)
+})
+
 test('resolveMatchTarget：搜索与择优必须用同一个基准（否则搜到了也会被拒）', () => {
   const real = '【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”'
   assert.deepEqual(resolveMatchTarget(real, '西伯利亚麻雀'), { title: '起风了', artist: '买辣椒也用券' })
