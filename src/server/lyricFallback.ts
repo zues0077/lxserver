@@ -20,6 +20,7 @@
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 import * as store from './musicAccount/store'
 import { getTrackLyric as getSodaTrackLyric } from './extraSources/soda'
+import { fetchSubtitleLyric } from './extraSources/bilibili'
 import { durationSeconds, cleanTitle, pickBest, plainToLrc, scoreCandidate } from '@/utils/lyricMatch'
 import { resolveMatchTarget } from './xiaoai/musicMatch'
 
@@ -176,6 +177,29 @@ async function crossSourceLyric(target: LyricTarget): Promise<LyricPayload | nul
     return payload
   }
   return null
+}
+
+/**
+ * B站曲目的最后一招：视频自带的 CC/AI 字幕。
+ *
+ * 位置刻意放在跨平台与 LRCLIB **之后**——官方歌词准确率明显更高
+ * （实测字幕与官方词的字符重合中位只有 77%，属于「能读但有错字」）。
+ * 只有前面全空时才用它，把「暂无歌词」变成「有词」。
+ * 匿名拿不到字幕（B站要求登录态），没有 B站账号时直接放过。
+ */
+async function biliSubtitleLyric(target: LyricTarget): Promise<LyricPayload | null> {
+  const bvid = String(target.songmid || '').trim()
+  if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) return null
+  let cookie = ''
+  try {
+    const accounts = (store.getCookies('bili') || []) as Array<{ primary?: boolean; cookie?: string }>
+    const primary = accounts.find(a => a.primary) || accounts[0]
+    cookie = primary?.cookie || ''
+  } catch { /* 没账号 → 没字幕，交给「暂无歌词」 */ }
+  if (!cookie) return null
+  const hit = await withTimeout(fetchSubtitleLyric(bvid, cookie), 12000)
+  if (!hit || !hit.lyric) return null
+  return { lyric: hit.lyric, tlyric: '', rlyric: '', lxlyric: '', _fallbackFrom: 'bili:subtitle' }
 }
 
 /** 酷狗概念版的 songmid 就是酷狗主站的 hash，直接拿去查主站歌词 */
@@ -335,6 +359,8 @@ export async function getFallbackLyric(target: LyricTarget): Promise<LyricPayloa
     else if (source === 'kglite') hit = await kgliteLyric(normalized)
     if (!hit) hit = await crossSourceLyric(normalized)
     if (!hit) hit = await lrclibLyric(normalized)
+    // B站：最后一级用视频字幕（官方词、跨源、LRCLIB 都空时才会走到这里）
+    if (!hit && source === 'bili') hit = await biliSubtitleLyric(normalized)
     return hit
   })()
     .catch(() => null)

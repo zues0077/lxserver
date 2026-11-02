@@ -20,6 +20,7 @@
  * 账号（Cookie）带来的增益：大会员解锁 Hi-Res FLAC / 杜比；非会员只有 192k 及以下。
  */
 
+import { createHash } from 'node:crypto'
 import { request, extFromUrl } from '../musicAccount/http'
 import * as store from '../musicAccount/store'
 
@@ -1698,5 +1699,225 @@ export async function getComments(
     page: pn,
     limit: ps,
     maxPage: Math.ceil(total / ps) || 1,
+  }
+}
+
+// ===== 视频字幕当歌词（B站音乐视频自带的 CC / AI 字幕） =====
+//
+// 2026-11-02 实测（42 首真实搜索结果）：
+//   - 单曲类 B 站视频 67% 带字幕，绝大多数是 `ai-zh`（平台 ASR 听写），
+//     与官方歌词的字符 bigram 重合中位 **77%**（有错字、无逐字轴）；
+//   - 现有「跨平台 + LRCLIB」链路对 B 站曲目已覆盖 71%，字幕只作**最后一级补漏**：
+//     无词的单曲里约一半能靠它补上（实测 6 首补 3 首）；
+//   - **必须登录态**：匿名打 player/v2 时 `subtitle.subtitles` 恒为空数组；
+//   - **必须走 WBI 签名的 `/x/player/wbi/v2`**：普通 `/x/player/v2` 返回的是轮换脏数据
+//     （实测同一份内容的 md5 会出现在毫不相干的 BV 上，内容与请求的视频完全无关；
+//      换 WBI 后同一 BV 连测三轮 md5 一致）；
+//   - 搜索结果里约 50% 是合集/长视频，整段听写毫无意义 → 用时长 + 行密度硬门槛拒掉。
+
+const PLAYER_WBI_API = 'https://api.bilibili.com/x/player/wbi/v2'
+/** 超过这个时长按「合集/串烧」处理：一条视频多首歌，拿不到「当前这首」的词 */
+export const SUBTITLE_MAX_VIDEO_SEC = 600
+/** 行密度合理区间（行/分钟）：歌曲实测 6~13，口播/直播回放 60~130 */
+const SUBTITLE_MIN_LPM = 4
+const SUBTITLE_MAX_LPM = 30
+/** 字幕至少要盖到歌曲后半段，只盖开头的多半是片头字幕 */
+const SUBTITLE_MIN_COVER = 0.5
+const SUBTITLE_MIN_LINES = 8
+const SUBTITLE_MIN_CHARS = 100
+
+/** WBI 混淆表（B站前端固定常量） */
+const WBI_TAB = [
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+  33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61,
+  26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36,
+  20, 34, 44, 52,
+]
+
+let wbiCache: { key: string; at: number } = { key: '', at: 0 }
+const WBI_TTL = 3600_000
+
+/** 从 nav 接口的 wbi_img 两份 URL 里拼出 mixin key（1 小时缓存） */
+async function wbiMixinKey(cookie: string): Promise<string> {
+  if (wbiCache.key && Date.now() - wbiCache.at < WBI_TTL) return wbiCache.key
+  const resp = await request<any>(NAV_API, { headers: await headersWithCookie(cookie), timeout: 10000 })
+  const fileName = (u: string): string => {
+    const last = String(u || '').split('/').pop() || ''
+    return last.split('.')[0] || ''
+  }
+  const raw = fileName(resp.body?.data?.wbi_img?.img_url) + fileName(resp.body?.data?.wbi_img?.sub_url)
+  if (raw.length < 64) return ''
+  const key = WBI_TAB.map(i => raw[i] || '').join('').slice(0, 32)
+  if (!key) return ''
+  wbiCache = { key, at: Date.now() }
+  return key
+}
+
+/** 按 WBI 规则签名：参数排序 → 过滤 !'()* → 拼 wts → md5(query + mixin) */
+function wbiSign(params: Record<string, string | number>, mixin: string): string {
+  const all: Record<string, string> = {}
+  for (const [k, v] of Object.entries(params)) all[k] = String(v)
+  all.wts = String(Math.round(Date.now() / 1000))
+  const query = Object.keys(all)
+    .sort()
+    .map(k => `${encodeURIComponent(k)}=${encodeURIComponent(all[k].replace(/[!'()*]/g, ''))}`)
+    .join('&')
+  return `${query}&w_rid=${createHash('md5').update(query + mixin).digest('hex')}`
+}
+
+function lrcTime(sec: number): string {
+  const s = Math.max(0, sec)
+  const m = Math.floor(s / 60)
+  return `${String(m).padStart(2, '0')}:${(s - m * 60).toFixed(2).padStart(5, '0')}`
+}
+
+/**
+ * 字幕 JSON → LRC。
+ * 字幕体是 `[{from,to,content}]`，`content` 里常带 ♪ 装饰音标记，按句给轴（没有逐字轴）。
+ * 连续重复行（ASR 抖动会产生）只留第一句。
+ */
+export function subtitleToLrc(body: any[]): { lyric: string; lines: number } {
+  const out: string[] = []
+  let prev = ''
+  for (const item of body) {
+    const raw = String(item?.content ?? '').replace(/[♪♫]/g, ' ').replace(/\s+/g, ' ').trim()
+    if (!raw) continue
+    if (!/[\u4e00-\u9fff\u3040-\u30ffa-zA-Z0-9]/.test(raw)) continue
+    if (raw === prev) continue
+    const from = Number(item?.from)
+    if (!Number.isFinite(from) || from < 0) continue
+    out.push(`[${lrcTime(from)}]${raw}`)
+    prev = raw
+  }
+  return { lyric: out.join('\n'), lines: out.length }
+}
+
+export interface SubtitleLyric {
+  lyric: string
+  /** 命中的字幕语言，如 ai-zh / zh-CN */
+  lang: string
+  lines: number
+  /** 字幕覆盖到视频时长的比例 0~1 */
+  covered: number
+}
+
+export interface SubtitleMetrics {
+  /** 该分P的时长（秒）——注意用分P时长，不是整条视频总时长 */
+  durationSec: number
+  lines: number
+  chars: number
+  lpm: number
+  covered: number
+}
+
+/**
+ * 字幕能不能当歌词用。
+ *
+ * 三条硬门槛都来自实测：
+ *   - 时长 ≥600s 且是单P长视频 → 合集/串烧，整段听写是「多首歌混在一起」，只能拒；
+ *   - 行密度 4~30 行/分 → 歌曲 6~13，口播/直播回放 60~130，靠这个把 vlog 挡掉；
+ *   - 覆盖 ≥50% → 只盖开头的多半是片头字幕，不是整首歌词。
+ */
+export function isSubtitleUsable(m: SubtitleMetrics): boolean {
+  if (!(m.durationSec > 0)) return false
+  if (m.durationSec >= SUBTITLE_MAX_VIDEO_SEC) return false
+  if (m.lines < SUBTITLE_MIN_LINES) return false
+  if (m.chars < SUBTITLE_MIN_CHARS) return false
+  if (m.lpm < SUBTITLE_MIN_LPM || m.lpm > SUBTITLE_MAX_LPM) return false
+  return m.covered >= SUBTITLE_MIN_COVER
+}
+
+const SUB_LRC_CACHE = new Map<string, { value: SubtitleLyric | null; at: number }>()
+const SUB_LRC_HIT_TTL = 12 * 3600_000
+const SUB_LRC_MISS_TTL = 30 * 60_000
+const SUB_LRC_MAX = 300
+
+/**
+ * 取某条 B 站视频的字幕并转成 LRC。
+ *
+ * 只在「跨平台 + LRCLIB 都没词」时由歌词兜底链路调用；返回 null 表示不能用，
+ * 调用方按「暂无歌词」处理（不是错误）。
+ */
+export async function fetchSubtitleLyric(bvid: string, cookie = ''): Promise<SubtitleLyric | null> {
+  const id = String(bvid || '').trim()
+  if (!/^BV[0-9A-Za-z]{10}$/.test(id)) return null
+  const cached = SUB_LRC_CACHE.get(id)
+  if (cached) {
+    const ttl = cached.value ? SUB_LRC_HIT_TTL : SUB_LRC_MISS_TTL
+    if (Date.now() - cached.at < ttl) return cached.value
+  }
+  const save = (v: SubtitleLyric | null): SubtitleLyric | null => {
+    if (SUB_LRC_CACHE.size >= SUB_LRC_MAX) {
+      const first = SUB_LRC_CACHE.keys().next()
+      if (!first.done) SUB_LRC_CACHE.delete(first.value)
+    }
+    SUB_LRC_CACHE.set(id, { value: v, at: Date.now() })
+    return v
+  }
+
+  try {
+    const pageResp = await request<any>(`${PAGELIST_API}?bvid=${encodeURIComponent(id)}`, {
+      headers: await headersWithCookie(cookie),
+      timeout: 6000,
+    })
+    const pages: any[] = Array.isArray(pageResp.body?.data) ? pageResp.body.data : []
+    const cid = String(pages[0]?.cid || '')
+    const duration = Number(pages[0]?.duration || 0)
+    if (!cid) return save(null)
+    if (duration >= SUBTITLE_MAX_VIDEO_SEC) {
+      console.log(`[B站歌词] 跳过 ${id}：时长 ${duration}s，按合集/长视频处理`)
+      return save(null)
+    }
+
+    const aid = await fetchAid(id, cookie).catch(() => 0)
+    if (!aid) return save(null)
+    const mixin = await wbiMixinKey(cookie)
+    if (!mixin) {
+      console.warn('[B站歌词] 取 WBI 密钥失败，跳过字幕')
+      return save(null)
+    }
+
+    const resp = await request<any>(`${PLAYER_WBI_API}?${wbiSign({ aid, cid, bvid: id }, mixin)}`, {
+      headers: await headersWithCookie(cookie),
+      timeout: 6000,
+    })
+    const subs: any[] = resp.body?.data?.subtitle?.subtitles || []
+    if (!subs.length) return save(null)
+
+    // AI 字幕是整段听写（要的就是它）；人工 CC 更准但常常只是片头说明，
+    // 所以 AI 优先，人工的靠行数/覆盖门槛自然淘汰。
+    const ordered = subs
+      .slice()
+      .sort((a, b) => Number(/^ai-/.test(String(b?.lan))) - Number(/^ai-/.test(String(a?.lan))))
+
+    for (const s of ordered.slice(0, 3)) {
+      const url = String(s?.subtitle_url || '')
+      if (!url) continue
+      const jr = await request<any>(url.startsWith('//') ? `https:${url}` : url, {
+        headers: BASE_HEADERS,
+        timeout: 6000,
+      })
+      const body: any[] = Array.isArray(jr.body?.body) ? jr.body.body : []
+      if (!body.length) continue
+      const conv = subtitleToLrc(body)
+      const lpm = duration > 0 ? conv.lines / (duration / 60) : 0
+      const lastAt = Number(body[body.length - 1]?.to || 0)
+      const covered = duration > 0 ? Math.min(1, lastAt / duration) : 0
+      const chars = conv.lyric.replace(/\[[^\]]*\]/g, '').replace(/[^\u4e00-\u9fffa-zA-Z0-9]/g, '').length
+      const usable = isSubtitleUsable({ durationSec: duration, lines: conv.lines, chars, lpm, covered })
+      if (!usable) {
+        if (process.env.LX_LYRIC_DEBUG) {
+          console.log(`[B站歌词] 弃用 ${id} ${String(s?.lan || '')}：${conv.lines} 行 ${lpm.toFixed(1)}/分 覆盖 ${Math.round(covered * 100)}%`)
+        }
+        continue
+      }
+      const hit: SubtitleLyric = { lyric: conv.lyric, lang: String(s?.lan || ''), lines: conv.lines, covered }
+      console.log(`[B站歌词] 字幕命中 ${id}：${hit.lines} 行（${hit.lang}，覆盖 ${Math.round(covered * 100)}%）`)
+      return save(hit)
+    }
+    return save(null)
+  } catch (e: any) {
+    console.warn(`[B站歌词] 取字幕失败 ${id}：${String(e?.message || e).slice(0, 120)}`)
+    return save(null)
   }
 }
