@@ -175,6 +175,56 @@ interface DqTaskMeta {
     bytes?: number
 }
 
+/** 单条响应处理内部的三段耗时，由任务自己打点回填 */
+interface DqTaskProbe {
+    parseMs?: number
+    deconMs?: number
+    callbackMs?: number
+}
+
+/**
+ * 「响应体体积」被判定为主因的阈值：parse + 深拷贝合计超过它，才考虑降体积闸。
+ *
+ * 实测（2026-11-02，本地 vm2 复现 3.56MB / 6528 条纯数据）：
+ *   JSON.parse 21ms + decontextify 递归 11ms + 传参进沙箱 1ms + 沙箱内遍历 284ms ≈ 317ms
+ * 也就是说 3.5MB 的纯数据走完整条边界只要 0.3 秒，**6 秒不可能是体积造成的**。
+ * 所以这里必须按段判定：只有 parse/拷贝真的占了大头才降闸，否则降闸既拦不住卡顿、
+ * 又白白削弱了那个源。
+ */
+const BODY_COST_SUSPECT_MS = 1000
+/** 自适应体积闸有效期：到期自动恢复默认上限，避免一次偶发把源永久阉掉 */
+const ADAPTIVE_LIMIT_TTL_MS = 30 * 60 * 1000
+/** 自适应闸门的地板：音乐接口正常响应很少超过 1MB，再低就开始误伤正常请求 */
+const ADAPTIVE_LIMIT_FLOOR_BYTES = 1024 * 1024
+/** 判定为体积问题后，把该源上限压到本次体积的这个比例 */
+const ADAPTIVE_LIMIT_SHRINK = 0.6
+
+interface AdaptiveLimit {
+    limit: number
+    until: number
+    /** 触发时实测到的体积与耗时，日志里要能自证 */
+    bytes: number
+    cost: number
+}
+
+const adaptiveBodyLimits = new Map<string, AdaptiveLimit>()
+/** 同一源在窗口内命中「超长同步任务」的次数：用于区分偶发与常态 */
+const slowTaskHits = new Map<string, { count: number; since: number }>()
+const SLOW_TASK_HIT_WINDOW_MS = 30 * 60 * 1000
+/** 判定为「这个源根本处理不了这个量级」的硬阈值 */
+const SLOW_TASK_HARD_MS = 2000
+
+/** 当前生效的响应体上限：默认值与该源的自适应上限取小。仅供测试调用 */
+export function effectiveBodyLimit(owner: string, id: string): number {
+    const hit = adaptiveBodyLimits.get(`${owner}_${id}`)
+    if (!hit) return CUSTOM_SOURCE_MAX_BODY_BYTES
+    if (Date.now() >= hit.until) {
+        adaptiveBodyLimits.delete(`${owner}_${id}`)
+        return CUSTOM_SOURCE_MAX_BODY_BYTES
+    }
+    return Math.min(CUSTOM_SOURCE_MAX_BODY_BYTES, hit.limit)
+}
+
 /** 人类可读的体积，日志里比裸字节好认 */
 const formatBytes = (n?: number): string => {
     if (!n || n <= 0) return '0B'
@@ -183,36 +233,77 @@ const formatBytes = (n?: number): string => {
     return `${(n / 1024 / 1024).toFixed(2)}MB`
 }
 
-function dqEnqueue(task: () => void, meta?: DqTaskMeta): void {
+function dqEnqueue(task: (probe: DqTaskProbe) => void, meta?: DqTaskMeta): void {
     dqTail = dqTail
         .then(async () => {
             // 让出事件循环，确保本批 decontextify 不与其它响应回调挤在同一个同步长块里
             await new Promise<void>(r => setImmediate(r))
             const startedAt = Date.now()
+            const probe: DqTaskProbe = {}
             try {
-                task()
+                task(probe)
             } finally {
                 // 队列把「并发回来的多份响应」拆成了一任务一 tick，但单个任务本身仍可能是
                 // 数秒的同步块（超大响应体的 JSON.parse + 深拷贝，或脚本自己的同步重活）。
                 // 这类卡顿此前只能靠事件循环监控+活动账本间接归因，命中谁全凭时间窗，
-                // 这里直接量到「哪个源、多大响应、耗时多少」，让归因从猜测变成实证。
+                // 这里直接量到「哪个源、多大响应、三段各花多少」，让归因从猜测变成实证。
                 const cost = Date.now() - startedAt
-                if (cost >= SLOW_RESPONSE_TASK_MS) {
-                    const key = `${meta?.owner || ''}_${meta?.id || ''}`
-                    const now = Date.now()
-                    if (now - (slowTaskLoggedAt.get(key) || 0) >= SLOW_TASK_LOG_WINDOW_MS) {
-                        slowTaskLoggedAt.set(key, now)
-                        const msg = `[响应处理] 单条响应同步耗时 ${cost}ms：${meta?.name || '未知源'}`
-                            + `（响应体 ${formatBytes(meta?.bytes)}）`
-                        console.warn(msg)
-                        syncLog.warn(msg)
-                    }
-                }
+                if (cost >= SLOW_RESPONSE_TASK_MS) reportSlowTask(meta, cost, probe)
             }
         })
         .catch(() => {
             /* 单任务异常不影响后续入队任务 */
         })
+}
+
+/** 慢任务记账 + 按实测归因做自适应处置（体积问题才降闸；脚本自身重活只记不改）。仅供测试调用 */
+export function reportSlowTask(meta: DqTaskMeta | undefined, cost: number, probe: DqTaskProbe): void {
+    const key = `${meta?.owner || ''}_${meta?.id || ''}`
+    const now = Date.now()
+    const bytes = meta?.bytes || 0
+    const parseMs = probe.parseMs || 0
+    const deconMs = probe.deconMs || 0
+    const callbackMs = probe.callbackMs || 0
+    const bodyCost = parseMs + deconMs
+    const bodyIsBlame = bodyCost >= BODY_COST_SUSPECT_MS && bytes >= ADAPTIVE_LIMIT_FLOOR_BYTES
+
+    // 处置策略按实测归因分两条路：
+    //   体积为主因（parse+拷贝超 1s）→ 当场降闸，下一次同量级响应在 parse 之前就被丢弃
+    //   脚本自身重活 → 体积闸拦不住卡顿，只有「这个源处理这个量级就是不行」时（窗口内第 2 次
+    //     超 2s）才降闸；一次偶发不动它，避免为一次性抖动牺牲一个正常音源
+    let adapted = ''
+    if (bytes > ADAPTIVE_LIMIT_FLOOR_BYTES && meta?.owner && meta?.id) {
+        const hitKey = key
+        const prev = slowTaskHits.get(hitKey)
+        const hits = (!prev || now - prev.since > SLOW_TASK_HIT_WINDOW_MS)
+            ? { count: 1, since: now }
+            : { count: prev.count + 1, since: prev.since }
+        slowTaskHits.set(hitKey, hits)
+
+        const shouldShrink = bodyIsBlame
+            ? true
+            : (cost >= SLOW_TASK_HARD_MS && hits.count >= 2)
+        if (shouldShrink) {
+            const limit = Math.max(ADAPTIVE_LIMIT_FLOOR_BYTES, Math.round(bytes * ADAPTIVE_LIMIT_SHRINK))
+            if (limit < effectiveBodyLimit(meta.owner, meta.id)) {
+                adaptiveBodyLimits.set(key, { limit, until: now + ADAPTIVE_LIMIT_TTL_MS, bytes, cost })
+                adapted = `；已把该源响应体上限降到 ${formatBytes(limit)}`
+                    + `（${ADAPTIVE_LIMIT_TTL_MS / 60000} 分钟内有效，超限按失败回调，脚本自行换源）`
+            }
+        }
+    }
+
+    if (now - (slowTaskLoggedAt.get(key) || 0) < SLOW_TASK_LOG_WINDOW_MS) return
+    slowTaskLoggedAt.set(key, now)
+
+    const verdict = bodyIsBlame
+        ? '体积为主因'
+        : (callbackMs >= BODY_COST_SUSPECT_MS ? '脚本自身同步重活，非体积问题（降闸无效）' : '')
+    const msg = `[响应处理] 单条响应同步耗时 ${cost}ms：${meta?.name || '未知源'}`
+        + `（响应体 ${formatBytes(bytes)}｜parse ${parseMs}ms / 深拷贝 ${deconMs}ms / 脚本回调 ${callbackMs}ms`
+        + `${verdict ? `｜${verdict}` : ''}）${adapted}`
+    console.warn(msg)
+    syncLog.warn(msg)
 }
 
 // 用户API信息接口
@@ -591,13 +682,14 @@ async function createLxRequest(
                     const bodyBytes = typeof body === 'string'
                         ? Buffer.byteLength(body)
                         : (Buffer.isBuffer(body) ? body.length : 0)
-                    if (!err && bodyBytes > CUSTOM_SOURCE_MAX_BODY_BYTES) {
-                        const limitMb = (CUSTOM_SOURCE_MAX_BODY_BYTES / 1024 / 1024).toFixed(0)
+                    if (!err && bodyBytes > effectiveBodyLimit(owner, id)) {
+                        const bodyLimit = effectiveBodyLimit(owner, id)
+                        const limitText = formatBytes(bodyLimit)
                         const key = `${owner}_${id}`
                         const now = Date.now()
                         if (now - (oversizeLoggedAt.get(key) || 0) >= OVERSIZE_LOG_WINDOW_MS) {
                             oversizeLoggedAt.set(key, now)
-                            const msg = `[自定义源-${name || id}] 响应体 ${formatBytes(bodyBytes)} 超过上限 ${limitMb}MB，`
+                            const msg = `[自定义源-${name || id}] 响应体 ${formatBytes(bodyBytes)} 超过上限 ${limitText}，`
                                 + `已丢弃并回调错误（避免整份深拷贝阻塞事件循环）`
                             console.warn(msg)
                             syncLog.warn(msg)
@@ -605,7 +697,7 @@ async function createLxRequest(
                         releaseSlotOnce()
                         try {
                             callback.call(null, Object.assign(
-                                new Error(`响应体过大（${formatBytes(bodyBytes)} > ${limitMb}MB），已按失败处理`),
+                                new Error(`响应体过大（${formatBytes(bodyBytes)} > ${limitText}），已按失败处理`),
                                 { code: 'EBODYTOOLARGE' },
                             ), null, null)
                         } catch { /* 沙箱实例可能已被释放，回调失败不影响主流程 */ }
@@ -615,18 +707,25 @@ async function createLxRequest(
                     // 把「decontextify + 回调」收进串行化队列（根治主线程卡顿，见手册 P-1046）：
                     // 一批响应同时回来时，逐个同步深拷贝会叠成数秒阻塞；入队后本回调立即返回，
                     // 队列逐批处理、批间让出事件循环，最长连续阻塞被切成约等于单次 decontextify 的小段。
-                    dqEnqueue(() => {
+                    dqEnqueue((probe) => {
                         if (isDisposed?.()) { releaseSlotOnce(); return }
                         try {
                             if (err) {
-                                callback.call(null, decontextify(err), null, null)
+                                const tErr = Date.now()
+                                try {
+                                    callback.call(null, decontextify(err), null, null)
+                                } finally {
+                                    probe.callbackMs = Date.now() - tErr
+                                }
                                 return
                             }
                             let parsedBody = body
                             if (typeof body === 'string') {
+                                const tParse = Date.now()
                                 try {
                                     parsedBody = JSON.parse(body)
                                 } catch { }
+                                probe.parseMs = Date.now() - tParse
                             }
 
                             // 自动嗅探第三方脚本通过 HTTP 响应返回的更新提醒 (例如独家音源、各大更新接口)
@@ -642,6 +741,9 @@ async function createLxRequest(
                                 }
                             }
 
+                            // 深拷贝这一段单独计时：它是「体积导致卡顿」唯一能被宿主控制的成本，
+                            // 和脚本回调里的同步重活必须分开量，否则永远分不清该改哪一头
+                            const tDecon = Date.now()
                             let safeResp: any = {
                                 statusCode: resp.statusCode,
                                 statusMessage: resp.statusMessage,
@@ -662,8 +764,14 @@ async function createLxRequest(
                                 }));
                                 safeResp.body = jsonBody;
                             }
+                            probe.deconMs = Date.now() - tDecon
 
-                            callback.call(null, null, safeResp, safeResp.body)
+                            const tCb = Date.now()
+                            try {
+                                callback.call(null, null, safeResp, safeResp.body)
+                            } finally {
+                                probe.callbackMs = Date.now() - tCb
+                            }
                         } catch (error: any) {
                             callback.call(null, decontextify(error), null, null)
                         } finally {
