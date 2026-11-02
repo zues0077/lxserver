@@ -661,6 +661,10 @@ interface XiaoAiTrackTarget {
   mp3Path?: string
   /** 从第 N 秒开始投送（拖动进度条后重新投送用） */
   seekSec?: number
+  /** 写入 mp3 的 ID3 标题（源文件常无标签，用应用侧歌名兜底） */
+  title?: string
+  /** 写入 mp3 的 ID3 歌手 */
+  artist?: string
 }
 
 /** 扩展名 → Content-Type（本地缓存文件按真实格式命名过，可以直接推） */
@@ -1070,26 +1074,40 @@ const applyMp3Unification = async (
   const config = loadXiaoAiConfig()
   if (config.unifyMp3 === false) return target
   const fadeOutSec = Number(config.fadeOutSec) || 0
+  // 应用侧歌名/歌手：转码时写进 mp3 的 ID3，保证设备屏显真歌名而非占位（Theme Of Loft）
+  const metaTitle = String(songInfo.name || songInfo.title || '').trim()
+  const metaArtist = String(songInfo.singer || songInfo.artist || '').trim()
 
   if (target.path) {
-    if (isMp3File(target.path)) return target
+    // 已是 mp3：原样复用，但把 title/artist 带上，便于流式重拉时也能写进 ID3
+    if (isMp3File(target.path)) {
+      return { ...target, title: metaTitle, artist: metaArtist }
+    }
     const dest = mp3CachePath(username, songInfo, quality)
     const result = await transcodeFileToMp3(target.path, dest, {
       fadeOutSec,
       durationMs: Number(target.durationMs) || 0,
+      title: metaTitle,
+      artist: metaArtist,
     })
     if (!result.ok || !result.path) {
       console.warn(
         `[XiaoAi] 统一 mp3 失败，按原格式投送：${target.filename}（${result.error || '未知原因'}）`,
       )
-      return target
+      return { ...target, title: metaTitle, artist: metaArtist }
     }
+    // 关键修复：必须采用「转码后 mp3」的真实时长，而不是沿用上游可能错误的源时长。
+    // 例如 B站 m4a 的本地探测为 0，旧逻辑会回退到源视频时长（可达 40 分钟），
+    // 导致进度条几乎不动、自动续播永不触发；这里优先用转码产物的头部解析时长。
+    const mp3Duration = probeLocalFileDuration(result.path)
     return {
       ...target,
       path: result.path,
       contentType: 'audio/mpeg',
       via: `${target.via}｜转 mp3`,
-      durationMs: target.durationMs || probeLocalFileDuration(result.path),
+      durationMs: mp3Duration > 0 ? mp3Duration : (Number(target.durationMs) || mp3Duration),
+      title: metaTitle,
+      artist: metaArtist,
     }
   }
 
@@ -1099,13 +1117,15 @@ const applyMp3Unification = async (
     const mime = String(target.contentType || '').toLowerCase()
     const looksMp3 =
       mime.includes('audio/mpeg') || mime.includes('audio/mp3') || /\.mp3(\?|#|$)/i.test(target.url)
-    if (looksMp3) return { ...target, contentType: 'audio/mpeg' }
-    if (!(await isFfmpegAvailable())) return target
+    if (looksMp3) return { ...target, contentType: 'audio/mpeg', title: metaTitle, artist: metaArtist }
+    if (!(await isFfmpegAvailable())) return { ...target, title: metaTitle, artist: metaArtist }
     return {
       ...target,
       format: 'mp3',
       fadeOutSec,
       mp3Path: mp3CachePath(username, songInfo, quality),
+      title: metaTitle,
+      artist: metaArtist,
     }
   }
   return target

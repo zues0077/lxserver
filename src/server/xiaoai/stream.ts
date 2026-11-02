@@ -394,6 +394,9 @@ const serveTranscodedMp3 = async (
   const fadeOutSec = Number(payload.fadeOutSec) || 0
   const seekSec = Math.max(0, Math.floor(Number(payload.seekSec) || 0))
   const filename = payload.filename || 'track.mp3'
+  // ID3 元数据：流式转码时写进 mp3，让设备屏显真歌名而非占位（Theme Of Loft）
+  const title = String(payload.title || '').trim()
+  const artist = String(payload.artist || '').trim()
 
   // 1. 已有转码产物
   //
@@ -421,7 +424,7 @@ const serveTranscodedMp3 = async (
       return
     }
     const dest = cachedMp3 || `${payload.path}.mp3`
-    const result = await transcodeFileToMp3(payload.path, dest, { fadeOutSec, durationMs, seekSec })
+    const result = await transcodeFileToMp3(payload.path, dest, { fadeOutSec, durationMs, seekSec, title, artist })
 
     if (result.ok && result.path) {
       serveLocalFile(req, res, result.path, filename, payload.sid, durationMs)
@@ -473,7 +476,7 @@ const serveTranscodedMp3 = async (
 
   const startedAt = Date.now()
   let sent = 0
-  const transcoder = createMp3Transcoder(url, { fadeOutSec, durationMs, seekSec })
+  const transcoder = createMp3Transcoder(url, { fadeOutSec, durationMs, seekSec, title, artist })
 
   // 首字节迟迟不来时给一条可读告警：音箱端表现是「点了播放没声音」，
   // 光看「已发 0B」不知道是源慢还是 ffmpeg 出错，这里把两种信息都记下来。

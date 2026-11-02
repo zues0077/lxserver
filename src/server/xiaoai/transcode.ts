@@ -104,6 +104,16 @@ export interface TranscodeOptions {
    * 注意：给了 seekSec 时，durationMs 要传「剩余时长」，淡出起点才会落在真正的曲尾。
    */
   seekSec?: number
+  /**
+   * 写入 mp3 的 ID3 标题与歌手。
+   *
+   * 为什么在转码时写：小爱触屏机型在非歌词模式下会下发「默认封面占位 audioID」，
+   * 屏幕回落到占位曲名（Theme Of Loft）；只有流自身带正确的 ID3 元数据，设备才会显示真歌名。
+   * 各音源（汽水/B站等）的原始文件常常没有标签，所以这里用我们应用侧的歌名/歌手兜底写进去，
+   * 保证无论源文件有没有标签，推给音箱的 mp3 都带着正确元数据。
+   */
+  title?: string
+  artist?: string
 }
 
 /**
@@ -130,6 +140,12 @@ export const buildFfmpegArgs = (source: string, options: TranscodeOptions = {}):
   const seekSec = Math.max(0, Math.floor(Number(options.seekSec) || 0))
   if (seekSec > 0) args.push('-ss', String(seekSec))
   args.push('-i', source, '-vn')
+
+  // 写 ID3 标题/歌手：源文件常无标签，用应用侧歌名/歌手兜底，保证音箱屏显真歌名而非占位。
+  const metaTitle = String(options.title || '').trim()
+  const metaArtist = String(options.artist || '').trim()
+  if (metaTitle) args.push('-metadata', `title=${metaTitle}`)
+  if (metaArtist) args.push('-metadata', `artist=${metaArtist}`)
 
   // 淡出至少要留 1 秒余量，短音频直接放弃淡出
   const durationSec = durationMs > 0 ? durationMs / 1000 : 0

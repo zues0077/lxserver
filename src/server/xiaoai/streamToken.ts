@@ -40,6 +40,10 @@ export interface StreamTokenPayload {
    * 第二次直接命中本地文件（支持 Range），既快又稳。
    */
   mp3Path?: string
+  /** 写入 mp3 的 ID3 标题（源文件常无标签，用应用侧歌名兜底） */
+  title?: string
+  /** 写入 mp3 的 ID3 歌手 */
+  artist?: string
   /** 过期时间戳（毫秒） */
   exp: number
 }
@@ -59,6 +63,8 @@ export const createStreamToken = (target: {
   fadeOutSec?: number
   seekSec?: number
   mp3Path?: string
+  title?: string
+  artist?: string
   ttlMs?: number
 }): string => {
   const ttl = Math.max(MIN_TTL_MS, Number(target.ttlMs) || DEFAULT_TTL_MS)
@@ -79,6 +85,9 @@ export const createStreamToken = (target: {
     if (Number(target.fadeOutSec) > 0) payload.fadeOutSec = Number(target.fadeOutSec)
     if (target.mp3Path) payload.mp3Path = String(target.mp3Path)
   }
+  // ID3 元数据：无论是否走流式转码，都带进 token；流式转码时用来写进 mp3，让设备屏显真歌名
+  if (target.title) payload.title = String(target.title)
+  if (target.artist) payload.artist = String(target.artist)
 
   const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
   return `${encoded}.${sign(encoded)}`
@@ -133,6 +142,8 @@ export const buildStreamUrl = (
     fadeOutSec?: number
     seekSec?: number
     mp3Path?: string
+    title?: string
+    artist?: string
   },
 ) => {
   const base = String(baseUrl || '').trim().replace(/\/+$/, '')
