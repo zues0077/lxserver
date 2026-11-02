@@ -1534,34 +1534,80 @@ const normalizeAvatar = (raw: any): string => {
   return url.startsWith('//') ? `https:${url}` : url
 }
 
-async function fetchAid(bvid: string, cookie: string): Promise<number> {
-  // 接口优先：view 接口在机房 IP 上匿名可访问（2026-11-02 容器内实测 code=0）。
-  // ⚠️ 别以为 BV→aid 能算：2023 之后新视频的 aid 已经到 15 位（如 117493377010759），
-  // 经典 base58 换算法只覆盖老号段，算出来是错的，会把评论错接到别的视频上。
+/** bvid → aid 的内存缓存：评论翻页会反复问，命中一次就够一整天 */
+const AID_CACHE = new Map<string, { aid: number; at: number }>()
+const AID_CACHE_TTL = 6 * 3600_000
+
+/**
+ * 评论 oid 需要的是 aid（数字），不是 BV 号。
+ *
+ * 三条路，按可靠性排：
+ *   1) `/x/web-interface/view`：最准，但机房 IP 上随时吃 **412 风控**（实测连续几次后必挂）；
+ *   2) **按标题走搜索接口**：搜索的风控明显比 view 宽松（实测 view 412 时搜索仍 200），
+ *      结果里自带 `aid` 与 `bvid`，按 bvid 精确配对即可；
+ *   3) 本地 base58 换算：只覆盖老号段，新号段（15 位 aid）会算错 —— 算错会把评论接到别的视频上，
+ *      比报错更糟，所以只在 aid < 1e10 时采纳。
+ */
+async function fetchAid(bvid: string, cookie: string, title = ''): Promise<number> {
+  const cached = AID_CACHE.get(bvid)
+  if (cached && Date.now() - cached.at < AID_CACHE_TTL) return cached.aid
+  const remember = (aid: number) => {
+    AID_CACHE.set(bvid, { aid, at: Date.now() })
+    return aid
+  }
+
+  // 1) view 接口
   try {
     const resp = await request<any>(`${VIEW_API}?bvid=${encodeURIComponent(bvid)}`, {
       headers: await headersWithCookie(cookie),
       timeout: 10000,
     })
     const aid = Number((resp?.body as any)?.data?.aid || 0)
-    if (aid > 0) return aid
+    if (aid > 0) return remember(aid)
     const body: any = resp?.body
-    const snippet = typeof body === 'string' ? String(body).replace(/\s+/g, ' ').slice(0, 80) : ''
+    const snippet = typeof body === 'string' ? String(body).replace(/\s+/g, ' ').slice(0, 60) : ''
     console.warn(
-      `[bili] view 接口未返回 aid（${bvid}）：HTTP ${resp?.statusCode || '-'}` +
-      `${body?.message ? ` ${body.message}` : ''}${snippet ? ` ${snippet}` : ''}，改用本地换算`,
+      `[bili] view 未返回 aid（${bvid}）：HTTP ${resp?.statusCode || '-'}` +
+      `${body?.message ? ` ${body.message}` : ''}${snippet ? ` ${snippet}` : ''}`,
     )
   } catch (e: any) {
-    console.warn(`[bili] view 接口异常（${bvid}）：${e?.message || e}，改用本地换算`)
+    console.warn(`[bili] view 异常（${bvid}）：${e?.message || e}`)
   }
 
-  // 兜底本地换算（只对老号段可信，新号段会算错，所以只当最后手段）
+  // 2) 搜索兜底（按标题找回这条视频）
+  const keyword = String(title || '').trim()
+  if (keyword) {
+    try {
+      const params = new URLSearchParams({
+        search_type: 'video',
+        keyword: keyword.slice(0, 40),
+        page: '1',
+        page_size: '20',
+      })
+      const resp = await request<any>(`${SEARCH_API}?${params.toString()}`, {
+        headers: await headersWithCookie(''),
+        timeout: 12000,
+      })
+      const list: any[] = Array.isArray((resp?.body as any)?.data?.result) ? (resp.body as any).data.result : []
+      const hit = list.find((it: any) => String(it?.bvid || '') === bvid)
+      const aid = Number(hit?.aid || 0)
+      if (aid > 0) {
+        console.log(`[bili] aid 由搜索兜底命中：${bvid} → ${aid}`)
+        return remember(aid)
+      }
+      console.warn(`[bili] 搜索兜底未匹配到 ${bvid}（返回 ${list.length} 条）`)
+    } catch (e: any) {
+      console.warn(`[bili] 搜索兜底失败（${bvid}）：${e?.message || e}`)
+    }
+  }
+
+  // 3) 本地换算（仅老号段可信）
   const local = bvidToAid(bvid)
   if (local > 0 && local < 1e10) {
-    console.warn(`[bili] aid 由本地换算得到 ${local}（${bvid}），新号段视频可能不准`)
-    return local
+    console.warn(`[bili] aid 由本地换算得到 ${local}（${bvid}），新号段可能不准`)
+    return remember(local)
   }
-  throw new Error(`B站取 aid 失败（${bvid}）：接口未返回且本地换算不适用`)
+  throw new Error(`B站取 aid 失败（${bvid}）：view 与搜索都没拿到，本地换算又不适用新号段`)
 }
 
 /**
@@ -1613,7 +1659,7 @@ export async function getComments(
   const cleanBvid = String(bvid || songInfo?.songmid || songInfo?.id || '').replace(/^bili_/i, '').trim()
   if (!isBilibiliId(cleanBvid)) throw new Error(`B站歌曲 id 不合法（${cleanBvid || '空'}），无法取评论`)
 
-  const aid = await fetchAid(cleanBvid, '')
+  const aid = await fetchAid(cleanBvid, '', String(songInfo?.name || ''))
   const ps = Math.min(Math.max(Math.round(Number(limit) || 20), 1), 49)
   const pn = Math.max(Math.round(Number(page) || 1), 1)
   const sort = hot ? 2 : 0
