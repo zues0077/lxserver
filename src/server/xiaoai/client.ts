@@ -11,7 +11,7 @@ import {
 import type { TokenInfo } from './auth'
 import { generateRequestId } from './crypto'
 import { encodeForm, httpRequest, parseJson } from './http'
-import { buildSearchQueries, pickMusicCandidate, type MusicCandidate } from './musicMatch'
+import { buildSearchQueries, pickMusicCandidate, resolveMatchTarget, type MusicCandidate } from './musicMatch'
 
 /** 小爱设备 */
 export interface MinaDevice {
@@ -364,6 +364,9 @@ export class MinaClient {
     const songTitle = String(title || '').trim()
     if (!songTitle) return fallback
     const songArtist = String(artist || '').trim()
+    // 比对基准要与搜索用的一致：视频站标题（【无损音质】《起风了》-歌手 “感想”）
+    // 直接拿去和曲库的干净歌名比永远对不上，搜到了也会被择优拒掉
+    const target = resolveMatchTarget(songTitle, songArtist)
     // 多条 query 逐级放宽：本地歌手写法/歌名后缀常与曲库不一致，只发一条很容易整轮落空
     const queries = buildSearchQueries(songTitle, songArtist)
     if (!queries.length) return fallback
@@ -392,11 +395,11 @@ export class MinaClient {
         })
       }
       // 最理想档（同名 + 歌手匹配）已经到手，不必再用更宽的 query 追问
-      const decisive = pickMusicCandidate(candidates, songTitle, songArtist)
+      const decisive = pickMusicCandidate(candidates, target.title, target.artist)
       if (decisive && decisive.score >= 100) return decisive.candidate.audioId
     }
 
-    const best = pickMusicCandidate(candidates, songTitle, songArtist)
+    const best = pickMusicCandidate(candidates, target.title, target.artist)
     if (best) return best.candidate.audioId
 
     // 兼容旧的模糊兜底开关：只有在没有任何可信候选时才拿第一条（可能错配，默认关闭）

@@ -41,6 +41,27 @@ const PAREN_PATTERNS = [
   /〔[^〕]*〕/g,
 ]
 
+/**
+ * 引号里的内容。视频站标题经常在歌名后面挂一段话（“起风了，也让我想起了那年夏天”），
+ * 它既不是歌名也不是歌手，留着只会把 query 拖成一条没人能匹配的长串。
+ */
+const QUOTE_PATTERNS = [/“[^”]*”/g, /"[^"]*"/g, /「[^」]*」/g, /『[^』]*』/g]
+
+/** 书名号：里面的内容通常才是**真正的歌名**（【无损音质】《起风了》-买辣椒也用券） */
+const BOOK_TITLE_RE = /《([^》]{1,40})》/
+
+/**
+ * 书名号后面紧跟的那一段就是真歌手（`《起风了》-买辣椒也用券` / `《夜曲》_周杰伦`）。
+ * 只认《》之后的破折号，避免把「Love-Story」这种歌名里的连字符当成歌手分隔。
+ */
+const BOOK_ARTIST_RE = /》\s*[-–—_]\s*([^\-–—_“”"「」『』《》\s]{1,20})/
+
+/** 单个括号里的短内容，可当歌手提示用（稻香（杰伦）→ 杰伦） */
+const BRACKET_HINT_RES = [/[（(]([^）)]{1,8})[）)]/, /【([^】]{1,8})】/]
+
+/** 括号里出现这些词说明是版本/音质标签，不是歌手 */
+const BRACKET_NOISE = /(无损|音质|hi-?res|高清|完整|纯音乐|伴奏|翻唱|cover|live|现场|remix|伴唱|片段|mv|官方|原唱|女声|男声|dj)/i
+
 /** 版本/署名类尾巴，出现在破折号之后需要整段丢掉 */
 const VERSION_TAIL =
   /\s*[-–—]\s*(live|remaster(ed)?|version|instrumental|karaoke|acoustic|remix|mix|edit|demo|伴奏|纯音乐|和声|片段)\b.*$/i
@@ -59,13 +80,55 @@ const TRAILING_VERSION_MARK =
 /**
  * 去掉歌名里不影响「是不是同一首」的装饰，保留原样大小写与主体。
  * 用于二次搜索（曲库里的名字通常没有这些后缀）。
+ *
+ * 2026-11-02 补：视频站标题的两种典型形态也要清掉，否则 query 完全搜不到——
+ *   「【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”」
+ * 引号内容整段丢弃，书名号只丢符号保留内容（里面是歌名）。
  */
 export const stripSongDecorations = (raw: string): string => {
   let s = toHalfWidth(String(raw || '').trim())
+  for (const re of QUOTE_PATTERNS) s = s.replace(re, ' ')
+  s = s.replace(/《|》/g, ' ')
   for (const re of PAREN_PATTERNS) s = s.replace(re, ' ')
   s = s.replace(FEAT_TAIL, ' ')
   s = s.replace(VERSION_TAIL, ' ')
   return s.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 拆出书名号里的真歌名与紧跟其后的歌手。
+ *
+ * 视频站（B站等）的歌名不是「歌名」，而是「标签 + 歌名 + 歌手 + 一句感想」：
+ *   【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”
+ * 直接拿去搜曲库必然 0 命中，屏幕就只能显示占位曲目（Theme Of Loft）。
+ * 拆出来之后 `起风了-买辣椒也用券` 能一次命中云端曲库。
+ */
+export const splitBookTitle = (raw: string): { title: string; artist: string } | null => {
+  const s = toHalfWidth(String(raw || '').trim())
+  const m = BOOK_TITLE_RE.exec(s)
+  if (!m) return null
+  const title = m[1].trim()
+  if (!title) return null
+  const artistMatch = BOOK_ARTIST_RE.exec(s)
+  return { title, artist: artistMatch ? artistMatch[1].trim() : '' }
+}
+
+/**
+ * 从括号里取歌手提示：`稻香（杰伦）` → `杰伦`。
+ * 括号里是「无损音质 / 伴奏 / Live」这类版本标签时返回空串。
+ */
+export const extractBracketArtist = (raw: string): string => {
+  const s = toHalfWidth(String(raw || '').trim())
+  for (const re of BRACKET_HINT_RES) {
+    const m = re.exec(s)
+    const v = (m?.[1] || '').trim()
+    if (!v || BRACKET_NOISE.test(v)) continue
+    // 必须像个人名：只允许字母数字汉字
+    if (!/^[\p{L}\p{N}]+$/u.test(v)) continue
+    if (v.length < 2) continue
+    return v
+  }
+  return ''
 }
 
 /** 归一化歌名（只用于相等/包含判断，不能拿去搜索）。
@@ -96,31 +159,63 @@ export const firstArtistName = (raw: string): string => {
   return (first || '').trim() || s
 }
 
+/** 比对用的「歌名 + 歌手」 */
+export interface MatchTarget {
+  title: string
+  artist: string
+}
+
 /**
- * 构造搜索用的 query 列表（最多 3 条，按可信度从高到低）。
+ * 把投送过来的那串标题收敛成可用于曲库比对的歌名/歌手。
+ *
+ * 搜索（buildSearchQueries）与择优（pickMusicCandidate）必须用同一个基准，
+ * 否则会出现「搜到了但比不过」——视频站标题带前缀/感想时，
+ * 拿原串去和曲库里的干净歌名比，相似度过不了阈值，白搜一场。
+ */
+export const resolveMatchTarget = (title: string, artist: string): MatchTarget => {
+  const t = String(title || '').trim()
+  const a = String(artist || '').trim()
+  const book = splitBookTitle(t)
+  if (book) return { title: book.title, artist: book.artist || a }
+  const bracketArtist = extractBracketArtist(t)
+  if (bracketArtist) return { title: stripSongDecorations(t), artist: bracketArtist }
+  return { title: t, artist: a }
+}
+
+/**
+ * 构造搜索用的 query 列表（最多 4 条，按可信度从高到低）。
  *
  * 只发一条 `歌名-歌手` 是不够的：本地曲库的歌手写法经常和曲库不一样
  * （中文名/英文名、feat 署名、多歌手顺序），一带上就搜不到；
  * 歌名带 (Live)/(电视剧主题曲) 后缀时也会把结果带偏。
  * 所以逐级放宽，前一条有结果就不必再问后面。
+ *
+ * 视频站标题优先按「书名号里的歌名 + 书名号后的歌手」组 query：
+ * 外部传进来的歌手多半是 UP 主名（西伯利亚麻雀），拿去搜曲库只会白白落空。
  */
 export const buildSearchQueries = (title: string, artist: string): string[] => {
-  const t = String(title || '').trim()
-  const a = String(artist || '').trim()
-  if (!t) return []
+  const rawTitle = String(title || '').trim()
+  if (!rawTitle) return []
+  const outerArtist = String(artist || '').trim()
+  const target = resolveMatchTarget(rawTitle, outerArtist)
+  const mainTitle = target.title
+  const bestArtist = target.artist
+
   const out: string[] = []
   const push = (q: string): void => {
     const v = q.trim()
     if (v && !out.includes(v)) out.push(v)
   }
-  push(a ? `${t}-${a}` : t)
-  push(t)
-  const stripped = stripSongDecorations(t)
-  if (stripped && stripped !== t) {
-    push(a ? `${stripped}-${a}` : stripped)
-    if (a) push(stripped)
+  push(bestArtist ? `${mainTitle}-${bestArtist}` : mainTitle)
+  push(mainTitle)
+  if (outerArtist && outerArtist !== bestArtist) push(`${mainTitle}-${outerArtist}`)
+
+  const stripped = stripSongDecorations(mainTitle)
+  if (stripped && stripped !== mainTitle) {
+    push(bestArtist ? `${stripped}-${bestArtist}` : stripped)
+    if (bestArtist) push(stripped)
   }
-  return out.slice(0, 3)
+  return out.slice(0, 4)
 }
 
 /** 歌名相似档位 */
@@ -178,6 +273,9 @@ const artistLevel = (candArtist: string, targetArtist: string): ArtistLevel => {
   const cand = artistFlat(candArtist)
   if (!target || !cand) return 'unknown'
   if (containsAtBoundary(cand, target) || containsAtBoundary(target, cand)) return 'match'
+  // 中文里习惯用名字后缀称呼歌手（「杰伦」= 周杰伦、「奕迅」= 陈奕迅），
+  // 这类写法在视频站/翻唱标题里极常见，够长（≥2 字）就认作同一人。
+  if (target.length >= 2 && (cand.endsWith(target) || target.endsWith(cand))) return 'match'
   return 'mismatch'
 }
 

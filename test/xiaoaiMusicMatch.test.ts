@@ -20,8 +20,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   buildSearchQueries,
+  extractBracketArtist,
   normalizeSongName,
   pickMusicCandidate,
+  resolveMatchTarget,
+  splitBookTitle,
   stripSongDecorations,
   type MusicCandidate,
 } from '../src/server/xiaoai/musicMatch'
@@ -68,12 +71,12 @@ test('buildSearchQueries：有歌手时先发「歌名-歌手」，再退「纯�
   assert.deepEqual(buildSearchQueries('夜曲', '周杰伦'), ['夜曲-周杰伦', '夜曲'])
 })
 
-test('buildSearchQueries：歌名带后缀时追加清洗后的查询，最多 3 条', () => {
+test('buildSearchQueries：歌名带后缀时追加清洗后的查询', () => {
   const qs = buildSearchQueries('夜曲 (Live)', '周杰伦')
-  assert.equal(qs.length, 3)
   assert.equal(qs[0], '夜曲 (Live)-周杰伦')
   assert.equal(qs[1], '夜曲 (Live)')
   assert.equal(qs[2], '夜曲-周杰伦')
+  assert.equal(qs[3], '夜曲')
 })
 
 test('buildSearchQueries：无歌手时只发歌名，清洗后不同则补一条', () => {
@@ -84,6 +87,68 @@ test('buildSearchQueries：无歌手时只发歌名，清洗后不同则补一�
 test('buildSearchQueries：空歌名返回空数组（不再白打接口）', () => {
   assert.deepEqual(buildSearchQueries('', '周杰伦'), [])
   assert.deepEqual(buildSearchQueries('   ', ''), [])
+})
+
+test('splitBookTitle：视频站标题拆出真歌名与紧跟其后的真歌手', () => {
+  // 真机实测的 B站标题（2026-11-02）：外部歌手是 UP 主，曲库根本不认识
+  const real = '【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”'
+  assert.deepEqual(splitBookTitle(real), { title: '起风了', artist: '买辣椒也用券' })
+  assert.deepEqual(splitBookTitle('《夜曲》_周杰伦'), { title: '夜曲', artist: '周杰伦' })
+  // 没有书名号就是普通标题，交给别的分支处理
+  assert.equal(splitBookTitle('夜曲 (Live)'), null)
+})
+
+test('stripSongDecorations：引号感想整段丢弃，书名号只丢符号', () => {
+  const real = '【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”'
+  assert.equal(stripSongDecorations(real), '起风了 -买辣椒也用券')
+})
+
+test('extractBracketArtist：括号里是歌手就取出来，是音质/版本标签就返回空', () => {
+  assert.equal(extractBracketArtist('稻香（杰伦）'), '杰伦')
+  assert.equal(extractBracketArtist('夜曲 (周杰伦)'), '周杰伦')
+  assert.equal(extractBracketArtist('【无损音质】起风了'), '')
+  assert.equal(extractBracketArtist('夜曲 (Live)'), '')
+  assert.equal(extractBracketArtist('稻香（伴奏）'), '')
+  assert.equal(extractBracketArtist('夜曲'), '')
+})
+
+test('buildSearchQueries：视频站标题不再拿 UP 主当歌手搜（真机 0 命中场景）', () => {
+  const real = '【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”'
+  const qs = buildSearchQueries(real, '西伯利亚麻雀')
+  assert.equal(qs[0], '起风了-买辣椒也用券')
+  assert.equal(qs[1], '起风了')
+  // UP 主名只作最后备选
+  assert.ok(qs.includes('起风了-西伯利亚麻雀'))
+})
+
+test('buildSearchQueries：歌名括号里带歌手时，用清洗后的歌名 + 括号里的歌手', () => {
+  const qs = buildSearchQueries('稻香（杰伦）', '哇欣')
+  assert.equal(qs[0], '稻香-杰伦')
+  assert.equal(qs[1], '稻香')
+  assert.ok(qs.includes('稻香-哇欣'))
+})
+
+test('pickMusicCandidate：歌手用后缀称呼也算同一人（杰伦 = 周杰伦）', () => {
+  const pick = pickMusicCandidate([cand('稻香', '周杰伦', 'A1')], '稻香', '杰伦')
+  assert.ok(pick)
+  assert.equal(pick.score, 100)
+})
+
+test('resolveMatchTarget：搜索与择优必须用同一个基准（否则搜到了也会被拒）', () => {
+  const real = '【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”'
+  assert.deepEqual(resolveMatchTarget(real, '西伯利亚麻雀'), { title: '起风了', artist: '买辣椒也用券' })
+  assert.deepEqual(resolveMatchTarget('稻香（杰伦）', '哇欣'), { title: '稻香', artist: '杰伦' })
+  // 普通歌名原样保留
+  assert.deepEqual(resolveMatchTarget('夜曲', '周杰伦'), { title: '夜曲', artist: '周杰伦' })
+})
+
+test('端到端：视频站标题经 resolveMatchTarget 后能匹配到曲库干净歌名', () => {
+  const real = '【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”'
+  const target = resolveMatchTarget(real, '西伯利亚麻雀')
+  const pick = pickMusicCandidate([cand('起风了', '冯沁苑(买辣椒也用券)', 'HIT')], target.title, target.artist)
+  assert.ok(pick)
+  assert.equal(pick.candidate.audioId, 'HIT')
+  assert.equal(pick.score, 100)
 })
 
 test('pickMusicCandidate：同名 + 歌手匹配 → 采用（最理想档）', () => {
