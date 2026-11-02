@@ -555,10 +555,7 @@ async function createLxRequest(
                                 safeResp.body = jsonBody;
                             }
 
-                            const _stallCbT0 = Date.now()
                             callback.call(null, null, safeResp, safeResp.body)
-                            const _stallCbDt = Date.now() - _stallCbT0
-                            if (_stallCbDt > 800) console.warn(`[卡顿插桩] 源=${name} 响应回调同步处理耗时 ${_stallCbDt}ms`)
                         } catch (error: any) {
                             callback.call(null, decontextify(error), null, null)
                         } finally {
@@ -1010,11 +1007,7 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                     }
 
                     const result = await handler(inputData)
-                    const _stallDrT0 = Date.now()
-                    const _stallDr = decontextify(result)
-                    const _stallDrDt = Date.now() - _stallDrT0
-                    if (_stallDrDt > 800) console.warn(`[卡顿插桩] 源=${fullApiInfo.name} action=${action} decontextify(result) 耗时 ${_stallDrDt}ms`)
-                    return _stallDr
+                    return decontextify(result)
                 } catch (e: any) {
                     if (isProbeQuiet()) {
                         // 巡检期的失败是「预期内噪音」，聚合到摘要里，不逐条打印
