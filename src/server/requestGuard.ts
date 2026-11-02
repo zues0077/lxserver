@@ -194,6 +194,22 @@ export function logBlocked(hostname: string, address: string, range: string) {
 }
 
 /**
+ * 给用户看的话。
+ *
+ * 原文「目标地址属于内网保留网段（loopback），已被自定义源出站护栏拦截」技术人员能读懂，
+ * 普通用户只会觉得「坏了」。区分两种情形：
+ *  - 域名解析到本机/内网：通常是该音源接口域名已失效或被劫持（实测 yy.zddyr.top → 127.0.0.2）
+ *  - 脚本直接写死内网 IP：脚本想借容器访问内网，属于必须拦的行为
+ */
+export function blockedMessage(hostname: string, address: string, range: string): string {
+  const isLiteral = hostname === address || /^\d+\.\d+\.\d+\.\d+$/.test(hostname)
+  if (isLiteral) {
+    return `该音源试图访问内网地址 ${hostname}（${range}），已拦截。音源脚本应当只访问公网接口。`
+  }
+  return `音源接口 ${hostname} 解析到本机/内网地址 ${address}（${range}），已拦截。该音源很可能已失效，请换用其他音源。`
+}
+
+/**
  * 构造给 needle 的 `lookup`（needle 会原样透传给 http.request）。
  *
  * @param isEnabled 每个请求实时读一次开关，改配置后无需重载音源即可生效
@@ -222,7 +238,7 @@ export function createGuardedLookup(isEnabled: () => boolean) {
     const literalHit = net.isIP(literal) ? classifyAddress(literal) : null
     if (literalHit) {
       logBlocked(hostname, literal, literalHit)
-      return cb(Object.assign(new Error(`目标地址属于内网保留网段（${literalHit}），已被自定义源出站护栏拦截: ${hostname}`), { code: 'EBLOCKEDPRIVATE' }))
+      return cb(Object.assign(new Error(blockedMessage(hostname, literal, literalHit)), { code: 'EBLOCKEDPRIVATE' }))
     }
 
     dns.lookup(hostname, { ...opts, all: true }, (err: any, list: any) => {
@@ -233,7 +249,7 @@ export function createGuardedLookup(isEnabled: () => boolean) {
         const hit = classifyAddress(item.address)
         if (hit) {
           logBlocked(hostname, item.address, hit)
-          return cb(Object.assign(new Error(`目标地址属于内网保留网段（${hit}），已被自定义源出站护栏拦截: ${hostname} → ${item.address}`), { code: 'EBLOCKEDPRIVATE' }))
+          return cb(Object.assign(new Error(blockedMessage(hostname, item.address, hit)), { code: 'EBLOCKEDPRIVATE' }))
         }
       }
       done(null, addresses)

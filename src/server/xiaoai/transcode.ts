@@ -23,6 +23,9 @@ export const ffmpegPath = (): string => String(process.env.FFMPEG_PATH || 'ffmpe
 /** 默认转码码率：320k 对音箱而言已是上限，再高没有意义 */
 export const DEFAULT_MP3_BITRATE = '320k'
 
+/** 宽容模式的码率：先保证能出声，再谈音质 */
+export const TOLERANT_BITRATE = '128k'
+
 let ffmpegAvailable: boolean | null = null
 
 /**
@@ -137,6 +140,13 @@ export const isNativePlayable = (opts: { path?: string; url?: string; contentTyp
 
 export interface TranscodeOptions {
   bitrate?: string
+  /**
+   * 宽容模式：忽略解码错误、跳过淡出、降码率。
+   * 有些源的文件参数集是坏的（实测汽水《秋酿》：AAC 帧装 mp3 容器，
+   * ffmpeg 报 `[aac] channel element 2.9 is not allocated` 直接失败），
+   * ignore_err 后能出绝大部分音频 —— 总比「原格式直投但设备放不出来」强。
+   */
+  tolerant?: boolean
   /** 尾部淡出秒数（0 = 不淡出）；需要同时给出 durationMs 才能算出起点 */
   fadeOutSec?: number
   /** 源音频总时长（毫秒），用于计算淡出起点 */
@@ -170,12 +180,14 @@ export interface TranscodeOptions {
  * 时长未知时不做淡出（宁可没有淡出，也不要把整首歌都压成渐弱）。
  */
 export const buildFfmpegArgs = (source: string, options: TranscodeOptions = {}): string[] => {
-  const bitrate = options.bitrate || DEFAULT_MP3_BITRATE
+  const bitrate = options.bitrate || (options.tolerant ? TOLERANT_BITRATE : DEFAULT_MP3_BITRATE)
   const fadeSec = Math.max(0, Number(options.fadeOutSec) || 0)
   const durationMs = Number(options.durationMs) || 0
   const isRemote = /^https?:\/\//i.test(source)
 
   const args = ['-hide_banner', '-nostdin', '-loglevel', 'error']
+  // 宽容模式：让 ffmpeg 跳过无法解码的帧继续转，而不是整首失败
+  if (options.tolerant) args.push('-err_detect', 'ignore_err')
   // 降低探测开销：网络源默认要分析 5 秒/5MB 才出第一帧，音箱端就是「点了播放半天没声」
   args.push('-probesize', '1M', '-analyzeduration', '1000000')
   if (isRemote) {
@@ -196,7 +208,8 @@ export const buildFfmpegArgs = (source: string, options: TranscodeOptions = {}):
 
   // 淡出至少要留 1 秒余量，短音频直接放弃淡出
   const durationSec = durationMs > 0 ? durationMs / 1000 : 0
-  if (fadeSec > 0 && durationSec > fadeSec + 1) {
+  // 宽容模式不淡出：淡出滤镜要完整解码时间轴，源有坏帧时会连带失败
+  if (fadeSec > 0 && !options.tolerant && durationSec > fadeSec + 1) {
     const start = Math.max(0, durationSec - fadeSec)
     args.push('-af', `afade=t=out:st=${start.toFixed(2)}:d=${fadeSec.toFixed(2)}`)
   }
@@ -234,39 +247,54 @@ export const transcodeFileToMp3 = async (
   }
 
   const partPath = `${destPath}.part`
-  const args = [...buildFfmpegArgs(sourcePath, options), '-y', partPath]
-  const startedAt = Date.now()
 
-  return new Promise<TranscodeResult>(resolve => {
-    let stderr = ''
-    const proc = spawn(ffmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      if (stderr.length < 4000) stderr += chunk.toString()
-    })
-    proc.on('error', (error: any) => {
-      resolve({ ok: false, error: error?.message || 'ffmpeg 启动失败', transcoded: false })
-    })
-    proc.on('close', code => {
-      if (code !== 0) {
-        try {
-          if (fs.existsSync(partPath)) fs.unlinkSync(partPath)
-        } catch {
-          /* 忽略 */
+  const runOnce = (opts: TranscodeOptions): Promise<TranscodeResult> => {
+    const args = [...buildFfmpegArgs(sourcePath, opts), '-y', partPath]
+    const startedAt = Date.now()
+    return new Promise<TranscodeResult>(resolve => {
+      let stderr = ''
+      const proc = spawn(ffmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        if (stderr.length < 4000) stderr += chunk.toString()
+      })
+      proc.on('error', (error: any) => {
+        resolve({ ok: false, error: error?.message || 'ffmpeg 启动失败', transcoded: false })
+      })
+      proc.on('close', code => {
+        if (code !== 0) {
+          try {
+            if (fs.existsSync(partPath)) fs.unlinkSync(partPath)
+          } catch {
+            /* 忽略 */
+          }
+          resolve({ ok: false, error: stderr.trim().slice(0, 500) || `ffmpeg 退出码 ${code}`, transcoded: false })
+          return
         }
-        resolve({ ok: false, error: stderr.trim().slice(0, 500) || `ffmpeg 退出码 ${code}`, transcoded: false })
-        return
-      }
-      try {
-        fs.renameSync(partPath, destPath)
-      } catch (error: any) {
-        resolve({ ok: false, error: `落盘失败：${error?.message || error}`, transcoded: false })
-        return
-      }
-      const elapsed = Date.now() - startedAt
-      console.log(`[XiaoAi] 转码完成 → ${path.basename(destPath)}（${(elapsed / 1000).toFixed(1)}s）`)
-      resolve({ ok: true, path: destPath, transcoded: true })
+        try {
+          fs.renameSync(partPath, destPath)
+        } catch (error: any) {
+          resolve({ ok: false, error: `落盘失败：${error?.message || error}`, transcoded: false })
+          return
+        }
+        const elapsed = Date.now() - startedAt
+        const tag = opts.tolerant ? '（宽容模式）' : ''
+        console.log(`[XiaoAi] 转码完成${tag} → ${path.basename(destPath)}（${(elapsed / 1000).toFixed(1)}s）`)
+        resolve({ ok: true, path: destPath, transcoded: true })
+      })
     })
-  })
+  }
+
+  const first = await runOnce(options)
+  if (first.ok) return first
+  // 标准转码失败不再「假装成功然后原格式直投」（设备放不出 m4a/ogg/wma 就等于没修），
+  // 先用宽容模式再转一次：跳过坏帧、降码率、去掉淡出，能出多少算多少。
+  if (options.tolerant) return first
+  console.warn(
+    `[XiaoAi] 标准转码失败，改用宽容模式重试：${path.basename(sourcePath)}（${String(first.error || '').slice(0, 120)}）`,
+  )
+  const second = await runOnce({ ...options, tolerant: true, bitrate: TOLERANT_BITRATE, fadeOutSec: 0 })
+  if (second.ok) return second
+  return { ok: false, error: `标准转码失败：${first.error || ''}；宽容模式也失败：${second.error || ''}`, transcoded: false }
 }
 
 export interface Mp3Transcoder {

@@ -9,6 +9,15 @@ import {
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure } from './sourceProbe'
 import { syncLog } from '../utils/log4js'
+
+/**
+ * 自定义源单次请求的硬上限（毫秒）。
+ * 音源脚本自己传的 timeout 也不能超过这个帽：挂死的源会把整条换源队列堵住。
+ */
+const CUSTOM_SOURCE_REQUEST_MAX_MS = (() => {
+    const raw = Number(process.env.CUSTOM_SOURCE_REQUEST_MAX_MS)
+    return Number.isFinite(raw) && raw >= 5000 ? Math.round(raw) : 30000
+})()
 import {
     acquireRequestSlot,
     getActivitySnapshot,
@@ -469,7 +478,14 @@ async function createLxRequest(
             // 内网护栏：needle 会把这个 lookup 透传给 http.request，建连前按解析结果拦截。
             // 放在 lookup 而不是请求前查 URL，是为了同时挡住 302 跳转与 DNS rebinding。
             lookup: privateNetLookup,
-            response_timeout: typeof timeout === 'number' && timeout > 0 ? Math.min(timeout, 60000) : 60000
+            // 单请求上限从 60s 收到 30s（可用 CUSTOM_SOURCE_REQUEST_MAX_MS 覆盖）：
+            // 外层「换源总预算」到点返回后，底层请求仍会跑满自己的超时把槽位占着，
+            // 实测一个挂死的源能把整轮换源拖到 180s+。砍一半上限对正常源无影响，
+            // 对挂死的源能把空转时间直接减半。
+            response_timeout: Math.min(
+                typeof timeout === 'number' && timeout > 0 ? timeout : CUSTOM_SOURCE_REQUEST_MAX_MS,
+                CUSTOM_SOURCE_REQUEST_MAX_MS
+            ),
         }
 
         if (agentHttps && /^https:/i.test(String(url))) requestOptions.agent = agentHttps

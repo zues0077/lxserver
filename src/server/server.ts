@@ -663,6 +663,11 @@ interface XiaoAiTrackTarget {
   mp3Path?: string
   /** 从第 N 秒开始投送（拖动进度条后重新投送用） */
   seekSec?: number
+  /**
+   * 转码失败标记：置位表示「这首歌的标准转码甚至宽容模式都失败了」。
+   * 上层据此删缓存 + 换源重取（而不是原格式直投 —— 设备放不出 m4a/ogg/wma 等于没解决）。
+   */
+  transcodeError?: string
   /** 写入 mp3 的 ID3 标题（源文件常无标签，用应用侧歌名兜底） */
   title?: string
   /** 写入 mp3 的 ID3 歌手 */
@@ -858,13 +863,15 @@ const resolveXiaoAiTrackRaw = async (
   quality: string,
   verifiedUsername: string,
   directStreamUrl = '',
+  options: { skipCache?: boolean } = {},
 ): Promise<XiaoAiTrackTarget> => {
   const songName = String(songInfo.name || songInfo.title || 'track')
   const singer = String(songInfo.singer || '')
   const filename = `${singer ? `${singer} - ` : ''}${songName}.mp3`.replace(/[\\/:*?"<>|]/g, '_')
 
   // 1. 本地缓存命中：音源死活都不影响，首字节几乎为零
-  try {
+  //    skipCache=true 用在「转码失败后换源」：那个文件本身就是坏的，不能再命中它
+  if (!options.skipCache) try {
     const cached = fileCache.checkCache({ ...songInfo, quality }, verifiedUsername)
     if (cached?.exists && cached.path) {
       console.log(`[XiaoAi] 命中本地缓存，直接投送：${filename}`)
@@ -1102,10 +1109,11 @@ const applyMp3Unification = async (
       artist: metaArtist,
     })
     if (!result.ok || !result.path) {
-      console.warn(
-        `[XiaoAi] 统一 mp3 失败，按原格式投送：${target.filename}（${result.error || '未知原因'}）`,
-      )
-      return { ...target, title: metaTitle, artist: metaArtist }
+      // 不再「按原格式投送」了事：设备对 m4a/ogg/wma 是零进度（灯亮无声），
+      // 等同于放弃。这里只打标记，交给 resolveXiaoAiTrack 删缓存 + 换源重取。
+      const reason = String(result.error || '未知原因')
+      console.warn(`[XiaoAi] 统一 mp3 失败（标准+宽容模式都失败）：${target.filename}（${reason.slice(0, 160)}）`)
+      return { ...target, title: metaTitle, artist: metaArtist, transcodeError: reason }
     }
     // 关键修复：必须采用「转码后 mp3」的真实时长，而不是沿用上游可能错误的源时长。
     // 例如 B站 m4a 的本地探测为 0，旧逻辑会回退到源视频时长（可达 40 分钟），
@@ -1169,12 +1177,37 @@ const resolveXiaoAiTrack = async (
   }
 
   const target = await resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, directStreamUrl)
+  let unified: XiaoAiTrackTarget
   try {
-    return await applyMp3Unification(target, songInfo, quality, verifiedUsername)
+    unified = await applyMp3Unification(target, songInfo, quality, verifiedUsername)
   } catch (error: any) {
     console.warn(`[XiaoAi] mp3 统一异常，按原格式投送：${error?.message || error}`)
     return target
   }
+  if (!unified.transcodeError) return unified
+
+  // 转码这条路上彻底走不通了（标准 + 宽容模式都失败）。
+  // 坏文件十有八九就在缓存里：删掉它、跳过缓存、换源重新取一次 —— 这才是解决方案，
+  // 而不是把转不动的原格式硬推给设备（设备对 m4a/ogg/wma 是零进度，等于没声音）。
+  const badPath = String(target.path || '')
+  if (badPath) {
+    try {
+      fs.unlinkSync(badPath)
+      syncLog.warn(`[XiaoAi] 转码失败，已删除坏缓存：${path.basename(badPath)}`)
+    } catch {
+      /* 文件已被清理/占用时忽略，换源仍可继续 */
+    }
+  }
+  console.warn(`[XiaoAi] 转码失败，换源重取：${target.filename}（${String(unified.transcodeError).slice(0, 120)}）`)
+  const retry = await resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, '', { skipCache: true })
+  const retryUnified = await applyMp3Unification(retry, songInfo, quality, verifiedUsername)
+  if (!retryUnified.transcodeError) {
+    syncLog.info(`[XiaoAi] 换源后转码成功：${retryUnified.filename}（${retryUnified.via}）`)
+    return retryUnified
+  }
+  throw new Error(
+    `音源不可用：标准与宽容转码均失败，换源后仍失败（${String(retryUnified.transcodeError).slice(0, 120)}）`,
+  )
 }
 
 // 定时关机到点时统一停掉当前选中的全部设备（只做停止播放，不承诺断电）
