@@ -78,16 +78,6 @@
         /** 设备上报位置比墙钟落后超过该值，视为缓冲/上报错位，用位置重锚 */
         positionDriftToleranceMs: 20000,
         /**
-         * 收到「流被重拉」信号后，至少播这么久才认可为播完（防止开头重复请求误判）。
-         *
-         * 这个守卫原本是 5 秒，用来防「刚投送就被重拉」的误判。
-         * 但现在服务端只在「整首已完整送达」之后才置这个信号（streamRounds.complete），
-         * 误判风险已经消除；而 5 秒的等待意味着音箱会把上一首**再播 5 秒**——
-         * 正好是用户抱怨的「切歌时回放上一首的一部分」。
-         * 所以压到 1 秒：留一点余量给轮询间隔即可。
-         */
-        streamReplayGuardMs: 1000,
-        /**
          * near-end（设备回报进度接近结尾）判定的「最短已播时长」守卫。
          *
          * 这条判定原本没有任何时长守卫，只看设备回报的比例。某些本地文件元数据被污染
@@ -100,6 +90,25 @@
          * 坏元数据曲目会被挡住，改由 stream-replayed / wall-clock 兜底切歌。
          */
         nearEndMinPlayedMs: 15000,
+        /**
+         * 「我们已知这首的真实时长」（毫秒，0 = 未知）。
+         *
+         * 来自服务端解析出的文件时长或歌曲 interval 元数据，不含设备上报——因为像抖音这类源，
+         * 设备经常回报 0 或错误时长，拿它当「已知时长」会让比值/墙钟预判误判曲尾，
+         * 自动续播连切几首就把歌单播空、音箱报「没有歌单」。
+         *
+         * 已知时长 > 0：near-end 比值预判生效（正常曲目）；
+         * 已知时长 = 0（抖音/坏元数据）：near-end 预判禁用，只认权威的「流被完整重拉」信号，
+         * 避免时长未知被误判成播完。
+         */
+        knownDurationMs: 0,
+        /**
+         * 时长未知时，「流被重拉」必须至少播够这么久才认作播完。
+         *
+         * 抖音等源音源 URL 偶发提前重拉（token 过期/缓冲抖动），若一上来就当播完会立刻切歌。
+         * 给个下限兜底：不到这个时间点的重拉一律视为播放中重连，忽略。
+         */
+        streamReplayMinPlayedMs: 20000,
     };
 
     /**
@@ -208,18 +217,25 @@
             // 最可靠的「播完」信号：音箱把我们这一路流拉完一遍后，会自己重拉同一个 URL。
             // 服务端在「新一轮请求建立连接」的那一刻就置位（不用等这轮传完，快几十秒），
             // 没这个信号就只能靠猜时长，晚了就会听到上一首重头播。
-            // 加个最短播放守卫，避免投送后立刻的重复请求把一首歌误判成已播完。
-            if (sample.streamReplay === true && now - state.startedAt >= opts.streamReplayGuardMs) {
+            // 抖音等源音源 URL 偶发提前重拉（token 过期/缓冲抖动），不能一律当播完：
+            //   - 已知时长：必须至少播到「曲终前一点点」才算真的播完；
+            //   - 时长未知：至少播够 streamReplayMinPlayedMs 下限，否则当成播放中重连忽略。
+            const replayedPlayedOk = state.durationMs > 0
+                ? (elapsed >= state.durationMs - lead)
+                : (elapsed >= opts.streamReplayMinPlayedMs);
+            if (sample.streamReplay === true && replayedPlayedOk) {
                 return done('advance', 'stream-replayed');
             }
             // 兜底：老版本服务端只有遍数没有 replay 标记
-            if (Number(sample.streamFull) >= 2 && now - state.startedAt >= opts.streamReplayGuardMs) {
+            if (Number(sample.streamFull) >= 2 && replayedPlayedOk) {
                 return done('advance', 'stream-replayed');
             }
 
             // near-end 必须过「最短已播时长」守卫：坏元数据文件会让音箱刚投出去就回报
             // 接近 1.0 的比例，无守卫则立刻判播完 → 列表模式绕回同一首 → 无限重投。
-            if (hasRatio && ratio >= opts.prerollRatio) {
+            // 同时要求「我们已知时长」可信：时长未知（抖音/坏元数据，设备常报 0/错）时，
+            // 比值接近 1.0 多半是错误时长算出来的假接近结尾，禁用该预判，避免误判曲尾连切。
+            if (hasRatio && ratio >= opts.prerollRatio && Number(opts.knownDurationMs) > 0) {
                 if (now - state.playingSince >= opts.nearEndMinPlayedMs) {
                     return done('advance', 'near-end');
                 }

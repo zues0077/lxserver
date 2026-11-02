@@ -284,27 +284,44 @@
         const volume = badgeVolume();
         // 音箱音量 10 基本听不见，很容易被当成「没声音 = 没播」，单独标出来
         const lowVolume = volume > 0 && volume < 20;
-        const key = `${devices}|${volume}`;
-        if (routeBadge.el && routeBadge.key === key) return;
 
+        // 角标结构只建一次：音量滑块作为常驻元素，拖动时不被 innerHTML 重建打断
         if (!routeBadge.el) {
             routeBadge.el = document.createElement('div');
             routeBadge.el.id = 'xiaoai-route-badge';
             document.body.appendChild(routeBadge.el);
+            routeBadge.el.innerHTML = `
+                <i class="fa-solid fa-tower-broadcast text-[11px]"></i>
+                <span class="font-semibold whitespace-nowrap">正在投送小爱音箱</span>
+                <span class="badge-devices opacity-70 truncate max-w-[10rem]" title="${escapeHtml(devices)}">${escapeHtml(devices)}</span>
+                <span class="opacity-70 whitespace-nowrap">音量</span>
+                <input type="range" id="xiaoai-badge-volume" min="0" max="100" value="${volume}"
+                       class="w-24 h-1 accent-emerald-500 cursor-pointer align-middle" />
+                <span class="badge-vol-value opacity-70 text-xs w-8 text-right">${volume}</span>
+            `;
+            const slider = routeBadge.el.querySelector('#xiaoai-badge-volume');
+            slider.addEventListener('input', () => {
+                const vEl = routeBadge.el.querySelector('.badge-vol-value');
+                if (vEl) vEl.textContent = slider.value;
+            });
+            slider.addEventListener('change', () => {
+                window.xiaoAiSetVolume(Number(slider.value));
+            });
+        } else {
+            // 后续只更新设备名（音量在 input/change 中单独处理，不在此重建，避免打断拖动）
+            const dEl = routeBadge.el.querySelector('.badge-devices');
+            if (dEl) { dEl.textContent = devices; dEl.title = escapeHtml(devices); }
         }
-        routeBadge.key = key;
+        routeBadge.key = devices;
         routeBadge.el.className = 'fixed top-[4.5rem] left-1/2 -translate-x-1/2 z-[1004] max-w-[92vw] px-3 py-1.5 rounded-full shadow-lg border flex items-center gap-2 text-xs backdrop-blur-md '
             + (lowVolume
                 ? 'bg-amber-50/95 dark:bg-amber-950/90 border-amber-400/70 text-amber-800 dark:text-amber-200'
                 : 'bg-emerald-50/95 dark:bg-emerald-950/90 border-emerald-400/70 text-emerald-800 dark:text-emerald-200');
-        routeBadge.el.innerHTML = `
-            <i class="fa-solid fa-tower-broadcast text-[11px]"></i>
-            <span class="font-semibold whitespace-nowrap">正在投送小爱音箱</span>
-            ${devices
-                ? `<span class="opacity-70 truncate max-w-[10rem]" title="${escapeHtml(devices)}">${escapeHtml(devices)}</span>`
-                : '<span class="opacity-70">未选择设备</span>'}
-            <span class="opacity-70 whitespace-nowrap">音量 ${volume}${lowVolume ? '（偏低，可能听不到）' : ''}</span>
-        `;
+        // 滑块与音量对齐（拖动中除外，否则会抢走手势）
+        const slider = routeBadge.el.querySelector('#xiaoai-badge-volume');
+        if (slider && document.activeElement !== slider) slider.value = String(volume);
+        const vEl = routeBadge.el.querySelector('.badge-vol-value');
+        if (vEl && document.activeElement !== slider) vEl.textContent = String(volume);
     };
 
     const render = () => {
@@ -627,6 +644,32 @@
             }
         } catch (e) {
             console.warn('[小爱] 校正音量失败:', e.message);
+        }
+        renderRouteBadge();
+    };
+
+    /**
+     * 直接把音箱音量设到指定值——投送角标上的滑块调用，不依赖设置面板的音量条。
+     * 与 applyVolume 不同：applyVolume 读设置面板滑块；这里接收外部传入的数值，
+     * 服务端回读真实档位后同步角标与设置面板两处 UI。
+     */
+    const setVolumeTo = async volume => {
+        const vol = Math.max(0, Math.min(100, Math.round(Number(volume) || 0)));
+        try {
+            const data = await request('/volume', { volume: vol });
+            const ok = data.results?.some(r => r.ok);
+            const applied = Number.isFinite(Number(data.volume)) && Number(data.volume) >= 0 ? Number(data.volume) : vol;
+            state.lastVolume = applied;
+            void saveConfig({ volume: applied });
+            // 角标与设置面板滑块都对齐到设备真实档位
+            renderRouteBadge();
+            const range = $('xiaoai-volume-range');
+            if (range && document.activeElement !== range) range.value = String(applied);
+            const valueEl = $('xiaoai-volume-value');
+            if (valueEl) valueEl.textContent = String(applied);
+            setMessage(ok ? `音量已设为 ${applied}` : '音量设置失败', !ok);
+        } catch (e) {
+            setMessage(e.message, true);
         }
     };
 
@@ -1131,6 +1174,10 @@
         const offsetSec = Number(state.config && state.config.songTransitionOffset);
         const decision = watchdog.evaluate(watch.state, sample, {
             transitionOffsetMs: Number.isFinite(offsetSec) ? offsetSec * 1000 : 0,
+            // 「我们已知时长」= 服务端解析出的真实文件时长（优先）或歌曲 interval 元数据，
+            // 不含设备上报的时长——抖音等源设备常报错误/0 时长，拿它当已知时长会误判曲尾。
+            // 时长未知时护栏据此禁用按比值/墙钟的提前切歌，只认权威的「流被重拉」信号。
+            knownDurationMs: Number(sample.knownDurationMs) > 0 ? Number(sample.knownDurationMs) : 0,
         });
         watch.state = decision.state;
 
@@ -1218,6 +1265,9 @@
                 // 时长优先级：服务端解析的真实文件时长 > 歌曲 interval 元数据 > 设备上报
                 // （设备上报的是云端曲目元数据，interval 也常常和实际文件对不上）
                 durationMs: watch.audioDurationMs || metaDuration || deviceDuration,
+                // 「我们已知时长」：只取服务端解析/歌曲元数据，不含设备上报（抖音等设备常报 0/错）。
+                // 护栏据此判断时长是否可信，决定能否按比值/墙钟提前切歌。
+                knownDurationMs: Number(watch.audioDurationMs) > 0 ? watch.audioDurationMs : metaDuration,
                 // 距本次播放起点过了多久，供 watchdog 做墙钟预判、供预取按剩余时间触发。
                 // 第一次采样时 playingSince 还没建立，用投送时刻兜底，否则短歌会来不及预取。
                 elapsedMs: watchElapsedMs(),
@@ -1519,6 +1569,7 @@
     window.xiaoAiLogout = logout;
     window.xiaoAiFetchDevices = fetchDevices;
     window.xiaoAiApplyVolume = applyVolume;
+    window.xiaoAiSetVolume = setVolumeTo;
     window.xiaoAiStop = stop;
     window.xiaoAiUseSuggestedBase = useSuggestedBase;
     window.xiaoAiToggleTarget = toggleTarget;
