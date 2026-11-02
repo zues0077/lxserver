@@ -336,16 +336,23 @@
         if (lyricsToggle) lyricsToggle.checked = cfg.touchscreenLyrics === true;
         const cacheToggle = $('xiaoai-cache-toggle');
         if (cacheToggle) cacheToggle.checked = cfg.cacheBeforePlay === true;
-        // 统一 mp3（默认开；服务端没装 ffmpeg 时自动降级，这里把状态说清楚）
-        const mp3Toggle = $('xiaoai-mp3-toggle');
-        if (mp3Toggle) mp3Toggle.checked = cfg.unifyMp3 !== false;
+        // 推送格式策略（auto / always / off）；老配置没有 mp3Policy 时按 unifyMp3 推导
+        const mp3Select = $('xiaoai-mp3-policy');
+        const mp3Policy = cfg.mp3Policy || (cfg.unifyMp3 === false ? 'off' : 'auto');
+        if (mp3Select) mp3Select.value = mp3Policy;
         const mp3Hint = $('xiaoai-mp3-hint');
         if (mp3Hint) {
             if (cfg.ffmpegAvailable === false) {
-                mp3Hint.textContent = '服务端未检测到 ffmpeg，转码会自动跳过（按原格式投送）。';
+                mp3Hint.textContent = '服务端未检测到 ffmpeg，需要转码的格式会按原格式投送（部分格式设备放不出来）。';
+                mp3Hint.className = 'text-xs text-amber-600 mt-1';
+            } else if (mp3Policy === 'always') {
+                mp3Hint.textContent = '所有源都会转成 mp3 再投送（最稳，但多一次转码耗时）。';
+                mp3Hint.className = 'text-xs t-text-muted mt-1';
+            } else if (mp3Policy === 'off') {
+                mp3Hint.textContent = '不转码直接投送：m4a/ogg/wma 这类格式设备放不出来，仅建议排障时使用。';
                 mp3Hint.className = 'text-xs text-amber-600 mt-1';
             } else {
-                mp3Hint.textContent = '已是 mp3 的源不会重复转码；转码产物存入「歌曲缓存/xiaoai」，受权限与缓存限制约束。';
+                mp3Hint.textContent = '智能：音箱原生能播的格式（mp3/flac/wav）直接投，其余转 mp3；转码产物存入「歌曲缓存/xiaoai」。';
                 mp3Hint.className = 'text-xs t-text-muted mt-1';
             }
         }
@@ -1521,7 +1528,7 @@
             serverBaseUrl: ($('xiaoai-server-base-input')?.value || '').trim(),
             touchscreenLyrics: $('xiaoai-lyrics-toggle') ? !!$('xiaoai-lyrics-toggle').checked : false,
             cacheBeforePlay: $('xiaoai-cache-toggle') ? !!$('xiaoai-cache-toggle').checked : false,
-            unifyMp3: $('xiaoai-mp3-toggle') ? !!$('xiaoai-mp3-toggle').checked : true,
+            mp3Policy: $('xiaoai-mp3-policy') ? $('xiaoai-mp3-policy').value : 'auto',
             songTransitionOffset: Number($('xiaoai-transition-offset-input')?.value || 0),
             fadeOutSec: Number($('xiaoai-fadeout-input')?.value || 0),
         }),

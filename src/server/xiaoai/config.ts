@@ -41,8 +41,21 @@ export interface XiaoAiConfig {
   /**
    * 推送格式统一转 mp3（默认开启）。
    * 音箱对 mp3 的兼容性最好；已是 mp3 的源不会重复转码，直接复用。
+   *
+   * 兼容旧配置用：新逻辑看 `mp3Policy`，这里保留是为了老前端/老配置文件仍能读。
    */
   unifyMp3: boolean
+  /**
+   * 投送格式策略（2026-11-02 起）：
+   *  - `auto`  （默认）音箱**原生能播**的容器直接投，其余转 mp3
+   *  - `always` 一律转 mp3（老行为，最稳）
+   *  - `off`    一律原格式直投（排障用；m4a/ogg/wma 这类设备放不出来）
+   *
+   * 原生可播白名单来自真机实测（泰禾世家小爱触屏音箱，2026-11-02）：
+   *   mp3 / flac / wav 有进度；m4a(aac/alac) / ogg(vorbis/opus) / wma
+   *   能拉完全部字节但设备零进度（= 放不出来）。
+   */
+  mp3Policy: 'auto' | 'always' | 'off'
   /**
    * 切歌提前量偏移（秒，-30..30）。
    * 0 = 用服务端实测延迟自适应；负数更晚切（少截结尾），正数更早切（减少空档）。
@@ -76,6 +89,7 @@ const DEFAULT_CONFIG: XiaoAiConfig = {
   touchscreenLyrics: false,
   disabledModels: [],
   unifyMp3: true,
+  mp3Policy: 'auto',
   songTransitionOffset: 0,
   fadeOutSec: 1.5,
   volume: 50,
@@ -83,6 +97,17 @@ const DEFAULT_CONFIG: XiaoAiConfig = {
   devices: [],
   account: '',
   lastSyncAt: null,
+}
+
+/**
+ * 归一化 mp3 策略。
+ * 老配置只有 `unifyMp3`：显式关过转码 → off（保持用户原本的选择），
+ * 没关过 → auto（比老行为更省：mp3/flac/wav 不再无脑重编码）。
+ */
+export const normalizeMp3Policy = (raw: unknown, legacyUnify?: unknown): 'auto' | 'always' | 'off' => {
+  const value = String(raw || '').trim().toLowerCase()
+  if (value === 'auto' || value === 'always' || value === 'off') return value
+  return legacyUnify === false ? 'off' : 'auto'
 }
 
 /** 数值配置的兜底与夹取：配置文件被手改坏时不至于让逻辑跑飞 */
@@ -125,6 +150,8 @@ export const loadConfig = (): XiaoAiConfig => {
       touchscreenLyrics: raw.touchscreenLyrics === true,
       cacheBeforePlay: raw.cacheBeforePlay === true,
       unifyMp3: raw.unifyMp3 !== false,
+      // 老配置没有 mp3Policy：显式关过转码的沿用 off，其余升级到 auto
+      mp3Policy: normalizeMp3Policy(raw.mp3Policy, raw.unifyMp3),
       songTransitionOffset: clampNumber(raw.songTransitionOffset, -30, 30, 0),
       fadeOutSec: clampNumber(raw.fadeOutSec, 0, 6, 1.5),
       volume: Math.round(clampNumber(raw.volume, 0, 100, DEFAULT_CONFIG.volume)),
@@ -147,6 +174,7 @@ export const saveConfig = (patch: Partial<XiaoAiConfig>): XiaoAiConfig => {
     ...prev,
     ...patch,
     unifyMp3: patch.unifyMp3 !== undefined ? patch.unifyMp3 !== false : prev.unifyMp3,
+    mp3Policy: normalizeMp3Policy(patch.mp3Policy, patch.unifyMp3 !== undefined ? patch.unifyMp3 : prev.unifyMp3),
     songTransitionOffset:
       patch.songTransitionOffset !== undefined
         ? clampNumber(patch.songTransitionOffset, -30, 30, prev.songTransitionOffset)
@@ -163,6 +191,9 @@ export const saveConfig = (patch: Partial<XiaoAiConfig>): XiaoAiConfig => {
     selectedDeviceIds: patch.selectedDeviceIds ? patch.selectedDeviceIds.map(item => String(item)) : prev.selectedDeviceIds,
     devices: patch.devices ? patch.devices.map(normalizeDevice).filter((item: XiaoAiDevice) => item.deviceID) : prev.devices,
   }
+  // mp3Policy 是主开关：显式传了就不让 unifyMp3 与之打架（否则会出现
+  // 「策略=auto 但 unifyMp3=false」这种自相矛盾的落盘，界面显示与实际行为不一致）
+  if (patch.mp3Policy !== undefined) next.unifyMp3 = next.mp3Policy !== 'off'
   const file = configFilePath()
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, JSON.stringify(next, null, 2), 'utf8')

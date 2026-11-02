@@ -56,6 +56,15 @@ const BOOK_TITLE_RE = /《([^》]{1,40})》/
  */
 const BOOK_ARTIST_RE = /》\s*[-–—_]\s*([^\-–—_“”"「」『』《》\s]{1,20})/
 
+/**
+ * 第二种写法：`《海底》 一支榴莲 原版 配唯美mv` —— B站标题里书名号后面直接空格接歌手。
+ * 只取空格后的第一个词（2~12 字），后面「原版 / 配唯美mv」这类描述一律不看。
+ */
+const BOOK_ARTIST_SPACE_RE = /》\s+([^\-–—_“”"「」『』《》\s]{2,12})/
+
+/** 空格形态取到的词可能是「原版/高清」这类标签，命中就丢掉 */
+const ARTIST_LABEL_WORDS = /^(原版|原唱|完整版|高清|超清|无损|音质|伴奏|纯音乐|翻唱|正版|官方|片段|mv|live|hq|hd|4k)$/i
+
 /** 单个括号里的短内容，可当歌手提示用（稻香（杰伦）→ 杰伦） */
 const BRACKET_HINT_RES = [/[（(]([^）)]{1,16})[）)]/, /【([^】]{1,16})】/]
 
@@ -115,8 +124,17 @@ export const splitBookTitle = (raw: string): { title: string; artist: string } |
   if (!m) return null
   const title = m[1].trim()
   if (!title) return null
-  const artistMatch = BOOK_ARTIST_RE.exec(s)
-  return { title, artist: artistMatch ? artistMatch[1].trim() : '' }
+  let artist = ''
+  const dashMatch = BOOK_ARTIST_RE.exec(s)
+  if (dashMatch) {
+    artist = dashMatch[1].trim()
+  } else {
+    const spaceMatch = BOOK_ARTIST_SPACE_RE.exec(s)
+    const candidate = spaceMatch ? spaceMatch[1].trim() : ''
+    // 排除「原版 / 高清 / (Live)」这类版本标签，它们不是歌手
+    if (candidate && !ARTIST_LABEL_WORDS.test(candidate) && !BRACKET_NOISE.test(candidate)) artist = candidate
+  }
+  return { title, artist }
 }
 
 /**

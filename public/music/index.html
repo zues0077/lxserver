@@ -3977,14 +3977,18 @@
                                     <div
                                         class="t-bg-panel rounded-xl border t-border-main p-4 flex items-start justify-between gap-3">
                                         <div>
-                                            <h4 class="text-sm font-bold t-text-main">推送格式统一转为 mp3</h4>
+                                            <h4 class="text-sm font-bold t-text-main">推送格式处理</h4>
                                             <p class="text-xs t-text-muted mt-1" id="xiaoai-mp3-hint">
-                                                已是 mp3 的源不会重复转码；转码产物存入「歌曲缓存/xiaoai」，受权限与缓存限制约束。
+                                                智能：音箱原生能播的格式直接投，其余转 mp3；转码产物存入「歌曲缓存/xiaoai」。
                                             </p>
                                         </div>
-                                        <input type="checkbox" id="xiaoai-mp3-toggle"
-                                            class="w-4 h-4 mt-1 flex-shrink-0 accent-emerald-500 cursor-pointer"
+                                        <select id="xiaoai-mp3-policy"
+                                            class="t-bg-panel border t-border-main rounded-lg text-xs px-2 py-1.5 flex-shrink-0 cursor-pointer"
                                             onchange="xiaoAiSaveConfig()">
+                                            <option value="auto">智能（推荐）</option>
+                                            <option value="always">总是转 mp3</option>
+                                            <option value="off">不转码直投</option>
+                                        </select>
                                     </div>
 
                                     <!-- 播放目标 -->

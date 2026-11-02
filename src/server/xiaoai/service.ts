@@ -7,6 +7,7 @@ import { syncLog } from '../../utils/log4js'
 import { httpRequest } from './http'
 import {
   loadConfig,
+  normalizeMp3Policy,
   saveConfig,
   loadToken,
   saveToken,
@@ -73,8 +74,10 @@ export interface XiaoAiPublicConfig {
   touchscreenLyrics: boolean
   /** 投送前先缓存整首音频 */
   cacheBeforePlay: boolean
-  /** 推送格式统一转 mp3 */
+  /** 推送格式统一转 mp3（兼容字段，等价于 mp3Policy !== 'off'） */
   unifyMp3: boolean
+  /** 投送格式策略：auto 原生可播直投 / always 一律转 mp3 / off 一律直投 */
+  mp3Policy: 'auto' | 'always' | 'off'
   /** 切歌提前量偏移（秒，-30..30） */
   songTransitionOffset: number
   /** 转码时的尾部淡出秒数 */
@@ -199,6 +202,7 @@ class XiaoAiService {
       // 导致界面显示「已开启」而实际走的是直投，用户以为开了却没生效
       cacheBeforePlay: config.cacheBeforePlay === true,
       unifyMp3: config.unifyMp3 !== false,
+      mp3Policy: config.mp3Policy || (config.unifyMp3 === false ? 'off' : 'auto'),
       songTransitionOffset: config.songTransitionOffset || 0,
       fadeOutSec: config.fadeOutSec ?? 1.5,
       volume: Number.isFinite(Number(config.volume)) ? Number(config.volume) : 50,
@@ -219,6 +223,12 @@ class XiaoAiService {
     if (patch.touchscreenLyrics !== undefined) next.touchscreenLyrics = !!patch.touchscreenLyrics
     if (patch.cacheBeforePlay !== undefined) next.cacheBeforePlay = !!patch.cacheBeforePlay
     if (patch.unifyMp3 !== undefined) next.unifyMp3 = !!patch.unifyMp3
+    if (patch.mp3Policy !== undefined) {
+      const policy = normalizeMp3Policy(patch.mp3Policy, patch.unifyMp3)
+      next.mp3Policy = policy
+      // 两个字段保持同义，避免「策略=auto 但 unifyMp3=false」这种自相矛盾的落盘
+      next.unifyMp3 = policy !== 'off'
+    }
     if (patch.songTransitionOffset !== undefined) next.songTransitionOffset = Number(patch.songTransitionOffset) || 0
     if (patch.fadeOutSec !== undefined) next.fadeOutSec = Number(patch.fadeOutSec) || 0
     if (patch.volume !== undefined) next.volume = Number(patch.volume)

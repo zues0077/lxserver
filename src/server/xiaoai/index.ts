@@ -36,5 +36,5 @@ export { buildTrackKey, getCachedTrack, getCachedTrackUrl, setCachedTrackUrl, cl
 export { sleepTimer } from './sleepTimer'
 export type { SleepTimerStatus, SleepTimerMode } from './sleepTimer'
 export { mp3CacheDir, mp3CacheKey, mp3CachePath, removeMp3Cache } from './mp3Cache'
-export { isFfmpegAvailable, isMp3File, transcodeFileToMp3 } from './transcode'
+export { isFfmpegAvailable, isMp3File, isNativePlayable, transcodeFileToMp3 } from './transcode'
 export { seekSliceDir, seekSlicePath, sliceMp3FromFile, pruneSeekSlices } from './seek'

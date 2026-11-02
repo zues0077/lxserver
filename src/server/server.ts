@@ -78,6 +78,7 @@ import {
   sleepTimer,
   mp3CachePath,
   isMp3File,
+  isNativePlayable,
   transcodeFileToMp3,
   isFfmpegAvailable,
   seekSlicePath,
@@ -1073,11 +1074,20 @@ const applyMp3Unification = async (
   username: string,
 ): Promise<XiaoAiTrackTarget> => {
   const config = loadXiaoAiConfig()
-  if (config.unifyMp3 === false) return target
+  const policy = config.mp3Policy || (config.unifyMp3 === false ? 'off' : 'auto')
+  if (policy === 'off') return target
   const fadeOutSec = Number(config.fadeOutSec) || 0
   // 应用侧歌名/歌手：转码时写进 mp3 的 ID3，保证设备屏显真歌名而非占位（Theme Of Loft）
   const metaTitle = String(songInfo.name || songInfo.title || '').trim()
   const metaArtist = String(songInfo.singer || songInfo.artist || '').trim()
+
+  // auto：音箱原生能播的容器直接投，省掉一次转码（实测 mp3/flac/wav 有进度，
+  // m4a/ogg/wma 拉完流零进度 = 放不出来，必须转）。always 则跳过这层、一律转码。
+  if (policy === 'auto' && isNativePlayable({ path: target.path, url: target.url, contentType: target.contentType })) {
+    const mime = String(target.contentType || '').toLowerCase()
+    const contentType = mime || (isMp3File(target.path || '') ? 'audio/mpeg' : target.contentType)
+    return { ...target, contentType, title: metaTitle, artist: metaArtist }
+  }
 
   if (target.path) {
     // 已是 mp3：原样复用，但把 title/artist 带上，便于流式重拉时也能写进 ID3

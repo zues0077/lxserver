@@ -89,6 +89,15 @@ test('buildSearchQueries：空歌名返回空数组（不再白打接口）', ()
   assert.deepEqual(buildSearchQueries('   ', ''), [])
 })
 
+test('splitBookTitle：书名号后接空格+歌手（B站第二种写法）', () => {
+  // 真机踩过：《海底》 一支榴莲 原版 配唯美mv —— 旧逻辑只认破折号，歌手取不到 → 退占位
+  assert.deepEqual(splitBookTitle('《海底》 一支榴莲 原版 配唯美mv'), { title: '海底', artist: '一支榴莲' })
+  assert.deepEqual(splitBookTitle('《晴天》 周杰伦'), { title: '晴天', artist: '周杰伦' })
+  // 空格后是版本标签时不能当歌手
+  assert.equal(splitBookTitle('《晴天》 原版').artist, '')
+  assert.equal(splitBookTitle('《晴天》 高清').artist, '')
+})
+
 test('splitBookTitle：视频站标题拆出真歌名与紧跟其后的真歌手', () => {
   // 真机实测的 B站标题（2026-11-02）：外部歌手是 UP 主，曲库根本不认识
   const real = '【无损音质】《起风了》-买辣椒也用券  “起风了，也让我想起了那年夏天”'

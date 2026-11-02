@@ -88,6 +88,53 @@ export const isMp3File = (filePath: string): boolean => {
   }
 }
 
+/**
+ * 音箱**原生能播**的容器（不用转码就能出声）。
+ *
+ * 2026-11-02 真机实测（泰禾世家小爱触屏音箱 / 小米触屏音箱，20s 正弦波逐格式直投）：
+ *   mp3   → 有进度 ✅
+ *   flac  → 有进度 ✅
+ *   wav   → 有进度 ✅
+ *   m4a(aac) / m4a(alac) / ogg(vorbis) / ogg(opus) / wma → 设备把流**完整拉完**
+ *     （服务端日志「上游拉 X / 已发 X / 总 X」）但进度恒 0，即解码失败、放不出来。
+ *
+ * 所以「不转码直接推」只对这几种容器成立，其余必须转 mp3，否则是静默失败（灯亮无声）。
+ * 注意：判断按**容器**而不是编码 —— 实测有源把 AAC 帧装进 .mp3 容器，设备照样能播。
+ */
+export const NATIVE_PLAYABLE_EXTS: readonly string[] = ['.mp3', '.flac', '.wav']
+
+/** Content-Type 侧的原生可播判定（远端直链拿不到扩展名时用） */
+const NATIVE_PLAYABLE_MIMES: readonly string[] = [
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/flac',
+  'audio/x-flac',
+  'audio/wav',
+  'audio/wave',
+  'audio/x-wav',
+]
+
+/**
+ * 源是否可以不转码直接投给音箱。
+ *
+ * @param opts.path        本地文件路径（优先按扩展名 + mp3 帧头判断）
+ * @param opts.url         远端地址（退化为 URL 后缀判断）
+ * @param opts.contentType 已探测到的 MIME（最可靠）
+ */
+export const isNativePlayable = (opts: { path?: string; url?: string; contentType?: string }): boolean => {
+  if (opts.path) {
+    const ext = path.extname(opts.path).toLowerCase()
+    // 只按容器判断：实测有源把 AAC 帧装进 .mp3 容器，设备照样能播，
+    // 反而强行转码会报 `[aac] channel element ... is not allocated` 失败。
+    return NATIVE_PLAYABLE_EXTS.includes(ext)
+  }
+  const mime = String(opts.contentType || '').toLowerCase().split(';')[0].trim()
+  if (mime && NATIVE_PLAYABLE_MIMES.includes(mime)) return true
+  if (mime) return false
+  const url = String(opts.url || '')
+  return /\.(mp3|flac|wav)(\?|#|$)/i.test(url)
+}
+
 export interface TranscodeOptions {
   bitrate?: string
   /** 尾部淡出秒数（0 = 不淡出）；需要同时给出 durationMs 才能算出起点 */
