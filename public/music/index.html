@@ -4363,6 +4363,20 @@
                         <!-- Lines injected here -->
                         <p class="t-text-muted text-lg font-medium">暂无歌词</p>
                     </div>
+
+                    <!-- 歌词时间轴微调：跨平台歌词（尤其 B站视频/翻唱）常整体偏移几秒，
+                         自动对齐没有可靠通用解，给 ±0.5s 微调并按歌曲记忆 -->
+                    <div id="lyric-offset-ctl"
+                        class="absolute bottom-3 right-3 z-30 flex items-center gap-1 rounded-full t-bg-panel/85 backdrop-blur px-1.5 py-0.5 border t-border-main opacity-0 hover:opacity-100 transition-opacity"
+                        title="歌词对不上人声时点这里微调（每首歌单独记忆）" onclick="event.stopPropagation()">
+                        <button type="button" onclick="adjustLyricOffset(-0.5)"
+                            class="w-6 h-6 rounded-full text-sm t-text-muted hover:text-emerald-500 cursor-pointer">−</button>
+                        <span id="lyric-offset-val" class="text-xs t-text-muted w-12 text-center tabular-nums">0.0s</span>
+                        <button type="button" onclick="adjustLyricOffset(0.5)"
+                            class="w-6 h-6 rounded-full text-sm t-text-muted hover:text-emerald-500 cursor-pointer">+</button>
+                        <button type="button" onclick="resetLyricOffset()" title="重置微调"
+                            class="w-6 h-6 rounded-full text-[10px] t-text-muted hover:text-emerald-500 cursor-pointer">⟲</button>
+                    </div>
                 </div>
             </div>
         </div>

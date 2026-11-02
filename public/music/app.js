@@ -10862,9 +10862,81 @@ async function fetchLyric(song, quality = null) {
     }
 }
 
+// ===== 歌词时间轴微调（每首歌独立记忆）=====
+// 跨平台歌词（尤其 B站视频里的翻唱/现场）经常整体偏几秒：视频前奏多一截、
+// 或歌词取自另一个编曲版本。自动对齐没有可靠通用解（没有音高/节奏对齐模型），
+// 所以给用户一个 ±0.5s 的微调并记住 —— 和网易云/QQ 音乐的「歌词微调」同一思路。
+let lyricUserOffsetSec = 0;
+let lyricOffsetSongKey = '';
+
+function lyricOffsetStorageKey() {
+    const s = currentPlayingSong || {};
+    const id = s.songmid || s.id || '';
+    return `lx_lyric_offset_${s.source || ''}_${id}`;
+}
+
+function refreshLyricOffsetUI() {
+    const el = document.getElementById('lyric-offset-val');
+    if (el) {
+        const v = lyricUserOffsetSec;
+        el.textContent = `${v > 0 ? '+' : ''}${v.toFixed(1)}s`;
+        el.className = v === 0
+            ? 'text-xs t-text-muted w-12 text-center tabular-nums'
+            : 'text-xs text-emerald-500 w-12 text-center tabular-nums font-bold';
+    }
+    const ctl = document.getElementById('lyric-offset-ctl');
+    if (ctl) {
+        ctl.dataset.active = lyricUserOffsetSec === 0 ? '0' : '1';
+        // 有过微调就常显，否则只在 hover 时出现（不干扰观赏）
+        ctl.style.opacity = lyricUserOffsetSec === 0 ? '' : '1';
+    }
+}
+
+function applyLyricUserOffset() {
+    if (lyricPlayer) lyricPlayer.offset = Math.round(lyricUserOffsetSec * 1000);
+    refreshLyricOffsetUI();
+}
+
+/** 切歌时按 songmid 读回上次的微调值 */
+function syncLyricOffsetForSong() {
+    const key = lyricOffsetStorageKey();
+    if (key === lyricOffsetSongKey) return;
+    lyricOffsetSongKey = key;
+    try {
+        lyricUserOffsetSec = Number(localStorage.getItem(key) || 0) || 0;
+    } catch (e) {
+        lyricUserOffsetSec = 0;
+    }
+    applyLyricUserOffset();
+}
+
+function adjustLyricOffset(delta) {
+    lyricUserOffsetSec = Math.max(-15, Math.min(15, Math.round((lyricUserOffsetSec + delta) * 10) / 10));
+    try {
+        if (lyricUserOffsetSec === 0) localStorage.removeItem(lyricOffsetStorageKey());
+        else localStorage.setItem(lyricOffsetStorageKey(), String(lyricUserOffsetSec));
+    } catch (e) { /* 隐私模式忽略 */ }
+    applyLyricUserOffset();
+    applyLyricUpdate();
+}
+
+function resetLyricOffset() {
+    lyricUserOffsetSec = 0;
+    try {
+        localStorage.removeItem(lyricOffsetStorageKey());
+    } catch (e) { /* 忽略 */ }
+    applyLyricUserOffset();
+    applyLyricUpdate();
+}
+
+window.adjustLyricOffset = adjustLyricOffset;
+window.resetLyricOffset = resetLyricOffset;
+
 // 辅助函数：根据当前设置应用歌词更新
 function applyLyricUpdate() {
     if (!lyricPlayer || !currentRawLrc) return;
+    syncLyricOffsetForSong();
+    applyLyricUserOffset();
 
     const extendedLyrics = [];
     const showTrans = settings.showLyricTranslation !== false;
@@ -14869,6 +14941,32 @@ async function fetchCustomSources() {
 }
 
 
+/**
+ * 汇总「每个平台当前有几个可用公开源」。
+ * 数据直接来自 /api/custom-source/list 的 supportedSources / disabledSources，
+ * 被巡检自动禁用的平台会自动从计数里扣掉。
+ */
+function buildSourceHealthSummary(list) {
+    if (!Array.isArray(list) || !list.length) return '';
+    const LABEL = { wy: '网易云', tx: 'QQ', kw: '酷我', kg: '酷狗', mg: '咪咕' };
+    const counts = {};
+    for (const item of list) {
+        if (!item || item.enabled === false) continue;
+        const disabled = new Set((item.disabledSources || []).map(x => (typeof x === 'string' ? x : (x && x.source))).filter(Boolean));
+        for (const p of (item.supportedSources || [])) {
+            const code = typeof p === 'string' ? p : (p && p.source);
+            if (!code || !LABEL[code] || disabled.has(code)) continue;
+            counts[code] = (counts[code] || 0) + 1;
+        }
+    }
+    const parts = Object.keys(LABEL).filter(c => counts[c] > 0).map(c => `${LABEL[c]} ${counts[c]}`);
+    if (!parts.length) return '';
+    return `<div id="source-health-summary" class="mb-3 px-3 py-2 rounded-lg t-bg-panel border t-border-main text-[11px] t-text-muted leading-relaxed">
+        <i class="fas fa-heart-pulse text-emerald-500 mr-1"></i>当前可用公开音源：${parts.join(' · ')}
+        <span class="opacity-60">（取链失败会自动换源；某平台为 0 就该补源了）</span>
+    </div>`;
+}
+
 function updateSourceScopeUI() {
     const username = getUploadTargetOwner();
     const isPublic = username === 'default';
@@ -14995,9 +15093,17 @@ async function renderCustomSources() {
     // 渲染目标容器 ID 列表：模态框内 & 设置界面内
     const targetIds = ['custom-sources-list', 'settings-custom-sources-list'];
 
+    // 各平台「当前可用公开源」数量：取链失败时用户第一个疑问就是「是不是全坏了」，
+    // 把结论直接摆出来（数字来自每个源自己上报的 disabledSources，自动禁用会实时反映）
+    const healthSummary = buildSourceHealthSummary(list);
+
     targetIds.forEach(containerId => {
         const container = document.getElementById(containerId);
         if (!container) return;
+
+        // 先清掉上一次的汇总（每次渲染都重算，避免显示过期数字）
+        const staleSummary = container.querySelector('#source-health-summary');
+        if (staleSummary) staleSummary.remove();
 
         // 如果开启了公开限制且未通过验证，则显示锁定提示
         if (shouldShowHidden) {
@@ -15029,6 +15135,8 @@ async function renderCustomSources() {
         }
 
         container.innerHTML = '';
+        // 列表最上方先摆「各平台当前可用源数」，取链失败时用户一眼能判断是不是源全挂了
+        if (healthSummary) container.insertAdjacentHTML('beforeend', healthSummary);
 
         list.forEach((source, index) => {
             const div = document.createElement('div');

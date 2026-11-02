@@ -1516,3 +1516,91 @@ export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): P
   putAlbumCache(kw, fallback)
   return fallback
 }
+
+/** 评论接口用的是 aid（数字），不是 BV 号 */
+const VIEW_API = 'https://api.bilibili.com/x/web-interface/view'
+const REPLY_API = 'https://api.bilibili.com/x/v2/reply'
+
+const formatCommentTime = (ts: number): string => {
+  if (!ts) return ''
+  const d = new Date(ts * 1000)
+  const p2 = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
+}
+
+const normalizeAvatar = (raw: any): string => {
+  const url = String(raw || '').trim()
+  if (!url) return ''
+  return url.startsWith('//') ? `https:${url}` : url
+}
+
+async function fetchAid(bvid: string, cookie: string): Promise<number> {
+  const resp = await request<any>(`${VIEW_API}?bvid=${encodeURIComponent(bvid)}`, {
+    headers: await headersWithCookie(cookie),
+    timeout: 10000,
+  })
+  const aid = Number(resp?.body?.data?.aid || 0)
+  if (!aid) throw new Error(`B站取 aid 失败（${bvid}）：${resp?.body?.message || '未知'}`)
+  return aid
+}
+
+/**
+ * B站评论（视频评论区 type=1）。
+ *
+ * 走老接口 `/x/v2/reply`：匿名 + UA/Referer 就够，**不需要 wbi 签名**
+ * （2026-11-02 实测 code=0，一个 1282 条评论的视频正常返回）。
+ * 新接口 `/x/v2/reply/wbi/main` 要 w_rid/wts 签名，能用老的就不引签名逻辑。
+ *
+ * @param hot true = 按热度（sort=2），false = 按时间（sort=0）
+ */
+export async function getComments(
+  songInfo: any,
+  page = 1,
+  limit = 20,
+  hot = false,
+): Promise<{ source: string; comments: any[]; total: number; page: number; limit: number; maxPage: number }> {
+  const { bvid } = pickIds(songInfo)
+  const cleanBvid = String(bvid || songInfo?.songmid || songInfo?.id || '').replace(/^bili_/i, '').trim()
+  if (!isBilibiliId(cleanBvid)) throw new Error(`B站歌曲 id 不合法（${cleanBvid || '空'}），无法取评论`)
+
+  const aid = await fetchAid(cleanBvid, '')
+  const ps = Math.min(Math.max(Math.round(Number(limit) || 20), 1), 49)
+  const pn = Math.max(Math.round(Number(page) || 1), 1)
+  const sort = hot ? 2 : 0
+  const resp = await request<any>(`${REPLY_API}?type=1&oid=${aid}&pn=${pn}&ps=${ps}&sort=${sort}`, {
+    headers: await headersWithCookie(''),
+    timeout: 15000,
+  })
+  const code = Number(resp?.body?.code)
+  if (code !== 0) throw new Error(`B站评论接口失败（code=${code}）：${resp?.body?.message || '未知'}`)
+
+  const data = resp?.body?.data || {}
+  const total = Number(data?.page?.count || 0)
+  const list: any[] = Array.isArray(data?.replies) ? data.replies : []
+  const toComment = (item: any) => ({
+    id: String(item?.rpid || ''),
+    text: String(item?.content?.message || ''),
+    time: item?.ctime || '',
+    timeStr: item?.ctime ? formatCommentTime(Number(item.ctime)) : '',
+    location: String(item?.reply_control?.location || '').replace(/^IP属地[:：]\s*/, ''),
+    userName: String(item?.member?.uname || ''),
+    avatar: normalizeAvatar(item?.member?.avatar),
+    userId: String(item?.member?.mid || ''),
+    likedCount: Number(item?.like || 0),
+    reply: [] as any[],
+  })
+  const comments = list.map((item: any) => {
+    const base = toComment(item)
+    const sub: any[] = Array.isArray(item?.replies) ? item.replies : []
+    base.reply = sub.slice(0, 3).map(toComment)
+    return base
+  })
+  return {
+    source: 'bili',
+    comments,
+    total,
+    page: pn,
+    limit: ps,
+    maxPage: Math.ceil(total / ps) || 1,
+  }
+}

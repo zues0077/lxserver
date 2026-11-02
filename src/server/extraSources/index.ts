@@ -27,6 +27,26 @@ const RESOLVERS: Record<string, (songInfo: any, quality: string, cookie: string,
   soda: soda.getAudioUrl,
 }
 
+/** 评论：目前只有 B站有可用的公开接口（musicSdk 里没有 bili，所以走这里分发） */
+const COMMENTS: Record<string, (songInfo: any, page: number, limit: number, hot: boolean) => Promise<any>> = {
+  bili: bilibili.getComments,
+}
+
+/**
+ * 取「额外音源」的评论。返回 null 表示这个源没有评论实现（交回原有 500 逻辑）。
+ */
+export async function getComments(
+  source: string,
+  songInfo: any,
+  page = 1,
+  limit = 20,
+  hot = false,
+): Promise<any | null> {
+  const fn = COMMENTS[String(source || '')]
+  if (!fn) return null
+  return fn(songInfo, page, limit, hot)
+}
+
 const DISPLAY_NAME: Record<string, string> = {
   bili: 'Bilibili',
   soda: '汽水音乐',

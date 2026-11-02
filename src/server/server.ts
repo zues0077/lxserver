@@ -6953,6 +6953,25 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             return
           }
 
+          // 落盘成 .lrc：和音频同目录，跟着「歌曲缓存」一起被配额/清理管理。
+          // 之前只在内存缓存 12 小时，容器重启就白搜一遍；而且用户离线播放时读不到词。
+          // 只有音频确实在缓存里才写（严格同 basename，索引才配得上），否则下次播放时再落。
+          try {
+            const probe = fileCache.checkCache({ ...buildLyricSongInfo(songmid), quality: '' }, lyricUsername)
+            const cachedQuality = probe?.exists ? String((probe as any).quality || '') : ''
+            if (cachedQuality) {
+              const saved = fileCache.saveLyricCache(
+                { ...buildLyricSongInfo(songmid), quality: cachedQuality },
+                lyricInfo,
+                lyricUsername,
+              )
+              if (saved) console.log(`[歌词服务] 已落盘 .lrc：${source}_${songmid}（${cachedQuality}）`)
+            }
+          } catch (e: any) {
+            // 落盘失败不影响这次返回
+            console.warn(`[歌词服务] .lrc 落盘失败：${e?.message || e}`)
+          }
+
           res.writeHead(200, {
             'Content-Type': 'application/json',
             'Cache-Control': 'public, max-age=86400' // Cache lyrics for 1 day
@@ -9670,6 +9689,22 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             }
             const source = songInfo.source
             console.log(`[评论服务] 请求评论: ${source} - ${songInfo.name} - ${type} - 第 ${page} 页`)
+
+            // B站/汽水这类「额外音源」不在 musicSdk 里，先由 extraSources 分发。
+            // 之前 B站评论弹窗报 500 就是卡在这句「Source bili not supported」。
+            const extraComments = await extraSources.getComments(
+              source,
+              songInfo,
+              Number(page) || 1,
+              Number(limit) || 20,
+              type === 'hot',
+            )
+            if (extraComments) {
+              console.log(`[评论服务] 获取成功(额外音源): ${source} - 共找到 ${extraComments.comments?.length} 条评论`)
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify(extraComments))
+              return
+            }
 
             if (!musicSdk[source] || !musicSdk[source].comment) {
               console.warn(`[评论服务] 音源 ${source} 不支持评论功能`)
