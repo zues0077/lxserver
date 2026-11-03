@@ -173,6 +173,40 @@ export function plainToLrc(text: string): string {
  * 行首是「行起始毫秒」，每个 `<偏移,时长,0>` 是一个字的相对时间。
  * 这个格式与我们咪咕 MRC 的逐字结构同构，转成 `<偏移,时长>字` 就能给前端逐字滚动用。
  */
+export interface LyricKeyParts {
+  source: string
+  name: string
+  singer: string
+  interval?: string
+  songmid?: string
+  hash?: string
+}
+
+/** 取词结果取决于平台 id 的源（其余源走「按名字跨源搜索」） */
+const ID_SCOPED_LYRIC_SOURCES = new Set(['bili', 'soda', 'kglite'])
+
+/**
+ * 歌词兜底缓存的键。
+ *
+ * 只拼「源 + 歌名 + 歌手 + 时长」是不够的：bili 的字幕按 BV 号取、soda 按曲目 id 取、
+ * kglite 按酷狗 hash 取 —— 这三级的**结果取决于平台 id**，同标题同歌手的两个曲目会共用
+ * 同一条缓存。2026-11-03 实测：用同一个歌名查 5 个不同 BV，全部返回同一条 36 行字幕；
+ * 换成 5 个不同歌名后各自正确（36 / 46 / 0 / 67 行）。
+ *
+ * 所以对这三个源把 id 一并拼进键；其余源不加 id，保住跨入口（搜索 / 歌单 / 播放列表）
+ * 的缓存复用，也避免同一首歌因入口不同写法产生多份缓存。
+ */
+export function lyricCacheKey(t: LyricKeyParts): string {
+  const source = String(t?.source || '').toLowerCase()
+  const parts = [source, cleanTitle(t?.name), cleanTitle(t?.singer), durationSeconds(t?.interval)]
+  if (ID_SCOPED_LYRIC_SOURCES.has(source)) {
+    // kglite 的 songmid 本身就是酷狗 hash，两者取其一即可
+    const id = String((source === 'kglite' ? t?.hash || t?.songmid : t?.songmid) || '').trim()
+    if (id) parts.push(id)
+  }
+  return parts.join('|')
+}
+
 export function parseSodaQrc(raw: string): { lyric: string; lxlyric: string } {
   const lines = String(raw || '').replace(/\r/g, '').split('\n')
   const lrcLines: string[] = []

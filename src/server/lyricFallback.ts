@@ -21,7 +21,7 @@ import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 import * as store from './musicAccount/store'
 import { getTrackLyric as getSodaTrackLyric } from './extraSources/soda'
 import { fetchSubtitleLyric } from './extraSources/bilibili'
-import { durationSeconds, cleanTitle, pickBest, plainToLrc, scoreCandidate } from '@/utils/lyricMatch'
+import { durationSeconds, lyricCacheKey, pickBest, plainToLrc, scoreCandidate } from '@/utils/lyricMatch'
 import { resolveMatchTarget } from './xiaoai/musicMatch'
 
 const musicSdk: any = musicSdkRaw as any
@@ -303,8 +303,9 @@ async function lrclibLyric(target: LyricTarget): Promise<LyricPayload | null> {
   }
 }
 
+/** 缓存键实现见 lyricMatch.lyricCacheKey（按平台 id 取词的源会把 id 拼进去，防串词） */
 function cacheKey(t: LyricTarget): string {
-  return [t.source, cleanTitle(t.name), cleanTitle(t.singer), durationSeconds(t.interval)].join('|')
+  return lyricCacheKey(t)
 }
 
 function readCache(key: string): LyricPayload | null | undefined {
