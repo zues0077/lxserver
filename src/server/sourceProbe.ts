@@ -200,6 +200,8 @@ export interface ProbeStatusSnapshot {
   lastRun: ProbeRunResult | null
   /** 「已关闭平台快速复检」的间隔（分钟）；0 表示关闭 */
   restoreIntervalMinutes: number
+  /** 每轮复检最多探多少个「源 × 平台」 */
+  restoreBatch: number
   /** 最近一次快速复检的时刻（与 lastRunAt 分开，主巡检快照不受它影响） */
   lastRestoreAt: number | null
   lastRestoreRun: ProbeRunResult | null
@@ -1302,16 +1304,14 @@ export async function runSourceProbe(
     if (!options.firstProbe) {
       jobs.sort((a, b) => lastCheckOf(a) - lastCheckOf(b))
     }
-    // 快速复检每轮只取 N 个，按关闭时间最久的优先（老证据最不可靠，也最该重验）
+    // 快速复检每轮只取 N 个。**必须按「上次探测时间」轮转，不能按「关闭时间」**：
+    // 按关闭时间会把最老的 16 个固定下来，它们若一直探不通，后面的平台永远排不到
+    // （2026-11-03 实机首轮就踩到：16 个全失败，下一轮还是同一批）。
+    // 这里的 jobs 已经按 lastCheckAt 升序排好，探测后 lastCheckAt 会刷新，天然轮转。
     let plannedJobs = jobs
     if (options.restoreOnly && jobs.length > conf.restoreBatch) {
-      const closedAt = (job: Job): number => {
-        const st = statusFor(job.target.owner)
-        const ps = st.sources[job.target.id]?.platforms?.[job.platform]
-        return ps?.disabledAt || ps?.lastCheckAt || 0
-      }
-      plannedJobs = jobs.slice().sort((a, b) => closedAt(a) - closedAt(b)).slice(0, conf.restoreBatch)
-      result.message = `关闭平台复检：本轮只取 ${plannedJobs.length}/${jobs.length} 个（restoreBatch=${conf.restoreBatch}）`
+      plannedJobs = jobs.slice(0, conf.restoreBatch)
+      result.message = `关闭平台复检：本轮只取 ${plannedJobs.length}/${jobs.length} 个（restoreBatch=${conf.restoreBatch}，按最久未探轮转）`
     }
 
     // 并发消费探测任务。同一个平台会按候选测试曲目依次重试，任意一首成功即视为该平台可用 ——
@@ -1716,8 +1716,9 @@ export function createSourceProbeRestoreTask(): ScheduledTask {
     // 0 表示关闭该功能：任务仍注册（面板可见），但不自动跑
     enabled: conf.enabled && minutes > 0,
     isRunning: false,
-    // 排在主巡检（启动后 120 秒）之后，避免两个任务在启动期同时打平台
-    startupDelayMs: 10 * 60 * 1000,
+    // 排在主巡检之后足够远：主巡检启动后 120 秒开跑、约 5 分钟结束，
+    // 复检若紧跟其后（实测首次设在 10 分钟）会撞在平台限流的尾巴上，16 个平台集体失败。
+    startupDelayMs: 20 * 60 * 1000,
     run: async (): Promise<TaskExecutionResult> => {
       const result = await runSourceProbe({ restoreOnly: true })
       return {
@@ -1799,6 +1800,7 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
     lastRunAt,
     lastRun,
     restoreIntervalMinutes: conf.restoreIntervalMinutes,
+    restoreBatch: conf.restoreBatch,
     lastRestoreAt,
     lastRestoreRun,
     maxDurationMs: conf.maxDurationMs,
