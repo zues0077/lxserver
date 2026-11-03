@@ -4,7 +4,7 @@ import { syncLog } from '@/utils/log4js'
 import { ScheduledTask, TaskExecutionResult } from './task/types'
 import { createNetworkListTask } from './task/networkListTask'
 import { createSyncDownloadTask, syncDownloadForAllUsers } from './task/syncDownloadTask'
-import { createSourceProbeTask } from './sourceProbe'
+import { createSourceProbeTask, createSourceProbeRestoreTask } from './sourceProbe'
 
 export * from './task/types'
 export { parseIntervalMs, checkAllUsersNetworkLists } from './task/networkListTask'
@@ -205,6 +205,11 @@ export const startScheduler = () => {
   // 关闭（customSource.probe.enabled = false）时任务仍会注册但 enabled=false，面板上可见、可单独改间隔
   const sourceProbeTask = createSourceProbeTask()
   registerTask(sourceProbeTask)
+
+  // 已关闭平台的快速复检（只恢复、不定罪）：把误关/临时故障的恢复窗口从「一个全量周期」
+  // 压到 30 分钟。customSource.probe.restoreIntervalMinutes=0 可关闭。
+  const sourceProbeRestoreTask = createSourceProbeRestoreTask()
+  registerTask(sourceProbeRestoreTask)
 
   syncLog.info('[任务调度] 后台任务调度器已启动')
 

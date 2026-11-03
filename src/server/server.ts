@@ -31,7 +31,7 @@ const musicSdk = musicSdkRaw as any
 import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, describeError } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation } from './sourceGuard'
-import { getSourceProbeStatus, runSourceProbe } from './sourceProbe'
+import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
 import { getAppVersion } from '@/utils/version'
@@ -10603,6 +10603,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'customSource.probe.autoDisablePlatform': global.lx.config['customSource.probe.autoDisablePlatform'] !== false,
             'customSource.probe.autoRemoveSource': global.lx.config['customSource.probe.autoRemoveSource'] !== false,
             'customSource.probe.removeMode': global.lx.config['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash',
+            // 快速复检 / 节流 / 单轮预算：0 是合法值（关闭），不能用 || 兜底
+            'customSource.probe.restoreIntervalMinutes': Number.isFinite(Number(global.lx.config['customSource.probe.restoreIntervalMinutes']))
+              ? Number(global.lx.config['customSource.probe.restoreIntervalMinutes']) : 30,
+            'customSource.probe.restoreBatch': Number(global.lx.config['customSource.probe.restoreBatch']) || 16,
+            'customSource.probe.throttleMs': Number.isFinite(Number(global.lx.config['customSource.probe.throttleMs']))
+              ? Number(global.lx.config['customSource.probe.throttleMs']) : 250,
+            'customSource.probe.maxDurationMs': Number(global.lx.config['customSource.probe.maxDurationMs']) || 480000,
             'configBackup.enable': global.lx.config['configBackup.enable'] ?? true,
             'configBackup.retentionDays': global.lx.config['configBackup.retentionDays'] ?? 7,
             'configBackup.dir': global.lx.config['configBackup.dir'] ?? '',
@@ -10677,15 +10684,41 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (newConfig['customSource.probe.removeMode'] !== undefined) {
                 global.lx.config['customSource.probe.removeMode'] = newConfig['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash'
               }
+              // 已关闭平台快速复检：间隔 0 = 关闭该功能（下限 0、上限 1440 分钟）
+              if (newConfig['customSource.probe.restoreIntervalMinutes'] !== undefined) {
+                global.lx.config['customSource.probe.restoreIntervalMinutes'] =
+                  Math.min(1440, Math.max(0, parseInt(newConfig['customSource.probe.restoreIntervalMinutes']) || 0))
+              }
+              if (newConfig['customSource.probe.restoreBatch'] !== undefined) {
+                global.lx.config['customSource.probe.restoreBatch'] =
+                  Math.min(200, Math.max(1, parseInt(newConfig['customSource.probe.restoreBatch']) || 16))
+              }
+              // 同平台探测最小间隔：0 = 不节流，上限 5000ms
+              if (newConfig['customSource.probe.throttleMs'] !== undefined) {
+                global.lx.config['customSource.probe.throttleMs'] =
+                  Math.min(5000, Math.max(0, parseInt(newConfig['customSource.probe.throttleMs']) || 0))
+              }
+              // 单轮总时长预算：最少 60 秒，默认 8 分钟
+              if (newConfig['customSource.probe.maxDurationMs'] !== undefined) {
+                global.lx.config['customSource.probe.maxDurationMs'] =
+                  Math.max(60000, parseInt(newConfig['customSource.probe.maxDurationMs']) || 480000)
+              }
 
               // 巡检开关与间隔改动后立即重排任务。
               // 不能指望配置文件热重载：那边的 hash 判定会把「本次保存自己触发的
               // fs.watch 事件」当成无实质变化跳过，改完要等重启才生效。
               if (Object.keys(newConfig).some(k => k.startsWith('customSource.probe.'))) {
+                const probeEnabled = global.lx.config['customSource.probe.enabled'] !== false
                 try {
-                  scheduler.updateTaskConfig('custom_source_health_probe', {
-                    enabled: global.lx.config['customSource.probe.enabled'] !== false,
+                  scheduler.updateTaskConfig(PROBE_TASK_ID, {
+                    enabled: probeEnabled,
                     intervalMs: (Number(global.lx.config['customSource.probe.intervalMinutes']) || 360) * 60 * 1000,
+                  })
+                  // 复检任务跟随总开关与自己的间隔：间隔 0 视为关闭（任务仍注册，面板可见）
+                  const restoreMin = Math.max(0, Number(global.lx.config['customSource.probe.restoreIntervalMinutes']) || 0)
+                  scheduler.updateTaskConfig(PROBE_RESTORE_TASK_ID, {
+                    enabled: probeEnabled && restoreMin > 0,
+                    intervalMs: Math.max(1, restoreMin) * 60 * 1000,
                   })
                 } catch { /* 调度器尚未启动时忽略 */ }
               }

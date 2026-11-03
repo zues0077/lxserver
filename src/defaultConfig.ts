@@ -158,6 +158,16 @@ const config: LX.Config = {
   'customSource.probe.autoRemoveSource': true, // 全平台不可用是否自动移除音源
   'customSource.probe.removeMode': 'trash', // 移除方式：trash 移入回收站 / delete 直接删除
   'customSource.probe.probeOnNewSource': true, // 新增音源是否立即巡检
+  // 已关闭平台「快速复检」：只探被自动关闭的平台、每平台 1 首，成功即恢复，不做定罪。
+  // 全量巡检 6 小时一轮，被误关或平台临时故障的源原本要等这么久才能复活；
+  // 复检把恢复窗口压到 30 分钟，成本只有全量的几十分之一。设 0 关闭。
+  'customSource.probe.restoreIntervalMinutes': 30,
+  'customSource.probe.restoreBatch': 16, // 每轮复检最多探多少个「源×平台」，多的按关闭时间轮转
+  // 同一平台两次探测的最小间隔（毫秒）。全量巡检里单个平台常排 20~30 个源，
+  // 并发全开时同一平台会瞬时收到多个请求，最容易被平台判成异常流量。设 0 关闭。
+  'customSource.probe.throttleMs': 250,
+  // 单轮巡检总时长预算（毫秒）。到点不再领新任务，剩余留到下一轮最前面（按上次探测时间排序，不会饿死）。
+  'customSource.probe.maxDurationMs': 480000,
   // 各平台测试曲目覆盖（留空则用缓存/内置搜索）。
   // kg 必须显式配置：它的歌曲主键是 32 位文件 hash，而缓存索引只存 audio_id 且不带 hash，
   // 内置搜索虽然能带出 hash 但要多一次搜索。这里给一首固定曲目当首选，失配时仍会走搜索兜底。

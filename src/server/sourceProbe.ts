@@ -37,6 +37,8 @@ import { beginHostActivity, endHostActivity } from './sourceActivity'
 import type { ScheduledTask, TaskExecutionResult } from './task/types'
 
 export const PROBE_TASK_ID = 'custom_source_health_probe'
+/** 已关闭平台快速复检任务（只做恢复，不定罪） */
+export const PROBE_RESTORE_TASK_ID = 'custom_source_restore_probe'
 const STATUS_FILE = 'probe-status.json'
 const AUDIT_FILE = 'probe-audit.log'
 const TRASH_DIR = '.trash'
@@ -151,6 +153,11 @@ export interface ProbeRunResult {
   /** 本次移除的音源 */
   removed: string[]
   /**
+   * 因超出单轮时长预算（maxDurationMs）而未探测的任务数。
+   * 与 platformsDeferred 区分：那个是「探了但证据不足暂缓处置」，这个是「压根没探，留到下一轮」。
+   */
+  budgetCut?: number
+  /**
    * 本轮被判定为「平台侧系统性异常」而暂缓处置的平台。
    *
    * 判据：该平台在多数音源上同时失败。此时更可能是测试曲目不可播、
@@ -191,6 +198,14 @@ export interface ProbeStatusSnapshot {
   removeMode: 'trash' | 'delete'
   lastRunAt: number | null
   lastRun: ProbeRunResult | null
+  /** 「已关闭平台快速复检」的间隔（分钟）；0 表示关闭 */
+  restoreIntervalMinutes: number
+  /** 最近一次快速复检的时刻（与 lastRunAt 分开，主巡检快照不受它影响） */
+  lastRestoreAt: number | null
+  lastRestoreRun: ProbeRunResult | null
+  /** 单轮总时长预算（毫秒）与同平台最小探测间隔（毫秒），面板可据此判断是否需要调参 */
+  maxDurationMs: number
+  throttleMs: number
   /** 已排队、等待巡检的「新增音源」数量（撞上正在跑的轮次时会排队，不会丢） */
   pendingNewSources: number
   /** 当前生效的「自动关闭」平台清单 */
@@ -201,7 +216,7 @@ export interface ProbeStatusSnapshot {
 
 // ============================ 配置 ============================
 
-interface ProbeConfig {
+export interface ProbeConfig {
   enabled: boolean
   intervalMinutes: number
   failThreshold: number
@@ -219,6 +234,33 @@ interface ProbeConfig {
   suspectMaxOkRatio: number
   /** 平台侧疑似异常的平台停探半个周期（省掉注定失败的重复探测，配置可关） */
   suspectBackoff: boolean
+  /**
+   * 已关闭平台的「快速复检」间隔（分钟）。0 = 关闭该功能。
+   *
+   * 为什么需要：被自动关闭的平台原本只能等下一轮**全量**巡检才有机会恢复，
+   * 而全量间隔默认 180/360 分钟 —— 一次误判或平台临时故障，用户最坏要等 3~6 小时
+   * 才能把那个源重新用起来。复检只探「已关闭」的平台、每平台 1 首，成本是全量的几十分之一，
+   * 却能把这个窗口压到半小时以内。
+   */
+  restoreIntervalMinutes: number
+  /** 每轮复检最多探多少个「源 × 平台」（限制瞬时压力，多的下一轮按关闭时间轮转） */
+  restoreBatch: number
+  /**
+   * 同一平台两次探测之间的最小间隔（毫秒）。0 = 不节流。
+   *
+   * 全量巡检并发打 139 个平台，同一平台往往有 20~30 个源同时排队；
+   * 并发全开时会出现「同一个平台瞬时收到 6 个请求」，正是最容易触发平台风控的形态。
+   * 加一道很轻的间隔（默认 250ms）就能把瞬时并发摊平，对总时长影响可忽略。
+   */
+  throttleMs: number
+  /**
+   * 单轮巡检的总时长预算（毫秒）。超预算就不再领取新任务，剩下的留到下一轮。
+   *
+   * 实测 39 源 / 139 平台在并发 2 下要跑 304 秒，正好和用户点歌、投送撞车；
+   * 与其让它无限延长，不如到点收工 —— 任务按「上次探测时间最久」排序，
+   * 被截断的自然排到下一轮最前面，不会饿死。
+   */
+  maxDurationMs: number
 }
 
 /**
@@ -278,13 +320,25 @@ const SUSPECT_MIN_SAMPLE = 5
 const positiveNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
 
+/**
+ * 允许 0 的数值配置（0 表示「关闭该功能」）。
+ * 注意与 positiveNumber 的区别：那边 0 会被当成「没填」而回落默认值，
+ * 对 restoreIntervalMinutes / throttleMs 这种「0 是合法关闭值」的键必须用这个。
+ */
+const nonNegativeNumber = (value: unknown, fallback: number): number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback
+
 /** 取 [0,1] 区间的比例配置 */
 const ratioNumber = (value: unknown, fallback: number): number => {
   const n = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(n) && n > 0 && n <= 1 ? n : fallback
 }
 
-const configOf = (): ProbeConfig => {
+/**
+ * 读取当前生效的巡检配置（导出的目的是让单测能验证「0 是合法关闭值」这类边界，
+ * 以及让诊断脚本能读到真实的生效参数，而不是照着默认值猜）。
+ */
+export const configOf = (): ProbeConfig => {
   const c: any = (global.lx && global.lx.config) || {}
   const rawTestSongs = c['customSource.probe.testSongs']
   return {
@@ -304,6 +358,13 @@ const configOf = (): ProbeConfig => {
     systemicFailureRatio: ratioNumber(c['customSource.probe.systemicFailureRatio'], DEFAULT_SYSTEMIC_RATIO),
     suspectMaxOkRatio: ratioNumber(c['customSource.probe.suspectMaxOkRatio'], DEFAULT_SUSPECT_MAX_OK_RATIO),
     suspectBackoff: c['customSource.probe.suspectBackoff'] !== false,
+    // 快速复检：默认 30 分钟一轮，每轮最多 16 个「源 × 平台」；设 0 可关闭
+    restoreIntervalMinutes: nonNegativeNumber(c['customSource.probe.restoreIntervalMinutes'], 30),
+    restoreBatch: Math.max(1, Math.round(positiveNumber(c['customSource.probe.restoreBatch'], 16))),
+    // 同平台探测最小间隔：默认 250ms，上限 5000ms，避免配置写错把巡检拖成几小时
+    throttleMs: Math.min(5000, nonNegativeNumber(c['customSource.probe.throttleMs'], 250)),
+    // 单轮预算：默认 8 分钟（低于默认间隔 180/360 分钟，留足余量）
+    maxDurationMs: positiveNumber(c['customSource.probe.maxDurationMs'], 8 * 60 * 1000),
   }
 }
 
@@ -907,6 +968,9 @@ let depsRef: ProbeDeps | null = null
 let running = false
 let lastRunAt: number | null = null
 let lastRun: ProbeRunResult | null = null
+/** 最近一次「已关闭平台快速复检」的时刻与结果（与主巡检分开记，避免污染面板快照） */
+let lastRestoreAt: number | null = null
+let lastRestoreRun: ProbeRunResult | null = null
 let scheduledTimer: NodeJS.Timeout | null = null
 let periodicTimer: NodeJS.Timeout | null = null
 
@@ -1080,7 +1144,16 @@ export function reportManualFailure(ev: ManualFailureReport): { counted: boolean
 }
 
 export async function runSourceProbe(
-  options: { owner?: string; only?: Array<{ owner: string; id: string }>; firstProbe?: boolean } = {},
+  options: {
+    owner?: string
+    only?: Array<{ owner: string; id: string }>
+    firstProbe?: boolean
+    /**
+     * 只复检「已被自动关闭」的平台：每平台 1 首、不做定罪/关闭/移除。
+     * 由 createSourceProbeRestoreTask 以远小于全量的间隔调用，用来快速恢复误关或临时故障的平台。
+     */
+    restoreOnly?: boolean
+  } = {},
 ): Promise<ProbeRunResult> {
   const startedAt = Date.now()
   const empty: ProbeRunResult = {
@@ -1097,13 +1170,16 @@ export async function runSourceProbe(
   if (running) return { ...empty, message: '上一轮巡检仍在进行中，跳过本次' }
 
   running = true
-  lastRunAt = startedAt
+  // 复检不计入 lastRunAt：它只覆盖「已关闭平台」这一小撮样本，
+  // 写进主快照会让面板显示成「1 源 / 3 平台」的假巡检结果（本轮压测就踩过这个误判）。
+  if (options.restoreOnly) lastRestoreAt = startedAt
+  else lastRunAt = startedAt
   statesCache.clear()
   searchAttempted.clear() // 每轮重新允许一次内置搜索，平台恢复后仍能拿到测试曲目
   poolRefreshedThisRound = false
   // 巡检自身就是卡顿来源之一（并发回调的同步序列化开销会叠加），
   // 这里留痕，好让归因把「巡检期内的卡顿」与「音源自发的卡顿」区分开
-  beginHostActivity('sourceProbe', `巡检中（${options.firstProbe ? '首轮' : '周期'}）`)
+  beginHostActivity('sourceProbe', options.restoreOnly ? '关闭平台复检中' : `巡检中（${options.firstProbe ? '首轮' : '周期'}）`)
   // 巡检期会触发大量「预期内的失败解析」，开启静默把逐条错误聚合到轮末摘要
   beginProbeQuiet()
   // 探测期间会有持续的解析与网络开销，标记为「忙碌」避免被自检护栏误判成异常空转
@@ -1152,6 +1228,11 @@ export async function runSourceProbe(
       for (const platform of target.platforms) {
         if (!sourceState.platforms[platform]) sourceState.platforms[platform] = emptyPlatformState()
         const platformState = sourceState.platforms[platform]
+
+        // 快速复检模式：只处理「已被自动关闭」的平台。
+        // 其余平台既不探测也不计入 skipped —— 这一轮的样本本来就只覆盖关闭平台，
+        // 把它们算进「跳过」会让面板上的数字看起来像巡检大面积失效。
+        if (options.restoreOnly && !platformState.autoDisabled) continue
 
         // 用户在面板上手动关闭的平台：尊重用户选择，永不参与自动复检
         const flags = readPlatformFlags(ownerDirName(target.owner), target.id)
@@ -1202,14 +1283,58 @@ export async function runSourceProbe(
           continue
         }
         // 新增音源的首次探测只试 1 首候选曲目：批量导入时不至于被「每平台 3 首重试」放大数倍；
-        // 首轮失败只是累计 failCount（默认要连续 2 轮），真正的定罪与重试留给后续周期巡检
-        jobs.push({ target, platform, songs: options.firstProbe ? songs.slice(0, 1) : songs })
+        // 首轮失败只是累计 failCount（默认要连续 2 轮），真正的定罪与重试留给后续周期巡检。
+        // 快速复检同样只试 1 首：复检的目的只是「确认平台是否恢复」，探到能出链就停，
+        // 探不到也只记证据、不定罪，多试几首纯属浪费上游请求。
+        const onlyOne = options.firstProbe || options.restoreOnly
+        jobs.push({ target, platform, songs: onlyOne ? songs.slice(0, 1) : songs })
       }
+    }
+
+    // ---- 任务排序与预算 ----
+    // 按「该源×平台上次探测时间」从旧到新排队。配合下面的总时长预算，
+    // 被预算截断的任务天然落到下一轮最前面，不会出现「尾部平台永远探不到」的饥饿。
+    const lastCheckOf = (job: Job): number => {
+      const st = statusFor(job.target.owner)
+      const ps = st.sources[job.target.id]?.platforms?.[job.platform]
+      return ps?.lastCheckAt || 0
+    }
+    if (!options.firstProbe) {
+      jobs.sort((a, b) => lastCheckOf(a) - lastCheckOf(b))
+    }
+    // 快速复检每轮只取 N 个，按关闭时间最久的优先（老证据最不可靠，也最该重验）
+    let plannedJobs = jobs
+    if (options.restoreOnly && jobs.length > conf.restoreBatch) {
+      const closedAt = (job: Job): number => {
+        const st = statusFor(job.target.owner)
+        const ps = st.sources[job.target.id]?.platforms?.[job.platform]
+        return ps?.disabledAt || ps?.lastCheckAt || 0
+      }
+      plannedJobs = jobs.slice().sort((a, b) => closedAt(a) - closedAt(b)).slice(0, conf.restoreBatch)
+      result.message = `关闭平台复检：本轮只取 ${plannedJobs.length}/${jobs.length} 个（restoreBatch=${conf.restoreBatch}）`
     }
 
     // 并发消费探测任务。同一个平台会按候选测试曲目依次重试，任意一首成功即视为该平台可用 ——
     // 单曲常常恰好是无版权/需会员的歌，只探一首会把「歌不可播」错判成「平台不可用」。
     let cursor = 0
+    /** 因超出总时长预算而未探测的任务数（下一轮会排在最前面） */
+    let budgetCut = 0
+    // 平台级节流：同一平台的两次探测之间至少间隔 conf.throttleMs。
+    // 全量巡检 139 个平台里，单个平台往往排着 20~30 个源；并发全开时同一平台会瞬时收到
+    // 好几个请求，这正是最容易触发平台风控（以及被平台侧判定为异常流量）的形态。
+    // 用一个很轻的间隔把瞬时并发摊平，对总时长的影响可以忽略（139×0.25s 分散在几分钟里）。
+    const nextSlotAt = new Map<string, number>()
+    const waitPlatformSlot = async (platform: string) => {
+      if (!conf.throttleMs) return
+      const now = Date.now()
+      const slot = nextSlotAt.get(platform) || 0
+      if (slot > now) {
+        await new Promise<void>(resolve => setTimeout(resolve, Math.min(slot - now, conf.throttleMs)))
+      }
+      nextSlotAt.set(platform, Date.now() + conf.throttleMs)
+    }
+    // 总时长预算：到点不再领新任务，剩余留到下一轮（任务已按上次探测时间排好序，不会饿死）
+    const budgetDeadline = startedAt + conf.maxDurationMs
     const worker = async () => {
       while (true) {
         // 处理完一个平台就让出一次事件循环：
@@ -1218,8 +1343,15 @@ export async function runSourceProbe(
         // setImmediate 只让出一个 tick，对巡检总时长的影响可以忽略。
         await new Promise<void>(resolve => { setImmediate(resolve) })
         const index = cursor++
-        if (index >= jobs.length) return
-        const job = jobs[index]
+        if (index >= plannedJobs.length) return
+        // 预算耗尽：剩下的不领了。标记出来而不是静默跳过 ——
+        // 「这轮只探了 80 个」和「这轮 80 个都正常」是两件事。
+        if (Date.now() > budgetDeadline) {
+          budgetCut++
+          continue
+        }
+        const job = plannedJobs[index]
+        await waitPlatformSlot(job.platform)
         const status = statusFor(job.target.owner)
         const platformState = status.sources[job.target.id].platforms[job.platform]
         result.platformsChecked++
@@ -1263,14 +1395,24 @@ export async function runSourceProbe(
       }
     }
 
-    await Promise.all(Array.from({ length: Math.min(conf.concurrency, Math.max(1, jobs.length)) }, () => worker()))
+    await Promise.all(Array.from({ length: Math.min(conf.concurrency, Math.max(1, plannedJobs.length)) }, () => worker()))
+    if (budgetCut > 0) {
+      const msg = `[音源巡检] 本轮达到 ${Math.round(conf.maxDurationMs / 1000)} 秒预算，剩余 ${budgetCut} 个任务留到下一轮（下轮优先）`
+      console.warn(msg)
+      syncLog.warn(msg)
+      result.budgetCut = budgetCut
+      result.message = result.message ? `${result.message}；${msg}` : msg
+    }
 
     // ---- 平台侧系统性异常判定 ----
     // 同一个平台如果在「多数音源」上同时失败，那么更可能是测试曲目不可播、平台侧限流/风控等外部原因，
     // 而不是某个音源自己坏了。此时若继续按「连续失败达阈值」自动关闭，会一次性误伤大量可用音源，
     // 甚至因为「全部平台都失败」把这些音源整个删掉。因此这类平台本轮只记录、不处置，交由人工判断。
     const platformStats = new Map<string, { checked: number; failed: number; ok: number }>()
-    for (const job of jobs) {
+    // 快速复检的样本只覆盖「已关闭平台」，单平台 1 首，既不能代表平台整体，也不足以定罪；
+    // 传空数组让后续所有「平台侧异常 / 停探续期」分支自然不成立。
+    const statJobs = options.restoreOnly ? [] : jobs
+    for (const job of statJobs) {
       const ps = statusFor(job.target.owner).sources[job.target.id].platforms[job.platform]
       const stat = platformStats.get(job.platform) || { checked: 0, failed: 0, ok: 0 }
       stat.checked++
@@ -1335,7 +1477,9 @@ export async function runSourceProbe(
     }
 
     // ---- 落定每个平台的结论并执行自动关闭 ----
-    for (const target of targets) {
+    // 快速复检到这里就结束：worker 里已经把「探测成功」的平台重新打开，
+    // 剩下的事（定罪、关闭、移除）都需要多轮多平台证据，单平台单曲的复检样本一律不参与。
+    if (!options.restoreOnly) for (const target of targets) {
       const sourceState = statusFor(target.owner).sources[target.id]
       for (const platform of target.platforms) {
         const ps = sourceState.platforms[platform]
@@ -1378,7 +1522,7 @@ export async function runSourceProbe(
     }
 
     // 全平台不可用 → 移除音源
-    if (conf.autoRemoveSource) {
+    if (conf.autoRemoveSource && !options.restoreOnly) {
       for (const target of targets) {
         const status = statusFor(target.owner)
         const sourceState = status.sources[target.id]
@@ -1423,7 +1567,8 @@ export async function runSourceProbe(
       (result.suspectSkippedPlatforms.length
         ? `；${result.suspectSkippedPlatforms.length} 个平台上轮疑似异常本轮停探（每平台保留 ${SUSPECT_SAMPLE_SIZE} 个哨兵）` : '')
 
-    lastRun = result
+    if (options.restoreOnly) lastRestoreRun = result
+    else lastRun = result
     console.log(`[音源巡检] 本轮完成（${result.durationMs}ms）：${result.message}`)
     // 同时写入 log4js（app.log）：console 只进 stdout，容器外看不到；
     // 这样管理面板的日志查看器与 /api/logs?type=app 里都能追溯巡检历史
@@ -1447,7 +1592,8 @@ export async function runSourceProbe(
     console.error(`[音源巡检] ${message}`)
     syncLog.error(`[音源巡检] ${message}`)
     const failed: ProbeRunResult = { ...empty, durationMs: Date.now() - startedAt, message }
-    lastRun = failed
+    if (options.restoreOnly) lastRestoreRun = failed
+    else lastRun = failed
     return failed
   } finally {
     running = false
@@ -1548,6 +1694,46 @@ export function createSourceProbeTask(): ScheduledTask {
   return task
 }
 
+/**
+ * 「已关闭平台」快速复检任务。
+ *
+ * 为什么单独一个任务：全量巡检的间隔是 180/360 分钟，而被自动关闭的平台只能在全量轮里
+ * 才有机会恢复 —— 一次误判、或平台一次临时故障，用户最坏要等 3~6 小时才能重新用上那个源。
+ * 复检只探已关闭平台、每平台 1 首、每轮限量，成本是全量的几十分之一，却把恢复窗口压到 30 分钟内。
+ *
+ * 三条安全边界：
+ *   1. `restoreOnly` 下只做「恢复」，不做定罪/关闭/移除（样本太小，不足以定罪）；
+ *   2. 每轮最多 restoreBatch 个，按关闭时间最久的优先；
+ *   3. 与全量巡检共用 running 互斥，撞上就跳过本次，不会两轮同时打平台。
+ */
+export function createSourceProbeRestoreTask(): ScheduledTask {
+  const conf = configOf()
+  const minutes = conf.restoreIntervalMinutes
+  const task: ScheduledTask = {
+    id: PROBE_RESTORE_TASK_ID,
+    name: '已关闭平台快速复检',
+    intervalMs: Math.max(1, minutes) * 60 * 1000,
+    // 0 表示关闭该功能：任务仍注册（面板可见），但不自动跑
+    enabled: conf.enabled && minutes > 0,
+    isRunning: false,
+    // 排在主巡检（启动后 120 秒）之后，避免两个任务在启动期同时打平台
+    startupDelayMs: 10 * 60 * 1000,
+    run: async (): Promise<TaskExecutionResult> => {
+      const result = await runSourceProbe({ restoreOnly: true })
+      return {
+        taskId: PROBE_RESTORE_TASK_ID,
+        timestamp: Date.now(),
+        success: true,
+        message: result.restored.length
+          ? `已恢复 ${result.restored.length} 个平台：${result.restored.slice(0, 5).join('、')}`
+          : result.message,
+        details: result,
+      }
+    },
+  }
+  return task
+}
+
 export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot {
   const conf = configOf()
   const autoDisabledPlatforms: ProbeStatusSnapshot['autoDisabledPlatforms'] = []
@@ -1612,6 +1798,11 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
     removeMode: conf.removeMode,
     lastRunAt,
     lastRun,
+    restoreIntervalMinutes: conf.restoreIntervalMinutes,
+    lastRestoreAt,
+    lastRestoreRun,
+    maxDurationMs: conf.maxDurationMs,
+    throttleMs: conf.throttleMs,
     pendingNewSources: pendingNewSources.size,
     autoDisabledPlatforms,
     ...(includeDetail ? { details } : {}),

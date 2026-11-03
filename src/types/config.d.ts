@@ -633,6 +633,26 @@ declare namespace LX {
      */
     'customSource.probe.probeOnNewSource'?: boolean
     /**
+     * 已关闭平台「快速复检」的间隔(分钟,默认 30;0 = 关闭)。
+     *
+     * 全量巡检默认 180/360 分钟一轮,而被自动关闭的平台只有全量轮才会被重新探测 ——
+     * 一次误判或平台临时故障,用户最坏要等一个周期才能用回该源。复检只探已关闭平台、
+     * 每平台 1 首,成功即恢复,失败只记证据不定罪,把恢复窗口压到半小时内。
+     */
+    'customSource.probe.restoreIntervalMinutes'?: number
+    /** 每轮复检最多探测多少个「源 × 平台」(默认 16),多的按关闭时间轮转 */
+    'customSource.probe.restoreBatch'?: number
+    /**
+     * 同一平台两次探测之间的最小间隔(毫秒,默认 250;0 = 不节流)。
+     * 用于摊平「同一平台瞬时收到多个并发探测」的形态,降低被平台判为异常流量的风险。
+     */
+    'customSource.probe.throttleMs'?: number
+    /**
+     * 单轮巡检的总时长预算(毫秒,默认 8 分钟)。超预算不再领新任务,
+     * 剩余任务按「上次探测时间最久优先」留到下一轮,不会饿死。
+     */
+    'customSource.probe.maxDurationMs'?: number
+    /**
      * 各平台探测用测试曲目覆盖,如 { wy: { songmid: '1903149553', name: '无名的人', singer: '毛不易' } }。
      * 未配置的平台会优先使用用户缓存中实际播放过的同平台歌曲,再退化为内置搜索。
      *
