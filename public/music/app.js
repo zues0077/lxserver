@@ -7565,6 +7565,16 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
 
     if (!isRetry) {
         lastKnownPlaybackTime = 0;
+        // 上游 issue #494：切到非下一首时进度条停在上一首的进度。
+        // 两处兜底：① 清掉可能残留的拖拽态（否则 timeupdate 会被 isDragging 直接 return）；
+        // ② 立即把进度条/当前时间归零，不等新音频的 timeupdate（metadata 未就绪前 duration 还是旧值）。
+        if (isDragging === 'progress') isDragging = null;
+        try {
+            const barEl = document.getElementById('progress-bar');
+            if (barEl) barEl.style.width = '0%';
+            const curEl = document.getElementById('time-current');
+            if (curEl) curEl.innerText = formatTime(0);
+        } catch (e) { }
         isServerReconnecting = false;
         if (serverReconnectTimer) {
             clearTimeout(serverReconnectTimer);

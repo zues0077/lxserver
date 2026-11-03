@@ -2665,6 +2665,11 @@ class App {
             if (form.elements['user.cacheSizeLimit']) {
                 form.elements['user.cacheSizeLimit'].value = config['user.cacheSizeLimit'] || 2000;
             }
+            if (form.elements['cache.maxAgeDays']) {
+                // 0 是合法值（永久保留），不能用 || 兜底，否则 0 会被显示成默认 14
+                const maxAge = config['cache.maxAgeDays'];
+                form.elements['cache.maxAgeDays'].value = (maxAge === undefined || maxAge === null || maxAge === '') ? 14 : maxAge;
+            }
             if (form.elements['system.allowUnsafeVM']) {
                 form.elements['system.allowUnsafeVM'].checked = config['system.allowUnsafeVM'] === true;
             }
@@ -3430,6 +3435,13 @@ class App {
             'user.enableLoginCacheRestriction': formData.get('user.enableLoginCacheRestriction') === 'on',
             'user.enableCacheSizeLimit': formData.get('user.enableCacheSizeLimit') === 'on',
             'user.cacheSizeLimit': parseInt(formData.get('user.cacheSizeLimit')) || 2000,
+            // 留空 = 默认 14 天；填 0 = 永久保留（0 是合法值，不能用 || 兜底）
+            'cache.maxAgeDays': (() => {
+                const raw = formData.get('cache.maxAgeDays');
+                if (raw === null || String(raw).trim() === '') return 14;
+                const n = parseInt(String(raw));
+                return Number.isFinite(n) && n >= 0 ? n : 14;
+            })(),
             ...(adminPasswordInput ? { 'admin.password': adminPasswordInput } : {}),
             'player.name': (formData.get('player.name') || '').trim() || 'LX Music Web',
             'player.enableAuth': formData.get('player.enableAuth') === 'on',

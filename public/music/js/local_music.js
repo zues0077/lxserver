@@ -1290,6 +1290,16 @@ window.LocalMusicManager = {
             return 0;
         });
 
+        // #493：「全部」视图把「缓存」与「已下载」分成两段，避免两种来源混在一起
+        // （sort 在现代引擎是稳定排序，这里再按 folder 排一次不会打乱上面的 sortBy 顺序）
+        if (this.filterFolder === 'all') {
+            current.sort((a, b) => {
+                const fa = a.folder === 'music' ? 1 : 0;
+                const fb = b.folder === 'music' ? 1 : 0;
+                return fa - fb;
+            });
+        }
+
         // 4. Update UI Indicator
         const dot = document.getElementById('lm-filter-active-dot');
         const hasActiveFilters = this.searchKeyword || this.quickSearchKeyword || this.filterQuality.size > 0 || this.filterFolder !== 'all' || this.filterStatus.size > 0 || this.filterSource.size > 0;
@@ -1418,8 +1428,27 @@ window.LocalMusicManager = {
         this.updatePagination();
 
         let html = '';
+        // #493：「全部」视图按来源插入分组表头（缓存 / 已下载）
+        const lmGroupCounts = this.displayData.reduce((acc, it) => {
+            const k = it.folder === 'music' ? 'music' : 'cache';
+            acc[k] = (acc[k] || 0) + 1;
+            return acc;
+        }, {});
+        let lmLastFolder = null;
         page.list.forEach((item, pageIndex) => {
             const index = page.start + pageIndex;
+            if (this.filterFolder === 'all') {
+                const lmFolder = item.folder === 'music' ? 'music' : 'cache';
+                if (lmFolder !== lmLastFolder) {
+                    lmLastFolder = lmFolder;
+                    const lmIsMusic = lmFolder === 'music';
+                    html += `<div class="flex items-center gap-2 px-3 md:px-4 pt-4 pb-1 text-xs font-bold t-text-muted select-none">
+                        <i class="fas ${lmIsMusic ? 'fa-download text-blue-500' : 'fa-hdd text-emerald-500'}"></i>
+                        <span>${lmIsMusic ? '已下载' : '自动缓存'}</span>
+                        <span class="font-normal opacity-60">${lmGroupCounts[lmFolder] || 0} 首</span>
+                    </div>`;
+                }
+            }
             const safeName = this.escapeHtml(item.name || '未知歌曲');
             const safeSinger = this.escapeHtml(item.singer || '未知歌手');
             const safeAlbum = this.escapeHtml(item.album || '--');

@@ -7412,7 +7412,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 if (proxyRes.headers['content-range']) headers['Content-Range'] = proxyRes.headers['content-range']
 
                 if (!isInline) {
-                  headers['Content-Disposition'] = `attachment; filename="${encodeURIComponent(filename)}"`
+                  // 上游 issue #485：只写 filename="%E6%99%B4%E5%A4%A9.mp3"（百分号编码）时，
+                  // 部分 Edge 版本会直接把下载判为失败（「无法下载 - 出现问题」）。
+                  // 按 RFC6266 给 ASCII 兜底名 + filename*=UTF-8''（浏览器优先用后者，中文名可正常保存）。
+                  const encodedName = encodeURIComponent(filename)
+                  const extMatch = filename.match(/\.[a-z0-9]{2,5}$/i)
+                  const asciiFallback = /[^\x20-\x7e]/.test(filename)
+                    ? `download${extMatch ? extMatch[0] : '.mp3'}`
+                    : filename.replace(/["\\]/g, '_')
+                  headers['Content-Disposition'] = `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedName}`
                 }
 
                 // [Unified metadata] Tagging support for browser download
@@ -7938,6 +7946,17 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           res.writeHead(400); res.end('Missing name'); return
         }
 
+        // 上游 v2.1.3 起把搜索返回从「数组」改成「{list,...}」，会打断 xiaomusic 这类按数组解析的第三方
+        // （上游 issue #472）。这里保留对象结构不动，但给一个显式兼容出口：
+        //   ?format=array  或 ?legacy=1  → 只返回 list 数组本体
+        const wantArrayFormat = ['array', 'list'].includes((urlObj.searchParams.get('format') || '').toLowerCase())
+          || urlObj.searchParams.get('legacy') === '1'
+        const sendSearchResult = (payload: any) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          const body = wantArrayFormat && payload && Array.isArray(payload.list) ? payload.list : payload
+          res.end(JSON.stringify(body))
+        }
+
         try {
           // 额外音源（Bilibili / 汽水）自带搜索实现，不经过 musicSdk（那个目录会被上游覆盖）
           if (extraSources.isExtraSource(source)) {
@@ -7954,15 +7973,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const data = type === 'singer'
                 ? await extraSources.searchSingers(source, name, Math.max(1, page), Math.min(Math.max(requestedLimit || 20, 1), 50))
                 : await extraSources.searchAlbums(source, name, Math.max(1, page), Math.min(Math.max(requestedLimit || 20, 1), 50))
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({
+              sendSearchResult({
                 list: data.list,
                 total: data.total,
                 allPage: data.allPage,
                 pageSize: requestedLimit || 20,
                 fetchedPages: page,
                 source,
-              }))
+              })
               return
             }
             if (type !== 'song') {
@@ -7980,8 +7998,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               ? await extraSources.searchSongs(source, name, pageNo, pageSize)
               : await extraSources.searchAll(source, name)
             const list = requestedLimit > 0 ? data.list.slice(0, requestedLimit) : data.list
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({
+            sendSearchResult({
               list,
               total: data.total,
               allPage: data.allPage,
@@ -7990,7 +8007,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               stopReason: 'extra-source',
               hasMore: requestedLimit > 0 ? pageNo < data.allPage : false,
               source,
-            }))
+            })
             return
           }
 
@@ -8006,14 +8023,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const pageNo = requestedLimit > 0 ? Math.max(1, page) : 1
             if (type === 'singer') {
               const data = await musicAccount.kglite.searchSinger(name, pageNo, pageSize, cookie)
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ list: data.list, total: data.total, allPage: data.allPage, pageSize, fetchedPages: pageNo, source }))
+              sendSearchResult({ list: data.list, total: data.total, allPage: data.allPage, pageSize, fetchedPages: pageNo, source })
               return
             }
             if (type === 'album') {
               const data = await musicAccount.kglite.searchAlbum(name, pageNo, pageSize, cookie)
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ list: data.list, total: data.total, allPage: data.allPage, pageSize, fetchedPages: pageNo, source }))
+              sendSearchResult({ list: data.list, total: data.total, allPage: data.allPage, pageSize, fetchedPages: pageNo, source })
               return
             }
             const data = requestedLimit > 0
@@ -8109,8 +8124,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (r.status === 'fulfilled') merged.push(...r.value)
               else failed++
             }
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({
+            sendSearchResult({
               list: merged,
               total: merged.length,
               allPage: 1,
@@ -8120,7 +8134,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               hasMore: false,
               source,
               failedSources: failed,
-            }))
+            })
             return
           }
 
@@ -8244,8 +8258,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           }
 
           fs.appendFileSync(path.join(process.cwd(), 'debug.txt'), `[Search] Source: ${source}, Type: ${type}, Query: ${name}, FetchedPages: ${result.fetchedPages}, Returned: ${result.list.length}, PlatformTotal: ${result.total}\n`)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result))
+          sendSearchResult(result)
         } catch (err: any) {
           const msg = String(err?.message || '')
           // 平台侧超时不是「服务器错误」：给 504 + 能看懂的提示，别让界面弹红色 500

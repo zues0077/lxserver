@@ -1253,7 +1253,7 @@
                                         <div class="config-toggle-row">
                                             <div class="config-toggle-info">
                                                 <span class="config-toggle-label">开启缓存空间限制</span>
-                                                <span class="config-toggle-desc">超出上限时按最近访问时间（LRU）自动清理最旧文件</span>
+                                                <span class="config-toggle-desc">只统计并清理缓存目录（不含已下载文件），超出上限时按最近访问时间（LRU）删最旧</span>
                                             </div>
                                             <label class="toggle-switch">
                                                 <input type="checkbox" name="user.enableCacheSizeLimit" />
@@ -1274,7 +1274,7 @@
                                             </div>
                                         </div>
                                         <small class="config-hint">保留天数与上方容量上限是<strong>两套独立规则</strong>：超期文件每 12
-                                            小时按时间清理一次；容量超限时按最近访问时间（LRU）清理最旧文件。填 <strong>0
+                                            小时按时间清理一次；容量超限时按最近访问时间（LRU）清理最旧文件。两套规则都<strong>只作用于缓存目录</strong>，已下载文件不会被自动清理。填 <strong>0
                                                 表示永久保留</strong>。</small>
                                     </div>
                                 </div>

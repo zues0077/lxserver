@@ -3627,42 +3627,49 @@ export const cleanupStaleTempFiles = async (username?: string, maxAgeMs: number 
     return cleanedCount
 }
 
+/**
+ * 缓存配额基准：只算缓存目录（含小爱 xiaoai/ 子目录），**不含已下载文件**。
+ * 上游 issue #489：旧逻辑用 getCacheStats().totalSize（cache + music），
+ * 用户把上限调小后会把下载目录里的老文件一起删掉。
+ */
+export const getCacheQuotaUsageBytes = (stats: { cache?: { totalSize?: number } }): number =>
+    Math.max(0, Number(stats?.cache?.totalSize) || 0)
+
 export const checkAndCleanupCache = async (username?: string) => {
     void cleanupStaleTempFiles(username)
     const config = (global as any).lx.config
     if (!config || !config['user.enableCacheSizeLimit']) return
-    const { totalSize } = getCacheStats(username)
+    // 配额只针对缓存目录（含小爱 xiaoai/ 子目录），已下载文件（music 目录）不计入、也不清理。
+    // 上游 issue #489：旧逻辑把 music 一起统计+删除，用户改小上限后下载目录被清掉一半。
+    const stats = getCacheStats(username)
+    const usedBytes = getCacheQuotaUsageBytes(stats)
     const limitBytes = (config['user.cacheSizeLimit'] || 2000) * 1024 * 1024
-    if (totalSize <= limitBytes) return
-    const roots: Array<'cache' | 'music'> = ['cache', 'music']
-    const allFiles: Array<{ path: string, size: number, mtime: number }> = []
+    if (usedBytes <= limitBytes) return
     const normalizedUsername = normalizeUsername(username)
-    for (const folder of roots) {
-        const dir = getCacheDir(normalizedUsername, folder === 'music')
-        if (!fs.existsSync(dir)) continue
-        const files = fs.readdirSync(dir)
-        for (const file of files) {
-            try {
-                const filePath = path.join(dir, file)
-                const stats = fs.statSync(filePath)
-                // 子目录（如小爱的 xiaoai/）也要收进来，否则限额清理永远动不到它们
-                if (stats.isDirectory()) {
-                    collectAudioFiles(filePath, allFiles)
-                    continue
-                }
-                allFiles.push({ path: filePath, size: stats.size, mtime: stats.mtime.getTime() })
-            } catch (e) { }
-        }
+    const allFiles: Array<{ path: string, size: number, mtime: number }> = []
+    const dir = getCacheDir(normalizedUsername, false)
+    if (!fs.existsSync(dir)) return
+    for (const file of fs.readdirSync(dir)) {
+        try {
+            const filePath = path.join(dir, file)
+            const fileStats = fs.statSync(filePath)
+            // 子目录（如小爱的 xiaoai/）也要收进来，否则限额清理永远动不到它们
+            if (fileStats.isDirectory()) {
+                collectAudioFiles(filePath, allFiles)
+                continue
+            }
+            allFiles.push({ path: filePath, size: fileStats.size, mtime: fileStats.mtime.getTime() })
+        } catch (e) { }
     }
     allFiles.sort((a, b) => a.mtime - b.mtime)
-    let currentSize = totalSize
+    let currentSize = usedBytes
     const targetSize = limitBytes * 0.95
     let deletedCount = 0
     for (const file of allFiles) {
         if (currentSize <= targetSize) break
         try { fs.unlinkSync(file.path); currentSize -= file.size; deletedCount++ } catch (e) { }
     }
-    console.log(`[文件缓存] 用户 ${normalizedUsername} 缓存空间清理完成，已删除 ${deletedCount} 个过期文件`)
+    console.log(`[文件缓存] 用户 ${normalizedUsername} 缓存空间清理完成，已删除 ${deletedCount} 个过期缓存文件（不含已下载文件）`)
 }
 
 // 启动 5 秒后自动扫描并清理系统遗留的过期 .tmp 文件

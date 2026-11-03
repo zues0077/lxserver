@@ -1258,17 +1258,32 @@ class WebDAVSync extends EventEmitter {
                 return { success: false, message: 'WebDAV客户端初始化失败，请检查配置是否正确' };
             }
 
-            // 增加 10 秒超时控制，避免请求无限挂起
-            const timeoutPromise = new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error('连接超时，请检查 WebDAV 地址及网络连接')), 10000)
-            )
+            // 上游 issue #474：原来只 PROPFIND 根目录 `/`，而备份走的是配置的同步目录。
+            // 反向代理常常只放行 GET/PUT，PROPFIND 根会被网关直接 502 —— 于是「备份成功但测试连接失败」。
+            // 现在改为：先探测真实业务目录（syncPath，备份/同步就用它），再退回根目录；
+            // 命中 404 说明服务器与认证都通、只是目录还没建（首次同步会自动创建），也算连接成功。
+            const withTimeout = <T>(p: Promise<T>) => Promise.race([
+                p,
+                new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('连接超时，请检查 WebDAV 地址及网络连接')), 10000)
+                ),
+            ]) as Promise<T>
 
-            await Promise.race([
-                this.client.getDirectoryContents('/'),
-                timeoutPromise
-            ])
-
-            return { success: true, message: '连接成功！WebDAV配置正确' };
+            const probePaths = [this.syncPath, '/']
+            let lastErr: any = null
+            for (const probePath of probePaths) {
+                try {
+                    await withTimeout(this.client.getDirectoryContents(probePath))
+                    return { success: true, message: `连接成功！WebDAV 配置正确（已访问 ${probePath}）` };
+                } catch (err: any) {
+                    const msg = String(err?.message || err || '')
+                    if (msg.includes('404')) {
+                        return { success: true, message: `连接成功！服务器与认证正常，目录 ${probePath} 尚未创建（首次同步会自动创建）` };
+                    }
+                    lastErr = err
+                }
+            }
+            throw lastErr || new Error('连接失败')
         } catch (err: any) {
             let errorMsg = '连接失败';
             if (err.message) {
@@ -1278,6 +1293,9 @@ class WebDAVSync extends EventEmitter {
                     errorMsg = 'WebDAV路径不存在，请检查URL';
                 } else if (err.message.includes('ENOTFOUND') || err.message.includes('ECONNREFUSED')) {
                     errorMsg = '无法连接到服务器，请检查URL和网络';
+                } else if (/50[234]|Bad Gateway|Method Not Allowed|405/i.test(err.message)) {
+                    // 网关/反代拒绝 PROPFIND 时给出可执行的排查方向，而不是丢一个 502 原文
+                    errorMsg = `连接失败：${err.message}（服务器或反向代理拒绝了 PROPFIND 请求，常见于只放行 GET/PUT 的网关；备份/同步走的是 PUT，所以可能出现「备份成功但测试失败」）`;
                 } else {
                     errorMsg = err.message;
                 }

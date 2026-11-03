@@ -17,7 +17,8 @@ const config: LX.Config = {
   'user.enableCustomMusicDir': false, // 是否启用自定义歌曲目录
   'user.enableLoginCacheRestriction': false, // 是否启用登录用户缓存限制
   'user.enableCacheSizeLimit': false, // 是否启用缓存空间限制
-  'user.cacheSizeLimit': 2000, // 缓存空间限制大小 (MB)
+  'user.cacheSizeLimit': 2000, // 缓存空间限制大小 (MB)，只统计缓存目录，不含已下载文件
+  'cache.maxAgeDays': 14, // 缓存文件自动保留天数（0 = 永久保留），只作用于缓存目录
 
   maxSnapshotNum: 10, // 公共最大备份快照数
   'list.addMusicLocationType': 'top', // 公共添加歌曲到我的列表时的位置 top | bottom，参考客户端的「设置 → 列表设置 → 添加歌曲到列表时的位置」
