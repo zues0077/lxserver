@@ -19,12 +19,59 @@ import { encodeRequestUrl } from '../utils/urlEncode'
 const coverImageCache = new Map<string, { ts: number, buf: Buffer, ct: string }>()
 const COVER_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
 const COVER_CACHE_MAX = 3000
+/**
+ * 内存封面上限按**字节**再兜一层。
+ *
+ * 只按条数（3000）限制是不够的：一条封面可能是 3KB 的小图，也可能是 600KB 的原图，
+ * 3000 条最坏能占到 1.5GB —— 小内存盒子（NAS）上就是一次 OOM。
+ * 真实占用按实际字节算，超出就按插入顺序淘汰最旧的条目。
+ */
+const COVER_CACHE_MAX_BYTES = 96 * 1024 * 1024
+let coverCacheBytes = 0
+
+/** 计算需要淘汰多少字节（纯函数，便于单测） */
+export const coverCacheEvictCount = (
+    sizes: Array<{ key: string; bytes: number }>,
+    totalBytes: number,
+    maxBytes: number,
+): number => {
+    if (totalBytes <= maxBytes) return 0
+    let over = totalBytes - maxBytes
+    let n = 0
+    for (const item of sizes) {
+        if (over <= 0) break
+        over -= item.bytes
+        n++
+    }
+    return n
+}
+
 function coverCacheSet(key: string, val: { ts: number, buf: Buffer, ct: string }) {
+    const prev = coverImageCache.get(key)
+    if (prev) coverCacheBytes -= prev.buf.length
     coverImageCache.set(key, val)
+    coverCacheBytes += val.buf.length
     // 容量上限：超出时淘汰最旧条目，避免长期运行 Buffer 堆积导致 OOM 崩溃
-    if (coverImageCache.size > COVER_CACHE_MAX) {
+    while (coverImageCache.size > COVER_CACHE_MAX) {
         const oldest = coverImageCache.keys().next().value
-        if (oldest !== undefined) coverImageCache.delete(oldest)
+        if (oldest === undefined) break
+        const drop = coverImageCache.get(oldest)
+        coverImageCache.delete(oldest)
+        if (drop) coverCacheBytes -= drop.buf.length
+    }
+    if (coverCacheBytes > COVER_CACHE_MAX_BYTES) {
+        const evict = coverCacheEvictCount(
+            [...coverImageCache.entries()].map(([k, v]) => ({ key: k, bytes: v.buf.length })),
+            coverCacheBytes,
+            COVER_CACHE_MAX_BYTES,
+        )
+        let n = evict
+        for (const k of coverImageCache.keys()) {
+            if (n-- <= 0) break
+            const drop = coverImageCache.get(k)
+            coverImageCache.delete(k)
+            if (drop) coverCacheBytes -= drop.buf.length
+        }
     }
 }
 

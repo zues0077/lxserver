@@ -1822,6 +1822,26 @@ export async function callUserApiGetMusicUrl(
     const attempts: any[] = []
     // 单个音源取链的超时上限：脚本内部可能串行试十几个后端，默认给 20s。
     const callTimeoutMs = configNumber('customSource.callTimeoutMs', DEFAULT_CALL_TIMEOUT_MS)
+    /**
+     * 调用方给了整体 deadline 时，单个源的超时要按**剩余预算 / 剩余源数**分配。
+     *
+     * 实测（2026-11-03 17:29，tx《起风了》）：25 秒硬预算被第一个聚合源一次吃光 ——
+     * 它自带 20 秒超时、内部串行试 12 个后端，等它失败时只剩 5 秒，
+     * 后面的源连上场机会都没有；而排在后面的星澜其实 0.9 秒就能出链。
+     * 更糟的是调用方 25 秒返回 500 之后，这层循环还在挨个源继续请求，
+     * 17:29:49 才在后台拿到链（白打 20 秒上游）。
+     *
+     * 所以两点：
+     * 1. 单源超时 = (剩余预算 - 800ms) / 剩余源数，下限 5 秒 —— 保证每个源都能上场；
+     * 2. 预算见底（<1.5s）立即跳出，不再后台空转。
+     */
+    const budgetForSource = (remainingSources: number): number => {
+        if (!deadlineAt) return callTimeoutMs
+        const left = deadlineAt - Date.now()
+        const share = Math.floor((left - 800) / Math.max(1, remainingSources))
+        return Math.max(5000, Math.min(callTimeoutMs, share))
+    }
+    const budgetExhausted = (): boolean => !!deadlineAt && deadlineAt - Date.now() < 1500
     // 本轮取链里失败的音源（用于轮末把硬故障证据交给巡检）
     const roundFailures: Array<{ api: any; message: string }> = []
 
@@ -1830,6 +1850,8 @@ export async function callUserApiGetMusicUrl(
         const maxRetries = 3
 
         for (let i = 0; i < maxRetries; i++) {
+            if (budgetExhausted()) break
+            const perTimeout = budgetForSource(maxRetries - i)
             try {
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (第 ${i + 1}/${maxRetries} 次, 所属: ${api.info.owner})`)
 
@@ -1839,8 +1861,8 @@ export async function callUserApiGetMusicUrl(
                         quality: quality,
                         type: quality
                     }),
-                    callTimeoutMs,
-                    `音源 [${api.info.name}] 取链超时（超过 ${callTimeoutMs}ms 未返回）`
+                    perTimeout,
+                    `音源 [${api.info.name}] 取链超时（超过 ${perTimeout}ms 未返回）`
                 )
                 const url = validateReturnedMusicUrl(rawUrl, api.info.name)
                 // 字符串校验挡不住「URL 正常但请求下来是 404」——实测某源对不存在的歌
@@ -1874,6 +1896,9 @@ export async function callUserApiGetMusicUrl(
         // 多个源，轮流尝试
         for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
             const api = candidates[candidateIndex]
+            // 预算见底就别再挨个源打了：调用方早就返回 500，这里继续请求只是白烧上游配额
+            if (budgetExhausted()) break
+            const perTimeout = budgetForSource(candidates.length - candidateIndex)
             try {
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (所属: ${api.info.owner})`)
 
@@ -1883,8 +1908,8 @@ export async function callUserApiGetMusicUrl(
                         quality: quality,
                         type: quality
                     }),
-                    callTimeoutMs,
-                    `音源 [${api.info.name}] 取链超时（超过 ${callTimeoutMs}ms 未返回）`
+                    perTimeout,
+                    `音源 [${api.info.name}] 取链超时（超过 ${perTimeout}ms 未返回）`
                 )
                 const url = validateReturnedMusicUrl(rawUrl, api.info.name)
                 // 同上：链接长得正常但请求下来是 404，必须判失败并继续试下一个源，

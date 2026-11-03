@@ -589,7 +589,9 @@ const resolvePlayableAudio = async (
       if (Date.now() >= deadline || probes >= RESOLVE_MAX_PROBES) return null
       let result: any
       try {
-        result = await callUserApiGetMusicUrl(source, candidate, quality, username, undefined, true, exclude)
+        // 第 8 个参数是整体 deadline：让每个自定义源按剩余预算收缩超时，
+        // 别让一个 20 秒超时的聚合源把 25 秒预算一次吃光（2026-11-03 实测 mg《平凡之路》）
+        result = await callUserApiGetMusicUrl(source, candidate, quality, username, undefined, true, exclude, deadline)
       } catch (error: any) {
         failures.push(`${source}: ${error?.message || error}`)
         return null

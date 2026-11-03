@@ -1340,8 +1340,28 @@ export async function getAlbumSongs(id: string): Promise<{
 }
 
 /** 专辑搜索结果缓存（关键词级）。合集侧有 10 分钟缓存，这里再包一层省掉视频搜索 */
-const albumSearchCache = new Map<string, { at: number; data: { list: any[]; total: number; allPage: number } }>()
+const albumSearchCache = new Map<string, { at: number; data: { list: any[]; total: number; allPage: number }; ttl?: number }>()
 const ALBUM_SEARCH_TTL = 10 * 60 * 1000
+/**
+ * 兜底结果（`bili-kw|` 虚拟专辑）的缓存时长。
+ *
+ * 兜底只代表「这一轮没匹配上」，可能是真的没有合集，也可能是那一轮的 B 站搜索召回、
+ * 合集接口超时或限流导致的**瞬时失败**。用 10 分钟去缓存这个结论会有两个后果：
+ * 1. 用户看到假专辑后立刻重搜，仍然命中缓存，怎么试都是假的（不能自愈）；
+ * 2. 不同写法会归一到同一个 key（`cleanAlbumKeyword` 会剥掉「合集：」「丨后半句」），
+ *    所以一次失败会把「用完整合集标题重搜」也一起毒掉。
+ * 因此兜底只缓存 ALBUM_FALLBACK_TTL，让下一次搜索有机会重新解析真合集。
+ */
+const ALBUM_FALLBACK_TTL = 60 * 1000
+/**
+ * 解析没命中时是否值得重搜一次：至少还要留 3 秒预算，
+ * 否则重搜会把整次请求拖出 9 秒预算，反而让首屏更慢。
+ */
+const ALBUM_RETRY_MIN_BUDGET_MS = 3000
+
+/** 是否重试一次专辑解析（纯函数，便于单测） */
+export const shouldRetryAlbumResolve = (foundCount: number, remainingMs: number): boolean =>
+  foundCount === 0 && remainingMs > ALBUM_RETRY_MIN_BUDGET_MS
 const ALBUM_SEARCH_CACHE_MAX = 200
 /** 整次专辑搜索的时间预算：1 次视频搜索 + 最多 6 次合集列表，超了就用手上已有的结果 */
 const ALBUM_SEARCH_BUDGET_MS = 9000
@@ -1358,12 +1378,12 @@ const ALBUM_MATCH_MIN = 0.4
 const ALBUM_PREFIX_MIN = 0.5
 
 /** 写专辑搜索缓存（带容量上限，防止长期运行时按关键词无限累积） */
-function putAlbumCache(kw: string, data: { list: any[]; total: number; allPage: number }): void {
+function putAlbumCache(kw: string, data: { list: any[]; total: number; allPage: number }, ttl?: number): void {
   if (albumSearchCache.size >= ALBUM_SEARCH_CACHE_MAX && !albumSearchCache.has(kw)) {
     const oldest = albumSearchCache.keys().next().value
     if (oldest !== undefined) albumSearchCache.delete(oldest)
   }
-  albumSearchCache.set(kw, { at: Date.now(), data })
+  albumSearchCache.set(kw, ttl ? { at: Date.now(), data, ttl } : { at: Date.now(), data })
 }
 
 /**
@@ -1397,97 +1417,121 @@ export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): P
   const kw = cleanAlbumKeyword(raw) || raw
 
   const cachedAlbum = albumSearchCache.get(kw)
-  if (cachedAlbum && Date.now() - cachedAlbum.at < ALBUM_SEARCH_TTL) return cachedAlbum.data
+  if (cachedAlbum && Date.now() - cachedAlbum.at < (cachedAlbum.ttl ?? ALBUM_SEARCH_TTL)) return cachedAlbum.data
 
   const deadline = Date.now() + ALBUM_SEARCH_BUDGET_MS
   const data = await searchSongs(kw, 1, 50).catch(() => ({ list: [] as any[], total: 0, allPage: 1 }))
   const hits = data.list || []
   if (!hits.length) return empty
 
-  // ---- 1) 给候选 UP 打分：同「系列前缀」出现次数 + 前缀与关键词的相似度 ----
-  // 按 (UP, 标题前缀) 两维统计：同一个 UP 有 3 条「【神仙唱诗班】」说明那是个真系列，
-  // 而某个 UP 只发过 1 条带某前缀的视频时，前缀大概率只是这期标题的一部分（噪声）。
-  type UpAgg = { mid: string; name: string; prefixes: Map<string, number> }
-  const upAgg = new Map<string, UpAgg>()
-  for (const hit of hits) {
-    const mid = String(hit?.meta?.mid || '').trim()
-    if (!/^\d+$/.test(mid)) continue
-    let agg = upAgg.get(mid)
-    if (!agg) {
-      agg = { mid, name: String(hit?.singer || ''), prefixes: new Map() }
-      upAgg.set(mid, agg)
-    }
-    const prefix = extractTitlePrefix(String(hit?.name || ''))
-    if (prefix) agg.prefixes.set(prefix, (agg.prefixes.get(prefix) || 0) + 1)
-  }
-  const candidates = [...upAgg.values()]
-    .map((agg) => {
-      let best = { prefix: '', prefixCount: 0, sim: 0, score: 0 }
-      for (const [prefix, count] of agg.prefixes) {
-        const sim = albumMatchScore(kw, prefix)
-        const score = Math.min(5, count) * 0.4 + sim
-        if (score > best.score) best = { prefix, prefixCount: count, sim, score }
-      }
-      return { mid: agg.mid, name: agg.name, ...best }
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, ALBUM_UP_LIMIT)
-
-  // ---- 2) 反查这些 UP 的合集/系列，挑名字对得上的当专辑 ----
+  // ---- 1)+2) 从「视频命中」里解析真合集：给候选 UP 打分 → 反查它们的合集/系列 ----
+  // 抽成函数是为了能重试一次：B站搜索召回和合集接口都会偶发抖动（实测同一个关键词
+  // 13:00 解析失败、16:16 又能命中 3 个合集），一次抖动就回落假专辑对用户太亏。
   type AlbumHit = { score: number; album: any }
-  const found: AlbumHit[] = []
-  const seenAlbum = new Set<string>()
-  await Promise.all(candidates.map(async (up) => {
-    if (Date.now() > deadline) return
-    const cols = await listCollections(up.mid).catch(() => null)
-    if (!cols) return
-    const groups: Array<[string, any[], string]> = [
-      ['season', cols.seasons, SEASON_ID_PREFIX],
-      ['series', cols.series, SERIES_ID_PREFIX],
-    ]
-    for (const [kind, arr, prefixId] of groups) {
-      for (const item of arr) {
-        const meta = item?.meta || {}
-        const cid = String(kind === 'season' ? meta.season_id : meta.series_id)
-        if (!cid) continue
-        const name = decodeEntities(String(meta.name || ''))
-        // 两条通道取高分：用户搜的词本身，或该 UP 视频标题里的系列前缀。
-        // 前缀通道要同时满足：前缀与关键词相关、且该前缀在搜索结果里出现 ≥2 次（是真系列）
-        const kwScore = albumMatchScore(kw, name)
-        const prefixScore = up.prefixCount >= 2 && up.sim >= ALBUM_PREFIX_MIN
-          ? albumMatchScore(up.prefix, name)
-          : 0
-        const score = Math.max(kwScore, prefixScore)
-        if (score < ALBUM_MATCH_MIN) continue
-        const id = `${prefixId}${up.mid}|${cid}`
-        if (seenAlbum.has(id)) continue
-        seenAlbum.add(id)
-        found.push({
-          score,
-          album: {
-            source: 'bili',
-            id,
-            name,
-            picUrl: normalizeCover(String(meta.cover || '')),
-            singer: up.name,
-            artistName: up.name,
-            artistId: up.mid,
-            songCount: Number(meta.total) || (Array.isArray(item?.archives) ? item.archives.length : 0) || 0,
-            publishTime: '',
-            // 真合集：点进去是合集里的稿件，不再是「关键词视频列表」
-            meta: { mid: up.mid, kind, collectionId: cid, collection: true, matchScore: Number(score.toFixed(3)) },
-          },
-        })
+  const collectFromHits = async (runHits: any[], runDeadline: number): Promise<{ found: AlbumHit[]; ups: number; colsOk: number }> => {
+    // 按 (UP, 标题前缀) 两维统计：同一个 UP 有 3 条「【神仙唱诗班】」说明那是个真系列，
+    // 而某个 UP 只发过 1 条带某前缀的视频时，前缀大概率只是这期标题的一部分（噪声）。
+    type UpAgg = { mid: string; name: string; prefixes: Map<string, number> }
+    const upAgg = new Map<string, UpAgg>()
+    for (const hit of runHits) {
+      const mid = String(hit?.meta?.mid || '').trim()
+      if (!/^\d+$/.test(mid)) continue
+      let agg = upAgg.get(mid)
+      if (!agg) {
+        agg = { mid, name: String(hit?.singer || ''), prefixes: new Map() }
+        upAgg.set(mid, agg)
       }
+      const prefix = extractTitlePrefix(String(hit?.name || ''))
+      if (prefix) agg.prefixes.set(prefix, (agg.prefixes.get(prefix) || 0) + 1)
     }
-  }))
+    const candidates = [...upAgg.values()]
+      .map((agg) => {
+        let best = { prefix: '', prefixCount: 0, sim: 0, score: 0 }
+        for (const [prefix, count] of agg.prefixes) {
+          const sim = albumMatchScore(kw, prefix)
+          const score = Math.min(5, count) * 0.4 + sim
+          if (score > best.score) best = { prefix, prefixCount: count, sim, score }
+        }
+        return { mid: agg.mid, name: agg.name, ...best }
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, ALBUM_UP_LIMIT)
+
+    const found: AlbumHit[] = []
+    const seenAlbum = new Set<string>()
+    let colsOk = 0
+    await Promise.all(candidates.map(async (up) => {
+      if (Date.now() > runDeadline) return
+      const cols = await listCollections(up.mid).catch(() => null)
+      if (!cols) return
+      // 拿到响应就算「接口通」，哪怕这个 UP 真的没有合集 —— 用来区分
+      // 「接口限流导致全空」和「确实没有对得上的合集」，只有前者值得重试
+      colsOk++
+      const groups: Array<[string, any[], string]> = [
+        ['season', cols.seasons, SEASON_ID_PREFIX],
+        ['series', cols.series, SERIES_ID_PREFIX],
+      ]
+      for (const [kind, arr, prefixId] of groups) {
+        for (const item of arr) {
+          const meta = item?.meta || {}
+          const cid = String(kind === 'season' ? meta.season_id : meta.series_id)
+          if (!cid) continue
+          const name = decodeEntities(String(meta.name || ''))
+          // 两条通道取高分：用户搜的词本身，或该 UP 视频标题里的系列前缀。
+          // 前缀通道要同时满足：前缀与关键词相关、且该前缀在搜索结果里出现 ≥2 次（是真系列）
+          const kwScore = albumMatchScore(kw, name)
+          const prefixScore = up.prefixCount >= 2 && up.sim >= ALBUM_PREFIX_MIN
+            ? albumMatchScore(up.prefix, name)
+            : 0
+          const score = Math.max(kwScore, prefixScore)
+          if (score < ALBUM_MATCH_MIN) continue
+          const id = `${prefixId}${up.mid}|${cid}`
+          if (seenAlbum.has(id)) continue
+          seenAlbum.add(id)
+          found.push({
+            score,
+            album: {
+              source: 'bili',
+              id,
+              name,
+              picUrl: normalizeCover(String(meta.cover || '')),
+              singer: up.name,
+              artistName: up.name,
+              artistId: up.mid,
+              songCount: Number(meta.total) || (Array.isArray(item?.archives) ? item.archives.length : 0) || 0,
+              publishTime: '',
+              // 真合集：点进去是合集里的稿件，不再是「关键词视频列表」
+              meta: { mid: up.mid, kind, collectionId: cid, collection: true, matchScore: Number(score.toFixed(3)) },
+            },
+          })
+        }
+      }
+    }))
+    return { found, ups: candidates.length, colsOk }
+  }
+
+  let attempt = await collectFromHits(hits, deadline)
+  let retried = false
+  // 一次没命中且预算还够 → 重搜一次再解析（B站搜索召回抖动，重搜通常能换一批候选 UP）
+  if (!attempt.found.length && shouldRetryAlbumResolve(attempt.found.length, deadline - Date.now())) {
+    retried = true
+    await new Promise<void>(resolve => { setTimeout(resolve, 400) })
+    const again = await searchSongs(kw, 1, 50).catch(() => null)
+    const againHits = again?.list || []
+    if (againHits.length) {
+      const second = await collectFromHits(againHits, Math.max(deadline, Date.now() + 3000))
+      if (second.found.length) attempt = second
+      else attempt = { found: [], ups: second.ups, colsOk: Math.max(attempt.colsOk, second.colsOk) }
+    }
+  }
+  const found = attempt.found
 
   if (found.length) {
     found.sort((a, b) => b.score - a.score)
     const list = found.slice(0, ALBUM_RESULT_LIMIT).map(h => h.album)
     const result = { list, total: list.length, allPage: 1 }
     putAlbumCache(kw, result)
-    console.log(`[B站] 专辑搜索「${raw}」→ 清洗「${kw}」，命中 ${list.length} 个合集/系列`)
+    console.log(`[B站] 专辑搜索「${raw}」→ 清洗「${kw}」，命中 ${list.length} 个合集/系列${retried ? '（重试一次后）' : ''}`)
     return result
   }
 
@@ -1495,7 +1539,7 @@ export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): P
   const { item: hit, score } = pickClosestVideo(hits, kw)
   const represent = hit || hits[0]
   const mid = String(represent?.meta?.mid || '')
-  console.log(`[B站] 专辑搜索「${raw}」→ 清洗「${kw}」，无合集命中，回落关键词视频（相似度 ${score.toFixed(2)}）`)
+  console.log(`[B站] 专辑搜索「${raw}」→ 清洗「${kw}」，无合集命中，回落关键词视频（相似度 ${score.toFixed(2)}；候选UP ${attempt.ups}、合集接口通 ${attempt.colsOk}${retried ? '、已重试' : ''}）`)
   const fallback = {
     list: [{
       source: 'bili',
@@ -1514,7 +1558,7 @@ export async function searchAlbums(keyword: string, page = 1, _pageSize = 20): P
     total: 1,
     allPage: 1,
   }
-  putAlbumCache(kw, fallback)
+  putAlbumCache(kw, fallback, ALBUM_FALLBACK_TTL)
   return fallback
 }
 

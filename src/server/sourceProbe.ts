@@ -1288,7 +1288,12 @@ export async function runSourceProbe(
         // 首轮失败只是累计 failCount（默认要连续 2 轮），真正的定罪与重试留给后续周期巡检。
         // 快速复检同样只试 1 首：复检的目的只是「确认平台是否恢复」，探到能出链就停，
         // 探不到也只记证据、不定罪，多试几首纯属浪费上游请求。
-        const onlyOne = options.firstProbe || options.restoreOnly
+        //
+        // 已被自动关闭的平台在全量轮里也只试 1 首（2026-11-03 实测）：
+        // 这类平台本来就判过「不可用」，139 个平台里有 43 个属于此类，
+        // 每平台再试 3 首等于拿 3 倍超时时间去确认一个已知结论。
+        // 它们的目的是「发现恢复」而不是「复核可用性」，1 首足够；真恢复了下轮自然会转正常巡检。
+        const onlyOne = options.firstProbe || options.restoreOnly || platformState.autoDisabled
         jobs.push({ target, platform, songs: onlyOne ? songs.slice(0, 1) : songs })
       }
     }

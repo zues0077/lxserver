@@ -68,3 +68,15 @@ test('合集匹配：完全一致给 1，包含关系给高分', () => {
   assert.equal(albumMatchScore('范特西', '范特西'), 1)
   assert.ok(albumMatchScore('范特西', '周杰伦 范特西') >= 0.8)
 })
+
+// 2026-11-03 实机发现的「假专辑 10 分钟不可自愈」：
+// 同一个关键词（神仙诗班 / 周杰伦）上午能命中真合集，下午某一轮回落成 bili-kw 虚拟专辑，
+// 而兜底结果被按 10 分钟缓存，用户立刻用完整合集标题重搜也还是假的（两条写法清洗后同 key）。
+// 处置：兜底只缓存 60 秒 + 没命中时重搜一次，但重搜必须有预算兜底。
+test('专辑解析重试：没命中且预算充足才重试', async () => {
+  const { shouldRetryAlbumResolve } = await import('../src/server/extraSources/bilibili')
+  assert.equal(shouldRetryAlbumResolve(0, 8000), true)
+  assert.equal(shouldRetryAlbumResolve(0, 3000), false, '预算刚好 3 秒不重试，避免拖爆 9 秒预算')
+  assert.equal(shouldRetryAlbumResolve(0, 1200), false)
+  assert.equal(shouldRetryAlbumResolve(2, 8000), false, '已经命中就不该重搜')
+})
