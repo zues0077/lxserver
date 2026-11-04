@@ -687,7 +687,15 @@ body {
 .content-wrapper {
     flex: 1;
     padding: 0 2rem 2rem;
-    overflow-y: auto;
+    /* 这里原本是 overflow-y: auto，但它从来没有真正滚动过：桌面端 #app 只设了
+       min-height，本元素被内容撑到自然高度，滚动其实发生在 body 上。
+       而 overflow 非 visible 会让它成为「滚动容器」，里面 position: sticky 的元素
+       （配置页工具栏、保存条）就以这个永不滚动的盒子为参照 —— 吸顶彻底失效，
+       表现就是「往下翻工具栏就没了」。改成 visible + clip，吸顶重新以视口为参照。
+       横向仍用 clip 兜住（clip 只裁剪、不建滚动容器，也不会把纵向带成 auto）。
+       移动端在媒体查询里另行设为 auto，那里 .main-content 被限成 100vh，是真滚动。 */
+    overflow-x: clip;
+    overflow-y: visible;
 }
 
 /* =============== 视图管理 =============== */
@@ -5654,8 +5662,11 @@ input:-webkit-autofill:active {
     border-radius: 14px;
     margin-top: 0.25rem;
     box-sizing: border-box;
-    position: sticky;
-    bottom: 0.75rem;
+    /* 这里原来是 sticky bottom，但当时 .content-wrapper 自建了一个永不滚动的滚动容器，
+       它根本吸不住（一直是普通流里的位置）。这次修好吸顶后它会突然变成「常驻浮动保存条」，
+       常驻浮条会一直盖住页面底部约 60px 内容 —— 用户没要求过，保持原样更像他现在的印象。
+       想改成常驻浮条，把下面这行换回 position: sticky; bottom: 0.75rem 即可。 */
+    position: static;
     z-index: 780;
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
@@ -7787,7 +7798,9 @@ form.config-page.cfg-rows .config-group-grid > .config-card.config-card--danger 
    -------------------------------------------------------------------------- */
 #view-config.cfg-rows .config-toolbar {
     position: sticky;
-    top: 0;
+    /* 和卡片版用同一个偏移：由 JS 按「真正的滚动容器」实时写入，
+       这里再写死 0 就会在桌面端被顶栏整条盖住 */
+    top: var(--cfg-sticky-top, 0px);
     z-index: 950;
     /* 左右各扩出滚动容器的内边距（--cfg-gutter 由 JS 按实际内边距写入），
        做成满版条，避免卡片从条的两侧露边 */
@@ -7804,7 +7817,7 @@ form.config-page.cfg-rows .config-group-grid > .config-card.config-card--danger 
 
 /* 点导航跳转时，分组标题要落在固定条下方，不被压住 */
 #view-config.cfg-rows .config-group {
-    scroll-margin-top: 4.2rem;
+    scroll-margin-top: calc(var(--cfg-sticky-top, 0px) + 4.2rem);
 }
 
 #view-config.cfg-rows .config-subnav-item {

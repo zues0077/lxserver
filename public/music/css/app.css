@@ -1307,3 +1307,41 @@ aside {
 }
 
 
+
+/* ── 自定义源管理工具栏：6 个动作按钮统一成等宽等高的网格 ──
+   原先前两个按钮 flex-1 撑开、后面几个按内容宽度排，换行后「回收站」孤零零占一行，
+   同一行里宽窄也不一（2026-11-04 用户指出）。改成固定 3 列，两行各三个。 */
+#custom-source-toolbar {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.6rem;
+    /* 比原本的 p-4 稍微加一点顶部留白：按钮右上角有数量角标，贴边会被弹窗分割线压住 */
+    padding-top: 0.95rem;
+}
+
+#custom-source-toolbar > button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    width: 100%;
+    height: 3rem;
+    padding: 0 0.55rem;
+    font-size: 0.83rem;
+    line-height: 1.2;
+    white-space: nowrap;
+    border-radius: 0.75rem;
+}
+
+/* 图标不再用 mr-2 撑间距，统一交给上面的 gap，避免每种按钮内边距不一致 */
+#custom-source-toolbar > button > i {
+    margin-right: 0;
+    font-size: 0.9rem;
+    flex: 0 0 auto;
+}
+
+@media (max-width: 640px) {
+    #custom-source-toolbar {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}

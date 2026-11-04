@@ -2960,16 +2960,28 @@ class App {
     initConfigPageUi() {
         this.applyConfigLayout();
         this.initConfigSearch();
-        // 吸顶偏移必须相对「滚动容器」算，不能按顶栏高度算：
-        // .content-wrapper 自己 overflow-y:auto 就是滚动容器，而 .top-bar 在它外面
-        // （并且已经 sticky 在 top:0）。把顶栏高度再加进来，等于让导航条在滚动容器里
-        // 至少离顶部 92px —— 页面还没滚动就被硬推下去 90px，中间空出一大块，
-        // 同时压到下面「基础」分组标题上，看起来就是错位（2026-11-04 用户指出）。
+        // 吸顶偏移必须按「真正的滚动容器」算。两种布局下原点不一样：
+        //  · 桌面：#app 只给了 min-height，.main-content/.content-wrapper 都被内容撑到自然高度，
+        //    滚动实际发生在 body 上 → 吸顶原点是视口顶部，而 .top-bar 正 sticky 在 top:0 且
+        //    z-index 更高，偏移算小了导航条就被顶栏整条盖住（2026-11-04「往下翻就没了」）。
+        //  · 移动端：.main-content 被限成 100vh + overflow hidden，滚动才真的发生在
+        //    .content-wrapper 里 → 原点已是它自己的上沿（已含顶栏高度），不能再加一次。
+        // 所以先判断谁在滚，再决定加不加顶栏高度。
         const syncStickyOffset = () => {
             const scroller = document.querySelector('.content-wrapper');
+            const bar = document.querySelector('.top-bar');
             const cs = scroller ? getComputedStyle(scroller) : null;
-            const padTop = cs ? (parseFloat(cs.paddingTop) || 0) : 0;
-            document.documentElement.style.setProperty('--cfg-sticky-top', (padTop + 10) + 'px');
+            const scrollerScrolls = !!scroller && scroller.scrollHeight > scroller.clientHeight + 2;
+            let offset = 0;
+            if (scrollerScrolls) {
+                offset = cs ? (parseFloat(cs.paddingTop) || 0) : 0;
+            } else if (bar) {
+                // 顶栏 sticky 在 top:0，吸顶时它的下沿就是自身高度。
+                // 用 offsetHeight 而不是 rect.bottom：rect 会带上 .main-content 的 padding-top，
+                // 页面没滚动时测出来会多 16px，钉住后中间就露出一条缝。
+                offset = Math.round(bar.offsetHeight);
+            }
+            document.documentElement.style.setProperty('--cfg-sticky-top', offset + 'px');
             // 行列表变体的固定导航条要横向铺满整条内容区，靠这个变量把负外边距算准
             const padSide = cs ? (parseFloat(cs.paddingLeft) || 0) : 0;
             document.documentElement.style.setProperty('--cfg-gutter', padSide + 'px');
@@ -2977,6 +2989,10 @@ class App {
         syncStickyOffset();
         if (!this._cfgStickyBound) {
             window.addEventListener('resize', syncStickyOffset);
+            // 字体加载完顶栏高度会变一点，重算一次，别留半条缝
+            if (document.fonts && document.fonts.ready) {
+                document.fonts.ready.then(syncStickyOffset).catch(() => { });
+            }
             this._cfgStickyBound = true;
         }
 

@@ -201,8 +201,23 @@ test('配置页双版式：默认卡片，行列表版本的分组导航固定�
   const css = fs.readFileSync(path.join(ROOT, 'public/style.css'), 'utf8')
   const pinned = sliceBetween(css, '#view-config.cfg-rows .config-toolbar {', '}')
   assert.match(pinned, /position:\s*sticky/, '行列表版本的分组导航必须吸顶固定')
-  assert.match(pinned, /top:\s*0/, '吸顶不能留偏移，否则会压住第一组标题')
-  assert.match(css, /#view-config\.cfg-rows \.config-group \{\s*scroll-margin-top/, '跳转后分组标题要避开固定条')
+  // 偏移必须和卡片版共用同一个变量：桌面端滚动发生在 body 上，写死 0 会被顶栏整条盖住
+  assert.match(pinned, /top:\s*var\(--cfg-sticky-top/, '固定条偏移要跟随滚动容器计算，不能写死')
+  assert.match(css, /#view-config\.cfg-rows \.config-group \{\s*scroll-margin-top:\s*calc\(var\(--cfg-sticky-top/,
+    '跳转后分组标题要避开固定条')
+})
+
+test('吸顶偏移按真正的滚动容器算，别被顶栏盖住', () => {
+  // 回归：桌面端 .content-wrapper 是自然高度（滚动在 body 上），偏移必须是顶栏下沿；
+  // 只有它自己成为滚动容器时（移动端）才用自身 paddingTop。
+  const cssBase = fs.readFileSync(path.join(ROOT, 'public/style.css'), 'utf8')
+  assert.match(appJs, /scroller\.scrollHeight > scroller\.clientHeight/, '未判断滚动容器归属')
+  assert.match(appJs, /bar\.offsetHeight/, '未取顶栏高度作为吸顶偏移')
+  // 桌面端 .content-wrapper 一旦 overflow 非 visible，就成了永不滚动的「滚动容器」，
+  // 里面的 sticky 全部失效（配置页工具栏「往下翻就没了」的根因）
+  const baseWrapper = sliceBetween(cssBase, '.content-wrapper {', '}')
+  assert.match(baseWrapper, /overflow-y:\s*visible/, '内容区不能自建滚动容器，否则吸顶失效')
+  assert.doesNotMatch(appJs, /setProperty\('--cfg-sticky-top', \(padTop \+ 10\)/, '旧的自然高度偏移应已移除')
 })
 
 test('配置项搜索：工具栏吸顶、筛选只加 class 不动结构', () => {
