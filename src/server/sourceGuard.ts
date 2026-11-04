@@ -126,7 +126,7 @@ export interface GuardStatus {
     flagged: Array<{ id: string; name: string; level: GuardLevel; reasons: string[] }>
     /** 用户手动确认安全的音源（owner:id） */
     trusted: string[]
-    isolated: Array<{ id: string; name: string; reason: string; level: GuardLevel; at: string; source: IsolateSource }>
+    isolated: Array<{ id: string; name: string; reason: string; reasonText?: string; level: GuardLevel; at: string; source: IsolateSource }>
     lastProbe: { at: string; candidates: number; confirmed: string[] } | null
     /** 单次采样尖峰计数：5~6 秒级的卡顿会被 15s 窗口均值稀释，这里单独捕捉 */
     cpuSpikes: { count: number; lastAt: string | null }
@@ -348,6 +348,12 @@ interface GuardStore {
      * 所以处置权必须留给人：这里记的就是用户已经看过并接受的那些。
      */
     trusted: string[]
+    /**
+     * 「运行期隔离到期自动放行」的次数（key = owner:id）。
+     * 用来兜住误判：放行后又被同一机制抓到满 MAX_AUTO_RELEASE 次，就认定是真凶，
+     * 不再自动放行，避免「放行 → 再隔离」来回折腾。
+     */
+    autoReleased?: Record<string, number>
 }
 
 const storeFilePath = (): string =>
@@ -363,9 +369,10 @@ const loadStore = (): GuardStore => {
             version: 1,
             isolated: Array.isArray(parsed?.isolated) ? parsed.isolated : [],
             trusted: Array.isArray(parsed?.trusted) ? parsed.trusted.filter((k: unknown) => typeof k === 'string') : [],
+            autoReleased: parsed?.autoReleased && typeof parsed.autoReleased === 'object' ? parsed.autoReleased : {},
         }
     } catch (e) {
-        storeCache = { version: 1, isolated: [], trusted: [] }
+        storeCache = { version: 1, isolated: [], trusted: [], autoReleased: {} }
     }
     return storeCache
 }
@@ -384,6 +391,84 @@ const saveStore = (): void => {
 const recordKey = (owner: string, id: string) => `${owner}_${id}`
 
 /**
+ * 运行期判定（CPU 复检 / 卡顿归因）的隔离，多久后自动放行一次。
+ * 静态特征码是脚本里真实存在的写法，命中就是命中；运行期判定是「采样推断」，
+ * 一次误判就永久停用不合理 —— 到期放行让人和系统都有复核的机会。
+ */
+export const ISOLATION_AUTO_RELEASE_MS = 24 * 3600_000
+
+/** 同一音源最多自动放行几次：放行了还犯满 3 次，就认定是真凶，不再放行 */
+const MAX_AUTO_RELEASE = 3
+
+/**
+ * 该条隔离记录是否已到「自动放行复核」的条件。
+ * 抽成纯函数是为了能单测：运行期判定（probe）有误判可能，24h 放行一次；
+ * 静态命中（static）与人工隔离（manual）是明确结论，不放行；
+ * 同一音源放行满 MAX_AUTO_RELEASE 次仍被重新隔离，就按真凶处理。
+ */
+export function isIsolationExpired(record: IsolateRecord, pardonCount: number, now = Date.now()): boolean {
+    if (record.source !== 'probe') return false
+    if (pardonCount >= MAX_AUTO_RELEASE) return false
+    const at = Date.parse(record.at)
+    // 时间戳坏了宁可当成「没到期」：放行是有副作用的动作，不能因为脏数据白放一次
+    if (!Number.isFinite(at)) return false
+    return now - at >= ISOLATION_AUTO_RELEASE_MS
+}
+
+/** 静态特征码 → 人话 */
+const REASON_TEXT: Record<string, string> = {
+    infinite_loop: '空转死循环（while(true){} 之类）',
+    while_true_loop: '混淆模板里的 while(!![]) 循环',
+    debugger_trap: 'debugger 反调试陷阱',
+    sandbox_escape: '试图取出宿主全局对象（沙箱逃逸）',
+    busy_polling: '多个高频定时器自旋（≤16ms，典型时间片空转）',
+    obfuscated: '代码被混淆（jsjiami/sojson 等）',
+    hex_identifiers: '大量十六进制标识符（混淆特征）',
+    string_array: '字符串数组混淆',
+    dynamic_eval: '动态 eval 执行',
+    host_access: '调用宿主 process.exit',
+    long_line: '超长单行（压缩/混淆特征）',
+    debugger_statement: '含 debugger 语句',
+}
+
+/**
+ * 静态特征码（可能多条）转人话，用于「可疑音源」提示。
+ * 与隔离原因共用一套词表，避免同一特征在列表和弹窗里两种说法。
+ */
+export function describeGuardReasons(codes: string[]): string {
+    return (codes || [])
+        .map(code => REASON_TEXT[String(code).split(':')[0]] || String(code))
+        .join('、')
+}
+
+/**
+ * 隔离原因转人话。
+ * 原始 reason 是机器码（`cpu_probe:16.7%`、`stall:1200ms`、`infinite_loop+debugger_trap`），
+ * 直接摆给用户看等于没说，所以统一在这里翻译；前端只负责展示。
+ */
+export function describeIsolationReason(reason: string): string {
+    const raw = String(reason || '').trim()
+    if (!raw) return '未知原因'
+
+    const cpu = /^cpu_probe:([\d.]+)%?$/.exec(raw)
+    if (cpu) {
+        return `疑似空转：卸载它之后 CPU 仍占 ${cpu[1]}%（推断结论，可能误判）`
+    }
+
+    const stall = /^stall:(\d+)ms$/.exec(raw)
+    if (stall) {
+        const ms = Number(stall[1])
+        const human = ms >= 1000
+            ? `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)} 秒`
+            : `${ms} 毫秒`
+        return `定时器回调卡住事件循环 ${human}`
+    }
+
+    const parts = raw.split('+').map(s => s.trim()).filter(Boolean)
+    return describeGuardReasons(parts) || raw
+}
+
+/**
  * 判断该脚本是否已被隔离。
  * 脚本指纹与记录不一致（内容被更新过）时自动解除隔离并落盘。
  */
@@ -399,6 +484,22 @@ export function shouldSkipSource(owner: string, id: string, fingerprint: string)
         saveStore()
         console.log(`[自检护栏] 脚本内容已更新，自动解除隔离: ${hit.name} (${hit.id})`)
         return null
+    }
+
+    // 运行期判定（source === 'probe'）属于采样推断，可能是误判：
+    // 到期先自动放行一次，让它重新参与加载；真有问题下一轮采样会再抓到。
+    // 手动隔离（manual）与静态命中（static）不放行 —— 那些是用户/特征码的明确结论。
+    if (hit.source === 'probe') {
+        const pardons = (store.autoReleased || {})[key] || 0
+        if (isIsolationExpired(hit, pardons)) {
+            store.isolated = store.isolated.filter(item => item !== hit)
+            if (!store.autoReleased) store.autoReleased = {}
+            store.autoReleased[key] = pardons + 1
+            activeIsolations.delete(key)
+            saveStore()
+            console.log(`[自检护栏] 运行期隔离已满 24h，自动放行复核（第 ${pardons + 1}/${MAX_AUTO_RELEASE} 次）: ${hit.name} (${hit.id})，原因 ${hit.reason}`)
+            return null
+        }
     }
     return hit
 }
@@ -436,6 +537,8 @@ export function clearIsolation(owner: string, id: string): boolean {
     const before = store.isolated.length
     store.isolated = store.isolated.filter(item => recordKey(item.owner, item.id) !== key)
     activeIsolations.delete(key)
+    // 人为放行等于「重新开始」：把到期自动放行的计数清零，下次真出事还有完整的复核机会
+    if (store.autoReleased) delete store.autoReleased[key]
     if (store.isolated.length !== before) {
         saveStore()
         return true
@@ -462,6 +565,7 @@ export function trustSource(owner: string, id: string): boolean {
     if (!store.trusted.includes(key)) store.trusted.push(key)
     // 信任优先于历史隔离：一并撤掉，否则「我信了但仍被隔离」会让人以为没生效
     store.isolated = store.isolated.filter(item => recordKey(item.owner, item.id) !== key)
+    if (store.autoReleased) delete store.autoReleased[key]
     saveStore()
     flagged.delete(key)
     activeIsolations.delete(key)
@@ -644,6 +748,7 @@ export function getSourceGuardStatus(): GuardStatus {
             id: item.id,
             name: item.name,
             reason: item.reason,
+            reasonText: describeIsolationReason(item.reason),
             level: item.level,
             at: item.at,
             source: item.source,
@@ -691,6 +796,39 @@ const sampleCpuOver = async (ms: number): Promise<number> => {
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
+/**
+ * 到期放行运行期隔离（每 10 分钟最多扫一次）。
+ * 只在空闲时做：正在复检/加载/下载时不重载音源，否则会把 CPU 采样搅乱、甚至断掉音频流。
+ */
+let lastExpirySweepAt = 0
+const EXPIRY_SWEEP_INTERVAL_MS = 10 * 60_000
+
+const sweepExpiredIsolations = (): void => {
+    const now = Date.now()
+    if (now - lastExpirySweepAt < EXPIRY_SWEEP_INTERVAL_MS) return
+    lastExpirySweepAt = now
+    if (probing || now < busyUntil) return
+    if (guardDeps?.isBusy?.()) return
+
+    const store = loadStore()
+    const due = store.isolated.filter(item =>
+        isIsolationExpired(item, (store.autoReleased || {})[recordKey(item.owner, item.id)] || 0, now)
+    )
+    if (!due.length) return
+
+    for (const item of due) {
+        const key = recordKey(item.owner, item.id)
+        store.isolated = store.isolated.filter(x => x !== item)
+        if (!store.autoReleased) store.autoReleased = {}
+        store.autoReleased[key] = (store.autoReleased[key] || 0) + 1
+        activeIsolations.delete(key)
+        console.log(`[自检护栏] 运行期隔离已满 24h，自动放行复核（第 ${store.autoReleased[key]}/${MAX_AUTO_RELEASE} 次）: ${item.name} (${item.id})，原因 ${item.reason}`)
+        // 记录撤了还得让它真的回到加载态，否则要等服务重启才生效
+        try { void guardDeps?.reload(item.owner, item.id) } catch (e) { }
+    }
+    saveStore()
+}
+
 const windowAvg = (): number =>
     samples.length === 0 ? 0 : samples.reduce((sum, value) => sum + value, 0) / samples.length
 
@@ -705,6 +843,9 @@ const scheduleSampler = (): void => {
 const tick = (): void => {
     const current = cfg()
     if (!current.enabled) return
+
+    // 到期的运行期隔离要能「自己好」，不能等服务重启才放行
+    sweepExpiredIsolations()
 
     const value = sampleOnce()
     idleCpuPercent = value

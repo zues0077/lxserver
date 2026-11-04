@@ -7,7 +7,7 @@ import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
 import { encodeRequestUrl } from '../utils/urlEncode'
 import { verifyUser } from './userAuth'
-import { getFlagFor, getIsolationFor } from './sourceGuard'
+import { getFlagFor, getIsolationFor, describeIsolationReason, describeGuardReasons, ISOLATION_AUTO_RELEASE_MS } from './sourceGuard'
 import { moveScriptToTrash, listTrash, takeFromTrash, purgeTrash, removeTrashCopies } from './sourceTrash'
 
 // 读取请求体
@@ -509,7 +509,8 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
         // 所以这里只把结论交给前端展示，处置权留给用户。
         try {
             const flag = getFlagFor(source.owner, source.id)
-            if (flag) source.guard = flag
+            // 顺带把特征码翻成人话：列表角标与弹窗都用它，避免直接显示 infinite_loop 这种码
+            if (flag) source.guard = { ...flag, reasonText: describeGuardReasons(flag.reasons) }
         } catch (e) { }
 
         // 已隔离的音源必须能被看见：它被卸载后状态看起来只是「没生效」，
@@ -519,9 +520,15 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
             if (isolation) {
                 source.isolated = {
                     reason: isolation.reason,
+                    // 人话原因：机器码（cpu_probe:16.7%）直接给用户看等于没说
+                    reasonText: describeIsolationReason(isolation.reason),
                     level: isolation.level,
                     at: isolation.at,
                     source: isolation.source,
+                    // 运行期判定会在 24h 后自动放行复核，前端据此给出「什么时候会自己好」
+                    autoReleaseAt: isolation.source === 'probe'
+                        ? new Date((Date.parse(isolation.at) || Date.now()) + ISOLATION_AUTO_RELEASE_MS).toISOString()
+                        : null,
                 }
             }
         } catch (e) { }
@@ -664,6 +671,26 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
 
         const oldEnabled = target.enabled
         const oldAllowUnsafeVM = !!target.allowUnsafeVM
+
+        // 已被护栏隔离的源不会被加载：这里若把 enabled 写成 true，接口照样回 success，
+        // 前端还会弹「已启用」，但取链时仍被 shouldSkipSource 拦下 —— 典型的假成功。
+        // 启用时先查隔离记录，命中就明确拒绝，把用户引到「解除隔离」面板（前端按 isolated 处理）。
+        if (enabled === true) {
+            const isolation = getIsolationFor(targetOwner, targetId)
+                || getIsolationFor(target.owner || 'open', targetId)
+            if (isolation) {
+                const reasonText = describeIsolationReason(isolation.reason)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({
+                    success: false,
+                    isolated: true,
+                    reason: isolation.reason,
+                    reasonText,
+                    message: `该音源正被自检护栏隔离（${reasonText}），需先解除隔离才能启用。`,
+                }))
+                return
+            }
+        }
 
         // 核心安全校验：如果试图开启 VM 模式（或当前就是 VM 模式），必须要验证管理员密码
         if (target.allowUnsafeVM || allowUnsafeVM) {

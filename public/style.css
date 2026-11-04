@@ -29,7 +29,11 @@ body {
     background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
     color: var(--text-primary);
     min-height: 100vh;
+    /* hidden 会让 body 变成「滚动容器」（overflow-y 被算成 auto），
+       站内 position: sticky 的元素就会以不会滚动的 body 为参照而失效。
+       clip 只裁剪、不建立滚动容器，吸顶元素才能跟随 .content-wrapper 正常工作。 */
     overflow-x: hidden;
+    overflow-x: clip;
 }
 
 .hidden {
@@ -7415,4 +7419,302 @@ input:-webkit-autofill:active {
 /* 编辑框展开时横跨整行，方便粘贴长 Cookie */
 .music-acc-item.is-editing {
     grid-column: 1 / -1;
+}
+
+/* ==========================================================================
+   系统配置：布局变体 B「设置行列表」
+   --------------------------------------------------------------------------
+   与默认的变体 A「分组 → 卡片网格」共用同一份 HTML，只靠 #config-form 上的
+   .cfg-rows 切换 —— 字段 name 契约、联动 id、FormData 提交全都不受影响
+   （改结构会踩 P-0961 的三条硬约束）。
+   视觉上把「每张卡一个外框」收敛成「每组一块面板 + 组内细分节 + 左侧标题列」，
+   外框从 20 个降到 8 个，视线可以沿左列标题从上往下扫读。
+   ========================================================================== */
+
+/* 组间留白略收，因为组内已经多了一层「面板」的边界 */
+form.config-page.cfg-rows {
+    gap: 2.4rem;
+}
+
+form.config-page.cfg-rows .config-group {
+    gap: 0.7rem;
+}
+
+/* 组标题不再画下划线：面板本身已经是分组边界，再加线就是重复 */
+form.config-page.cfg-rows .config-group-head {
+    border-bottom: none;
+    padding: 0 0.2rem;
+}
+
+form.config-page.cfg-rows .config-group-head h3 {
+    padding-bottom: 0;
+    font-size: 0.92rem;
+}
+
+form.config-page.cfg-rows .config-group-head h3::after {
+    display: none;
+}
+
+form.config-page.cfg-rows .config-group-head p {
+    padding-bottom: 0;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+}
+
+/* 组容器：一块面板装下整组，覆盖 data-cols 的固定列数 */
+form.config-page.cfg-rows .config-group-grid,
+form.config-page.cfg-rows .config-group-grid[data-cols] {
+    display: block;
+    max-width: 100%;
+    background: rgba(255, 255, 255, 0.022);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 14px;
+    overflow: hidden;
+    align-items: initial;
+}
+
+/* 卡片降级为面板内的「小节」：去外框、去玻璃、去投影 */
+form.config-page.cfg-rows .config-group-grid > .config-card {
+    display: block;
+    height: auto;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: none;
+    overflow: visible;
+}
+
+form.config-page.cfg-rows .config-group-grid > .config-card + .config-card {
+    border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+form.config-page.cfg-rows .config-group-grid > .config-card:hover {
+    box-shadow: none;
+}
+
+/* 小节头：图标缩到标记大小，和标题同一视觉层级 */
+form.config-page.cfg-rows .config-card-header {
+    padding: 0.95rem 1.3rem 0.3rem;
+    background: transparent;
+    border-bottom: none;
+    gap: 0.6rem;
+}
+
+form.config-page.cfg-rows .config-card-icon {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    opacity: 0.92;
+}
+
+form.config-page.cfg-rows .config-card-icon svg {
+    width: 14px;
+    height: 14px;
+}
+
+form.config-page.cfg-rows .config-card-title {
+    font-size: 0.845rem;
+    font-weight: 600;
+    margin: 0;
+}
+
+form.config-page.cfg-rows .config-card-desc {
+    font-size: 0.73rem;
+    color: var(--text-muted);
+    margin-top: 1px;
+}
+
+/* 字段区：逐行排，不再有卡片内 padding */
+form.config-page.cfg-rows .config-card-body {
+    display: block;
+    padding: 0.15rem 1.3rem 0.75rem;
+}
+
+/* 字段行：左标题列定宽 + 右控件列，控件左边缘对齐成一条线 */
+form.config-page.cfg-rows .config-field {
+    display: grid;
+    grid-template-columns: minmax(130px, 210px) minmax(0, 1fr);
+    grid-template-areas:
+        "label control"
+        ".     hint";
+    align-items: center;
+    column-gap: 1.25rem;
+    row-gap: 0.3rem;
+    padding: 0.5rem 0;
+}
+
+form.config-page.cfg-rows .config-field > .config-label {
+    grid-area: label;
+    /* 标签跨「控件 + 说明」两行，必须和控件首行对齐而不是整体居中，
+       否则有说明文字的字段看起来像标签往下掉了一截 */
+    align-self: start;
+    padding-top: 0.52rem;
+    line-height: 1.35;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    opacity: 0.92;
+}
+
+form.config-page.cfg-rows .config-field > .config-input,
+form.config-page.cfg-rows .config-field > input,
+form.config-page.cfg-rows .config-field > select,
+form.config-page.cfg-rows .config-field > .config-input-group {
+    grid-area: control;
+    justify-self: start;
+    width: 100%;
+    max-width: 520px;
+}
+
+form.config-page.cfg-rows .config-field > .config-hint {
+    grid-area: hint;
+    margin-top: 0;
+    max-width: 520px;
+}
+
+/* 兜底：未显式命中的子元素一律落到控件列，避免自由布局把栅格撑乱 */
+form.config-page.cfg-rows .config-field > *:not(.config-label):not(.config-hint) {
+    grid-column: 2;
+}
+
+/* 开关行：沿用同一套两列骨架，开关与输入框左边缘对齐 */
+form.config-page.cfg-rows .config-toggle-row {
+    display: grid;
+    grid-template-columns: minmax(130px, 210px) minmax(0, 1fr);
+    column-gap: 1.25rem;
+    /* 与字段行一致：开关贴标题首行，不跟着说明文字整体居中 */
+    align-items: start;
+    padding: 0.5rem 0;
+}
+
+form.config-page.cfg-rows .config-toggle-row > .toggle-switch,
+form.config-page.cfg-rows .config-toggle-row > .config-toggle-control {
+    justify-self: start;
+    margin-top: 0.1rem;
+}
+
+form.config-page.cfg-rows .config-toggle-label {
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+
+form.config-page.cfg-rows .config-toggle-desc {
+    font-size: 0.73rem;
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+
+/* 行间分隔线更淡：面板内部只需要「暗示」，不需要「划界」 */
+form.config-page.cfg-rows .config-divider {
+    margin: 0.35rem 0;
+    opacity: 0.35;
+}
+
+/* 提示块在行列表里整行展示，不挤在控件列 */
+form.config-page.cfg-rows .config-card-body > .config-note {
+    margin-top: 0.55rem;
+}
+
+/* 两列字段行（如「用户名 / 密码」）保持两列，但内部字段改回上下排，
+   否则会出现「列中列」把标签挤成两三个字 */
+form.config-page.cfg-rows .config-field-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+    padding: 0.5rem 0;
+}
+
+form.config-page.cfg-rows .config-field-row .config-field {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+    padding: 0;
+}
+
+form.config-page.cfg-rows .config-field-row .config-field > .config-input,
+form.config-page.cfg-rows .config-field-row .config-field > input,
+form.config-page.cfg-rows .config-field-row .config-field > select,
+form.config-page.cfg-rows .config-field-row .config-field > .config-hint {
+    max-width: none;
+}
+
+/* 窄屏：左标题列退化为上下结构，避免标签被压成一行两三个字 */
+@media (max-width: 900px) {
+    form.config-page.cfg-rows .config-field,
+    form.config-page.cfg-rows .config-toggle-row {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas:
+            "label"
+            "control"
+            "hint";
+        row-gap: 0.35rem;
+        padding: 0.6rem 0;
+    }
+
+    form.config-page.cfg-rows .config-field > *:not(.config-label):not(.config-hint) {
+        grid-column: 1;
+    }
+
+    form.config-page.cfg-rows .config-card-body,
+    form.config-page.cfg-rows .config-card-header {
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+
+    form.config-page.cfg-rows .config-field-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* 行列表内部的两个特殊块：分组小标题与危险提示 */
+form.config-page.cfg-rows .config-card-body > .config-subhead {
+    margin-top: 0.8rem;
+    margin-bottom: 0.15rem;
+    font-size: 0.7rem;
+}
+
+form.config-page.cfg-rows .config-card-body > .config-subhead:first-child {
+    margin-top: 0.1rem;
+}
+
+form.config-page.cfg-rows .config-card-body > .config-danger-note {
+    margin: 0.6rem 0 0.25rem;
+}
+
+/* 危险类卡片去框后靠左侧红条保留警示，不至于和普通小节一模一样 */
+form.config-page.cfg-rows .config-group-grid > .config-card.config-card--danger {
+    box-shadow: inset 3px 0 0 rgba(239, 68, 68, 0.55);
+}
+
+/* --------------------------------------------------------------------------
+   行列表变体：分组导航固定成「常驻导航条」
+   长页面往下翻时导航不跟着滚走，随时能跳到任意分组；固定条做成满版遮罩，
+   滚上来的内容不会从两侧或圆角缝隙里透出来。
+   -------------------------------------------------------------------------- */
+#view-config.cfg-rows .config-subnav {
+    position: sticky;
+    top: 0;
+    z-index: 950;
+    /* 左右各扩出滚动容器的内边距（--cfg-gutter 由 JS 按实际内边距写入），
+       做成满版条，避免卡片从条的两侧露边 */
+    margin: 0 calc(-1 * var(--cfg-gutter, 2rem)) 1.1rem;
+    padding: 0.7rem var(--cfg-gutter, 2rem) 0.65rem;
+    border: none;
+    border-bottom: 1px solid var(--glass-border);
+    border-radius: 0;
+    background: rgba(13, 18, 33, 0.95);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow: 0 12px 26px -20px rgba(0, 0, 0, 0.9);
+}
+
+/* 点导航跳转时，分组标题要落在固定条下方，不被压住 */
+#view-config.cfg-rows .config-group {
+    scroll-margin-top: 4.2rem;
+}
+
+#view-config.cfg-rows .config-subnav-item {
+    padding: 0.46rem 0.95rem;
 }

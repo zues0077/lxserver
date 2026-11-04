@@ -144,12 +144,25 @@ test('隔离状态能出现在音源列表里（用户可见、可解除）', ()
     const guard = fs.readFileSync(guardFile, 'utf-8')
     assert.match(guard, /export function getIsolationFor/)
     const handler = fs.readFileSync(path.join(process.cwd(), 'src/server/customSourceHandlers.ts'), 'utf-8')
-    assert.match(handler, /import \{ getFlagFor, getIsolationFor \} from '\.\/sourceGuard'/)
+    assert.match(handler, /import \{[^}]*getIsolationFor[^}]*\} from '\.\/sourceGuard'/)
     assert.match(handler, /source\.isolated = \{/)
     const app = fs.readFileSync(path.join(process.cwd(), 'public/music/app.js'), 'utf-8')
     assert.match(app, /已隔离/, '前端应有「已隔离」标记')
     assert.match(app, /release/, '前端应能调 release 解除隔离')
-    assert.match(app, /if\(action === 'release'\) await reloadSource\(id\)|if \(action === 'release'\) await reloadSource\(id\)/)
+    assert.match(app, /if \(action === 'release' \|\| \(action === 'trust' && reloadAfter\)\) await reloadSource\(id\)/, '解除隔离/信任后必须重新加载音源')
+})
+
+test('启用被隔离的源必须明确拒绝，不能返回假成功', () => {
+    const handler = fs.readFileSync(path.join(process.cwd(), 'src/server/customSourceHandlers.ts'), 'utf-8')
+    // 后端：启用前先查隔离记录，命中直接返回 isolated 标记
+    assert.match(handler, /if \(enabled === true\) \{[\s\S]{0,400}?getIsolationFor/)
+    assert.match(handler, /isolated: true/)
+    // 前端：批量启用不能只看 response.ok —— 隔离源回的是 200 + success:false
+    const app = fs.readFileSync(path.join(process.cwd(), 'public/music/app.js'), 'utf-8')
+    const batch = app.slice(app.indexOf('async function batchSourceEnable'), app.indexOf('async function batchSourceDelete'))
+    assert.match(batch, /data && data\.success/, '批量启用必须按 success 计数')
+    assert.ok(!/if \(response\.ok\) successCount\+\+/.test(batch), '不能只看状态码就算成功')
+    assert.match(batch, /isolated/, '被隔离的要单独统计并告知用户')
 })
 
 test('默认配置开启护栏', () => {

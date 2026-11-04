@@ -15345,7 +15345,8 @@ async function renderCustomSources() {
             // 自检护栏的可疑特征角标：只提示不代劳，点开由用户决定信任还是隔离
             const guardTag = source.guard ? (() => {
                 const isA = source.guard.level === 'A';
-                const reasons = (source.guard.reasons || []).join('、');
+                // 优先用后端翻好的人话，老接口没有 reasonText 时退回特征码
+                const reasons = source.guard.reasonText || (source.guard.reasons || []).join('、');
                 return `<span data-guard-id="${escapeHtmlText(encodeURIComponent(source.id))}"
                         data-guard-owner="${escapeHtmlText(source.owner || 'open')}"
                         data-guard-name="${escapeHtmlText(source.name)}"
@@ -15383,14 +15384,23 @@ async function renderCustomSources() {
             // 隔离原因单独成行：按钮只说「已停用」，这里说清楚是「系统关的」以及为什么。
             // 否则用户会以为是自己关的，或者对着一个停用的源找不到启用按钮为何无效。
             const isolatedNote = forcedOff ? (() => {
-                const reason = (source.isolated && source.isolated.reason) || '未知原因';
-                const at = source.isolated && source.isolated.at
-                    ? new Date(source.isolated.at).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+                const iso = source.isolated || {};
+                const reason = iso.reason || '未知原因';
+                // 原因优先用后端翻好的人话（cpu_probe:16.7% → 疑似空转：卸载后 CPU 仍占 …）
+                const reasonText = iso.reasonText || reason;
+                const at = iso.at
+                    ? new Date(iso.at).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
                     : '';
+                const autoAt = iso.autoReleaseAt
+                    ? new Date(iso.autoReleaseAt).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+                    : '';
+                const tip = `自检护栏自动停用：${reasonText}（原始判定 ${reason}）${at ? '（' + at + '）' : ''}`
+                    + (autoAt ? ` · 若误判，${autoAt} 后会自动放行复核` : '')
+                    + ' · 点击解除';
                 return `<div class="mt-1 flex items-center">
-                    <span onclick="showSourceGuardMenuById(${jsArg(source.id)}, ${jsArg(source.owner || 'open')}, ${jsArg(source.name)}, 'isolated', ${jsArg(reason)})"
+                    <span onclick="showSourceGuardMenuById(${jsArg(source.id)}, ${jsArg(source.owner || 'open')}, ${jsArg(source.name)}, 'isolated', ${jsArg(reason)}, ${jsArg(reasonText)}, ${jsArg(autoAt)})"
                           class="cursor-pointer text-[9px] md:text-[10px] text-red-600 dark:text-red-400 hover:underline whitespace-nowrap truncate max-w-[220px] md:max-w-none"
-                          title="自检护栏自动停用：${escapeHtmlText(reason)}${at ? '（' + escapeHtmlText(at) + '）' : ''} · 点击解除"><i class="fas fa-lock mr-1"></i>系统隔离：${escapeHtmlText(reason)}</span>
+                          title="${escapeHtmlText(tip)}"><i class="fas fa-lock mr-1"></i>系统隔离：${escapeHtmlText(reasonText)}</span>
                 </div>`;
             })() : '';
 
@@ -15619,6 +15629,15 @@ async function toggleSource(sourceId, currentEnabled, allowUnsafeVM = false) {
 
         const result = await response.json();
 
+        // 被护栏隔离的源：后端不再假装启用成功，这里直接把用户引到解除面板
+        if (result.isolated) {
+            const srcName = (window._currentCustomSourcesList || []).find(s => s.id === sourceId);
+            showError(result.message || '该音源已被自检护栏隔离，需先解除隔离。');
+            await showSourceGuardMenuById(sourceId, username, (srcName && srcName.name) || '', 'isolated', result.reason || '', result.reasonText || '');
+            await renderCustomSources();
+            return;
+        }
+
         if (result.disabledVM) {
             showError(result.message || '已禁用VM');
             return;
@@ -15647,8 +15666,11 @@ async function toggleSource(sourceId, currentEnabled, allowUnsafeVM = false) {
 
 // 静态特征只是「可疑迹象」而非「恶意证据」——46 个真实音源里 10 个带 while(!![]) 且完全正常，
 // 所以这里不自动禁用，只把结论摆出来让用户自己决定。
-function showGuardDialog(name, level, reasons) {
+function showGuardDialog(name, level, reasons, reasonText, autoAt) {
     const isIsolated = level === 'isolated';
+    // 隔离原因分两层展示：上面是给用户看的人话，下面小字保留原始判定码，便于排查/反馈
+    const humanText = isIsolated ? (reasonText || reasons || '未知原因') : (reasons || '未知');
+    const showRaw = isIsolated && reasons && reasons !== humanText;
     return new Promise((resolve) => {
         const modal = document.createElement('div');
         modal.className = "fixed inset-0 z-[200] flex items-center justify-center p-4 animate-fade-in";
@@ -15666,9 +15688,11 @@ function showGuardDialog(name, level, reasons) {
                         </div>
                         <div class="flex-1">
                             <p class="text-sm t-text-main font-bold mb-1">${escapeHtmlText(name)}</p>
-                            <p class="text-xs t-text-muted leading-relaxed">${isIsolated ? '隔离原因' : '命中特征'}：<span class="font-mono">${escapeHtmlText(reasons || '未知')}</span>${isIsolated ? '' : `（${level === 'A' ? '高危级' : '可疑级'}）`}</p>
+                            <p class="text-xs t-text-muted leading-relaxed">${isIsolated ? '隔离原因' : '命中特征'}：<span class="font-medium">${escapeHtmlText(humanText)}</span>${isIsolated ? '' : `（${level === 'A' ? '高危级' : '可疑级'}）`}</p>
+                            ${showRaw ? `<p class="text-[10px] t-text-muted/70 mt-1 font-mono">原始判定：${escapeHtmlText(reasons)}</p>` : ''}
+                            ${isIsolated && autoAt ? `<p class="text-[11px] text-amber-600 dark:text-amber-400 mt-1.5">若判定有误，${escapeHtmlText(autoAt)} 后系统会自动放行复核一次。</p>` : ''}
                             <p class="text-xs t-text-muted leading-relaxed mt-2">${isIsolated
-                                ? '该音源已被自检护栏隔离并卸载，取链时不会被使用。若确认它没有问题，可以解除隔离恢复使用；脚本内容一旦更新也会自动解除。'
+                                ? '该音源已被自检护栏隔离并卸载，取链时不会被使用。确认没问题就「解除隔离」；若解除后立刻又被同一特征拦下（静态特征码判定），改选「信任并忽略」，之后不再检查这个脚本（脚本内容更新后会重新体检）。'
                                 : (level === 'A'
                                     ? '这类特征基本只在真正危险的脚本里出现，建议直接隔离。'
                                     : '这类特征绝大多数是代码混淆、压缩的副产物，不代表恶意。若该音源一直用着正常，选「信任并忽略」即可。')}</p>
@@ -15677,7 +15701,8 @@ function showGuardDialog(name, level, reasons) {
                 </div>
                 <div class="p-4 t-bg-main/50 border-t t-border-main/50 flex flex-col gap-2">
                     ${isIsolated
-                        ? '<button id="guard-release" class="w-full py-2.5 text-sm font-bold text-white bg-emerald-500 hover:bg-emerald-600 rounded-xl shadow-lg transition-all active:scale-95">解除隔离，恢复使用</button>'
+                        ? '<button id="guard-release" class="w-full py-2.5 text-sm font-bold text-white bg-emerald-500 hover:bg-emerald-600 rounded-xl shadow-lg transition-all active:scale-95">解除隔离，重新加载</button>'
+                        + '<button id="guard-trust" class="w-full py-2.5 text-sm font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-500/15 border border-emerald-200 dark:border-emerald-500/30 hover:bg-emerald-100 rounded-xl transition-all active:scale-95">信任并忽略，不再检查</button>'
                         : '<button id="guard-trust" class="w-full py-2.5 text-sm font-bold text-white bg-emerald-500 hover:opacity-90 rounded-xl shadow-lg transition-all active:scale-95">信任并忽略</button><button id="guard-isolate" class="w-full py-2.5 text-sm font-bold text-white bg-red-500 hover:bg-red-600 rounded-xl shadow-lg transition-all active:scale-95">隔离该音源</button>'}
                     <button id="guard-cancel" class="w-full py-2.5 text-sm font-bold t-text-muted hover:t-text-main hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-all">取消</button>
                 </div>
@@ -15702,7 +15727,7 @@ function showGuardDialog(name, level, reasons) {
     });
 }
 
-async function postGuardAction(action, owner, id, name) {
+async function postGuardAction(action, owner, id, name, reloadAfter = false) {
     const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
     const adminPass = localStorage.getItem('lx_admin_password');
     if (adminPass) headers['x-frontend-auth'] = adminPass;
@@ -15714,7 +15739,7 @@ async function postGuardAction(action, owner, id, name) {
         });
         if (res.status === 403) {
             const authorized = await handleAdminAuth('处置自定义源需要管理员身份');
-            if (authorized) return await postGuardAction(action, owner, id, name);
+            if (authorized) return await postGuardAction(action, owner, id, name, reloadAfter);
             return;
         }
         const data = await res.json().catch(() => ({}));
@@ -15722,8 +15747,8 @@ async function postGuardAction(action, owner, id, name) {
         showSuccess(action === 'trust' ? '已标记为可信，不再提示'
             : action === 'release' ? '已解除隔离，正在重新加载音源…'
                 : '已隔离该音源');
-        // 解除隔离只是删掉记录，脚本还停在「未加载」状态，必须走一次强制启用才真的回来
-        if (action === 'release') await reloadSource(id);
+        // 解除隔离/信任只是改了记录，脚本还停在「未加载」状态，必须走一次强制启用才真的回来
+        if (action === 'release' || (action === 'trust' && reloadAfter)) await reloadSource(id);
         await renderCustomSources();
     } catch (error) {
         console.error('[Guard] 处置失败:', error);
@@ -15742,11 +15767,12 @@ async function showSourceGuardMenu(el) {
 }
 
 /** 无 DOM 元素的入口：卡片上的状态按钮直接按 id 调起处置面板 */
-async function showSourceGuardMenuById(id, owner, name, level, reasons) {
+async function showSourceGuardMenuById(id, owner, name, level, reasons, reasonText, autoAt) {
     if (!id) return;
-    const choice = await showGuardDialog(name || id, level || 'B', reasons || '');
+    const choice = await showGuardDialog(name || id, level || 'B', reasons || '', reasonText || '', autoAt || '');
     if (!choice) return;
-    await postGuardAction(choice, owner || 'open', id, name || id);
+    // 隔离中的源本来就没加载：信任后同样要重新加载一次才算真的回来
+    await postGuardAction(choice, owner || 'open', id, name || id, level === 'isolated');
 }
 
 // 删除方式二选一：默认进回收站，也允许直接抹掉（不想让它在回收站里占地/碍眼时）
@@ -16131,14 +16157,20 @@ function updateSourceBatchCount(scope) {
 async function batchSourceEnable(scope, enable) {
     const selected = [...(window._sourceBatchSelected || [])];
     if (!selected.length) { showInfo('请先选择要操作的源'); return; }
-    const label = enable ? '启用' : '禁用';
+    const label = enable ? '启用' : '停用';
     if (!(await showSelect(`批量${label}`, `确定要${label} ${selected.length} 个源吗？`, {}))) return;
 
     const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
     const adminPass = localStorage.getItem('lx_admin_password');
     if (adminPass) headers['x-frontend-auth'] = adminPass;
 
+    // 名称表只用于提示文案，缺了不影响操作
+    const nameMap = {};
+    (window._currentCustomSourcesList || []).forEach(s => { nameMap[s.id] = s.name || s.id; });
+
     let successCount = 0;
+    const isolatedNames = [];
+    const failedNames = [];
     for (const sourceId of selected) {
         try {
             const response = await fetch('/api/custom-source/toggle', {
@@ -16147,10 +16179,31 @@ async function batchSourceEnable(scope, enable) {
                 // 批量选择可能同时含公开源与个人源，逐个按真实归属提交
                 body: JSON.stringify({ username: resolveSourceOwner(sourceId), sourceId, enabled: enable })
             });
-            if (response.ok) successCount++;
-        } catch(e) { console.error('[BatchSource] toggle error', sourceId, e); }
+            const data = await response.json().catch(() => ({}));
+            // 注意不能只看 response.ok：被隔离的源后端回 200 + success:false，
+            // 只看状态码就会把它算成「已启用」，这正是之前批量启用的假成功。
+            if (response.ok && data && data.success) successCount++;
+            else if (data && data.isolated) isolatedNames.push(nameMap[sourceId] || sourceId);
+            else failedNames.push(nameMap[sourceId] || sourceId);
+        } catch(e) {
+            console.error('[BatchSource] toggle error', sourceId, e);
+            failedNames.push(nameMap[sourceId] || sourceId);
+        }
     }
-    showSuccess(`已${label} ${successCount} 个源`);
+
+    // 结果必须如实汇报：成功几个、被系统隔离跳过几个、失败几个，一个都不能并进「成功」里
+    let msg = `已${label} ${successCount} 个源`;
+    if (isolatedNames.length) msg += `，${isolatedNames.length} 个被系统隔离未生效（需单独解除）`;
+    if (failedNames.length) msg += `，${failedNames.length} 个失败`;
+    if (isolatedNames.length || failedNames.length) {
+        const detail = [
+            isolatedNames.length ? `已隔离：${isolatedNames.slice(0, 5).join('、')}${isolatedNames.length > 5 ? ' 等' : ''}` : '',
+            failedNames.length ? `失败：${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}` : '',
+        ].filter(Boolean).join('；');
+        showInfo(`${msg}。${detail}`);
+    } else {
+        showSuccess(msg);
+    }
     exitSourceBatchMode(scope);
 }
 

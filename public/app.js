@@ -2926,8 +2926,34 @@ class App {
         }
     }
 
+    /**
+     * 系统配置页布局切换：cards（分组 → 卡片网格，默认）/ rows（设置行列表）。
+     *
+     * 只切 #config-form 上的 class，HTML 结构与字段 name 一律不动 —— 改结构会踩
+     * 「name 契约 / 联动 id / 必在 form 内」三条硬约束（见手册 P-0961）。
+     * 两套版式都留在代码里，靠 URL 切换：默认 cards，`?cfg=rows` 看行列表版本，
+     * 不影响日常访问，也不把选择写进 localStorage（避免用户上次看过就再也回不到默认）。
+     */
+    applyConfigLayout() {
+        const form = document.getElementById('config-form');
+        if (!form) return;
+        let layout = null;
+        try {
+            layout = new URLSearchParams(location.search).get('cfg');
+        } catch (e) { }
+        // 只在 URL 显式指定时切换，不做记忆：默认恒为「分组 + 卡片」，
+        // 想回看行列表版本就访问 /admin/?cfg=rows（保存下来的对照版本）。
+        const rows = layout === 'rows';
+        form.classList.toggle('cfg-rows', rows);
+        const view = document.getElementById('view-config');
+        // 固定导航条是行列表变体专属样式，用 #view-config 上的同名 class 做作用域
+        // （导航条在 <form> 之外，只靠 form 上的 class 选择不到）
+        if (view) view.classList.toggle('cfg-rows', rows);
+    }
+
     // ===== 系统配置页：分组导航 / 依赖锁定 / 页内跳转 =====
     initConfigPageUi() {
+        this.applyConfigLayout();
         // 吸顶偏移必须相对「滚动容器」算，不能按顶栏高度算：
         // .content-wrapper 自己 overflow-y:auto 就是滚动容器，而 .top-bar 在它外面
         // （并且已经 sticky 在 top:0）。把顶栏高度再加进来，等于让导航条在滚动容器里
@@ -2935,8 +2961,12 @@ class App {
         // 同时压到下面「基础」分组标题上，看起来就是错位（2026-11-04 用户指出）。
         const syncStickyOffset = () => {
             const scroller = document.querySelector('.content-wrapper');
-            const padTop = scroller ? (parseFloat(getComputedStyle(scroller).paddingTop) || 0) : 0;
+            const cs = scroller ? getComputedStyle(scroller) : null;
+            const padTop = cs ? (parseFloat(cs.paddingTop) || 0) : 0;
             document.documentElement.style.setProperty('--cfg-sticky-top', (padTop + 10) + 'px');
+            // 行列表变体的固定导航条要横向铺满整条内容区，靠这个变量把负外边距算准
+            const padSide = cs ? (parseFloat(cs.paddingLeft) || 0) : 0;
+            document.documentElement.style.setProperty('--cfg-gutter', padSide + 'px');
         };
         syncStickyOffset();
         if (!this._cfgStickyBound) {
@@ -2994,9 +3024,21 @@ class App {
     }
 
     setConfigSubnavActive(id) {
+        const nav = document.getElementById('config-subnav');
+        let activeEl = null;
         document.querySelectorAll('#config-subnav .config-subnav-item').forEach(item => {
-            item.classList.toggle('active', item.dataset.target === id);
+            const on = item.dataset.target === id;
+            item.classList.toggle('active', on);
+            if (on) activeEl = item;
         });
+        // 窄屏时导航条横向可滚：当前分组要是滚出可视区，高亮等于没有，这里把它带回来
+        if (nav && activeEl && nav.scrollWidth > nav.clientWidth + 1) {
+            const left = activeEl.offsetLeft;
+            const right = left + activeEl.offsetWidth;
+            if (left < nav.scrollLeft || right > nav.scrollLeft + nav.clientWidth) {
+                nav.scrollTo({ left: left - nav.clientWidth / 2 + activeEl.offsetWidth / 2, behavior: 'smooth' });
+            }
+        }
     }
 
     // 依赖父开关的输入框：父开关关闭时置灰只读（用 readOnly 而非 disabled，保证仍随表单提交）

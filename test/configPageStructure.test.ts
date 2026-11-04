@@ -188,3 +188,18 @@ test('音源巡检默认间隔已放宽到 360 分钟（默认值、兜底值与
   assert.match(serverTs, /probe\.intervalMinutes'\]\) \|\| 360/)
   assert.match(formBlock, /name="customSource\.probe\.intervalMinutes"[\s\S]{0,200}?value="360"/)
 })
+
+test('配置页双版式：默认卡片，行列表版本的分组导航固定常驻', () => {
+  // 版式只在 URL 上切换，不写 localStorage：用户上次看过 ?cfg=rows 不该回不到默认
+  assert.match(appJs, /new URLSearchParams\(location\.search\)\.get\('cfg'\)/)
+  assert.doesNotMatch(appJs, /localStorage\.(get|set)Item\('lx_config_layout'/, '版式选择不应记忆在本地')
+  assert.match(appJs, /form\.classList\.toggle\('cfg-rows'/, '未切换表单上的版式 class')
+  // 导航条在 <form> 之外，只会靠 #view-config 上的同名 class 生效
+  assert.match(appJs, /view\.classList\.toggle\('cfg-rows'/, '导航条所在的视图也要打上版式 class')
+
+  const css = fs.readFileSync(path.join(ROOT, 'public/style.css'), 'utf8')
+  const pinned = sliceBetween(css, '#view-config.cfg-rows .config-subnav {', '}')
+  assert.match(pinned, /position:\s*sticky/, '行列表版本的分组导航必须吸顶固定')
+  assert.match(pinned, /top:\s*0/, '吸顶不能留偏移，否则会压住第一组标题')
+  assert.match(css, /#view-config\.cfg-rows \.config-group \{\s*scroll-margin-top/, '跳转后分组标题要避开固定条')
+})

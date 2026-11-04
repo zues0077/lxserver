@@ -5,6 +5,7 @@ import {
     beginSourceReload,
     markSourceBusy,
     reviewSourceScript,
+    describeIsolationReason,
 } from './sourceGuard'
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure } from './sourceProbe'
@@ -2062,7 +2063,7 @@ async function loadOneSourceInner(
             if (!guardDecision.flag) {
                 console.warn(`[自检护栏] ⓘ 命中既有隔离记录，跳过加载: ${metadata.name || source.name} (${source.id}) 原因=${guardDecision.reason}`)
             }
-            apiStatus.set(apiKey, { status: 'failed', error: `已被自检护栏隔离（${guardDecision.reason}）` })
+            apiStatus.set(apiKey, { status: 'failed', error: `已被自检护栏隔离（${describeIsolationReason(guardDecision.reason)}）` })
             unloadLoadedApi(apiKey)
             stats.isolatedCount = (stats.isolatedCount || 0) + 1
             return { needsSave: false }
