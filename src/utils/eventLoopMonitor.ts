@@ -84,13 +84,26 @@ const SAMPLE_INTERVAL_MS = (() => {
 
 /** 卡顿超过该值才记录（毫秒） */
 const STALL_LOG_THRESHOLD_MS = 500
+/**
+ * 卡顿分级阈值（毫秒）。
+ *
+ * 2026-11-04 实测：一天 259 条 `[ERROR] 主线程卡顿`，其中绝大多数是 500~2000ms 的
+ * 小停顿（巡检/慢源回调），把真正的 ERROR 淹没了。分级后：
+ *   - < 2s：WARN，且 60 秒内只记一条（否则慢源一次巡检能刷十几条）
+ *   - ≥ 2s：ERROR，照旧带全量快照并做联动归因（这种量级才值得查是谁）
+ */
+const STALL_ERROR_MS = 2000
+/** 告警档（500ms~2s）的最小记录间隔：合并成每分钟一条 */
+const STALL_WARN_COOLDOWN_MS = 60_000
+/** 错误档（≥2s）的最小记录间隔，避免卡顿本身把日志刷爆（毫秒） */
+const STALL_LOG_COOLDOWN_MS = 1000
+/** 启动后这段时间内的卡顿按「启动/重载期」处理：同步加载几十个源必然卡，不做归因 */
+const STARTUP_WINDOW_MS = 120_000
 /** GC 暂停超过该值单独记一行（毫秒） */
 const GC_LOG_THRESHOLD_MS = 300
 /** 进入 recentPauses 的最低暂停（毫秒） */
 const RECENT_PAUSE_THRESHOLD_MS = 100
 const MAX_RECENT_PAUSES = 10
-/** 卡顿日志最小间隔，避免卡顿本身把日志刷爆（毫秒） */
-const STALL_LOG_COOLDOWN_MS = 1000
 
 let started = false
 let histogram: ReturnType<typeof monitorEventLoopDelay> | null = null
@@ -133,14 +146,32 @@ const describeLoop = (): string => {
 /** 卡顿时刻的完整快照：同时写 stdout（docker logs）与 app.log */
 const logStall = (lagMs: number): void => {
   const now = Date.now()
-  if (now - lastStallLogAt < STALL_LOG_COOLDOWN_MS) return
+  const severe = lagMs >= STALL_ERROR_MS
+  // 启动后 2 分钟内 / 刚加载完几十个音源：同步 eval 必然把主线程占住，
+  // 这不是「哪个源有问题」，不该按 ERROR 记，也不该丢给归因去误判嫌疑人。
+  const startup = process.uptime() * 1000 < STARTUP_WINDOW_MS
+  const cooldown = severe ? STALL_LOG_COOLDOWN_MS : STALL_WARN_COOLDOWN_MS
+  if (now - lastStallLogAt < cooldown) return
   lastStallLogAt = now
+
   const msg = `[事件循环] 主线程卡顿 ${lagMs}ms（期间所有 HTTP 请求与音频下发都会停顿）` +
     ` | ${describeMemory()} | ${describeLoop()}` +
     (gcCount > 0 ? ` | GC 累计 ${gcCount} 次共 ${Math.round(gcTotalPauseMs)}ms（单次最大 ${Math.round(gcMaxPauseMs)}ms）` : '') +
-    ` | 活动长定时器: ${describeActiveLongTimers()}`
-  console.error(msg)
-  syncLog.error(msg)
+    ` | 活动长定时器: ${describeActiveLongTimers()}` +
+    (startup ? ' | 启动/重载期' : '')
+
+  if (severe) {
+    console.error(msg)
+    syncLog.error(msg)
+  } else {
+    // 500ms~2s 的停顿在巡检/多源并发时很常见，降为 WARN 并合并记录
+    console.warn(msg)
+    syncLog.warn(msg)
+  }
+
+  if (startup) return
+  if (!severe) return
+
   // 卡顿联动归因：直接从「慢定时器回调 + 定时器登记」锁定候选音源。
   // 默认 warn 模式只告警不隔离；连续归因同一源且显式开启开关才隔离。
   try {

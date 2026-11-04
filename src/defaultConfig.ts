@@ -169,10 +169,13 @@ const config: LX.Config = {
   'customSource.trash.retentionDays': 30,
   'customSource.probe.probeOnNewSource': true, // 新增音源是否立即巡检
   // 已关闭平台「快速复检」：只探被自动关闭的平台、每平台 1 首，成功即恢复，不做定罪。
-  // 全量巡检 6 小时一轮，被误关或平台临时故障的源原本要等这么久才能复活；
-  // 复检把恢复窗口压到 30 分钟，成本只有全量的几十分之一。设 0 关闭。
-  'customSource.probe.restoreIntervalMinutes': 30,
-  'customSource.probe.restoreBatch': 16, // 每轮复检最多探多少个「源×平台」，多的按关闭时间轮转
+  // 全量巡检一轮后，被误关或平台临时故障的源原本要等这么久才能复活；
+  // 复检把恢复窗口压到 12 小时，成本只有全量的几十分之一。设 0 关闭。
+  // 默认 180（3 小时）而不是 30：慢源（脚本同步块 5~7 秒）恰好也有一堆平台被关着，
+  // 30 分钟一轮等于每半小时把主线程卡 6~13 秒（2026-11-04 246 实测）。
+  // 也不用 720：246 实测有 62 个平台待复检，720 分钟 × 4 轮 = 单个平台最长要等两天才轮到。
+  'customSource.probe.restoreIntervalMinutes': 180,
+  'customSource.probe.restoreBatch': 32, // 每轮复检最多探多少个「源×平台」，多的按关闭时间轮转（62 个平台约 2 轮扫完）
   // 同一平台两次探测的最小间隔（毫秒）。全量巡检里单个平台常排 20~30 个源，
   // 并发全开时同一平台会瞬时收到多个请求，最容易被平台判成异常流量。设 0 关闭。
   'customSource.probe.throttleMs': 250,

@@ -362,9 +362,10 @@ export const configOf = (): ProbeConfig => {
     systemicFailureRatio: ratioNumber(c['customSource.probe.systemicFailureRatio'], DEFAULT_SYSTEMIC_RATIO),
     suspectMaxOkRatio: ratioNumber(c['customSource.probe.suspectMaxOkRatio'], DEFAULT_SUSPECT_MAX_OK_RATIO),
     suspectBackoff: c['customSource.probe.suspectBackoff'] !== false,
-    // 快速复检：默认 30 分钟一轮，每轮最多 16 个「源 × 平台」；设 0 可关闭
-    restoreIntervalMinutes: nonNegativeNumber(c['customSource.probe.restoreIntervalMinutes'], 30),
-    restoreBatch: Math.max(1, Math.round(positiveNumber(c['customSource.probe.restoreBatch'], 16))),
+    // 快速复检：默认 180 分钟（3 小时）一轮，每轮最多 32 个「源 × 平台」；设 0 可关闭
+    // 246 实测 62 个平台待复检：32 个/轮 → 2 轮（6 小时）扫完，单个平台最长等 6 小时
+    restoreIntervalMinutes: nonNegativeNumber(c['customSource.probe.restoreIntervalMinutes'], 180),
+    restoreBatch: Math.max(1, Math.round(positiveNumber(c['customSource.probe.restoreBatch'], 32))),
     // 同平台探测最小间隔：默认 250ms，上限 5000ms，避免配置写错把巡检拖成几小时
     throttleMs: Math.min(5000, nonNegativeNumber(c['customSource.probe.throttleMs'], 250)),
     // 单轮预算：默认 8 分钟（低于默认间隔 180/360 分钟，留足余量）
@@ -1205,6 +1206,10 @@ export async function runSourceProbe(
       message: '',
     }
 
+    // 复检专属：被跳过的「降速源」数量与批量截断备注，最后拼进摘要
+    let restoreSkippedThrottled = 0
+    let restoreCutNote = ''
+
     const statusByOwner = new Map<string, ProbeStatusFile>()
     const statusFor = (owner: string): ProbeStatusFile => {
       let s = statusByOwner.get(owner)
@@ -1237,6 +1242,14 @@ export async function runSourceProbe(
         // 其余平台既不探测也不计入 skipped —— 这一轮的样本本来就只覆盖关闭平台，
         // 把它们算进「跳过」会让面板上的数字看起来像巡检大面积失效。
         if (options.restoreOnly && !platformState.autoDisabled) continue
+
+        // 复检跳过「降速运行」的慢源：它单次同步块就要 5~7 秒，探它一次就是把主线程
+        // 停住一次，而它的平台本来也大多是同一个后端在失败——纯亏。
+        // 这些源仍在全量巡检里参与，降速状态 30 分钟自动过期，过期后复检自然又会带上它。
+        if (options.restoreOnly && isThrottled(target.owner, target.id)) {
+          restoreSkippedThrottled++
+          continue
+        }
 
         // 用户在面板上手动关闭的平台：尊重用户选择，永不参与自动复检
         const flags = readPlatformFlags(ownerDirName(target.owner), target.id)
@@ -1327,7 +1340,8 @@ export async function runSourceProbe(
     let plannedJobs = jobs
     if (options.restoreOnly && jobs.length > conf.restoreBatch) {
       plannedJobs = jobs.slice(0, conf.restoreBatch)
-      result.message = `关闭平台复检：本轮只取 ${plannedJobs.length}/${jobs.length} 个（restoreBatch=${conf.restoreBatch}，按最久未探轮转）`
+      // 不能直接写 result.message：后面统一拼摘要时会整段覆盖，这条提示就丢了
+      restoreCutNote = `；本轮只取 ${plannedJobs.length}/${jobs.length} 个（restoreBatch=${conf.restoreBatch}，按最久未探轮转）`
     }
 
     // 并发消费探测任务。同一个平台会按候选测试曲目依次重试，任意一首成功即视为该平台可用 ——
@@ -1537,6 +1551,13 @@ export async function runSourceProbe(
       }
     }
 
+    // 复检只做「恢复」：上面的定罪块整段跳过，platformsDown 因此永远是 0，
+    // 摘要就变成「可用 0、不可用 0、跳过 0」——看着像啥都没干（2026-11-04 246 实测三轮都这样）。
+    // 这里按「探测过但没恢复」补齐，让面板与日志能看出复检到底成没成。
+    if (options.restoreOnly) {
+      result.platformsDown = Math.max(0, result.platformsChecked - result.platformsOk)
+    }
+
     // 全平台不可用 → 移除音源
     if (conf.autoRemoveSource && !options.restoreOnly) {
       for (const target of targets) {
@@ -1581,7 +1602,9 @@ export async function runSourceProbe(
       (result.removed.length ? `；移除 ${result.removed.length} 个音源` : '') +
       (result.suspectPlatforms.length ? `；${result.suspectPlatforms.length} 个平台疑似平台侧异常已暂缓处置` : '') +
       (result.suspectSkippedPlatforms.length
-        ? `；${result.suspectSkippedPlatforms.length} 个平台上轮疑似异常本轮停探（每平台保留 ${SUSPECT_SAMPLE_SIZE} 个哨兵）` : '')
+        ? `；${result.suspectSkippedPlatforms.length} 个平台上轮疑似异常本轮停探（每平台保留 ${SUSPECT_SAMPLE_SIZE} 个哨兵）` : '') +
+      (restoreSkippedThrottled ? `；跳过 ${restoreSkippedThrottled} 个降速中的慢源` : '') +
+      restoreCutNote
 
     if (options.restoreOnly) lastRestoreRun = result
     else lastRun = result

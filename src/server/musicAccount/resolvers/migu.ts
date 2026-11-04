@@ -498,6 +498,18 @@ export async function keepalive(cookie: string): Promise<{ renewed: boolean; coo
   if (info.newPacmToken) {
     return { renewed: true, cookie: mergePacmToken(cookie, info.newPacmToken), online: info.online }
   }
+  // 票真的过期了（平台回 299999「uid不能为空」）时，queryUserInfo 不会下发新票：
+  // 只靠这条路径，一次超过 2 小时的停机就能让保温永久失败，直到用户手动点校验
+  // 或 72h 巡检走到 getAccountInfo 里的换票兜底（2026-11-04 246 实测：停服 6 小时
+  // 后每小时 4 条 299999、连续 2 小时没恢复，而手工校验立刻拿到新票）。
+  // 这里补上同一条救命路径：用 LTToken 换一张新票。
+  if (info.online === false) {
+    const rescued = await refreshPacmToken(cookie)
+    if (rescued.ok && rescued.cookie) {
+      console.log('[平台账号] 咪咕 pacmtoken 已用 LTToken 在保温时续活（原本已过期）')
+      return { renewed: true, cookie: rescued.cookie, online: true }
+    }
+  }
   return { renewed: false, cookie, online: info.online }
 }
 

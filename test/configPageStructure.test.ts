@@ -63,6 +63,7 @@ const REQUIRED_FIELDS = [
   'subsonic.source.priority', 'subsonic.source.crossPlatform', 'subsonic.source.autoSwitchCustom',
   'customSource.probe.enabled', 'customSource.probe.intervalMinutes',
   'customSource.probe.concurrency', 'customSource.probe.failThreshold',
+  'customSource.probe.restoreIntervalMinutes',
   'customSource.probe.autoDisablePlatform', 'customSource.probe.autoRemoveSource',
   'customSource.probe.removeMode',
   'customSource.trash.retentionDays',

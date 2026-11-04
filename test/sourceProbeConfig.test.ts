@@ -24,11 +24,13 @@ const withConfig = (cfg: Record<string, any>, fn: () => void) => {
   }
 }
 
-test('新增配置的默认值：复检 30 分钟 / 每轮 16 个 / 节流 250ms / 预算 8 分钟', () => {
+test('新增配置的默认值：复检 180 分钟（3h）/ 每轮 32 个 / 节流 250ms / 预算 8 分钟', () => {
   withConfig({}, () => {
     const c = configOf()
-    assert.strictEqual(c.restoreIntervalMinutes, 30)
-    assert.strictEqual(c.restoreBatch, 16)
+    // 默认从 30 改成 180：30 分钟一轮会让慢源反复把主线程卡 6~13 秒（2026-11-04 实测）；
+    // 也不用 720 —— 62 个待复检平台会让单个平台最长等 2 天
+    assert.strictEqual(c.restoreIntervalMinutes, 180)
+    assert.strictEqual(c.restoreBatch, 32)
     assert.strictEqual(c.throttleMs, 250)
     assert.strictEqual(c.maxDurationMs, 8 * 60 * 1000)
   })

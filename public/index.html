@@ -2278,6 +2278,14 @@
                                                 class="form-input config-input" value="2" min="1" />
                                             <small class="config-hint">调高可减少误判，但失效平台会更晚被关闭</small>
                                         </div>
+                                        <div class="config-field">
+                                            <label class="config-label">已关闭平台复检间隔（分钟）</label>
+                                            <input type="number" name="customSource.probe.restoreIntervalMinutes"
+                                                class="form-input config-input" value="180" min="0" max="10080" />
+                                            <small class="config-hint">
+                                                默认 180（3 小时）。只复检被自动关闭的平台，成功即恢复，不参与定罪；填 0 关闭。已降速的慢源会被跳过，不重复占用主线程
+                                            </small>
+                                        </div>
                                         <div class="config-divider"></div>
                                         <div class="config-subhead">失效处理</div>
                                         <div class="config-toggle-row">

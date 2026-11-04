@@ -207,7 +207,7 @@ export const startScheduler = () => {
   registerTask(sourceProbeTask)
 
   // 已关闭平台的快速复检（只恢复、不定罪）：把误关/临时故障的恢复窗口从「一个全量周期」
-  // 压到 30 分钟。customSource.probe.restoreIntervalMinutes=0 可关闭。
+  // 压到 12 小时（默认 720 分钟）。customSource.probe.restoreIntervalMinutes=0 可关闭。
   const sourceProbeRestoreTask = createSourceProbeRestoreTask()
   registerTask(sourceProbeRestoreTask)
 

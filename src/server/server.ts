@@ -9719,14 +9719,77 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             return
           }
 
-          // console.log(`[热搜服务] 获取热搜: source=${source}`)
-          const result = await musicSdk[source].hotSearch.getList()
+          // 热搜是「顺带看看」的功能，不该被单个平台的超时拖住、更不该因此空着。
+          // 单平台超时实测会遇到 Request Timeout（2026-11-04 246 日志），原来直接返回 [],
+          // 用户在界面上就是「热搜一片空白」。改为：首选平台 → 依次兜底其它支持热搜的平台
+          // → 全挂则用 30 分钟内最近一次成功结果（标 stale）。
+          const HOT_SEARCH_TIMEOUT_MS = 6000
+          const HOT_SEARCH_CACHE_MS = 30 * 60 * 1000
+          type HotCache = { at: number; list: any }
+          const hotCache: Map<string, HotCache> = ((global as any).__lxHotSearchCache ??= new Map())
+
+          const withTimeout = async <T>(p: Promise<T>, ms: number, label: string): Promise<T> => {
+            let timer: NodeJS.Timeout | undefined
+            try {
+              return await Promise.race([
+                p,
+                new Promise<T>((_, reject) => {
+                  timer = setTimeout(() => reject(new Error(`${label} 超时 (${ms}ms)`)), ms)
+                  timer.unref?.()
+                }),
+              ])
+            } finally {
+              if (timer) clearTimeout(timer)
+            }
+          }
+
+          const candidates = [source, ...Object.keys(musicSdk).filter(k => k !== source && musicSdk[k]?.hotSearch?.getList)]
+          const failures: string[] = []
+          let payload: any = null
+          let usedSource = ''
+          for (const cand of candidates) {
+            const getter = musicSdk[cand]?.hotSearch?.getList
+            if (!getter) continue
+            try {
+              const list = await withTimeout(Promise.resolve(getter.call(musicSdk[cand].hotSearch)), HOT_SEARCH_TIMEOUT_MS, cand)
+              if (Array.isArray(list) && list.length) {
+                payload = list
+                usedSource = cand
+                hotCache.set(cand, { at: Date.now(), list })
+                if (cand !== source) console.warn(`[热搜服务] ${source} 不可用（${failures.join('；') || '无数据'}），已兜底到 ${cand}`)
+                break
+              }
+              failures.push(`${cand}: 空结果`)
+            } catch (e: any) {
+              failures.push(`${cand}: ${e?.message || e}`)
+            }
+          }
+
+          if (!payload) {
+            // 全平台都拿不到：退回最近 30 分钟的成功结果，避免界面直接空掉
+            const stale = [...hotCache.entries()].sort((a, b) => b[1].at - a[1].at)[0]
+            if (stale && Date.now() - stale[1].at <= HOT_SEARCH_CACHE_MS) {
+              console.warn(`[热搜服务] 全部平台失败（${failures.join('；')}），返回 ${stale[0]} 的缓存结果`)
+              res.writeHead(200, {
+                'Content-Type': 'application/json',
+                'Cache-Control': 'no-store',
+                'X-Hot-Search-Stale': '1',
+              })
+              res.end(JSON.stringify(stale[1].list))
+              return
+            }
+            console.error('[热搜服务] 获取热搜失败:', failures.join('；'))
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify([]))
+            return
+          }
 
           res.writeHead(200, {
             'Content-Type': 'application/json',
-            'Cache-Control': 'public, max-age=300' // 5分钟缓存
+            'Cache-Control': 'public, max-age=300', // 5分钟缓存
+            ...(usedSource !== source ? { 'X-Hot-Search-Source': usedSource } : {}),
           })
-          res.end(JSON.stringify(result))
+          res.end(JSON.stringify(payload))
         } catch (err: any) {
           console.error('[热搜服务] 获取热搜失败:', err.message)
           // Return empty array instead of 500 to keep UI stable
@@ -10653,8 +10716,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               ? Number(global.lx.config['customSource.trash.retentionDays']) : 30,
             // 快速复检 / 节流 / 单轮预算：0 是合法值（关闭），不能用 || 兜底
             'customSource.probe.restoreIntervalMinutes': Number.isFinite(Number(global.lx.config['customSource.probe.restoreIntervalMinutes']))
-              ? Number(global.lx.config['customSource.probe.restoreIntervalMinutes']) : 30,
-            'customSource.probe.restoreBatch': Number(global.lx.config['customSource.probe.restoreBatch']) || 16,
+              ? Number(global.lx.config['customSource.probe.restoreIntervalMinutes']) : 180,
+            'customSource.probe.restoreBatch': Number(global.lx.config['customSource.probe.restoreBatch']) || 32,
             'customSource.probe.throttleMs': Number.isFinite(Number(global.lx.config['customSource.probe.throttleMs']))
               ? Number(global.lx.config['customSource.probe.throttleMs']) : 250,
             'customSource.probe.maxDurationMs': Number(global.lx.config['customSource.probe.maxDurationMs']) || 480000,
@@ -10744,14 +10807,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   ? Math.min(3650, Math.max(0, days))
                   : 30
               }
-              // 已关闭平台快速复检：间隔 0 = 关闭该功能（下限 0、上限 1440 分钟）
+              // 已关闭平台快速复检：间隔 0 = 关闭该功能（下限 0、上限 10080 分钟 = 7 天）
+              // 上限放到 7 天是为了跟「巡检间隔」解耦：主巡检可以设很久，复检单独调
               if (newConfig['customSource.probe.restoreIntervalMinutes'] !== undefined) {
                 global.lx.config['customSource.probe.restoreIntervalMinutes'] =
-                  Math.min(1440, Math.max(0, parseInt(newConfig['customSource.probe.restoreIntervalMinutes']) || 0))
+                  Math.min(10080, Math.max(0, parseInt(newConfig['customSource.probe.restoreIntervalMinutes']) || 0))
               }
               if (newConfig['customSource.probe.restoreBatch'] !== undefined) {
                 global.lx.config['customSource.probe.restoreBatch'] =
-                  Math.min(200, Math.max(1, parseInt(newConfig['customSource.probe.restoreBatch']) || 16))
+                  Math.min(200, Math.max(1, parseInt(newConfig['customSource.probe.restoreBatch']) || 32))
               }
               // 同平台探测最小间隔：0 = 不节流，上限 5000ms
               if (newConfig['customSource.probe.throttleMs'] !== undefined) {

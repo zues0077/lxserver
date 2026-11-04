@@ -2751,6 +2751,12 @@ class App {
             if (form.elements['customSource.probe.failThreshold']) {
                 form.elements['customSource.probe.failThreshold'].value = config['customSource.probe.failThreshold'] || 2;
             }
+            // 复检间隔：0 是合法值（关闭），不能用 || 兜底
+            if (form.elements['customSource.probe.restoreIntervalMinutes']) {
+                const restoreMin = Number(config['customSource.probe.restoreIntervalMinutes']);
+                form.elements['customSource.probe.restoreIntervalMinutes'].value =
+                    Number.isFinite(restoreMin) ? restoreMin : 180;
+            }
             if (form.elements['customSource.probe.autoDisablePlatform']) {
                 form.elements['customSource.probe.autoDisablePlatform'].checked = config['customSource.probe.autoDisablePlatform'] !== false;
             }
@@ -3630,6 +3636,11 @@ class App {
             'customSource.probe.intervalMinutes': parseInt(formData.get('customSource.probe.intervalMinutes')) || 360,
             'customSource.probe.concurrency': parseInt(formData.get('customSource.probe.concurrency')) || 6,
             'customSource.probe.failThreshold': parseInt(formData.get('customSource.probe.failThreshold')) || 2,
+            // 复检间隔：0 = 关闭该功能，非法输入回落 720
+            'customSource.probe.restoreIntervalMinutes': (() => {
+                const minutes = parseInt(formData.get('customSource.probe.restoreIntervalMinutes'));
+                return Number.isFinite(minutes) ? Math.min(10080, Math.max(0, minutes)) : 180;
+            })(),
             'customSource.probe.autoDisablePlatform': formData.get('customSource.probe.autoDisablePlatform') === 'on',
             'customSource.probe.autoRemoveSource': formData.get('customSource.probe.autoRemoveSource') === 'on',
             'customSource.probe.removeMode': formData.get('customSource.probe.removeMode') || 'trash',
