@@ -327,6 +327,19 @@ declare namespace LX {
     'musicAccount.kglite.minRemainHours'?: number
 
     /**
+     * 酷狗概念版：是否开启登录态静默续期。
+     * 概念版 App token 约 60 天过期，过期后取链/领取全线失效且只能重新登录。
+     * 开启后每账号每 6~8 天随机续一次（见下面两个键），账号之间自动错开。
+     */
+    'musicAccount.kglite.tokenRefresh'?: boolean
+
+    /** 酷狗概念版：续期间隔下限（天），实际值在 [下限, 上限] 内随机 */
+    'musicAccount.kglite.tokenRefreshMinDays'?: number
+
+    /** 酷狗概念版：续期间隔上限（天） */
+    'musicAccount.kglite.tokenRefreshMaxDays'?: number
+
+    /**
      * 是否启用自定义歌曲目录
      */
     'user.enableCustomMusicDir'?: boolean

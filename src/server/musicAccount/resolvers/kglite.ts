@@ -30,6 +30,17 @@
 import crypto from 'crypto'
 import { request, withTimeout, extFromUrl, parseCookie } from '../http'
 import type { AccountResolveResult, AccountInfo } from '../types'
+import {
+  aesCbcDecrypt,
+  aesCbcEncryptHex,
+  encryptEmptyParams,
+  guidFromSeed,
+  rsaRawEncryptHex,
+  LITE_AES,
+  LITE_T1,
+  LITE_T2,
+  LITE_T3,
+} from '../kugouLiteCrypto'
 
 // —— 概念版固定参数 ——
 const APP_ID = 3116
@@ -55,6 +66,8 @@ const LISTEN_CLIENT_VER = 10566
 const LISTEN_UA = 'Android13-1070-10566-201-0-ReportPlaySongToServerProtocol-wifi'
 
 const GATEWAY = 'https://gateway.kugou.com'
+/** 登录态续期走登录域，不是 gateway；而且这个域上游用的就是**明文 http** */
+const LOGIN_USER_API = 'http://login.user.kugou.com'
 
 /** 今日领取额度上限（平台侧 fixed=8，一次 3 小时刚好覆盖一天） */
 export const DAILY_CLAIM_LIMIT = 8
@@ -852,6 +865,179 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
   }
 }
 
+// —— 登录态续期（token 每周静默续一次） ——
+
+export interface TokenRefreshResult {
+  ok: boolean
+  /** 平台确实应答了「登录态有效」；token 可能换新，也可能原样返回 */
+  renewed: boolean
+  /** 平台下发的新 token 与旧的不同（日志里用来区分「续到新票」和「原样返回」） */
+  changed?: boolean
+  /** 成功时可直接落库的 Cookie（token/userid/mid/dfid + t1 + 设备四件套） */
+  cookie?: string
+  message?: string
+  errorCode?: number
+}
+
+/**
+ * 登录设备四件套。
+ *
+ * 优先沿用 Cookie 里已有的 `KUGOU_API_*`（扫码登录现在会把它们写进凭据）；
+ * 老凭据没有就用「userid + mid」派生 —— **必须稳定**，每次随机等于设备漂移，
+ * 平台侧看到的就是「同一个 token 在不同手机上被用」，反而更容易触发风控。
+ */
+function loginDevice(c: LiteCreds, raw: Record<string, string>): { guid: string; dev: string; mac: string } {
+  const seed = `${c.userid}:${c.mid}`
+  return {
+    guid: String(raw.KUGOU_API_GUID || '').trim() || guidFromSeed(`${seed}:guid`),
+    dev: String(raw.KUGOU_API_DEV || '').trim() || md5(`${seed}:dev`).slice(0, 10).toUpperCase(),
+    mac: String(raw.KUGOU_API_MAC || '').trim(),
+  }
+}
+
+/**
+ * 续期接口的错误码 → 人话。
+ *
+ * 与 `claimErrorText` 分开：同一个码在两条链路上含义不同，硬套会误导排查。
+ * 实测（2026-11-04，用假 token 打真接口）：
+ *   - 签名/参数正确但 token 是假的 → `20017`
+ *   - 故意把 signature 改成 deadbeef → `20006`
+ * 也就是说 **20017 才是「token 不认」，20006 是我们自己请求写错了**，
+ * 而领取链路里 20006 表示限流 —— 别混。
+ */
+function refreshErrorText(b: any): string {
+  const code = Number(b?.error_code ?? b?.errcode) || 0
+  const raw = String(b?.error_msg || b?.error || b?.msg || '').trim()
+  if (code === 20017) return '登录态已失效（20017），需要重新扫码或短信登录'
+  if (code === 20006) return '请求被平台拒绝（20006，签名/参数不合法）'
+  if (code === 30000) return '操作过于频繁（30000），稍后再试'
+  if (code === 20028) return '触发平台人机验证（20028）'
+  if (raw) return raw
+  return `status=${b?.status ?? '-'}${code ? `，error_code=${code}` : ''}`
+}
+
+/**
+ * 用当前 App token 静默换一张新 token（`/v5/login_by_token`）。
+ *
+ * 为什么要做：概念版 App token 大约 60 天过期，过期后只能重新扫码/收短信。
+ * 上游 KGM-AUTO-CHECKIN 的做法是**每周日**刷一次，这里改成「每账号每周随机一次」，
+ * 排程在 index.ts（避免所有账号同一时刻打同一个登录接口）。
+ *
+ * 三条硬约束（照抄上游，别简化）：
+ *   1. `p3` = AES({clienttime(秒), token})，用**固定** liteKey/liteIv；
+ *   2. `params` = AES('{}')，用**临时随机 key**；`pk` = 裸RSA({clienttime_ms, key})，
+ *      服务端靠 pk 解出 params 的 key，再去解响应里的 `secu_params`；
+ *   3. 响应成功但**没有有效 token** 时绝不写回 —— 写回空值等于把这个号弄死
+ *      （上游 8e8b5ec4 踩过：`undefined !== 旧值` 成立，token 被覆盖成 undefined）。
+ */
+export async function refreshLoginToken(cookie: string): Promise<TokenRefreshResult> {
+  if (!hasLiteCreds(cookie)) {
+    return { ok: false, renewed: false, message: '概念版凭据不完整（需要 token / userid / mid），请重新登录' }
+  }
+  const raw = parseCookie(cookie) as Record<string, string>
+  const c = extractCreds(cookie)
+  const dev = loginDevice(c, raw)
+  const now = Date.now()
+
+  const p3 = aesCbcEncryptHex(
+    JSON.stringify({ clienttime: Math.floor(now / 1000), token: c.token }),
+    LITE_AES.key, LITE_AES.iv,
+  )
+  const encParams = encryptEmptyParams()
+  const pk = rsaRawEncryptHex(JSON.stringify({ clienttime_ms: now, key: encParams.key }))
+  // t2 里的 0f6072… 是概念版客户端写死的固定串，不是我们的设备 id
+  const t2 = aesCbcEncryptHex(
+    `${dev.guid}|0f607264fc6318a92b9e13c65db7cd3c|${dev.mac}|${dev.dev}|${now}`,
+    LITE_T2.key, LITE_T2.iv,
+  )
+  const t1 = aesCbcEncryptHex(`${String(raw.t1 || '').trim()}|${now}`, LITE_T1.key, LITE_T1.iv)
+
+  try {
+    const r = await liteCall('/v5/login_by_token', cookie, {
+      method: 'POST',
+      host: LOGIN_USER_API,
+      timeout: 15000,
+      data: {
+        dfid: c.dfid,
+        p3,
+        plat: 1,
+        t1,
+        t2,
+        t3: LITE_T3,
+        pk,
+        params: encParams.str,
+        userid: c.userid,
+        clienttime_ms: now,
+        dev: dev.dev,
+      },
+    })
+    const b: any = r.body || {}
+    if (Number(b.status) !== 1) {
+      const code = Number(b?.error_code) || 0
+      return {
+        ok: false,
+        renewed: false,
+        errorCode: code || undefined,
+        message: refreshErrorText(b),
+      }
+    }
+
+    const d: any = b.data || {}
+    let token = ''
+    let t1New = String(d.t1 || '').trim()
+    if (d.secu_params) {
+      let plain = ''
+      try {
+        plain = aesCbcDecrypt(String(d.secu_params), encParams.key)
+      } catch (e: any) {
+        return { ok: false, renewed: false, message: `平台返回的 secu_params 解密失败：${e?.message || e}` }
+      }
+      try {
+        const obj = JSON.parse(plain)
+        if (obj && typeof obj === 'object') {
+          token = String(obj.token || '').trim()
+          t1New = String(obj.t1 || t1New).trim()
+        } else {
+          token = String(obj || '').trim()
+        }
+      } catch {
+        token = plain.trim()
+      }
+    }
+    if (!token) token = String(d.token || '').trim()
+    if (!token || token === 'undefined' || token === 'null') {
+      return { ok: false, renewed: false, message: '平台返回成功但没有有效 token（已保留原凭据，不写回）' }
+    }
+
+    // 合并式写回：保留原 Cookie 里的其它字段（`t`、`KugooID`、厂商字段…），只覆盖本次变化的部分。
+    // 整份重建会悄悄丢掉不认识的键 —— 现在用不到不代表平台以后不用。
+    const merged = new Map<string, string>(Object.entries(raw))
+    merged.set('token', token)
+    merged.set('userid', c.userid)
+    merged.set('mid', c.mid)
+    merged.set('dfid', c.dfid)
+    // 扫码登录时 `t` 是 token 的副本；token 换了它也得跟着换，否则同一份 Cookie 里两个 token 打架
+    if (String(raw.t || '').trim() === c.token) merged.set('t', token)
+    // t1 是下次续期要用的会话票据，拿到就存下来（拿不到也不影响本次）
+    if (t1New) merged.set('t1', t1New)
+    merged.set('KUGOU_API_GUID', dev.guid)
+    merged.set('KUGOU_API_MID', c.mid)
+    merged.set('KUGOU_API_DEV', dev.dev)
+    if (dev.mac) merged.set('KUGOU_API_MAC', dev.mac)
+
+    const changed = token !== c.token
+    return {
+      ok: true,
+      renewed: true,
+      changed,
+      cookie: Array.from(merged.entries()).map(([k, v]) => `${k}=${v}`).join('; '),
+      message: changed ? '已换到新 token' : '平台返回同一 token（登录态有效）',
+    }
+  } catch (e: any) {
+    return { ok: false, renewed: false, message: e?.message || String(e) }
+  }
+}
+
 // —— 手机验证码登录 ——
 
 const SMS_SIGN_KEY = 'NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt'
@@ -966,8 +1152,16 @@ export async function loginBySmsCode(
     }
     return {
       ok: true,
-      // 只留取链真正需要的 4 个字段，减少落库体积与敏感面
-      cookie: `token=${token}; userid=${userid}; mid=${state.mid}; dfid=-`,
+      // 只留取链与续期真正需要的字段（续期要用 GUID/DEV 复现同一台设备）
+      cookie: [
+        `token=${token}`,
+        `userid=${userid}`,
+        `mid=${state.mid}`,
+        'dfid=-',
+        `KUGOU_API_GUID=${state.guid}`,
+        `KUGOU_API_MID=${state.mid}`,
+        `KUGOU_API_DEV=${state.device}`,
+      ].join('; '),
       message: '登录成功',
     }
   } catch (e: any) {

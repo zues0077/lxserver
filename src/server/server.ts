@@ -10671,6 +10671,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'musicAccount.kglite.gapMaxSeconds': musicAccount.getKugouLiteAutoClaimConfig().gapMaxSeconds,
             'musicAccount.kglite.minRemainHours': global.lx.config['musicAccount.kglite.minRemainHours'] ?? 24,
             'musicAccount.kglite.rounds': global.lx.config['musicAccount.kglite.rounds'] ?? 3,
+            // 登录态续期：每账号 6~8 天随机一次，账号之间自动错开
+            'musicAccount.kglite.tokenRefresh': musicAccount.getKugouLiteTokenRefreshConfig().enabled,
+            'musicAccount.kglite.tokenRefreshMinDays': musicAccount.getKugouLiteTokenRefreshConfig().minDays,
+            'musicAccount.kglite.tokenRefreshMaxDays': musicAccount.getKugouLiteTokenRefreshConfig().maxDays,
             subsonicPortConflict: global.lx.subsonicPortConflict || null,
             localMusicIdentifyThreads: global.lx.config['localMusicIdentifyThreads'] ?? 2,
             configFilePath: global.lx.configPath || process.env.CONFIG_PATH || path.join(global.lx.dataPath, 'config.js'),
@@ -11763,6 +11767,29 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               global.lx.config['musicAccount.kglite.rounds'] = Math.min(24, Math.max(1, Math.floor(patch.kgliteRounds)))
               kgliteDirty = true
             }
+            // 登录态续期：开关与天数区间。改完立即重排（否则要等下次重启才生效）
+            let refreshDirty = false
+            if (typeof patch.kgliteTokenRefresh === 'boolean') {
+              global.lx.config['musicAccount.kglite.tokenRefresh'] = patch.kgliteTokenRefresh
+              refreshDirty = true
+            }
+            if (typeof patch.kgliteTokenRefreshMinDays === 'number' && Number.isFinite(patch.kgliteTokenRefreshMinDays)) {
+              global.lx.config['musicAccount.kglite.tokenRefreshMinDays'] = Math.min(30, Math.max(1, patch.kgliteTokenRefreshMinDays))
+              refreshDirty = true
+            }
+            if (typeof patch.kgliteTokenRefreshMaxDays === 'number' && Number.isFinite(patch.kgliteTokenRefreshMaxDays)) {
+              global.lx.config['musicAccount.kglite.tokenRefreshMaxDays'] = Math.min(60, Math.max(1, patch.kgliteTokenRefreshMaxDays))
+              refreshDirty = true
+            }
+            {
+              const lo = Number(global.lx.config['musicAccount.kglite.tokenRefreshMinDays'])
+              const hi = Number(global.lx.config['musicAccount.kglite.tokenRefreshMaxDays'])
+              if (Number.isFinite(lo) && Number.isFinite(hi) && lo > hi) {
+                global.lx.config['musicAccount.kglite.tokenRefreshMinDays'] = hi
+                global.lx.config['musicAccount.kglite.tokenRefreshMaxDays'] = lo
+              }
+            }
+            if (refreshDirty) musicAccount.rescheduleKugouLiteTokenRefresh()
             if (kgliteDirty) musicAccount.rescheduleKugouLiteVipAutoClaim()
             if (typeof global.lx?.saveConfig === 'function') global.lx.saveConfig()
             const kgliteCfg = musicAccount.getKugouLiteAutoClaimConfig()
@@ -11778,6 +11805,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               kgliteGapMaxSeconds: kgliteCfg.gapMaxSeconds,
               kgliteMinRemainHours: global.lx.config['musicAccount.kglite.minRemainHours'] ?? 24,
               kgliteRounds: global.lx.config['musicAccount.kglite.rounds'] ?? 3,
+              kgliteTokenRefresh: musicAccount.getKugouLiteTokenRefreshConfig().enabled,
+              kgliteTokenRefreshMinDays: musicAccount.getKugouLiteTokenRefreshConfig().minDays,
+              kgliteTokenRefreshMaxDays: musicAccount.getKugouLiteTokenRefreshConfig().maxDays,
               autoSwitch: global.lx.config['musicAccount.autoSwitch'] || {},
               healthCheck: musicAccount.getHealthCheckState(),
             } }))
@@ -11973,6 +12003,32 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             return
           }
           const data = await musicAccount.claimKugouLiteVip(body.itemId ? String(body.itemId) : undefined)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: true, data }))
+        }).catch((e: any) => {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+        })
+        return
+      }
+
+      // 酷狗概念版：立即续期登录态（body: {itemId} 只续一个 / {all:true} 全部续一次）
+      // 自动续期是「每账号每周随机一次」，这里只是手动兜底：刚重登完想立刻确认链路是否通，
+      // 或某个号提示需要重登、想先探一探 token 到底死没死。
+      if (pathname === '/api/music/accounts/kglite/refresh-token' && req.method === 'POST') {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+        void readBody(req).then(async raw => {
+          let body: any = {}
+          try { body = raw ? JSON.parse(raw) : {} } catch { body = {} }
+          const data = await musicAccount.runKugouLiteTokenRefresh({
+            itemId: body.itemId ? String(body.itemId) : undefined,
+            all: !!body.all,
+          })
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ success: true, data }))
         }).catch((e: any) => {
@@ -13204,6 +13260,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       musicAccount.startKugouLiteVipAutoClaim()
     } catch (e: any) {
       console.warn('[平台账号] 概念版自动补领启动失败（不影响服务运行）:', e?.message || e)
+    }
+    // 概念版登录态静默续期：App token 约 60 天过期，每账号每周随机续一次（过期只能重登）
+    try {
+      musicAccount.startKugouLiteTokenRefresh()
+    } catch (e: any) {
+      console.warn('[平台账号] 概念版登录态续期启动失败（不影响服务运行）:', e?.message || e)
     }
   })
 

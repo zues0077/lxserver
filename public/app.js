@@ -5684,6 +5684,25 @@ class App {
                            </div>
                        </div>
                        <div class="music-acc-auto-tip" id="kglite-next-run"></div>
+                       <div class="music-acc-auto-grid" style="margin-top:6px;">
+                           <label class="music-acc-auto-field music-acc-auto-field--switch"
+                               title="概念版 App token 约 60 天过期，过期后取链与领会员全部失效，只能重新扫码或收短信。开启后每个账号在自己的时间点静默续一次，不需要你在场。">
+                               <input type="checkbox" id="kglite-token-refresh" onchange="app.refreshKugouLiteAutoSummary()"> 自动续期登录态
+                           </label>
+                           <label class="music-acc-auto-field"
+                               title="续期间隔下限（天）。实际间隔在 [下限, 上限] 之间随机抽取，所以不是固定星期几；账号之间会自动错开，至少隔 4 小时">
+                               续期间隔最短（天）
+                               <input type="number" id="kglite-refresh-min" min="1" max="30" step="1" oninput="app.refreshKugouLiteAutoSummary()">
+                           </label>
+                           <label class="music-acc-auto-field" title="续期间隔上限（天）">
+                               续期间隔最长（天）
+                               <input type="number" id="kglite-refresh-max" min="1" max="60" step="1" oninput="app.refreshKugouLiteAutoSummary()">
+                           </label>
+                       </div>
+                       <div class="music-acc-auto-actions">
+                           <button type="button" class="btn-secondary" onclick="app.refreshKugouLiteTokenNow(this)">立即续期登录态</button>
+                       </div>
+                       <div class="music-acc-auto-tip" id="kglite-refresh-state"></div>
                    </div>`
                 : '';
 
@@ -6088,6 +6107,20 @@ class App {
         }
         text += ` · 账号间隔 ${this._gapText(c.gapMinSeconds, c.gapMaxSeconds)}`
             + ` · ${this._kgliteRemainText(c.minRemainHours)}`;
+        // 登录态续期是独立的一件事（防 token 过期），但同样属于「自动维护」，放同一行摘要里
+        const tr = this._kgliteTokenRefresh || {};
+        const trOn = document.getElementById('kglite-token-refresh');
+        if (trOn ? trOn.checked : tr.enabled !== false) {
+            const readNum = (id, fallback) => {
+                const el = document.getElementById(id);
+                if (!el || String(el.value).trim() === '') return fallback;
+                const n = Number(el.value);
+                return Number.isFinite(n) ? n : fallback;
+            };
+            const lo = readNum('kglite-refresh-min', typeof tr.minDays === 'number' ? tr.minDays : 6);
+            const hi = readNum('kglite-refresh-max', typeof tr.maxDays === 'number' ? tr.maxDays : 8);
+            text += ` · 续期 ${lo}~${Math.max(lo, hi)} 天`;
+        }
         return text;
     }
 
@@ -6216,6 +6249,33 @@ class App {
             if (minEl) minEl.value = typeof d.minRemainHours === 'number' ? d.minRemainHours : 24;
             const roundsEl = document.getElementById('kglite-rounds');
             if (roundsEl) roundsEl.value = typeof d.rounds === 'number' ? d.rounds : 3;
+            // 登录态续期：开关 + 天数区间 + 每个账号的下次时间
+            const tr = d.tokenRefresh || {};
+            this._kgliteTokenRefresh = tr;
+            const trEl = document.getElementById('kglite-token-refresh');
+            if (trEl) trEl.checked = tr.enabled !== false;
+            const rMinEl = document.getElementById('kglite-refresh-min');
+            if (rMinEl) rMinEl.value = typeof tr.minDays === 'number' ? tr.minDays : 6;
+            const rMaxEl = document.getElementById('kglite-refresh-max');
+            if (rMaxEl) rMaxEl.value = typeof tr.maxDays === 'number' ? tr.maxDays : 8;
+            const trStateEl = document.getElementById('kglite-refresh-state');
+            if (trStateEl) {
+                if (tr.enabled === false) {
+                    trStateEl.textContent = '登录态续期已关闭（token 过期后只能重新登录）';
+                } else {
+                    const fmt = (ms) => new Date(ms).toLocaleString('zh-CN', {
+                        hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+                    });
+                    const rows = (tr.accounts || []).map(a => {
+                        const next = a.nextAt ? `下次 ${fmt(a.nextAt)}` : '未排程';
+                        const last = a.lastAt ? `上次 ${fmt(a.lastAt)}` : '从未续期';
+                        // 失败原因只在有备注且不是成功文案时带上，避免一行太长
+                        const note = a.note && a.note.includes('失败') ? ` · ${a.note}` : '';
+                        return `${a.label}：${next}（${last}）${note}`;
+                    });
+                    trStateEl.textContent = rows.length ? rows.join(' ｜ ') : '';
+                }
+            }
             const nextEl = document.getElementById('kglite-next-run');
             if (nextEl) {
                 if (d.autoClaim === false) {
@@ -6419,6 +6479,43 @@ class App {
         }
     }
 
+    /**
+     * 手动续期一次登录态（主账号）。
+     *
+     * 自动续期是「每账号 6~8 天随机一次」，平时不需要点这个按钮。
+     * 它的用途是：刚重登完想确认续期链路通不通、或者面板提示「需要重新登录」时先探一探 token 到底死没死。
+     * 续期成功只会换 token（并写回存储），不影响正在播放的链接与会话。
+     */
+    async refreshKugouLiteTokenNow(btn) {
+        if (btn && btn.disabled) return;
+        const text = btn ? btn.textContent : '';
+        if (btn) { btn.disabled = true; btn.textContent = '续期中…'; }
+        try {
+            const res = await this.request('/api/music/accounts/kglite/refresh-token', {
+                method: 'POST',
+                body: JSON.stringify({})
+            });
+            const d = res?.data || {};
+            const list = d.accounts || [];
+            if (d.halted) {
+                showInfo(d.halted);
+            } else if (!list.length) {
+                showInfo('没有需要续期的账号');
+            } else {
+                const okList = list.filter(a => a.ok);
+                const failList = list.filter(a => !a.ok);
+                if (okList.length) showSuccess(okList.map(a => `${a.label}：${a.message}`).join('；'));
+                if (failList.length) showError(failList.map(a => `${a.label}：${a.message}`).join('；'));
+            }
+            // 重新读一次：下次续期时间已按新结果重排，界面要跟上
+            await this.loadKugouLiteVip();
+        } catch (e) {
+            showError(`续期失败：${e.message}`);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = text || '立即续期登录态'; }
+        }
+    }
+
     /** 保存概念版自动领取设置（开始时间 / 账号间隔区间 / 补领阈值 / 开关） */
     async saveKugouLiteAutoClaim(btn) {
         const autoEl = document.getElementById('kglite-auto-claim');
@@ -6427,6 +6524,9 @@ class App {
         const gapMaxEl = document.getElementById('kglite-gap-max');
         const minEl = document.getElementById('kglite-min-remain');
         const roundsEl = document.getElementById('kglite-rounds');
+        const trEl = document.getElementById('kglite-token-refresh');
+        const trMinEl = document.getElementById('kglite-refresh-min');
+        const trMaxEl = document.getElementById('kglite-refresh-max');
         // 空输入不要当成 0（Number('') === 0），否则清空一下就把间隔拉成 5 秒
         const numOf = (el) => {
             if (!el || String(el.value).trim() === '') return undefined;
@@ -6455,6 +6555,17 @@ class App {
                         const n = numOf(roundsEl);
                         if (n === undefined) return undefined;
                         return Math.min(24, Math.max(1, Math.floor(n)));
+                    })(),
+                    kgliteTokenRefresh: trEl ? trEl.checked : undefined,
+                    kgliteTokenRefreshMinDays: (() => {
+                        const n = numOf(trMinEl);
+                        if (n === undefined) return undefined;
+                        return Math.min(30, Math.max(1, Math.floor(n)));
+                    })(),
+                    kgliteTokenRefreshMaxDays: (() => {
+                        const n = numOf(trMaxEl);
+                        if (n === undefined) return undefined;
+                        return Math.min(60, Math.max(1, Math.floor(n)));
                     })()
                 })
             });

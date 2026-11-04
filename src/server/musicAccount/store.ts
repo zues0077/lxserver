@@ -77,6 +77,17 @@ export interface StoredAccountItem {
    * 被当成掉线误报。分开记就不会再用「巡检快照旧」冒充「账号死了」。
    */
   lastSeenAt?: number
+  /**
+   * 下一次「登录态静默续期」的计划时刻（毫秒）。
+   *
+   * 为什么要落盘：续期是一周一次的低频动作，进程重启（容器重建很常见）不能让它重新抽签，
+   * 否则「每周随机」会退化成「每次重启都往后推一周」，最后永远不到点。
+   */
+  tokenRefreshAt?: number
+  /** 上一次续期成功的时刻（毫秒），界面上用来区分「在续」和「从没续过」 */
+  tokenRefreshedAt?: number
+  /** 上一次续期的结果说明（成功/失败都写，排查时不必翻日志） */
+  tokenRefreshNote?: string
 }
 
 export interface StoredAccount {
@@ -109,6 +120,12 @@ export interface AccountItemView {
   health: AccountHealth
   healthText: string
   ageHours: number | null
+  /** 下一次登录态续期的计划时刻，null 表示还没排 */
+  tokenRefreshAt: number | null
+  /** 上一次续期成功时刻，null 表示从未续期 */
+  tokenRefreshedAt: number | null
+  /** 上一次续期结果说明 */
+  tokenRefreshNote: string | null
 }
 
 let cachedDir: string | null = null
@@ -358,6 +375,9 @@ export function listAccounts(): Array<{
         health,
         healthText: health === hp.health ? hp.text : '正常（近期凭证续期成功）',
         ageHours: hp.ageHours,
+        tokenRefreshAt: Number(it.tokenRefreshAt || 0) || null,
+        tokenRefreshedAt: Number(it.tokenRefreshedAt || 0) || null,
+        tokenRefreshNote: it.tokenRefreshNote || null,
       }
     }).sort((a, b) => Number(b.primary) - Number(a.primary))
 
@@ -623,6 +643,42 @@ export function touchAccountSeen(id: string, itemId?: string): void {
     writeStore(store)
   } catch {
     /* 存活证据写失败不影响主流程 */
+  }
+}
+
+/**
+ * 写「登录态续期」的排程与结果。
+ *
+ * 只动这三个字段，不碰 Cookie / 校验快照：续期失败时界面上的「会员/健康」结论依然有效，
+ * 凭什么因为一次网络失败就把账号标成「未校验」。
+ */
+export function setTokenRefreshState(
+  id: string,
+  itemId: string | undefined,
+  patch: { at?: number | null; refreshedAt?: number | null; note?: string | null },
+): void {
+  if (!getPlatform(id)) return
+  try {
+    const store = readStore()
+    const acc = normalize(store.accounts[id])
+    if (!acc?.items?.length) return
+    const target = itemId ? acc.items.find(i => i.id === itemId) : primaryItem(acc)
+    if (!target) return
+    if (patch.at !== undefined) {
+      if (patch.at && patch.at > 0) target.tokenRefreshAt = patch.at
+      else delete target.tokenRefreshAt
+    }
+    if (patch.refreshedAt !== undefined) {
+      if (patch.refreshedAt && patch.refreshedAt > 0) target.tokenRefreshedAt = patch.refreshedAt
+      else delete target.tokenRefreshedAt
+    }
+    if (patch.note !== undefined) {
+      if (patch.note) target.tokenRefreshNote = patch.note.slice(0, 200)
+      else delete target.tokenRefreshNote
+    }
+    writeStore(store)
+  } catch (e: any) {
+    console.log(`[平台账号] 续期排程写入失败（忽略）：${e?.message || e}`)
   }
 }
 

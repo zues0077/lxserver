@@ -66,11 +66,15 @@ export async function create(): Promise<QrCreateResult> {
   const guid = randomGuid()
   const mid = deviceMid(guid)
   const clienttime = String(Date.now())
+  // 设备标识一旦生成就跟着这个号走：续期（/v5/login_by_token）的 t2/t1 要用它，
+  // 每次换一套等于「同一 token 在不同手机上来回切」，平台侧更容易判定异常。
+  const mac = crypto.randomUUID().replace(/-/g, '').slice(0, 12).toUpperCase()
+  const dev = crypto.randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase()
   const cookies: Record<string, string> = {
     KUGOU_API_GUID: guid,
     KUGOU_API_MID: mid,
-    KUGOU_API_MAC: crypto.randomUUID().replace(/-/g, '').slice(0, 12).toUpperCase(),
-    KUGOU_API_DEV: crypto.randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase(),
+    KUGOU_API_MAC: mac,
+    KUGOU_API_DEV: dev,
     dfid: '-',
   }
   const params: Record<string, string> = {
@@ -97,7 +101,7 @@ export async function create(): Promise<QrCreateResult> {
   }
 
   return {
-    state: { key, guid, mid },
+    state: { key, guid, mid, mac, dev },
     image: await qrDataUrl(`https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode=${encodeURIComponent(key)}`),
     hint: '打开酷狗音乐 App → 我的 → 扫一扫',
   }
@@ -112,6 +116,8 @@ export async function check(state: any): Promise<QrCheckResult> {
   const cookies: Record<string, string> = {
     KUGOU_API_GUID: String(state?.guid || ''),
     KUGOU_API_MID: mid,
+    ...(state?.mac ? { KUGOU_API_MAC: String(state.mac) } : {}),
+    ...(state?.dev ? { KUGOU_API_DEV: String(state.dev) } : {}),
     dfid: '-',
   }
   const params: Record<string, string> = {
@@ -148,6 +154,9 @@ export async function check(state: any): Promise<QrCheckResult> {
       `KugooID=${userId}`,
       `mid=${mid}`,
       `dfid=-`,
+      ...(state?.guid ? [`KUGOU_API_GUID=${String(state.guid)}`] : []),
+      ...(state?.mac ? [`KUGOU_API_MAC=${String(state.mac)}`] : []),
+      ...(state?.dev ? [`KUGOU_API_DEV=${String(state.dev)}`] : []),
     ].join('; ')
     return { status: 'success', message: '登录成功', cookie }
   }

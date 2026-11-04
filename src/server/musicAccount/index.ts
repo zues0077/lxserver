@@ -1247,6 +1247,8 @@ export type KugouLiteVipState = kglite.LiteVipInfo & {
   rounds: number
   /** 下一轮自动领取的时间戳（毫秒），没有排程时为 0 */
   nextRunAt: number
+  /** 登录态静默续期的排程与最近结果（每账号每周随机一次） */
+  tokenRefresh: ReturnType<typeof getKugouLiteTokenRefreshState>
   /** 手动「立即全部领取」的进度：running=true 时前端继续轮询 */
   claimAll: { running: boolean; startedAt: number; finishedAt: number; lastRound: LiteAutoClaimRound | null }
   /**
@@ -1349,6 +1351,7 @@ export async function getKugouLiteVip(): Promise<KugouLiteVipState> {
     minRemainHours: cfg.minRemainHours,
     rounds: cfg.rounds,
     nextRunAt: vipNextRunAt,
+    tokenRefresh: getKugouLiteTokenRefreshState(),
     claimAll: getKugouLiteClaimAllState(),
     claimReport: getKugouLiteClaimReport(),
   }
@@ -1755,6 +1758,376 @@ export function rescheduleKugouLiteVipAutoClaim(): void {
   }
   vipNextRunAt = 0
   scheduleNextAutoClaim()
+}
+
+// ---- 酷狗概念版：登录态静默续期（每账号每周随机一次 · 账号之间错开） ----
+//
+// 为什么需要：概念版是「App token」登录态，大约 60 天过期。过期后取链/领 VIP 全线 35005，
+// 只能让用户重新扫码或收短信 —— 而有续期接口时，这件事可以完全静默完成。
+//
+// 为什么不是「每周日统一刷一次」（上游 KGM-AUTO-CHECKIN 的做法）：
+//   所有账号在同一时刻打同一个登录接口，时间戳摆出来就是一条竖线，风控最喜欢这种形状；
+//   而且一旦那一次网络抖动，全体一起等一周。这里改成：
+//     · 每个账号自己的下一次时间 = 6~8 天随机（连 token 续期日都在漂移，不是固定星期几）；
+//     · 首次排程按账号数把一周切成等份，均匀铺开（新号不会全挤在同一天）；
+//     · 任意两个账号的续期时刻至少隔开 minSep（账号越多间隔越短，但不少于 4 小时）；
+//     · 同一轮里真的有多个账号到期时，账号之间仍按「领取」那套 60~600 秒随机错峰。
+// 排程落盘（store 的 tokenRefreshAt），所以容器重建不会把「每周一次」推成「每次重启一次」。
+const TOKEN_REFRESH_TICK_MS = 30 * 60_000
+const DAY_MS = 24 * 3600_000
+
+export interface KugouLiteTokenRefreshConfig {
+  enabled: boolean
+  minDays: number
+  maxDays: number
+}
+
+export function getKugouLiteTokenRefreshConfig(): KugouLiteTokenRefreshConfig {
+  const c = config()
+  const num = (key: string, def: number, min: number, max: number) => {
+    const v = Number(c[key])
+    if (!Number.isFinite(v)) return def
+    return Math.min(max, Math.max(min, v))
+  }
+  const minDays = num('musicAccount.kglite.tokenRefreshMinDays', 6, 1, 30)
+  const maxDays = Math.max(minDays, num('musicAccount.kglite.tokenRefreshMaxDays', 8, 1, 60))
+  return {
+    enabled: c['musicAccount.kglite.tokenRefresh'] !== false,
+    minDays,
+    maxDays,
+  }
+}
+
+/**
+ * 账号之间的最小间隔：按「一周分给每个账号的份额」的 80% 算，夹在 [4h, 36h]。
+ *
+ * 取 80% 而不是 100%：留一点余量，否则 N 个号刚好把一周除尽，每周都落在同一批时刻上，
+ * 又变回「固定日历」了。36 小时上限保证 1~2 个号时也不会隔出好几天；
+ * 4 小时下限保证号再多也不会在同一小时里连打（那和「一起刷」没区别）。
+ */
+export function tokenRefreshSeparationMs(accountCount: number): number {
+  const n = Math.max(1, Math.floor(accountCount))
+  const share = (7 * DAY_MS) / n
+  return Math.min(36 * 3600_000, Math.max(4 * 3600_000, Math.round(share * 0.8)))
+}
+
+/**
+ * 算「这个账号下一次续期」的时刻：在 [minDays, maxDays] 天里随机，
+ * 与其它账号的已排时刻至少隔开 minSep；连续撞车就按最小间隔顺延。
+ *
+ * 导出是为了单测：区间/边界/撞车顺延这三处最容易写错，
+ * 写错的表现分别是「永远不续」「天天续」「几个号又挤到一起」，都很难从界面看出来。
+ */
+export function planTokenRefreshAt(
+  now: number,
+  opts: {
+    minDays: number
+    maxDays: number
+    others?: number[]
+    minSepMs?: number
+    rand?: () => number
+  },
+): number {
+  const rand = opts.rand || Math.random
+  const lo = Math.max(0.5, Number.isFinite(opts.minDays) ? opts.minDays : 6)
+  const hi = Math.max(lo, Number.isFinite(opts.maxDays) ? opts.maxDays : 8)
+  const others = (opts.others || []).filter(t => Number.isFinite(t) && t > 0)
+  const minSep = Math.max(0, opts.minSepMs ?? tokenRefreshSeparationMs(others.length + 1))
+
+  let at = 0
+  for (let i = 0; i < 12; i++) {
+    at = now + Math.floor((lo + rand() * (hi - lo)) * DAY_MS)
+    if (!others.some(o => Math.abs(o - at) < minSep)) return at
+  }
+  // 一直撞车（账号很多、区间又窄）：直接按最小间隔往后排，保证彼此不重叠
+  for (const o of others) {
+    if (Math.abs(o - at) < minSep) at = o + minSep
+  }
+  return at
+}
+
+/**
+ * 首次排程：把未来一周切成 count 等份，第 i 个账号落在第 i 份的中间并带 ±25% 抖动。
+ *
+ * 为什么不直接对每个号各随机一个 6~8 天：那样 3 个号有相当概率全挤在头两天，
+ * 「间隔开」这件事就名存实亡了。等份 + 抖动既保证铺开，又不会变成固定星期几。
+ */
+export function seedTokenRefreshAt(
+  now: number,
+  index: number,
+  count: number,
+  rand: () => number = Math.random,
+): number {
+  const n = Math.max(1, count)
+  const slot = (7 * DAY_MS) / n
+  const base = now + (index + 0.5) * slot
+  const jitter = (rand() - 0.5) * slot * 0.5
+  return Math.round(base + jitter)
+}
+
+let tokenRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let tokenRefreshBoot: ReturnType<typeof setTimeout> | null = null
+let tokenRefreshRunning = false
+let tokenRefreshLastAt = 0
+
+export interface KugouLiteTokenRefreshAccountState {
+  id: string
+  label: string
+  primary: boolean
+  /** 下一次计划续期时刻（0 = 未排程） */
+  nextAt: number
+  /** 上一次续期成功时刻（0 = 从未成功） */
+  lastAt: number
+  /** 上一次续期结果说明 */
+  note: string
+}
+
+export function getKugouLiteTokenRefreshState(): {
+  enabled: boolean
+  minDays: number
+  maxDays: number
+  running: boolean
+  lastRunAt: number
+  accounts: KugouLiteTokenRefreshAccountState[]
+} {
+  const cfg = getKugouLiteTokenRefreshConfig()
+  const views = new Map(store.listAccountItems('kglite').map(v => [v.id, v]))
+  const accounts = store.getCookies('kglite')
+    .map(a => {
+      const v = views.get(a.id)
+      return {
+        id: a.id,
+        label: a.label,
+        primary: a.primary,
+        nextAt: Number(v?.tokenRefreshAt || 0),
+        lastAt: Number(v?.tokenRefreshedAt || 0),
+        note: v?.tokenRefreshNote || '',
+      }
+    })
+    .sort((a, b) => Number(b.primary) - Number(a.primary))
+  return {
+    enabled: cfg.enabled,
+    minDays: cfg.minDays,
+    maxDays: cfg.maxDays,
+    running: tokenRefreshRunning,
+    lastRunAt: tokenRefreshLastAt,
+    accounts,
+  }
+}
+
+/**
+ * 给还没有排程的账号补一个首次时间：把未来一周按账号数切成等份，一个号占一份。
+ * 已排过的账号不动：那是它自己摇出来的时间，重排等于把「随机」变成「跟着别人变」。
+ *
+ * 为什么首次不用 planTokenRefreshAt（在 6~8 天里随机）：3 个号各自随机有很大概率
+ * 全挤在头两天，「账号之间错开」就名存实亡。等份 + 抖动既铺满一周，又不是固定星期几。
+ */
+function ensureTokenRefreshSchedules(now = Date.now()): number {
+  const cfg = getKugouLiteTokenRefreshConfig()
+  const list = liteAccounts()
+  if (!list.length) return 0
+  const views = new Map(store.listAccountItems('kglite').map(v => [v.id, v]))
+  const minSep = tokenRefreshSeparationMs(list.length)
+  const known = list
+    .map(a => Number(views.get(a.id)?.tokenRefreshAt || 0))
+    .filter(t => t > 0)
+  const missing = list.filter(a => Number(views.get(a.id)?.tokenRefreshAt || 0) <= 0)
+  if (!missing.length) return 0
+
+  let added = 0
+  for (const a of missing) {
+    // 用它在完整列表里的序号定位：账号增删后新号会落在空档附近，而不是全挤到一起
+    const index = list.findIndex(x => x.id === a.id)
+    let at = seedTokenRefreshAt(now, index, list.length)
+    // 与已排时刻撞车（< minSep）就顺延，保证「至少隔开」这条硬约束
+    for (let guard = 0; guard < 30 && known.some(o => Math.abs(o - at) < minSep); guard++) {
+      at += minSep
+    }
+    known.push(at)
+    store.setTokenRefreshState('kglite', a.id, { at })
+    added++
+  }
+  if (added) {
+    console.log(
+      `[平台账号] 概念版登录态续期已排程：${added} 个账号（每 ${cfg.minDays}~${cfg.maxDays} 天随机一次，`
+      + `账号之间至少隔 ${Math.round(minSep / 3600_000)} 小时）`,
+    )
+  }
+  return added
+}
+
+export interface KugouLiteTokenRefreshAccountResult {
+  id: string
+  label: string
+  primary: boolean
+  ok: boolean
+  changed?: boolean
+  nextAt: number
+  message: string
+}
+
+/**
+ * 执行一轮续期。
+ *
+ * 三种入口共用一套逻辑：
+ *   - 定时心跳：`{dueOnly:true}` —— 只处理已到期的账号（绝大多数轮次什么都不做）
+ *   - 界面「立即续期」：不传参 —— 只续主账号（用户点一次就应该看到一个明确结果）
+ *   - 排查：`{all:true}` —— 所有账号各续一次
+ *
+ * @param opts.itemId 只续这一个账号
+ */
+export async function runKugouLiteTokenRefresh(
+  opts: { itemId?: string; all?: boolean; dueOnly?: boolean } = {},
+): Promise<{ accounts: KugouLiteTokenRefreshAccountResult[]; halted?: string }> {
+  const cfg = getKugouLiteTokenRefreshConfig()
+  const manual = !opts.dueOnly
+  if (!cfg.enabled && !manual) return { accounts: [], halted: '登录态续期已关闭' }
+  if (tokenRefreshRunning) return { accounts: [], halted: '上一轮续期还在进行中' }
+
+  const list = liteAccounts()
+  if (!list.length) return { accounts: [], halted: '未配置酷狗概念版账号' }
+
+  const now = Date.now()
+  ensureTokenRefreshSchedules(now)
+  const views = new Map(store.listAccountItems('kglite').map(v => [v.id, v]))
+  const gapCfg = getKugouLiteAutoClaimConfig()
+
+  let targets = list
+  if (opts.itemId) targets = list.filter(a => a.id === opts.itemId)
+  else if (opts.dueOnly && !opts.all) {
+    targets = list.filter(a => {
+      const at = Number(views.get(a.id)?.tokenRefreshAt || 0)
+      return at > 0 && at <= now
+    })
+  } else if (!opts.all) {
+    // 手动点按钮：只续主账号（列表已按主账号优先排序）
+    targets = list.slice(0, 1)
+  }
+  if (!targets.length) return { accounts: [] }
+
+  tokenRefreshRunning = true
+  tokenRefreshLastAt = now
+  const results: KugouLiteTokenRefreshAccountResult[] = []
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      const acct = targets[i]
+      if (i > 0 && gapCfg.gapMaxSeconds > 0) {
+        const gap = pickGapSeconds(gapCfg.gapMinSeconds, gapCfg.gapMaxSeconds)
+        if (gap > 0) {
+          console.log(`[平台账号] 概念版续期｜下一个账号等 ${gap} 秒（账号之间错峰）`)
+          await sleep(gap * 1000)
+        }
+      }
+      const res = await kglite.refreshLoginToken(acct.cookie)
+      const doneAt = Date.now()
+      // 其它账号的下次续期时刻（每轮重新读：本轮前面已经续过的号时间已经变了）
+      const viewNow = new Map(store.listAccountItems('kglite').map(v => [v.id, v]))
+      const others = store.getCookies('kglite')
+        .filter(a => a.id !== acct.id)
+        .map(a => Number(viewNow.get(a.id)?.tokenRefreshAt || 0))
+        .filter(t => t > 0)
+      if (res.ok && res.cookie) {
+        const saved = store.refreshCookie('kglite', res.cookie, acct.id)
+        // 续期成功本身也是「平台刚刚接受了这个号」的硬证据
+        store.touchAccountSeen('kglite', acct.id)
+        const nextAt = planTokenRefreshAt(doneAt, {
+          minDays: cfg.minDays,
+          maxDays: cfg.maxDays,
+          others,
+          minSepMs: tokenRefreshSeparationMs(list.length),
+        })
+        store.setTokenRefreshState('kglite', acct.id, {
+          at: nextAt,
+          refreshedAt: doneAt,
+          note: saved.success ? res.message : `续期成功但写回失败：${saved.error || '未知'}`,
+        })
+        console.log(
+          `[平台账号] 概念版续期｜${acct.label}：${res.message}`
+          + `${saved.success ? '' : `（写回失败：${saved.error || '未知'}）`}`
+          + `，下次 ${new Date(nextAt).toLocaleString('zh-CN')}`,
+        )
+        results.push({
+          id: acct.id, label: acct.label, primary: acct.primary, ok: true,
+          changed: res.changed, nextAt, message: res.message || '续期成功',
+        })
+        continue
+      }
+
+      // 失败：登录态真失效（20017/20018）重试也没用，等一周后再试并让用户去重登；
+      // 其余（网络/风控）第二天再来一次，别把一个瞬时失败拖成一周。
+      const dead = res.errorCode === 20017 || res.errorCode === 20018
+      const retryAt = doneAt + (dead ? Math.max(1, cfg.minDays) * DAY_MS : DAY_MS)
+      const note = `${dead ? '登录态已失效，需要重新登录' : '续期失败'}：${res.message || '未知原因'}`
+      store.setTokenRefreshState('kglite', acct.id, { at: retryAt, note })
+      console.log(`[平台账号] 概念版续期｜${acct.label}：${note}（下次 ${new Date(retryAt).toLocaleString('zh-CN')}）`)
+      results.push({ id: acct.id, label: acct.label, primary: acct.primary, ok: false, nextAt: retryAt, message: res.message || '未知原因' })
+    }
+  } finally {
+    tokenRefreshRunning = false
+  }
+  return { accounts: results }
+}
+
+/** 心跳：每 30 分钟看一眼有没有到期的账号（没到期就只查内存，不发任何请求） */
+export function startKugouLiteTokenRefresh(): void {
+  if (tokenRefreshTimer || tokenRefreshBoot) return
+  const cfg = getKugouLiteTokenRefreshConfig()
+  if (!cfg.enabled) {
+    console.log('[平台账号] 概念版登录态续期已关闭（musicAccount.kglite.tokenRefresh=false）')
+    return
+  }
+  const boot = setTimeout(() => {
+    tokenRefreshBoot = null
+    try {
+      ensureTokenRefreshSchedules()
+    } catch (e: any) {
+      // 首次排程失败不能把进程带走（定时器里抛异常是未捕获异常）；
+      // 下一轮心跳还会再试，账号按「未排程」静置，不会误发请求。
+      console.log(`[平台账号] 概念版续期首次排程失败（忽略）：${e?.message || e}`)
+    }
+    void runKugouLiteTokenRefresh({ dueOnly: true })
+      .then(r => {
+        if (r.accounts.length) console.log(`[平台账号] 概念版续期本轮完成：${r.accounts.length} 个账号`)
+      })
+      .catch(e => console.log(`[平台账号] 概念版续期出错（忽略）：${e?.message || e}`))
+      .finally(() => tick())
+  }, 5 * 60_000)
+  tokenRefreshBoot = boot
+  if (typeof boot.unref === 'function') boot.unref()
+
+  const tick = (): void => {
+    // 跑到一半被关掉（配置里取消勾选）时不再续心跳，否则「关掉」只生效到下一轮
+    if (!getKugouLiteTokenRefreshConfig().enabled) {
+      tokenRefreshTimer = null
+      console.log('[平台账号] 概念版登录态续期已关闭，心跳停止')
+      return
+    }
+    tokenRefreshTimer = setTimeout(() => {
+      tokenRefreshTimer = null
+      void runKugouLiteTokenRefresh({ dueOnly: true })
+        .catch(e => console.log(`[平台账号] 概念版续期出错（忽略）：${e?.message || e}`))
+        .finally(() => tick())
+    }, TOKEN_REFRESH_TICK_MS)
+    if (tokenRefreshTimer && typeof tokenRefreshTimer.unref === 'function') tokenRefreshTimer.unref()
+  }
+  console.log(
+    `[平台账号] 概念版登录态续期已排程：每账号 ${cfg.minDays}~${cfg.maxDays} 天随机一次，`
+    + `账号之间至少隔 ${Math.round(tokenRefreshSeparationMs(Math.max(1, liteAccounts().length)) / 3600_000)} 小时；`
+    + '启动 5 分钟后补排首次时间',
+  )
+}
+
+/** 配置改动（开关 / 天数区间）后重排：只清定时器，不改已落盘的到期时间 */
+export function rescheduleKugouLiteTokenRefresh(): void {
+  if (tokenRefreshBoot) {
+    clearTimeout(tokenRefreshBoot)
+    tokenRefreshBoot = null
+  }
+  if (tokenRefreshTimer) {
+    clearTimeout(tokenRefreshTimer)
+    tokenRefreshTimer = null
+  }
+  if (getKugouLiteTokenRefreshConfig().enabled) startKugouLiteTokenRefresh()
 }
 
 // ---- 浏览器扩展包（一键同步 Cookie） ----

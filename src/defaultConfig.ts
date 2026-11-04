@@ -101,6 +101,11 @@ const config: LX.Config = {
   'musicAccount.kglite.gapMinSeconds': 60,
   'musicAccount.kglite.gapMaxSeconds': 600,
   'musicAccount.kglite.minRemainHours': 24, // 剩余会员低于这么多小时才补领；够用就跳过（避免把额度攒到几个月后）
+  // 登录态静默续期：概念版 App token 约 60 天过期，过期后只能重新扫码/收短信。
+  // 每账号在 [最短, 最长] 天里随机续一次，账号之间按账号数自动错开（不是固定星期几）。
+  'musicAccount.kglite.tokenRefresh': true,
+  'musicAccount.kglite.tokenRefreshMinDays': 6,
+  'musicAccount.kglite.tokenRefreshMaxDays': 8,
 
   // 访问路径配置
   'admin.path': '/admin', // 后台管理路径
