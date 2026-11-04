@@ -10265,6 +10265,19 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return customSourceHandlers.handleUpdatePlatforms(req, res)
       }
 
+      // ===== 音源回收站 =====
+      // 删除/巡检移除都只是把脚本挪进 .trash/，没有这三个接口用户就永远看不到也恢复不了。
+      if (pathname === '/api/custom-source/trash' && req.method === 'GET') {
+        const username = urlObj.searchParams.get('username') || 'default'
+        return customSourceHandlers.handleTrashList(req, res, username)
+      }
+      if (pathname === '/api/custom-source/trash/restore' && req.method === 'POST') {
+        return customSourceHandlers.handleTrashRestore(req, res)
+      }
+      if (pathname === '/api/custom-source/trash/purge' && req.method === 'POST') {
+        return customSourceHandlers.handleTrashPurge(req, res)
+      }
+
       // ===== 手动触发一轮音源巡检 =====
       // 巡检默认 6 小时一轮，改完音源想立刻确认平台的真实可用性时没法等。
       // 这个入口只「触发一次已有巡检」，不增加任何处置能力（关闭/移除仍由巡检自身判据决定），

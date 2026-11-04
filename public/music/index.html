@@ -1882,7 +1882,7 @@
                                                     class="fas fa-toggle-on mr-1"></i>批量启用</button>
                                             <button onclick="batchSourceEnable('settings', false)"
                                                 class="px-2.5 py-1 text-xs bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors"><i
-                                                    class="fas fa-toggle-off mr-1"></i>批量禁用</button>
+                                                    class="fas fa-toggle-off mr-1"></i>批量停用</button>
                                             <button onclick="batchSourceDelete('settings')"
                                                 class="px-2.5 py-1 text-xs bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors"><i
                                                     class="fas fa-trash-alt mr-1"></i>批量删除</button>
@@ -4865,6 +4865,13 @@
                     class="flex items-center gap-2 px-4 py-2.5 bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400 border border-amber-100 dark:border-amber-500/30 rounded-xl hover:bg-amber-100 dark:hover:bg-amber-500/25 transition-colors font-medium whitespace-nowrap">
                     <i class="fas fa-stethoscope"></i>立即巡检
                 </button>
+                <button onclick="openSourceTrash()" id="btn-source-trash"
+                    title="删除的音源和被巡检移除的音源都在这里，可恢复或彻底删除"
+                    class="relative flex items-center gap-2 px-4 py-2.5 t-bg-main t-text-muted border t-border-main rounded-xl hover:t-bg-item-hover transition-colors font-medium whitespace-nowrap">
+                    <i class="fas fa-trash-restore"></i>回收站
+                    <span id="source-trash-badge"
+                        class="hidden absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold items-center justify-center leading-[18px] text-center"></span>
+                </button>
             </div>
 
             <!-- 批量操作工具栏 (Modal) -->
@@ -4883,7 +4890,7 @@
                             class="fas fa-toggle-on mr-1"></i>批量启用</button>
                     <button onclick="batchSourceEnable('modal', false)"
                         class="px-2.5 py-1 text-xs bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors"><i
-                            class="fas fa-toggle-off mr-1"></i>批量禁用</button>
+                            class="fas fa-toggle-off mr-1"></i>批量停用</button>
                     <button onclick="batchSourceDelete('modal')"
                         class="px-2.5 py-1 text-xs bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors"><i
                             class="fas fa-trash-alt mr-1"></i>批量删除</button>
@@ -4896,6 +4903,41 @@
             <!-- List -->
             <div class="flex-1 overflow-y-auto p-4 t-bg-main custom-scrollbar" id="custom-sources-list">
                 <!-- 列表将在此处渲染 -->
+            </div>
+        </div>
+    </div>
+
+    <!-- 音源回收站：删除/巡检移除的音源都在这里，可恢复或彻底删除 -->
+    <div id="source-trash-modal"
+        class="fixed inset-0 bg-black/60 z-[80] hidden flex items-center justify-center backdrop-blur-sm">
+        <div class="t-bg-panel rounded-2xl w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl mx-4 overflow-hidden">
+            <div class="p-5 border-b t-border-main flex justify-between items-start t-bg-main">
+                <div class="min-w-0 pr-3">
+                    <div class="flex items-center gap-2">
+                        <span class="p-1.5 rounded-lg bg-red-50 text-red-600 dark:bg-red-500/20 dark:text-red-400">
+                            <i class="fas fa-trash-restore text-sm"></i>
+                        </span>
+                        <h3 class="text-base font-bold t-text-main">音源回收站</h3>
+                        <span id="source-trash-count"
+                            class="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-neutral-100 dark:bg-neutral-800 t-text-muted"></span>
+                    </div>
+                    <p class="text-[11px] t-text-muted mt-1 leading-relaxed">
+                        删除的音源和被巡检移除的音源都会留在这里；恢复后名称、作者、支持平台与启用状态一并还原。
+                    </p>
+                </div>
+                <div class="flex items-center gap-1.5 shrink-0">
+                    <button type="button" onclick="purgeAllSourceTrash()" id="source-trash-purge-all"
+                        class="hidden px-2.5 py-1.5 text-[11px] font-medium bg-red-50 text-red-600 dark:bg-red-500/15 dark:text-red-400 rounded-lg hover:bg-red-100 dark:hover:bg-red-500/25 transition-colors">
+                        <i class="fas fa-broom mr-1"></i>清空
+                    </button>
+                    <button type="button" onclick="closeSourceTrash()"
+                        class="p-1.5 rounded-lg t-text-muted hover:t-bg-item-hover transition-colors" title="关闭">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            </div>
+            <div id="source-trash-list" class="flex-1 overflow-y-auto p-4 space-y-2 t-bg-main custom-scrollbar">
+                <!-- 列表在此渲染 -->
             </div>
         </div>
     </div>

@@ -923,7 +923,7 @@
                                 <h3>基础</h3>
                                 <p>服务器标识、访问路径与用户连接方式</p>
                             </div>
-                            <div class="config-group-grid">
+                            <div class="config-group-grid" data-cols="2">
 
                                 <div class="config-card glass">
                                     <div class="config-card-header">
@@ -1004,7 +1004,7 @@
                                 <h3>访问与账号</h3>
                                 <p>控制台与播放器的登录密码</p>
                             </div>
-                            <div class="config-group-grid">
+                            <div class="config-group-grid" data-cols="3">
 
                                 <div class="config-card glass">
                                     <div class="config-card-header">
@@ -1136,7 +1136,7 @@
                                 <h3>权限与缓存</h3>
                                 <p>公开用户 / 普通登录用户的能力边界与磁盘占用</p>
                             </div>
-                            <div class="config-group-grid">
+                            <div class="config-group-grid" data-cols="2">
 
                                 <div class="config-card glass">
                                     <div class="config-card-header">
@@ -1288,7 +1288,7 @@
                                 <h3>存储与备份</h3>
                                 <p>本地歌曲目录、歌单快照与配置副本的保留策略</p>
                             </div>
-                            <div class="config-group-grid">
+                            <div class="config-group-grid" data-cols="2">
 
                                 <div class="config-card glass">
                                     <div class="config-card-header">
@@ -1417,7 +1417,7 @@
                                 <h3>WebDAV 同步</h3>
                                 <p>连接参数只在这里改；备份、恢复、同步等操作在左侧「WebDAV 同步」页执行</p>
                             </div>
-                            <div class="config-group-grid">
+                            <div class="config-group-grid" data-cols="1">
 
                                 <div id="config-card-webdav" class="config-card glass">
                                     <div class="config-card-header">
@@ -1554,7 +1554,7 @@
                                 <h3>网络代理</h3>
                                 <p>反向代理与出站代理，用于访问受限网络或隐藏源站</p>
                             </div>
-                            <div class="config-group-grid">
+                            <div class="config-group-grid" data-cols="2">
 
                                 <div class="config-card glass">
                                     <div class="config-card-header">
@@ -2185,7 +2185,7 @@
                                 <h3>高级</h3>
                                 <p>影响全局的巡检与安全开关，改动前请确认风险</p>
                             </div>
-                            <div class="config-group-grid">
+                            <div class="config-group-grid" data-cols="3">
 
                                 <div class="config-card glass">
                                     <div class="config-card-header">
@@ -2296,6 +2296,9 @@
                                                     <option value="trash">移入回收站（可恢复）</option>
                                                     <option value="delete">直接删除</option>
                                                 </select>
+                                                <small class="config-hint">
+                                                    「移入回收站」和手动删除的音源，都会出现在 Web 播放器「音源管理 → 回收站」里，可以恢复或彻底删除。
+                                                </small>
                                             </div>
                                         </div>
                                     </div>

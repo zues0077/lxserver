@@ -34,6 +34,7 @@ import { localTime } from '@/utils/time'
 import { markSourceBusy } from './sourceGuard'
 import { beginProbeQuiet, endProbeQuiet } from './probeQuiet'
 import { beginHostActivity, endHostActivity } from './sourceActivity'
+import { moveScriptToTrash } from './sourceTrash'
 import type { ScheduledTask, TaskExecutionResult } from './task/types'
 
 export const PROBE_TASK_ID = 'custom_source_health_probe'
@@ -900,7 +901,7 @@ const pickTestSongs = async (platform: string, deps: ProbeDeps): Promise<ProbeTe
 // ============================ 音源移除 ============================
 
 /** 把脚本文件移入同级 .trash/，或直接删除 */
-const disposeScriptFile = (owner: string, sourceId: string, mode: 'trash' | 'delete'): string | null => {
+const disposeScriptFile = (owner: string, sourceId: string, mode: 'trash' | 'delete', reason?: string): string | null => {
   const dir = ownerDir(owner)
   const scriptPath = path.join(dir, sourceId)
   if (!fs.existsSync(scriptPath)) return null
@@ -909,12 +910,12 @@ const disposeScriptFile = (owner: string, sourceId: string, mode: 'trash' | 'del
       fs.unlinkSync(scriptPath)
       return null
     }
-    const trashDir = path.join(dir, TRASH_DIR)
-    if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir, { recursive: true })
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const target = path.join(trashDir, `${stamp}_${sourceId}`)
-    fs.renameSync(scriptPath, target)
-    return target
+    // 统一走回收站模块：会同时落一份 .meta.json 保存原 sources.json 条目，
+    // 否则「可恢复」恢复出来的只是一个没有名称/作者/平台/启用态的光脚脚本。
+    return moveScriptToTrash(owner, sourceId, {
+      by: 'probe',
+      reason: reason || '巡检判定全部平台不可用',
+    })
   } catch (e: any) {
     syncLog.warn(`[音源巡检] 移除脚本文件失败 (${owner}/${sourceId}):`, e?.message || e)
     return null
@@ -949,7 +950,7 @@ const removeSource = (owner: string, sourceId: string, sourceName: string, reaso
   try {
     deps.unload(owner, sourceId)
   } catch { /* ignore */ }
-  const trashedTo = disposeScriptFile(owner, sourceId, conf.removeMode)
+  const trashedTo = disposeScriptFile(owner, sourceId, conf.removeMode, reason)
   dropFromManifest(owner, sourceId)
   clearSourceState(owner, sourceId)
   audit(owner, 'remove-source', {

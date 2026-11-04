@@ -15049,6 +15049,8 @@ async function fetchCustomSources() {
         }
 
         if (!res.ok) throw new Error('Failed to fetch sources');
+        // 顺手刷新回收站角标（数量变了说明有源被删/被巡检移除）
+        if (typeof refreshSourceTrashBadge === 'function') void refreshSourceTrashBadge();
         return await res.json();
     } catch (err) {
         console.error('Fetch sources failed:', err);
@@ -15320,7 +15322,7 @@ async function renderCustomSources() {
                 </div>`;
             }
 
-            if (source.enabled) {
+            if (source.enabled && !source.isolated) {
                 if (source.status === 'success') {
                     statusBadge = `<span class="text-[9px] md:text-[10px] bg-emerald-50 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400 dark:border-emerald-500/30 px-1.5 py-0.5 rounded-full border border-emerald-100 flex items-center gap-1 transition-colors whitespace-nowrap"><i class="fas fa-check-circle"></i>正常</span>`;
                 } else if (source.status === 'failed') {
@@ -15356,26 +15358,54 @@ async function renderCustomSources() {
                         title="自检护栏：命中可疑特征 ${escapeHtmlText(reasons)}（点击处置）"><i class="fas fa-shield-alt mr-0.5"></i>${isA ? '高危' : '可疑'}</span>`;
             })() : '';
 
-            // 已隔离标记：隔离会被卸载源脚本，界面上原本只表现为「这个源好像没生效」，
-            // 用户既看不到原因也找不到恢复入口。这里给出显式标记 + 一键解除。
-            const isolationTag = source.isolated ? (() => {
-                const isoReason = source.isolated.reason || '未知原因';
-                const isoAt = source.isolated.at ? new Date(source.isolated.at).toLocaleString() : '';
-                return `<span data-guard-id="${escapeHtmlText(encodeURIComponent(source.id))}"
-                        data-guard-owner="${escapeHtmlText(source.owner || 'open')}"
-                        data-guard-name="${escapeHtmlText(source.name)}"
-                        data-guard-level="isolated"
-                        data-guard-reasons="${escapeHtmlText(isoReason)}"
-                        onclick="showSourceGuardMenu(this)"
-                        class="cursor-pointer px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold whitespace-nowrap bg-red-500 text-white hover:bg-red-600 transition-colors"
-                        title="自检护栏已隔离该音源：${escapeHtmlText(isoReason)}${isoAt ? '（' + escapeHtmlText(isoAt) + '）' : ''}（点击解除）"><i class="fas fa-lock mr-0.5"></i>已隔离</span>`;
-            })() : '';
+            // 「已隔离」不再是独立状态：按钮只显示「已停用」，隔离原因单独一行说明（见 isolatedNote）。
 
             // 权限判断：管理员有所有权限；登录用户对公开源只有查看使用（Toggle）权限，无法刷新或删除
             const isPublic = source.owner === 'open';
             const canManageSource = isAdmin || (!isPublic && isUser);
 
             const isBatchContainer = window._sourceBatchMode === containerId;
+            // 状态只保留两种：能取链 =「已启用」，不取链 =「已停用」。
+            // 被护栏隔离的源同样显示「已停用」——对用户来说结果一样（都不加载、都取不到链），
+            // 没必要在按钮上多造一个状态。区别只在恢复路径：隔离记录没解除时，
+            // 直接 toggle 上去也会被护栏再拦一次（等于白点），所以点击必须走解除面板。
+            const forcedOff = !!source.isolated;
+            const stateKey = (!forcedOff && source.enabled) ? 'enabled' : 'disabled';
+            const stateText = stateKey === 'enabled' ? '已启用' : '已停用';
+            const stateTitle = forcedOff
+                ? '已被自检护栏隔离（等同停用，不参与取链）· 点击查看原因并解除'
+                : (stateKey === 'enabled' ? '点击停用' : '点击启用');
+            const stateClick = isBatchContainer ? ''
+                : (forcedOff
+                    ? `showSourceGuardMenuById(${jsArg(source.id)}, ${jsArg(source.owner || 'open')}, ${jsArg(source.name)}, 'isolated', ${jsArg((source.isolated && source.isolated.reason) || '')})`
+                    : `toggleSource(${jsArg(source.id)}, ${source.enabled})`);
+
+            // 隔离原因单独成行：按钮只说「已停用」，这里说清楚是「系统关的」以及为什么。
+            // 否则用户会以为是自己关的，或者对着一个停用的源找不到启用按钮为何无效。
+            const isolatedNote = forcedOff ? (() => {
+                const reason = (source.isolated && source.isolated.reason) || '未知原因';
+                const at = source.isolated && source.isolated.at
+                    ? new Date(source.isolated.at).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+                    : '';
+                return `<div class="mt-1 flex items-center">
+                    <span onclick="showSourceGuardMenuById(${jsArg(source.id)}, ${jsArg(source.owner || 'open')}, ${jsArg(source.name)}, 'isolated', ${jsArg(reason)})"
+                          class="cursor-pointer text-[9px] md:text-[10px] text-red-600 dark:text-red-400 hover:underline whitespace-nowrap truncate max-w-[220px] md:max-w-none"
+                          title="自检护栏自动停用：${escapeHtmlText(reason)}${at ? '（' + escapeHtmlText(at) + '）' : ''} · 点击解除"><i class="fas fa-lock mr-1"></i>系统隔离：${escapeHtmlText(reason)}</span>
+                </div>`;
+            })() : '';
+
+            // 平台级关闭的汇总：徽标只是划线，数量多了不容易一眼看出关了几个
+            const platformOffText = (() => {
+                const off = (disabledSources || []).filter(s => {
+                    const info = { kg: '酷狗', kw: '酷我', tx: 'QQ', wy: '网易', mg: '咪咕' }[s];
+                    return !!info;
+                });
+                if (!off.length) return '';
+                const names = off.map(s => ({ kg: '酷狗', kw: '酷我', tx: 'QQ', wy: '网易', mg: '咪咕' }[s])).join('、');
+                return `<span class="text-[9px] md:text-[10px] text-amber-600 dark:text-amber-400 whitespace-nowrap"
+                        title="这些平台已在此音源中关闭，不会把取链请求交给它">· 已关 ${off.length} 个平台（${names}）</span>`;
+            })();
+
             div.innerHTML = `
             ${isBatchContainer ? `
             <div class="flex items-center self-stretch pr-2 md:pr-4 -ml-1 md:-ml-2 touch-none" onclick="toggleSourceBatchSelect(${jsArg(source.id)}, ${jsArg(containerId)})">
@@ -15397,7 +15427,6 @@ async function renderCustomSources() {
                          ${createMarqueeHtml(source.name, "font-bold t-text-main text-xs md:text-sm")}
                         ${ownerTag}
                         ${vmTag}
-                        ${isolationTag}
                         ${guardTag}
                     </div>
                     ${errorMsg}
@@ -15409,20 +15438,24 @@ async function renderCustomSources() {
                     </div>
                     ${updateAlertBanner}
                     ${supportedBadges}
+                    ${platformOffText ? `<div class="mt-1 flex items-center">${platformOffText}</div>` : ''}
+                    ${isolatedNote}
                 </div>
                 
                 <div class="flex flex-col items-end gap-1.5 md:gap-2 shrink-0">
-                    <button onclick="${isBatchContainer ? '' : `toggleSource(${jsArg(source.id)}, ${source.enabled})`}" 
-                            class="px-2 md:px-3 py-1 rounded-lg text-[11px] md:text-xs font-medium transition-colors whitespace-nowrap w-16 md:w-20 flex justify-center items-center ${source.enabled
-                    ? (source.status === 'failed'
-                        ? (isBatchContainer ? 'bg-red-100/50 text-red-400 dark:bg-red-500/10 dark:text-red-600 opacity-50 cursor-not-allowed' : 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-500/30')
-                        : (isBatchContainer ? 'bg-emerald-100/50 text-emerald-500/60 dark:bg-emerald-500/10 dark:text-emerald-600/60 opacity-60 cursor-not-allowed' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-500/30'))
-                    : (isBatchContainer ? 't-bg-track/50 t-text-muted opacity-40 cursor-not-allowed' : 't-bg-track t-text-muted hover:t-bg-item-hover')} ${isBatchContainer ? 'pointer-events-none select-none' : ''}">
-                        ${source.enabled ? '已启用' : '已禁用'}
+                    <button onclick="${stateClick}" title="${stateTitle}"
+                            class="px-2 md:px-3 py-1 rounded-lg text-[11px] md:text-xs font-medium transition-colors whitespace-nowrap w-16 md:w-20 flex justify-center items-center ${forcedOff
+                    ? (isBatchContainer ? 'bg-red-100/50 text-red-400 dark:bg-red-500/10 dark:text-red-600 opacity-50 cursor-not-allowed' : 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-500/30')
+                    : (stateKey === 'enabled'
+                        ? (source.status === 'failed'
+                            ? (isBatchContainer ? 'bg-red-100/50 text-red-400 dark:bg-red-500/10 dark:text-red-600 opacity-50 cursor-not-allowed' : 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-500/30')
+                            : (isBatchContainer ? 'bg-emerald-100/50 text-emerald-500/60 dark:bg-emerald-500/10 dark:text-emerald-600/60 opacity-60 cursor-not-allowed' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-500/30'))
+                        : (isBatchContainer ? 't-bg-track/50 t-text-muted opacity-40 cursor-not-allowed' : 't-bg-track t-text-muted hover:t-bg-item-hover'))} ${isBatchContainer ? 'pointer-events-none select-none' : ''}">
+                        ${stateText}
                     </button>
                     
                     <div class="flex items-center gap-1">
-                        ${source.enabled && source.status === 'failed' && canManageSource ? `
+                        ${source.enabled && source.status === 'failed' && !forcedOff && canManageSource ? `
                         <button ${isBatchContainer ? 'disabled' : `onclick="reloadSource(${jsArg(source.id)})"`}
                                 class="p-1 md:p-1.5 ${isBatchContainer ? 'text-gray-300 dark:text-neutral-700 cursor-not-allowed' : 'text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/40'} rounded-lg transition-colors"
                                 title="${isBatchContainer ? '' : '尝试重新加载'}">
@@ -15603,7 +15636,7 @@ async function toggleSource(sourceId, currentEnabled, allowUnsafeVM = false) {
 
         // 刷新列表
         await renderCustomSources();
-        showSuccess(currentEnabled ? '已禁用' : '已启用');
+        showSuccess(currentEnabled ? '已停用' : '已启用');
     } catch (error) {
         console.error('[CustomSource] 切换状态失败:', error);
         showError(`操作失败: ${error.message}`);
@@ -15699,20 +15732,69 @@ async function postGuardAction(action, owner, id, name) {
 }
 
 async function showSourceGuardMenu(el) {
-    const id = decodeURIComponent(el.dataset.guardId || '');
-    const owner = el.dataset.guardOwner || 'open';
-    const name = el.dataset.guardName || id;
-    const level = el.dataset.guardLevel || 'B';
-    const reasons = el.dataset.guardReasons || '';
+    return showSourceGuardMenuById(
+        decodeURIComponent(el.dataset.guardId || ''),
+        el.dataset.guardOwner || 'open',
+        el.dataset.guardName || '',
+        el.dataset.guardLevel || 'B',
+        el.dataset.guardReasons || ''
+    );
+}
+
+/** 无 DOM 元素的入口：卡片上的状态按钮直接按 id 调起处置面板 */
+async function showSourceGuardMenuById(id, owner, name, level, reasons) {
     if (!id) return;
-    const choice = await showGuardDialog(name, level, reasons);
+    const choice = await showGuardDialog(name || id, level || 'B', reasons || '');
     if (!choice) return;
-    await postGuardAction(choice, owner, id, name);
+    await postGuardAction(choice, owner || 'open', id, name || id);
+}
+
+// 删除方式二选一：默认进回收站，也允许直接抹掉（不想让它在回收站里占地/碍眼时）
+function showDeleteChoice(name) {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = "fixed inset-0 z-[200] flex items-center justify-center p-4 animate-fade-in";
+        modal.innerHTML = `
+            <div class="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300"></div>
+            <div class="t-bg-panel rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden transform transition-all animate-slide-up relative z-10 border t-border-main">
+                <div class="px-5 py-4 border-b flex justify-between items-center bg-red-50/60 dark:bg-red-500/10 t-border-main/50">
+                    <h3 class="text-sm font-bold t-text-main">删除自定义源</h3>
+                    <button id="del-close-x" class="t-text-muted hover:text-red-500 transition-colors"><i class="fas fa-times text-lg"></i></button>
+                </div>
+                <div class="p-6">
+                    <p class="text-sm t-text-main font-bold mb-1 truncate">${escapeHtmlText(name || '')}</p>
+                    <p class="text-xs t-text-muted leading-relaxed mt-2">选择删除方式。移入回收站可以随时恢复；直接删除不可恢复，脚本文件立即从磁盘抹除。</p>
+                </div>
+                <div class="p-4 t-bg-main/50 border-t t-border-main/50 flex flex-col gap-2">
+                    <button id="del-trash" class="w-full py-2.5 text-sm font-bold text-white bg-emerald-500 hover:bg-emerald-600 rounded-xl shadow-lg transition-all active:scale-95">
+                        移入回收站（可恢复）
+                    </button>
+                    <button id="del-purge" class="w-full py-2.5 text-sm font-bold text-white bg-red-500 hover:bg-red-600 rounded-xl shadow-lg transition-all active:scale-95">
+                        直接删除（不可恢复）
+                    </button>
+                    <button id="del-cancel" class="w-full py-2.5 text-sm font-bold t-text-muted hover:t-text-main hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-all">取消</button>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+
+        const close = (result) => {
+            const content = modal.querySelector('.max-w-sm');
+            if (content) { content.classList.add('scale-95', 'opacity-0'); }
+            modal.classList.add('opacity-0');
+            setTimeout(() => { modal.remove(); resolve(result); }, 180);
+        };
+        modal.querySelector('#del-trash').onclick = () => close('trash');
+        modal.querySelector('#del-purge').onclick = () => close('purge');
+        modal.querySelector('#del-cancel').onclick = () => close(null);
+        modal.querySelector('#del-close-x').onclick = () => close(null);
+        modal.querySelector('div:first-child').onclick = () => close(null);
+    });
 }
 
 // 删除源
 async function deleteSource(sourceId) {
-    if (!(await showSelect('删除自定义源', '确定要删除这个自定义源吗？', { danger: true }))) return;
+    const mode = await showDeleteChoice(sourceId);
+    if (!mode) return;
 
     try {
         const username = resolveSourceOwner(sourceId);
@@ -15723,7 +15805,7 @@ async function deleteSource(sourceId) {
         const response = await fetch('/api/custom-source/delete', {
             method: 'POST',
             headers: headers,
-            body: JSON.stringify({ username, sourceId })
+            body: JSON.stringify({ username, sourceId, mode })
         });
 
         if (response.status === 403) {
@@ -15736,12 +15818,228 @@ async function deleteSource(sourceId) {
 
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-        showSuccess('已删除');
+        showSuccess(mode === 'purge' ? '已永久删除' : '已移入回收站，可在「回收站」恢复');
         await renderCustomSources();
     } catch (error) {
         console.error('[CustomSource] 删除失败:', error);
         showError(`删除失败: ${error.message}`);
     }
+}
+
+// ========================================
+// 音源回收站
+// ========================================
+//
+// 删除/巡检移除的音源会被挪进 `.trash/`，但服务端早先只有「移入」没有「查看」，
+// 用户既看不到也恢复不了。这里补齐列表 / 恢复 / 彻底删除三个动作。
+// 空间维度：公开源在 default(open)，个人源在当前用户名下，两处都要查。
+
+function trashAuthHeaders(extra) {
+    const headers = Object.assign({}, getUserAuthHeaders(), extra || {});
+    const adminPass = localStorage.getItem('lx_admin_password');
+    if (adminPass) headers['x-frontend-auth'] = adminPass;
+    return headers;
+}
+
+function trashSpaces() {
+    const me = getCurrentUsername();
+    // 个人空间在前：用户更关心自己删的东西
+    return me === 'default' ? ['default'] : [me, 'default'];
+}
+
+async function fetchTrashItems() {
+    const out = [];
+    for (const space of trashSpaces()) {
+        try {
+            const res = await fetch(`/api/custom-source/trash?username=${encodeURIComponent(space)}`, {
+                headers: trashAuthHeaders()
+            });
+            // 个人空间之外的 403 属正常（非管理员看不了公开源回收站），静默跳过
+            if (!res.ok) continue;
+            const d = await res.json();
+            (d.items || []).forEach(it => out.push(Object.assign({}, it, { space })));
+        } catch (e) {
+            console.warn('[回收站] 读取失败:', space, e && e.message);
+        }
+    }
+    out.sort((a, b) => String(b.trashedAt).localeCompare(String(a.trashedAt)));
+    return out;
+}
+
+async function refreshSourceTrashBadge() {
+    const badge = document.getElementById('source-trash-badge');
+    if (!badge) return;
+    const items = await fetchTrashItems();
+    if (items.length > 0) {
+        badge.textContent = items.length > 99 ? '99+' : String(items.length);
+        badge.classList.remove('hidden');
+        badge.classList.add('flex');
+    } else {
+        badge.classList.add('hidden');
+        badge.classList.remove('flex');
+    }
+}
+
+async function openSourceTrash() {
+    const modal = document.getElementById('source-trash-modal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    await loadSourceTrash();
+}
+
+function closeSourceTrash() {
+    const modal = document.getElementById('source-trash-modal');
+    if (modal) modal.classList.add('hidden');
+}
+
+async function loadSourceTrash() {
+    const list = document.getElementById('source-trash-list');
+    const countEl = document.getElementById('source-trash-count');
+    const purgeAllBtn = document.getElementById('source-trash-purge-all');
+    if (!list) return;
+
+    list.innerHTML = `<div class="text-center py-10 t-text-muted text-xs">
+        <i class="fas fa-circle-notch fa-spin text-xl mb-2"></i><div>正在读取回收站…</div></div>`;
+
+    const items = await fetchTrashItems();
+    if (countEl) countEl.textContent = `${items.length} 项`;
+    if (purgeAllBtn) purgeAllBtn.classList.toggle('hidden', items.length === 0);
+
+    if (items.length === 0) {
+        list.innerHTML = `<div class="text-center py-12 t-text-muted">
+            <i class="fas fa-trash-restore text-3xl mb-3 opacity-30"></i>
+            <div class="text-sm font-medium">回收站是空的</div>
+            <div class="text-[11px] mt-1 opacity-80">删除音源时会先放到这里，随时可以恢复。</div>
+        </div>`;
+        return;
+    }
+
+    list.innerHTML = items.map(it => {
+        const when = it.trashedAt
+            ? new Date(it.trashedAt).toLocaleString('zh-CN', { hour12: false })
+            : '未知时间';
+        const size = it.size ? (it.size / 1024).toFixed(1) + ' KB' : '未知大小';
+        const isManual = it.trashedBy === 'manual';
+        const byText = isManual ? '手动删除' : '巡检移除';
+        const byClass = isManual
+            ? 'bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400'
+            : 'bg-purple-50 text-purple-600 dark:bg-purple-500/15 dark:text-purple-300';
+        const spaceText = it.space === 'default' ? '公开源' : '我的源';
+        const reason = it.reason ? escapeHtmlText(it.reason) : '';
+        const noMeta = it.hasMeta ? '' :
+            `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-red-50 text-red-500 dark:bg-red-500/15 dark:text-red-400"
+                   title="旧版本留下的文件没有保存元数据，恢复后需要重新选择平台">无元数据</span>`;
+        return `<div class="t-bg-panel border t-border-main rounded-xl p-3 flex items-start gap-3">
+            <i class="fas fa-file-code text-emerald-500 mt-0.5 shrink-0"></i>
+            <div class="flex-1 min-w-0">
+                <div class="flex flex-wrap items-center gap-1.5">
+                    <span class="font-bold t-text-main text-xs md:text-sm truncate">${escapeHtmlText(it.name)}</span>
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-neutral-100 dark:bg-neutral-800 t-text-muted">${spaceText}</span>
+                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold ${byClass}">${byText}</span>
+                    ${noMeta}
+                </div>
+                <div class="text-[10px] t-text-muted mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+                    <span><i class="far fa-clock mr-1 opacity-70"></i>${when}</span>
+                    <span><i class="far fa-hdd mr-1 opacity-70"></i>${size}</span>
+                    ${reason ? `<span class="truncate max-w-[220px]" title="${reason}">${reason}</span>` : ''}
+                </div>
+            </div>
+            <div class="flex flex-col sm:flex-row gap-1 shrink-0">
+                <button type="button"
+                    data-file="${encodeURIComponent(it.file)}"
+                    data-space="${encodeURIComponent(it.space)}"
+                    data-name="${encodeURIComponent(it.name || it.id || '')}"
+                    onclick="restoreSourceFromTrash(this)"
+                    class="px-2.5 py-1 text-[11px] font-medium bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg transition-colors whitespace-nowrap">
+                    <i class="fas fa-undo mr-1"></i>恢复
+                </button>
+                <button type="button"
+                    data-file="${encodeURIComponent(it.file)}"
+                    data-space="${encodeURIComponent(it.space)}"
+                    data-name="${encodeURIComponent(it.name || it.id || '')}"
+                    onclick="purgeSourceFromTrash(this)"
+                    class="px-2.5 py-1 text-[11px] font-medium t-bg-track t-text-muted rounded-lg hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-500/15 dark:hover:text-red-400 transition-colors whitespace-nowrap">
+                    <i class="fas fa-times mr-1"></i>彻底删除
+                </button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function restoreSourceFromTrash(btn) {
+    const file = decodeURIComponent(btn.dataset.file || '');
+    const space = decodeURIComponent(btn.dataset.space || '');
+    const name = decodeURIComponent(btn.dataset.name || '') || file;
+    if (!file) return;
+    btn.disabled = true;
+    try {
+        const res = await fetch('/api/custom-source/trash/restore', {
+            method: 'POST',
+            headers: trashAuthHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ username: space, file })
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok || !d.success) throw new Error(d.error || `HTTP ${res.status}`);
+        showSuccess(`已恢复「${name}」，确认平台后再手动启用`);
+        await loadSourceTrash();
+        if (typeof renderCustomSources === 'function') await renderCustomSources();
+        await refreshSourceTrashBadge();
+    } catch (e) {
+        showError(`恢复失败：${e.message}`);
+    } finally {
+        if (btn.isConnected) btn.disabled = false;
+    }
+}
+
+async function purgeSourceFromTrash(btn) {
+    const file = decodeURIComponent(btn.dataset.file || '');
+    const space = decodeURIComponent(btn.dataset.space || '');
+    const name = decodeURIComponent(btn.dataset.name || '') || file;
+    if (!file) return;
+    const ok = await showSelect('彻底删除', `「${name}」将被永久删除，无法恢复。确定继续？`, { danger: true });
+    if (!ok) return;
+    btn.disabled = true;
+    try {
+        const res = await fetch('/api/custom-source/trash/purge', {
+            method: 'POST',
+            headers: trashAuthHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ username: space, file })
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok || !d.success) throw new Error(d.error || `HTTP ${res.status}`);
+        showSuccess('已彻底删除');
+        await loadSourceTrash();
+        await refreshSourceTrashBadge();
+    } catch (e) {
+        showError(`删除失败：${e.message}`);
+        if (btn.isConnected) btn.disabled = false;
+    }
+}
+
+async function purgeAllSourceTrash() {
+    const ok = await showSelect('清空回收站', '回收站里的所有音源将被永久删除，无法恢复。确定继续？', { danger: true });
+    if (!ok) return;
+    const errors = [];
+    for (const space of trashSpaces()) {
+        try {
+            const res = await fetch('/api/custom-source/trash/purge', {
+                method: 'POST',
+                headers: trashAuthHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ username: space, all: true })
+            });
+            if (!res.ok) {
+                const d = await res.json().catch(() => ({}));
+                // 非管理员清不了公开源回收站，属预期，不报错
+                if (res.status !== 403) errors.push(d.error || `HTTP ${res.status}`);
+            }
+        } catch (e) {
+            errors.push(e.message);
+        }
+    }
+    if (errors.length) showError(`部分清理失败：${errors.join('；')}`);
+    else showSuccess('回收站已清空');
+    await loadSourceTrash();
+    await refreshSourceTrashBadge();
 }
 
 // ========================================

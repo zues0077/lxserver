@@ -2928,11 +2928,15 @@ class App {
 
     // ===== 系统配置页：分组导航 / 依赖锁定 / 页内跳转 =====
     initConfigPageUi() {
-        // 顶栏是 sticky 的，分组导航的吸顶偏移要按它的实际高度算
+        // 吸顶偏移必须相对「滚动容器」算，不能按顶栏高度算：
+        // .content-wrapper 自己 overflow-y:auto 就是滚动容器，而 .top-bar 在它外面
+        // （并且已经 sticky 在 top:0）。把顶栏高度再加进来，等于让导航条在滚动容器里
+        // 至少离顶部 92px —— 页面还没滚动就被硬推下去 90px，中间空出一大块，
+        // 同时压到下面「基础」分组标题上，看起来就是错位（2026-11-04 用户指出）。
         const syncStickyOffset = () => {
-            const topBar = document.querySelector('.top-bar');
-            const h = topBar ? topBar.getBoundingClientRect().height : 0;
-            document.documentElement.style.setProperty('--cfg-sticky-top', (h + 10) + 'px');
+            const scroller = document.querySelector('.content-wrapper');
+            const padTop = scroller ? (parseFloat(getComputedStyle(scroller).paddingTop) || 0) : 0;
+            document.documentElement.style.setProperty('--cfg-sticky-top', (padTop + 10) + 'px');
         };
         syncStickyOffset();
         if (!this._cfgStickyBound) {

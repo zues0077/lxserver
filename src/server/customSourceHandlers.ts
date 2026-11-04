@@ -8,6 +8,7 @@ import { getProxyAgent } from '../modules/utils/proxy.js'
 import { encodeRequestUrl } from '../utils/urlEncode'
 import { verifyUser } from './userAuth'
 import { getFlagFor, getIsolationFor } from './sourceGuard'
+import { moveScriptToTrash, listTrash, takeFromTrash, purgeTrash, removeTrashCopies } from './sourceTrash'
 
 // 读取请求体
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -830,7 +831,7 @@ export async function handleReorder(req: IncomingMessage, res: ServerResponse) {
 export async function handleDelete(req: IncomingMessage, res: ServerResponse) {
     try {
         const body = await readBody(req)
-        const { id, sourceId, username } = JSON.parse(body)
+        const { id, sourceId, username, mode } = JSON.parse(body)
         const targetId = id || sourceId
 
         // 查找逻辑同 Toggle
@@ -893,11 +894,21 @@ export async function handleDelete(req: IncomingMessage, res: ServerResponse) {
         }
 
         const scriptPath = path.join(sourcesDir, targetId)
+        const removedEntry = sources.find((s: any) => s.id === targetId)
         sources = sources.filter((s: any) => s.id !== targetId)
 
-        // 删除脚本文件
-        if (fs.existsSync(scriptPath)) {
-            fs.unlinkSync(scriptPath)
+        // 删除默认移入回收站（误删可恢复）；用户明确选「直接删除」时才真删。
+        // 之前一律 unlink，点错一次就得重新上传 + 重新配平台。
+        if (mode === 'purge') {
+            if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath)
+            // 回收站里如果还留着同名旧备份，一并清掉，避免用户以为「我删过了它怎么还在」
+            removeTrashCopies(targetOwner, targetId)
+        } else if (fs.existsSync(scriptPath)) {
+            moveScriptToTrash(targetOwner, targetId, {
+                by: 'manual',
+                entry: removedEntry,
+                reason: '用户手动删除',
+            })
         }
 
         fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
@@ -1016,5 +1027,125 @@ export async function handleUpdatePlatforms(req: IncomingMessage, res: ServerRes
     } catch (error: any) {
         res.writeHead(500, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: false, error: error.message }))
+    }
+}
+
+// ============================ 回收站 ============================
+//
+// 之前只有「移入」没有「查看」：巡检把源挪进 .trash/ 后用户既看不到、也恢复不了，
+// 手动删除更是直接 unlink 永久丢失。这里补齐 list / restore / purge 三个动作。
+
+const resolveOwner = (username?: string | null): string =>
+    (username && username !== 'default') ? username : 'open'
+
+/** 回收站统一鉴权：管理员全通；公开空间只给管理员；个人空间必须本人登录 */
+const guardTrashAccess = (req: IncomingMessage, res: ServerResponse, owner: string): boolean => {
+    if (req.headers['x-frontend-auth'] === global.lx.config['admin.password']) return true
+    if (owner === 'open') {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: '权限不足：公开音源的回收站仅管理员可操作。' }))
+        return false
+    }
+    // 不能复用 rejectCrossUserWrite：它在「未认证」时是放行的（那是为了不阻断开放部署的既有场景），
+    // 用在回收站上就等于谁都能列出别人删了什么。
+    const me = verifyUser(req)
+    if (me !== owner) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: '权限不足：请登录后查看自己的回收站。' }))
+        return false
+    }
+    return true
+}
+
+export async function handleTrashList(req: IncomingMessage, res: ServerResponse, username?: string) {
+    const owner = resolveOwner(username)
+    if (!guardTrashAccess(req, res, owner)) return
+    const items = listTrash(owner)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ success: true, owner, items }))
+}
+
+export async function handleTrashRestore(req: IncomingMessage, res: ServerResponse) {
+    try {
+        const body = await readBody(req)
+        const { username, file } = JSON.parse(body || '{}')
+        const owner = resolveOwner(username)
+        if (!guardTrashAccess(req, res, owner)) return
+
+        const got = takeFromTrash(owner, file)
+        if ('error' in got) {
+            res.writeHead(404, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: got.error }))
+            return
+        }
+
+        const sourcesDir = getSourceDir(owner)
+        if (!fs.existsSync(sourcesDir)) fs.mkdirSync(sourcesDir, { recursive: true })
+        const metaPath = path.join(sourcesDir, 'sources.json')
+        let sources: any[] = []
+        if (fs.existsSync(metaPath)) {
+            try { sources = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) } catch { sources = [] }
+        }
+
+        // 老回收站文件没有 meta：现场解析脚本头拿名称/作者，支持平台留空（前端显示「未知支持源」）
+        const realId = path.basename(got.scriptPath)
+        if (sources.some(s => s && s.id === realId)) {
+            res.writeHead(409, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: `同名音源 ${realId} 已存在，请先删除现有条目再恢复。` }))
+            return
+        }
+
+        let entry = got.entry
+        if (!entry) {
+            let content = ''
+            try { content = fs.readFileSync(got.scriptPath, 'utf-8') } catch { }
+            const md = extractMetadata(content)
+            entry = {
+                id: realId,
+                name: md.name || realId,
+                version: md.version || '1.0.0',
+                author: md.author || '未知',
+                description: md.description || '',
+                homepage: md.homepage || '',
+                size: Buffer.byteLength(content, 'utf-8'),
+                supportedSources: [],
+                enabled: false,
+                uploadTime: new Date().toISOString(),
+            }
+        } else {
+            entry = { ...entry, id: realId }
+        }
+        entry.id = realId
+
+        sources.push(entry)
+        fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
+
+        try { await reloadSingleSource(owner, realId) } catch (e: any) {
+            console.warn(`[回收站] 恢复后重载失败 (${owner}/${realId}): ${e?.message || e}`)
+        }
+        // 恢复的音源默认关闭：先让用户在列表里确认平台与状态，再手动启用，避免一恢复就参与取链
+        probeNewSource(owner, realId)
+
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: true, id: realId, name: entry.name, enabled: !!entry.enabled }))
+    } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: err.message }))
+    }
+}
+
+export async function handleTrashPurge(req: IncomingMessage, res: ServerResponse) {
+    try {
+        const body = await readBody(req)
+        const { username, file, all } = JSON.parse(body || '{}')
+        const owner = resolveOwner(username)
+        if (!guardTrashAccess(req, res, owner)) return
+
+        const removed = purgeTrash(owner, all ? undefined : file)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: true, removed }))
+    } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: err.message }))
     }
 }
