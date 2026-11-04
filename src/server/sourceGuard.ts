@@ -22,6 +22,7 @@ import path from 'path'
 import crypto from 'crypto'
 import { syncLog } from '../utils/log4js'
 import { getActiveHostActivities, registerStallHit } from './sourceActivity'
+import { isThrottled as isGovernorThrottled } from './sourceGovernor'
 
 // ============================ 类型 ============================
 
@@ -1149,7 +1150,12 @@ export interface StallAttribution {
     at: string
     stallMs: number
     suspects: StallSuspect[]
-    action: 'none' | 'warn' | 'isolated' | 'deferred'
+    /**
+     * throttled = 该源已在「降速运行」，本次卡顿是已知代价，不累计隔离计数。
+     * 这条分支是「降速」与「隔离」共存的关键：否则降速 8 秒后又被旧规则停用
+     * （2026-11-04 246 实测：非常刀 20:59:35 降速 → 20:59:43 被隔离）。
+     */
+    action: 'none' | 'warn' | 'isolated' | 'deferred' | 'throttled'
     /** 本次归因触发的自动降速动作（请求并发闸门），没有则为 undefined */
     throttle?: string
     /**
@@ -1330,6 +1336,18 @@ export function attributeStall(stallMs: number): StallAttribution | null {
     }
 
     const key = `${primary.owner}_${primary.id}`
+
+    // 已在「降速运行」的源不再累计隔离计数。
+    // 降速本身就是处置手段：同一时刻只跑一个请求、巡检排到队尾，它仍可能卡一次主线程，
+    // 但那是已知且被限制住的代价。再按次数把它隔离，等于又退回「一刀切停用」，
+    // 与「慢但真能出链的源要兼容」的目标相反（2026-11-04 246 实测就是这么被停掉的）。
+    if (isGovernorThrottled(primary.owner, primary.id)) {
+        attribution.action = 'throttled'
+        console.warn(`[自检护栏][归因] ⏸ ${primary.name} 已在降速运行，本次卡顿不计入隔离（降速不阻断取链）`)
+        pushAttribution(attribution)
+        return attribution
+    }
+
     const streak = (stallStreak.get(key) || 0) + 1
     stallStreak.set(key, streak)
 

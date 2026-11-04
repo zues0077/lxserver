@@ -31,6 +31,8 @@ const DEFAULT_SYNC_MS = 800
 const DEFAULT_MIN_HITS = 2
 /** 降速状态有效期（分钟）：到期自动回到正常，避免一次偶发把源永久戴帽子 */
 const DEFAULT_TTL_MINUTES = 30
+/** 单次就超过该值的同步块 → 首次即降速（实测这类源 5~7 秒，正常源 <100ms） */
+const DEFAULT_SEVERE_SYNC_MS = 2500
 /** 同一慢源允许排队的请求数（正在跑的那个不算） */
 const MAX_QUEUE = 1
 
@@ -38,6 +40,7 @@ export interface GovernorConfig {
     enabled: boolean
     syncMs: number
     minHits: number
+    severeSyncMs: number
     ttlMs: number
 }
 
@@ -72,6 +75,7 @@ export function getGovernorConfig(): GovernorConfig {
         enabled: cfg['customSource.governor.enabled'] !== false,
         syncMs: num(cfg['customSource.governor.syncMs'], DEFAULT_SYNC_MS, 100),
         minHits: Math.max(1, Math.round(num(cfg['customSource.governor.minHits'], DEFAULT_MIN_HITS, 1))),
+        severeSyncMs: num(cfg['customSource.governor.severeSyncMs'], DEFAULT_SEVERE_SYNC_MS, 500),
         ttlMs: Math.round(num(cfg['customSource.governor.ttlMinutes'], DEFAULT_TTL_MINUTES, 1) * 60 * 1000),
     }
 }
@@ -138,7 +142,12 @@ export function noteSyncBlock(owner: string, id: string, name: string, syncMs: n
     st.name = name || st.name
     st.worstSyncMs = Math.max(st.worstSyncMs, Math.round(syncMs))
 
-    if (st.hits >= cfg.minHits && st.until <= now) {
+    // 严重档：单次就 2.5 秒以上（实测这类源 5~7 秒，正常源 <100ms）→ 首次即降速。
+    // 必须单独开一档，否则巡检 180 分钟一轮、每轮只给每个源一次命中，
+    // 「30 分钟内 2 次」这个条件在日常巡检下永远攒不满，等于从不上场。
+    const severe = syncMs >= cfg.severeSyncMs && cfg.severeSyncMs > 0
+
+    if ((severe || st.hits >= cfg.minHits) && st.until <= now) {
         st.until = now + cfg.ttlMs
         return { throttled: true, justThrottled: true, hits: st.hits }
     }

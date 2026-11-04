@@ -28,20 +28,36 @@ const slowScriptTask = (id: string, name: string, callbackMs = 5182) => ({
     probe: { parseMs: 0, deconMs: 3, callbackMs },
 })
 
-test('脚本自身同步重活：连续 3 次自动停用，reason 带次数与耗时', () => {
+test('脚本自身同步重活：默认先降速运行，不直接停用', () => {
     const { meta, probe } = slowScriptTask('feichangdao.js', '非常刀')
 
+    // 246 实测：5.6 秒的同步块属于「严重档」，第一次就该降速
     api.reportSlowTask(meta, 5185, probe)
+    assert.equal(guard.getIsolationFor('open', 'feichangdao.js'), null, '降速优先，不该停用')
     api.reportSlowTask(meta, 5182, probe)
-    assert.equal(guard.getIsolationFor('open', 'feichangdao.js'), null, '前两次不该停用')
-
     api.reportSlowTask(meta, 5603, probe)
-    const rec = guard.getIsolationFor('open', 'feichangdao.js')
-    assert.ok(rec, '第 3 次应当自动停用')
-    assert.equal(rec.source, 'probe', '必须归为运行期判定，才能享受 24h 自动放行复核')
-    assert.match(rec.reason, /^slow_sync:\d+msx3$/, '原因要能自证：耗时 + 命中次数')
-    // fingerprint 留空：熔断是运行期判定，不该被「脚本内容变了」这条规则顺手解除
-    assert.equal(rec.fingerprint, '')
+    assert.equal(guard.getIsolationFor('open', 'feichangdao.js'), null, '已降速的源不再累计隔离计数')
+})
+
+test('关掉降速时，熔断停用仍是兜底（reason 带次数与耗时）', () => {
+    const prev = (global as any).lx?.config
+    ;(global as any).lx = { config: { 'customSource.governor.enabled': false } }
+    try {
+        const { meta, probe } = slowScriptTask('fallback.js', '兜底源')
+        api.reportSlowTask(meta, 5185, probe)
+        api.reportSlowTask(meta, 5182, probe)
+        assert.equal(guard.getIsolationFor('open', 'fallback.js'), null, '前两次不该停用')
+
+        api.reportSlowTask(meta, 5603, probe)
+        const rec = guard.getIsolationFor('open', 'fallback.js')
+        assert.ok(rec, '第 3 次应当自动停用')
+        assert.equal(rec.source, 'probe', '必须归为运行期判定，才能享受 24h 自动放行复核')
+        assert.match(rec.reason, /^slow_sync:\d+msx3$/, '原因要能自证：耗时 + 命中次数')
+        // fingerprint 留空：熔断是运行期判定，不该被「脚本内容变了」这条规则顺手解除
+        assert.equal(rec.fingerprint, '')
+    } finally {
+        ;(global as any).lx = { ...(prev ? { config: prev } : {}) }
+    }
 })
 
 test('体积为主因的源不熔断，只降闸', () => {
@@ -67,16 +83,22 @@ test('回调没超过 2 秒不计入熔断', () => {
     assert.equal(guard.getIsolationFor('open', 'mild.js'), null, '整体慢但回调不慢，不是脚本的锅')
 })
 
-test('已隔离的源重复触发不会刷掉原记录', () => {
-    const { meta, probe } = slowScriptTask('repeat.js', '重复源')
-    for (let i = 0; i < 3; i++) api.reportSlowTask(meta, 5200, probe)
-    const first = guard.getIsolationFor('open', 'repeat.js')
-    assert.ok(first)
-    // 再触发两次（停用后理论上不会再跑，这里直接模拟接口被重复调用）
-    api.reportSlowTask(meta, 6000, probe)
-    api.reportSlowTask(meta, 6200, probe)
-    const again = guard.getIsolationFor('open', 'repeat.js')
-    assert.equal(again.at, first.at, '不该覆盖已有记录的时间')
+test('关掉降速时，已隔离的源重复触发不会刷掉原记录', () => {
+    const prev = (global as any).lx?.config
+    ;(global as any).lx = { config: { 'customSource.governor.enabled': false } }
+    try {
+        const { meta, probe } = slowScriptTask('repeat.js', '重复源')
+        for (let i = 0; i < 3; i++) api.reportSlowTask(meta, 5200, probe)
+        const first = guard.getIsolationFor('open', 'repeat.js')
+        assert.ok(first)
+        // 再触发两次（停用后理论上不会再跑，这里直接模拟接口被重复调用）
+        api.reportSlowTask(meta, 6000, probe)
+        api.reportSlowTask(meta, 6200, probe)
+        const again = guard.getIsolationFor('open', 'repeat.js')
+        assert.equal(again.at, first.at, '不该覆盖已有记录的时间')
+    } finally {
+        ;(global as any).lx = { ...(prev ? { config: prev } : {}) }
+    }
 })
 
 test('隔离原因能翻成人话', () => {

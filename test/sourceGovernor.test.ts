@@ -37,11 +37,12 @@ test('默认阈值 800ms / 2 次：单次慢不降速，第二次才降', () => 
     assert.equal(cfg.syncMs, 800)
     assert.equal(cfg.minHits, 2)
 
-    const first = noteSyncBlock('open', 'a.js', '源A', 5200)
+    // 用「普通慢」档（低于 severeSyncMs）验证 2 次规则；严重档一次就降，见下一条
+    const first = noteSyncBlock('open', 'a.js', '源A', 1200)
     assert.equal(first.justThrottled, false, '偶发一次不该戴帽子')
     assert.equal(isThrottled('open', 'a.js'), false)
 
-    const second = noteSyncBlock('open', 'a.js', '源A', 5100)
+    const second = noteSyncBlock('open', 'a.js', '源A', 1100)
     assert.equal(second.justThrottled, true)
     assert.equal(isThrottled('open', 'a.js'), true)
     assert.equal(second.hits, 2)

@@ -10,7 +10,7 @@ import {
 } from './sourceGuard'
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure } from './sourceProbe'
-import { getGovernorConfig, noteSyncBlock, runWithGovernor } from './sourceGovernor'
+import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor } from './sourceGovernor'
 import { syncLog } from '../utils/log4js'
 
 /**
@@ -320,11 +320,13 @@ export function reportSlowTask(meta: DqTaskMeta | undefined, cost: number, probe
         noteScriptSyncCost(meta.owner, meta.id, meta.name || meta.id, callbackMs)
     }
 
-    // 体积型不动：它降闸就够，且数据大不是源的错。只有「降速后仍反复把主线程卡到 2 秒以上」
-    // 才升级到隔离停用（最后手段，可解除、24h 自动放行复核）。
+    // 体积型不动：它降闸就够，且数据大不是源的错。
+    // 已进入「降速运行」的源不再走熔断停用——降速就是它的处置结论，再停用等于一刀切。
     let isolated = ''
+    const governorActive = meta?.owner && meta?.id ? isGovernorThrottled(meta.owner, meta.id) : false
     if (
         SLOW_SOURCE_ISOLATE_ENABLED
+        && !governorActive
         && !bodyIsBlame
         && callbackMs >= SLOW_SOURCE_MIN_CALLBACK_MS
         && meta?.owner && meta?.id
@@ -370,9 +372,12 @@ function noteScriptSyncCost(owner: string, id: string, name: string, syncMs: num
     if (!res.justThrottled) return
     const cfg = getGovernorConfig()
     const mins = Math.round(cfg.ttlMs / 60000)
-    const msg = `[音源调度] ${name} 脚本同步块 ${Math.round(syncMs)}ms（${mins} 分钟窗口内第 ${res.hits} 次）`
+    const why = res.hits >= cfg.minHits
+        ? `（${mins} 分钟窗口内第 ${res.hits} 次）`
+        : `（单次即超过严重阈值 ${cfg.severeSyncMs}ms）`
+    const msg = `[音源调度] ${name} 脚本同步块 ${Math.round(syncMs)}ms${why}`
         + `，转为「降速运行」：同一时刻只处理一个请求、巡检排到队尾、${mins} 分钟内无新的慢记录自动恢复`
-        + `（不影响正常取链，也不停用该源）`
+        + `（不影响正常取链，也不停用该源；已降速期间不再累计隔离计数）`
     console.warn(msg)
     syncLog.warn(msg)
 }

@@ -731,6 +731,14 @@ declare namespace LX {
     'customSource.governor.syncMs'?: number
     /** 窗口内累计几次慢才进入降速运行 (默认 2)。一次偶发不动它。 */
     'customSource.governor.minHits'?: number
+    /**
+     * 单次同步块就超过该毫秒数(默认 2500)时, 首次即降速, 不等第二次。
+     *
+     * 依据: 246 实测这类源的单次脚本回调是 5.6s / 6.6s, 而正常源普遍 <100ms。
+     * 巡检默认 180 分钟一轮, 一轮只给每个源一次命中, 若只靠「30 分钟内 2 次」
+     * 永远攒不够 —— 严重卡顿必须一次就认。
+     */
+    'customSource.governor.severeSyncMs'?: number
     /** 降速状态有效期(分钟, 默认 30)。到期无新的慢记录自动回到正常, 避免一次偶发永久戴帽子。 */
     'customSource.governor.ttlMinutes'?: number
     /**

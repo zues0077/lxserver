@@ -200,6 +200,7 @@ const config: LX.Config = {
   'customSource.governor.enabled': true,
   'customSource.governor.syncMs': 800, // 单次同步块超过该毫秒数算一次「慢」（正常源通常几十毫秒）
   'customSource.governor.minHits': 2, // 窗口内累计几次才降速：一次偶发不动它
+  'customSource.governor.severeSyncMs': 2500, // 单次就超过该值（实测这类源 5~7 秒）→ 首次即降速，不必等第二次
   'customSource.governor.ttlMinutes': 30, // 降速状态有效期，到期自动回到正常
   // 出站护栏：自定义源脚本发起的请求不允许访问内网/保留地址（127/8、10/8、172.16/12、
   // 192.168/16、169.254/16、IPv6 ::1/fc00::/7/fe80::/10 等）。脚本无需逃逸沙箱就能
