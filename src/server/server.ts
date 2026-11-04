@@ -31,6 +31,7 @@ const musicSdk = musicSdkRaw as any
 import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, describeError } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation, listIsolations, ISOLATION_MAX_AUTO_RELEASE } from './sourceGuard'
+import { hasHotSearchItems } from './hotSearchFallback'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
@@ -9752,7 +9753,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             if (!getter) continue
             try {
               const list = await withTimeout(Promise.resolve(getter.call(musicSdk[cand].hotSearch)), HOT_SEARCH_TIMEOUT_MS, cand)
-              if (Array.isArray(list) && list.length) {
+              // SDK 六个平台都返回 `{ source, list }` 对象（前端按 data.list 消费），
+              // 这里必须用兼容判定；早先用 Array.isArray 会把每个平台都误判成空结果，
+              // 兜底跑满 5 个平台仍返回 []（2026-11-05 test-r42 实机回归）。
+              if (hasHotSearchItems(list)) {
                 payload = list
                 usedSource = cand
                 hotCache.set(cand, { at: Date.now(), list })

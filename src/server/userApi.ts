@@ -11,6 +11,7 @@ import {
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure } from './sourceProbe'
 import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor } from './sourceGovernor'
+import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker } from './sourceWorkerHost'
 import { syncLog } from '../utils/log4js'
 
 /**
@@ -1298,6 +1299,28 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                         inputData = JSON.parse(JSON.stringify(inputData))
                     }
 
+                    // 慢源独立线程：已被降速的源改走 worker，脚本同步块与
+                    // lx.request 的响应解析/回调都不再落在主线程（见 P-1046）。
+                    // 命中后完全跳过 runWithGovernor 的「慢源互斥闸」，让多个慢源真正并行；
+                    // worker 失败且允许回退时，才落回下面的主线程 vm2 路径。
+                    if (shouldRouteToWorker(fullApiInfo.owner, apiInfo.id)) {
+                        const worker = await tryWorkerCall(
+                            {
+                                owner: fullApiInfo.owner,
+                                id: apiInfo.id,
+                                name: fullApiInfo.name,
+                                script: fullApiInfo.script,
+                            },
+                            action,
+                            source,
+                            info,
+                        )
+                        if (worker.handled) {
+                            if (worker.error) throw worker.error
+                            return worker.value
+                        }
+                    }
+
                     const result = await runWithGovernor(
                         fullApiInfo.owner,
                         apiInfo.id,
@@ -2275,10 +2298,14 @@ function unloadLoadedApi(apiKey: string) {
     // 清掉活动账本：音源已卸载，账本不该继续把它列为卡顿嫌疑人
     if (old?.info?.owner && old?.info?.id) {
         resetActivity(old.info.owner, old.info.id)
+        disposeSourceWorker(old.info.owner, old.info.id)
         return
     }
     const idx = apiKey.indexOf('_')
-    if (idx > 0) resetActivity(apiKey.slice(0, idx), apiKey.slice(idx + 1))
+    if (idx > 0) {
+        resetActivity(apiKey.slice(0, idx), apiKey.slice(idx + 1))
+        disposeSourceWorker(apiKey.slice(0, idx), apiKey.slice(idx + 1))
+    }
 }
 
 /** 释放某个用户空间下所有已加载实例（全量重载前调用）。 */

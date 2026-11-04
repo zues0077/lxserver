@@ -742,6 +742,21 @@ declare namespace LX {
     /** 降速状态有效期(分钟, 默认 30)。到期无新的慢记录自动回到正常, 避免一次偶发永久戴帽子。 */
     'customSource.governor.ttlMinutes'?: number
     /**
+     * 是否把「已被降速的慢源」移进独立 worker_threads 执行 (默认 true)。
+     *
+     * 降速运行只解决多个慢源叠加, 挡不住单个脚本自身的 5~13s 同步块。开启后:
+     * 脚本、lx.request 网络请求、响应解析与回调全部留在 worker, 主线程只收最终结果,
+     * 因此 vm2 边界的 decontextify 深拷贝不再阻塞主线程 (手册 P-1046)。
+     * 只有被 sourceGovernor 判定降速的源会进入, 且进入后常驻直到源卸载;
+     * 其余源仍走原来的主线程 vm2 路径。关闭即完全回到旧行为。
+     */
+    'customSource.governor.worker.enabled'?: boolean
+    /**
+     * worker 启动或调用失败时是否回退到主线程 vm2 路径 (默认 true)。
+     * 连续失败 2 次后该源在本次进程内不再尝试 worker, 保证取链可用性优先。
+     */
+    'customSource.governor.worker.fallbackToMain'?: boolean
+    /**
      * 自定义源出站请求是否拦截内网/保留地址 (默认 true)。
      *
      * 脚本不需要逃出沙箱就能把容器当内网跳板: `lx.request('http://127.0.0.1:9527/health')`
