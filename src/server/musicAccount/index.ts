@@ -10,6 +10,7 @@
  */
 
 import * as netease from './resolvers/netease'
+import { syncLog } from '../../utils/log4js'
 import * as qq from './resolvers/qq'
 import * as kuwo from './resolvers/kuwo'
 import * as kugou from './resolvers/kugou'
@@ -1069,9 +1070,24 @@ async function keepaliveOne(id: string, itemId?: string): Promise<void> {
     // 续期请求能被平台正常应答，本身就是「这个号还活着」的证据。
     // 单独记 lastSeenAt（不动 lastVerify 快照）：否则面板/监控只能看 72h 巡检的时间戳，
     // 咪咕这类 2 小时票的平台会一直显示「快照很久以前」= 假掉线（实测 136 分钟误报）。
-    if (r.online !== false) store.touchAccountSeen(id, itemId)
+    if (r.online !== false) {
+      store.touchAccountSeen(id, itemId)
+      // 成功一次就把失败计数清零：保温是「票还有效」的证据，不需要连续成功
+      store.noteKeepaliveResult(id, itemId, true)
+    } else {
+      // 平台明确说没登录态（咪咕 299999）：这是「票死了」，不是网络抖动。
+      // 连续多次就把它记成需重新登录，否则面板会一直显示正常，用户只能从播放失败倒推。
+      const res = store.noteKeepaliveResult(id, itemId, false)
+      if (res.justFlagged) {
+        const msg = `[平台账号] ${name}短期凭证连续 ${res.failCount} 次无法续期，已标记为「需重新登录」，请到后台更新 Cookie`
+        console.warn(msg)
+        syncLog.warn(msg)
+      }
+    }
   } catch (e: any) {
     console.log(`[平台账号] ${name}保温续期请求失败（忽略）：${e?.message || e}`)
+    // 网络异常也算一次失败，但阈值有 3 次，偶发抖动不会误报
+    store.noteKeepaliveResult(id, itemId, false)
   }
 }
 
@@ -1155,8 +1171,11 @@ export interface AccountHint {
   name: string
   health: AccountHealth
   text: string
-  /** expired=登录态失效；notVip=登录正常但不是会员（取会员歌失败时记下） */
-  kind?: 'expired' | 'notVip'
+  /**
+   * expired=登录态失效；notVip=登录正常但不是会员（取会员歌失败时记下）；
+   * keepaliveFailed=短期凭证保温连续失败（票过期且换票也没成功，必须重新登录）
+   */
+  kind?: 'expired' | 'notVip' | 'keepaliveFailed'
 }
 
 /**
@@ -1178,6 +1197,19 @@ export function getAccountHints(): AccountHint[] {
   const hints: AccountHint[] = []
   for (const r of store.listAccounts()) {
     if (!r.configured) continue
+    // 保温连续失败优先报：这时 health 已被置为 expired，但原因与「Cookie 失效」不同 ——
+    // 号可能还是好的，只是短期票过期且换票失败，重新登录最省事。
+    const failed = r.accounts.find(a => a.needsRelogin)
+    if (failed) {
+      hints.push({
+        platform: r.id,
+        name: r.name,
+        health: r.health,
+        kind: 'keepaliveFailed',
+        text: `${r.name}账号（${failed.label}）短期凭证已连续 ${failed.keepaliveFailCount} 次无法续期，票已过期 — 请到后台「平台账号」重新登录或更新 Cookie`,
+      })
+      continue
+    }
     if (r.health === 'expired') {
       hints.push({
         platform: r.id,

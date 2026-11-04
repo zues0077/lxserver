@@ -26,6 +26,13 @@ import { extractAccountIdentity } from './identity'
 import { getAppVersion } from '../../utils/version'
 import type { AccountHealth } from './health'
 
+/**
+ * 短期凭证保温连续失败多少次 → 判定「需要重新登录」。
+ * 3 次 ≈ 3 小时（咪咕每小时一次心跳），足够排除单次网络抖动；
+ * 再晚就会让用户在一整段时间里「面板正常但播不了」。
+ */
+export const KEEPALIVE_FAIL_HINT_THRESHOLD = 3
+
 const FILE_VERSION = 1
 const KEY_FILE = '.music-account-key'
 const DATA_FILE = 'music-accounts.json'
@@ -88,6 +95,14 @@ export interface StoredAccountItem {
   tokenRefreshedAt?: number
   /** 上一次续期的结果说明（成功/失败都写，排查时不必翻日志） */
   tokenRefreshNote?: string
+  /**
+   * 短期凭证保温（咪咕 pacmtoken 这类）连续失败次数。
+   *
+   * 为什么需要：保温失败原来只写一行 console，面板照样显示「正常」，
+   * 直到用户发现播不了才知道号死了（2026-11-04 咪咕停服 6 小时后就这样）。
+   * 连续失败到阈值就置 needsRelogin，界面与 /api/music/account-hints 都会提示重新登录。
+   */
+  keepaliveFailCount?: number
 }
 
 export interface StoredAccount {
@@ -126,6 +141,10 @@ export interface AccountItemView {
   tokenRefreshedAt: number | null
   /** 上一次续期结果说明 */
   tokenRefreshNote: string | null
+  /** 短期凭证保温连续失败次数（0 = 正常） */
+  keepaliveFailCount: number
+  /** 保温反复失败 → 需要重新登录（界面据此置顶提示） */
+  needsRelogin: boolean
 }
 
 let cachedDir: string | null = null
@@ -361,7 +380,9 @@ export function listAccounts(): Array<{
       // 平台每次都正常应答，只是完整巡检快照不刷新。只按快照判就会把一个活着的号标成待复查。
       const seenAt = Number(it.lastSeenAt || 0)
       const seenFresh = seenAt > 0 && Date.now() - seenAt < 7 * 24 * 3600_000
-      const health = hp.health === 'stale' && seenFresh ? 'ok' : hp.health
+      let health = hp.health === 'stale' && seenFresh ? 'ok' : hp.health
+      // 保温连续失败优先于「快照还新」：票已经过期，界面必须说人话
+      if (Number(it.keepaliveFailCount || 0) >= KEEPALIVE_FAIL_HINT_THRESHOLD) health = 'expired'
       return {
         id: it.id,
         label: it.label || (it.primary ? '主账号' : `账号 ${idx + 1}`),
@@ -373,11 +394,15 @@ export function listAccounts(): Array<{
         lastVerify: staleByVersion ? null : raw,
         lastSeenAt: seenAt || null,
         health,
-        healthText: health === hp.health ? hp.text : '正常（近期凭证续期成功）',
+        healthText: Number(it.keepaliveFailCount || 0) >= KEEPALIVE_FAIL_HINT_THRESHOLD
+          ? `需重新登录（短期凭证保温连续失败 ${Number(it.keepaliveFailCount)} 次）`
+          : (health === hp.health ? hp.text : '正常（近期凭证续期成功）'),
         ageHours: hp.ageHours,
         tokenRefreshAt: Number(it.tokenRefreshAt || 0) || null,
         tokenRefreshedAt: Number(it.tokenRefreshedAt || 0) || null,
         tokenRefreshNote: it.tokenRefreshNote || null,
+        keepaliveFailCount: Number(it.keepaliveFailCount || 0),
+        needsRelogin: Number(it.keepaliveFailCount || 0) >= KEEPALIVE_FAIL_HINT_THRESHOLD,
       }
     }).sort((a, b) => Number(b.primary) - Number(a.primary))
 
@@ -643,6 +668,37 @@ export function touchAccountSeen(id: string, itemId?: string): void {
     writeStore(store)
   } catch {
     /* 存活证据写失败不影响主流程 */
+  }
+}
+
+/**
+ * 记一次短期凭证保温的结果（成功清零 / 失败累加）。
+ *
+ * 只动 keepaliveFailCount 一个字段：Cookie、校验快照都不碰，
+ * 避免保温这种轻量心跳把「上一次完整校验」的结论冲掉。
+ *
+ * @returns 累计失败次数与是否刚跨过「需重新登录」阈值（用于只打一条日志）
+ */
+export function noteKeepaliveResult(id: string, itemId: string | undefined, ok: boolean): { failCount: number; justFlagged: boolean } {
+  if (!getPlatform(id)) return { failCount: 0, justFlagged: false }
+  try {
+    const store = readStore()
+    const acc = normalize(store.accounts[id])
+    if (!acc?.items?.length) return { failCount: 0, justFlagged: false }
+    const target = itemId ? acc.items.find(i => i.id === itemId) : primaryItem(acc)
+    if (!target) return { failCount: 0, justFlagged: false }
+    const before = Number(target.keepaliveFailCount || 0)
+    if (ok) {
+      target.keepaliveFailCount = 0
+      writeStore(store)
+      return { failCount: 0, justFlagged: false }
+    }
+    const after = before + 1
+    target.keepaliveFailCount = after
+    writeStore(store)
+    return { failCount: after, justFlagged: after === KEEPALIVE_FAIL_HINT_THRESHOLD }
+  } catch {
+    return { failCount: 0, justFlagged: false }
   }
 }
 
