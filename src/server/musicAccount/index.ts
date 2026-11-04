@@ -1412,10 +1412,8 @@ async function refreshKugouLiteStatus(cookie: string, itemId?: string): Promise<
 // 排程方式：不是「固定间隔的 setInterval」，而是每轮结束后按「开始时间 + 3 小时 × N」
 // 重算下一次。这样进程重启也不会漂移，用户把开始时间从 6 点改到 22 点就真的 22 点跑。
 
-/** 每天从开始时间起跑几轮 */
+/** 每天从开始时间起跑几轮（默认值；实际轮数读 musicAccount.kglite.rounds） */
 const AUTO_CLAIM_ROUNDS = 8
-/** 轮与轮之间隔几小时（8 轮 × 3 小时 = 覆盖全天） */
-const AUTO_CLAIM_ROUND_GAP_HOURS = 3
 
 /** 读到一份「钳过范围」的自动领取配置，防止手改配置文件把定时器打死 */
 export function getKugouLiteAutoClaimConfig(): {
@@ -1492,30 +1490,77 @@ let vipNextRunAt = 0
 /**
  * 算出下一次该跑的时间（毫秒时间戳）。
  *
- * 每天的轮次是「startHour 起每 GAP 小时一轮、共 rounds 轮」，轮次在时间上均匀铺开
- * （rounds×GAP 不要求等于 24：因为每轮都把当日额度领满，覆盖有空隙也不会断档，只是
- * 少几轮空转）。跨过 0 点之后还有 00:00 / 03:00 这种「属于上一天周期」的轮次 —— 计算时必须
- * 把昨天、今天、明天三个周期的刻度一起算进去取最小值，否则进程如果在凌晨重启，
- * 那一轮会被整轮跳过，会员就可能断档。
+ * 每天「startHour 起共 rounds 轮」，但**轮与轮之间是不等额（随机）间隔**——
+ * 用当天日期做种子生成随机权重，把 24 小时切成 rounds-1 段随机长度，所以同一天内的排程稳定
+ * （重启不漂移），跨天自然变化，且不会出现「每 3 小时整点」这种一看就像脚本的固定节奏
+ * （和账号之间随机错峰是同一套思路）。
+ *
+ * 每天第一轮固定在 startHour（当天锚点），最后一轮 ≈ startHour + 24h（即第二天第一轮），
+ * 所以 24 小时被这 rounds 轮铺满、且跨过 0 点后的轮次也属于「上一天周期」——
+ * 必须把昨天、今天、明天三个周期的刻度一起算进去取最小值，否则进程在凌晨重启会跳过
+ * 上一天的最后一轮，会员就可能断档。
  *
  * 单独导出是为了能写单测：时区与跨天边界最容易错，而错了只会表现为「会员莫名其妙到期」。
  */
+export function seedForDate(d: Date): number {
+  // FNV-1a 32 位，把 YYYY-M-D 化成稳定整数种子
+  const key = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
+  let h = 2166136261
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/**
+ * 某一天（以 startHour 为当天第一轮锚点）的 rounds 轮时间戳：第一轮 = baseMs，
+ * 之后 rounds-1 个随机不等额间隔，合计约 24 小时。
+ * 导出是为了单测能直接复算、断言「下一次」一定落在这些点上。
+ */
+export function dayRoundTimes(baseMs: number, rounds: number, seed: number): number[] {
+  const n = Math.max(1, Math.floor(rounds))
+  if (n <= 1) return [baseMs]
+  const rnd = mulberry32(seed)
+  const weights: number[] = []
+  for (let i = 0; i < n - 1; i++) weights.push(0.2 + rnd() * 0.8) // [0.2, 1.0]，天然不等额
+  const sum = weights.reduce((a, b) => a + b, 0)
+  const dayMs = 24 * 3600_000
+  const times: number[] = [baseMs]
+  let acc = 0
+  for (let i = 0; i < n - 1; i++) {
+    acc += (dayMs * weights[i]) / sum
+    times.push(baseMs + acc)
+  }
+  return times
+}
+
 export function nextAutoClaimAt(startHour: number, now = Date.now(), rounds = AUTO_CLAIM_ROUNDS): number {
   const hour = Math.min(23, Math.max(0, Math.floor(Number.isFinite(startHour) ? startHour : 6)))
-  const stepMs = AUTO_CLAIM_ROUND_GAP_HOURS * 3600_000
-  let next = Number.POSITIVE_INFINITY
   const n = Math.max(1, Math.floor(rounds))
+  let next = Number.POSITIVE_INFINITY
   for (let dayOffset = -1; dayOffset <= 1; dayOffset++) {
     const base = new Date(now)
     base.setDate(base.getDate() + dayOffset)
     base.setHours(hour, 0, 0, 0)
-    for (let k = 0; k < n; k++) {
-      const t = base.getTime() + k * stepMs
+    const seed = seedForDate(base)
+    for (const t of dayRoundTimes(base.getTime(), n, seed)) {
       if (t > now && t < next) next = t
     }
   }
   // 正常不会走到这里（三个周期足以覆盖前后各一天），留个安全值免得定时器变成 0 延迟狂转
-  return Number.isFinite(next) ? next : now + stepMs
+  return Number.isFinite(next) ? next : now + 3600_000
 }
 
 export interface LiteAutoClaimAccount {
@@ -1684,7 +1729,7 @@ function scheduleNextAutoClaim(): void {
   const pad = (n: number) => String(n).padStart(2, '0')
   const when = new Date(at)
   console.log(
-    `[平台账号] 酷狗概念版 VIP 自动领取已排程：每天 ${pad(cfg.startHour)}:00 起，每 ${AUTO_CLAIM_ROUND_GAP_HOURS} 小时一轮（共 ${cfg.rounds} 轮，每轮把当日额度连领到满）；`
+    `[平台账号] 酷狗概念版 VIP 自动领取已排程：每天 ${pad(cfg.startHour)}:00 起共 ${cfg.rounds} 轮，轮间随机不等额间隔（当天稳定、跨天变化，铺满 24h）；每轮把当日额度连领到满；`
     + `${cfg.minRemainHours > 0 ? `剩余不足 ${cfg.minRemainHours} 小时才领` : '不看剩余、每轮都补'}，账号间隔 ${cfg.gapMinSeconds}~${cfg.gapMaxSeconds} 秒随机；`
     + `下一轮 ${when.getMonth() + 1}/${when.getDate()} ${pad(when.getHours())}:${pad(when.getMinutes())}`,
   )

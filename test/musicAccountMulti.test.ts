@@ -18,7 +18,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as store from '../src/server/musicAccount/store'
-import { nextAutoClaimAt } from '../src/server/musicAccount'
+import { nextAutoClaimAt, dayRoundTimes, seedForDate } from '../src/server/musicAccount'
 
 // 必须在任何 store 函数被调用之前把数据目录指到临时目录：
 // store 用的是「首次调用时确定目录」的策略（不在 import 时求值），所以这里赋值来得及。
@@ -125,46 +125,74 @@ test('store 里只有密文：明文 Cookie 不落盘', () => {
 })
 
 // ---- 概念版自动领取：时间计算 ----
-// 8 轮 × 3 小时，从 startHour 起对齐；跨 0 点最容易算错，单测专门盯这里
+// 每天 rounds 轮、轮间随机不等额间隔（用日期做种子，当天稳定、跨天变化）；跨 0 点最容易算错
 
-test('nextAutoClaimAt：开始时间未到 → 返回当天该点', () => {
+// 复算「某天、某 startHour、某 rounds」的全部轮次时间戳（和 nextAutoClaimAt 内部同一套算法）
+function dayTimes(startHour: number, rounds: number, d: Date): number[] {
+  const hour = Math.min(23, Math.max(0, Math.floor(Number.isFinite(startHour) ? startHour : 6)))
+  const base = new Date(d)
+  base.setHours(hour, 0, 0, 0)
+  return dayRoundTimes(base.getTime(), rounds, seedForDate(base))
+}
+
+test('nextAutoClaimAt：开始时间未到 → 返回当天第一轮（= startHour 整点）', () => {
   const now = new Date(2026, 9, 28, 4, 20).getTime()
   assert.equal(nextAutoClaimAt(6, now), new Date(2026, 9, 28, 6, 0, 0, 0).getTime())
 })
 
-test('nextAutoClaimAt：开始时间已过 → 返回下一个 3 小时刻度', () => {
-  const now = new Date(2026, 9, 28, 7, 30).getTime()
-  assert.equal(nextAutoClaimAt(6, now), new Date(2026, 9, 28, 9, 0, 0, 0).getTime())
+test('nextAutoClaimAt：第一轮永远钉在 startHour（当天锚点）', () => {
+  // 不论随机间隔怎么切，当天 00:00 之后、06:00 之前，下一轮必然是 06:00
+  const now = new Date(2026, 9, 28, 5, 59).getTime()
+  assert.equal(nextAutoClaimAt(6, now), new Date(2026, 9, 28, 6, 0, 0, 0).getTime())
+})
 
-  const now2 = new Date(2026, 9, 28, 13, 5).getTime()
-  assert.equal(nextAutoClaimAt(6, now2), new Date(2026, 9, 28, 15, 0, 0, 0).getTime())
+test('nextAutoClaimAt：结果一定落在当天/隔天/昨天的某一轮上，且晚于现在', () => {
+  const set = new Set<number>([
+    ...dayTimes(6, 8, new Date(2026, 9, 27)),
+    ...dayTimes(6, 8, new Date(2026, 9, 28)),
+    ...dayTimes(6, 8, new Date(2026, 9, 29)),
+  ])
+  const now = new Date(2026, 9, 28, 13, 5).getTime()
+  const at = nextAutoClaimAt(6, now)
+  assert.ok(at > now, `算出的 ${new Date(at).toISOString()} 不晚于现在`)
+  assert.ok(set.has(at), `算出的 ${new Date(at).toISOString()} 不在当天/隔天/昨天的轮次集合里`)
 })
 
 test('nextAutoClaimAt：深夜越过的 0 点轮次也算数', () => {
+  const set = new Set<number>([
+    ...dayTimes(6, 8, new Date(2026, 9, 28)),
+    ...dayTimes(6, 8, new Date(2026, 9, 29)),
+  ])
   const now = new Date(2026, 9, 28, 23, 30).getTime()
-  // 6 点起每 3 小时：21:00 之后是次日 00:00
-  assert.equal(nextAutoClaimAt(6, now), new Date(2026, 9, 29, 0, 0, 0, 0).getTime())
+  const at = nextAutoClaimAt(6, now)
+  assert.ok(at > now && set.has(at), `深夜 23:30 的下一次（${new Date(at).toISOString()}）应落在当天或次日的轮次上`)
 })
 
 test('nextAutoClaimAt：凌晨重启时不跳过「上一天周期的最后一轮」', () => {
-  // 6 点起跑时，10/28 03:00 属于 10/27 那个周期（06:00 起 21 小时后）。
-  // 若只看当天刻度，这里会算成 06:00，07:00~09:00 之间就会空出一大段没人补领。
+  // 6 点起跑、8 轮：前一天（10/27）的轮次跨过 0 点延伸到 10/28 早上；若只看当天刻度会漏掉它
+  const setPrev = new Set(dayTimes(6, 8, new Date(2026, 9, 27))) // 含 10/28 早上的最后一轮
   const now = new Date(2026, 9, 28, 1, 0).getTime()
-  assert.equal(nextAutoClaimAt(6, now), new Date(2026, 9, 28, 3, 0, 0, 0).getTime())
+  const at = nextAutoClaimAt(6, now)
+  assert.ok(at > now, `算出的 ${new Date(at).toISOString()} 不晚于现在`)
+  assert.ok(setPrev.has(at), `凌晨 1 点应回退到上一天周期的最后一轮（${new Date(at).toISOString()}）`)
 })
 
-test('nextAutoClaimAt：0 点起跑时，23:30 的下一轮是明天 0 点', () => {
+test('nextAutoClaimAt：0 点起跑时，23:30 的下一轮落在当日或次日的轮次上', () => {
+  const set = new Set<number>([
+    ...dayTimes(0, 8, new Date(2026, 9, 28)),
+    ...dayTimes(0, 8, new Date(2026, 9, 29)),
+  ])
   const now = new Date(2026, 9, 28, 23, 30).getTime()
-  assert.equal(nextAutoClaimAt(0, now), new Date(2026, 9, 29, 0, 0, 0, 0).getTime())
+  const at = nextAutoClaimAt(0, now)
+  assert.ok(at > now && set.has(at), `23:30 的下一次（${new Date(at).toISOString()}）应落在当日或次日的轮次上`)
 })
 
 test('nextAutoClaimAt：非法开始时间不抛错，越界值钳进 0-23', () => {
   const now = new Date(2026, 9, 28, 1, 0).getTime()
-  // NaN → 兜底 6 点，凌晨 1 点时最近的刻度仍是当天 03:00
-  assert.equal(nextAutoClaimAt(NaN, now), new Date(2026, 9, 28, 3, 0, 0, 0).getTime())
-  // 99 点钳成 23 点：上一周期是 10/27 23:00 起，下一刻度是 10/28 02:00
-  assert.equal(nextAutoClaimAt(99, now), new Date(2026, 9, 28, 2, 0, 0, 0).getTime())
-  assert.equal(nextAutoClaimAt(-5, now), new Date(2026, 9, 28, 3, 0, 0, 0).getTime())
+  // 不抛错即可；NaN/99/-5 都应由钳制 + 当天锚点给出合法结果
+  assert.ok(Number.isFinite(nextAutoClaimAt(NaN, now)))
+  assert.ok(Number.isFinite(nextAutoClaimAt(99, now)))
+  assert.ok(Number.isFinite(nextAutoClaimAt(-5, now)))
 })
 
 test('nextAutoClaimAt：结果一定晚于当前时刻', () => {
@@ -176,6 +204,20 @@ test('nextAutoClaimAt：结果一定晚于当前时刻', () => {
       assert.ok(at > now, `startHour=6 now=${new Date(now).toISOString()} 算出的 ${new Date(at).toISOString()} 不晚于现在`)
     }
   }
+})
+
+test('dayRoundTimes：轮数=1 只返回锚点；轮间不等额且合计≈24h', () => {
+  const base = new Date(2026, 9, 28, 6, 0, 0, 0).getTime()
+  assert.deepEqual(dayRoundTimes(base, 1, 123), [base])
+  const t = dayRoundTimes(base, 8, seedForDate(new Date(2026, 9, 28)))
+  assert.equal(t.length, 8)
+  assert.equal(t[0], base)
+  // 相邻间隔不全相等（随机）→ 至少有两段的间隔不同
+  const gaps = t.slice(1).map((x, i) => x - t[i])
+  const uniq = new Set(gaps.map(g => Math.round(g / 60000)))
+  assert.ok(uniq.size > 1, '轮间间隔应是不等额的（随机）')
+  // 最后一轮 ≈ base + 24h
+  assert.ok(Math.abs(t[t.length - 1] - (base + 24 * 3600_000)) < 1000, '最后一轮应≈24h后')
 })
 
 test('旧版本回写 cookie 时，以旧字段为准（降级一致性）', () => {
