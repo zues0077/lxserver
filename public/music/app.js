@@ -15363,6 +15363,17 @@ async function renderCustomSources() {
 
             // 「已隔离」不再是独立状态：按钮只显示「已停用」，隔离原因单独一行说明（见 isolatedNote）。
 
+            // 降速运行：源本身可用，只是脚本同步处理慢，被限制成「同一时刻只跑一个请求」。
+            // 它不是故障（照常能取链），所以不能跟「已停用」混淆，用一个中性的 amber 角标。
+            const throttleTag = source.throttled ? (() => {
+                const t = source.throttled || {};
+                const sec = t.worstSyncMs ? (t.worstSyncMs / 1000).toFixed(1) : '';
+                const tip = (t.reasonText || '脚本同步处理偏慢，已降速运行（不影响正常取链）')
+                    + (sec ? `｜实测单次同步 ${sec}s` : '');
+                return `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold whitespace-nowrap border bg-amber-50 text-amber-600 border-amber-200 dark:bg-amber-500/20 dark:text-amber-400 dark:border-amber-500/30"
+                        title="${escapeHtmlText(tip)}"><i class="fas fa-hourglass-half mr-0.5"></i>降速</span>`;
+            })() : '';
+
             // 权限判断：管理员有所有权限；登录用户对公开源只有查看使用（Toggle）权限，无法刷新或删除
             const isPublic = source.owner === 'open';
             const canManageSource = isAdmin || (!isPublic && isUser);
@@ -15406,6 +15417,22 @@ async function renderCustomSources() {
                 </div>`;
             })() : '';
 
+            // 降速运行说明行：按钮仍是「已启用」（源没坏），这里说明为什么它比别的源慢一拍
+            const throttleNote = source.throttled ? (() => {
+                const t = source.throttled || {};
+                const sec = t.worstSyncMs ? (t.worstSyncMs / 1000).toFixed(1) : '';
+                const autoAt = t.autoRecoverAt
+                    ? new Date(t.autoRecoverAt).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+                    : '';
+                const tip = (t.reasonText || '脚本同步处理偏慢，已降速运行')
+                    + (autoAt ? ` · ${autoAt} 后自动恢复常速` : '')
+                    + ' · 不影响取链，也不需要手动处理';
+                return `<div class="mt-1 flex items-center">
+                    <span class="text-[9px] md:text-[10px] text-amber-600 dark:text-amber-400 whitespace-nowrap truncate max-w-[240px] md:max-w-none"
+                          title="${escapeHtmlText(tip)}"><i class="fas fa-hourglass-half mr-1"></i>降速运行${sec ? `：脚本同步处理 ${sec}s` : ''}（不影响取链，到点自动恢复）</span>
+                </div>`;
+            })() : '';
+
             // 平台级关闭的汇总：徽标只是划线，数量多了不容易一眼看出关了几个
             const platformOffText = (() => {
                 const off = (disabledSources || []).filter(s => {
@@ -15440,6 +15467,7 @@ async function renderCustomSources() {
                         ${ownerTag}
                         ${vmTag}
                         ${guardTag}
+                        ${throttleTag}
                     </div>
                     ${errorMsg}
                     <div class="flex flex-wrap items-center text-[10px] t-text-muted gap-x-2.5 md:gap-x-3 gap-y-1 mt-1 md:mt-1.5">
@@ -15452,6 +15480,7 @@ async function renderCustomSources() {
                     ${supportedBadges}
                     ${platformOffText ? `<div class="mt-1 flex items-center">${platformOffText}</div>` : ''}
                     ${isolatedNote}
+                    ${throttleNote}
                 </div>
                 
                 <div class="flex flex-col items-end gap-1.5 md:gap-2 shrink-0">

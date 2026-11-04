@@ -714,6 +714,26 @@ declare namespace LX {
      */
     'customSource.callTimeoutMs'?: number
     /**
+     * 「慢源降速运行」总开关 (默认 true)。
+     *
+     * 有些公开音源本身可用, 但脚本里的同步逻辑要跑好几秒(实测「非常刀」5.2s、
+     * 「西瓜聚合源」5.6s), 一跑就把主线程事件循环占住。降速运行把它关进单间:
+     * 慢源之间互斥、同一源同时只跑一个请求、巡检排到队尾 —— 它仍然能取链,
+     * 但不再与其它慢源叠成十几秒的阻塞。关闭后恢复「不论多慢都并发跑」的老行为。
+     */
+    'customSource.governor.enabled'?: boolean
+    /**
+     * 单次「脚本同步块」超过多少毫秒算一次慢 (默认 800)。
+     *
+     * 口径是 handler 同步执行到第一个 await 的耗时, 或响应回调里的脚本处理耗时,
+     * 不含网络等待 —— 慢网络不等于重脚本, 用总耗时判定会把正常源误判成慢源。
+     */
+    'customSource.governor.syncMs'?: number
+    /** 窗口内累计几次慢才进入降速运行 (默认 2)。一次偶发不动它。 */
+    'customSource.governor.minHits'?: number
+    /** 降速状态有效期(分钟, 默认 30)。到期无新的慢记录自动回到正常, 避免一次偶发永久戴帽子。 */
+    'customSource.governor.ttlMinutes'?: number
+    /**
      * 自定义源出站请求是否拦截内网/保留地址 (默认 true)。
      *
      * 脚本不需要逃出沙箱就能把容器当内网跳板: `lx.request('http://127.0.0.1:9527/health')`

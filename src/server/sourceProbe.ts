@@ -32,6 +32,7 @@ import { encodeRequestUrl } from '@/utils/urlEncode'
 import { syncLog } from '@/utils/log4js'
 import { localTime } from '@/utils/time'
 import { markSourceBusy } from './sourceGuard'
+import { isThrottled } from './sourceGovernor'
 import { beginProbeQuiet, endProbeQuiet } from './probeQuiet'
 import { beginHostActivity, endHostActivity } from './sourceActivity'
 import { moveScriptToTrash } from './sourceTrash'
@@ -1308,7 +1309,16 @@ export async function runSourceProbe(
       return ps?.lastCheckAt || 0
     }
     if (!options.firstProbe) {
-      jobs.sort((a, b) => lastCheckOf(a) - lastCheckOf(b))
+      // 降速运行的慢源排到队尾：它单次就要占住主线程数秒，排在前面等于让同批其它源
+      // 都在它后面排队（慢源之间还有互斥闸，排在前面只会互相等）。
+      // 排序保持稳定：先按「是否降速」分组，组内仍按上次探测时间轮转，
+      // 慢源不会饿死 —— 降速状态 30 分钟自动过期，过期即回到正常队列。
+      jobs.sort((a, b) => {
+        const ra = isThrottled(a.target.owner, a.target.id) ? 1 : 0
+        const rb = isThrottled(b.target.owner, b.target.id) ? 1 : 0
+        if (ra !== rb) return ra - rb
+        return lastCheckOf(a) - lastCheckOf(b)
+      })
     }
     // 快速复检每轮只取 N 个。**必须按「上次探测时间」轮转，不能按「关闭时间」**：
     // 按关闭时间会把最老的 16 个固定下来，它们若一直探不通，后面的平台永远排不到

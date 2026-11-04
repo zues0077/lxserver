@@ -10,6 +10,7 @@ import {
 } from './sourceGuard'
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure } from './sourceProbe'
+import { getGovernorConfig, noteSyncBlock, runWithGovernor } from './sourceGovernor'
 import { syncLog } from '../utils/log4js'
 
 /**
@@ -312,7 +313,15 @@ export function reportSlowTask(meta: DqTaskMeta | undefined, cost: number, probe
         }
     }
 
-    // 脚本自身同步重活 → 熔断停用。体积型不动：它降闸就够，且数据大不是源的错。
+    // 脚本自身同步重活 → 先转「降速运行」，而不是直接停用。
+    // 降速是首选处置：源仍然能取链，只是同一时刻只跑一个请求、巡检排到队尾，
+    // 不再和别的慢源叠成十几秒的同步阻塞。统计口径与 callRequest 里的同步块实测共用一份窗口。
+    if (meta?.owner && meta?.id && callbackMs > 0) {
+        noteScriptSyncCost(meta.owner, meta.id, meta.name || meta.id, callbackMs)
+    }
+
+    // 体积型不动：它降闸就够，且数据大不是源的错。只有「降速后仍反复把主线程卡到 2 秒以上」
+    // 才升级到隔离停用（最后手段，可解除、24h 自动放行复核）。
     let isolated = ''
     if (
         SLOW_SOURCE_ISOLATE_ENABLED
@@ -345,6 +354,25 @@ export function reportSlowTask(meta: DqTaskMeta | undefined, cost: number, probe
     const msg = `[响应处理] 单条响应同步耗时 ${cost}ms：${meta?.name || '未知源'}`
         + `（响应体 ${formatBytes(bytes)}｜parse ${parseMs}ms / 深拷贝 ${deconMs}ms / 脚本回调 ${callbackMs}ms`
         + `${verdict ? `｜${verdict}` : ''}｜窗口内第 ${hits.count} 次）${adapted}${isolated}`
+    console.warn(msg)
+    syncLog.warn(msg)
+}
+
+/**
+ * 把一次「脚本自身同步块」的实测耗时交给调度层（sourceGovernor）。
+ *
+ * 这里只做记账与一条日志，真正的隔离手段在 governor 里：慢源之间互斥、同源单飞、
+ * 巡检排到队尾。**不在这里停用源** —— 慢但能出链的源仍然可用，只是不再拖累别人。
+ */
+function noteScriptSyncCost(owner: string, id: string, name: string, syncMs: number): void {
+    if (!owner || !id || !Number.isFinite(syncMs) || syncMs < 50) return
+    const res = noteSyncBlock(owner, id, name, syncMs)
+    if (!res.justThrottled) return
+    const cfg = getGovernorConfig()
+    const mins = Math.round(cfg.ttlMs / 60000)
+    const msg = `[音源调度] ${name} 脚本同步块 ${Math.round(syncMs)}ms（${mins} 分钟窗口内第 ${res.hits} 次）`
+        + `，转为「降速运行」：同一时刻只处理一个请求、巡检排到队尾、${mins} 分钟内无新的慢记录自动恢复`
+        + `（不影响正常取链，也不停用该源）`
     console.warn(msg)
     syncLog.warn(msg)
 }
@@ -1265,8 +1293,26 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                         inputData = JSON.parse(JSON.stringify(inputData))
                     }
 
-                    const result = await handler(inputData)
-                    return decontextify(result)
+                    const result = await runWithGovernor(
+                        fullApiInfo.owner,
+                        apiInfo.id,
+                        fullApiInfo.name,
+                        async () => {
+                            // 「脚本自身同步重活」的实测口径：handler 同步执行到第一个 await 的耗时。
+                            // 不能拿整个 await 的时长判定 —— 那里面大部分是网络等待，
+                            // 慢网络不等于重脚本，用它只会把一堆正常源打成慢源。
+                            const syncStartedAt = Date.now()
+                            const pending = handler(inputData)
+                            noteScriptSyncCost(
+                                fullApiInfo.owner,
+                                apiInfo.id,
+                                fullApiInfo.name,
+                                Date.now() - syncStartedAt,
+                            )
+                            return decontextify(await pending)
+                        },
+                    )
+                    return result
                 } catch (e: any) {
                     if (isProbeQuiet()) {
                         // 巡检期的失败是「预期内噪音」，聚合到摘要里，不逐条打印

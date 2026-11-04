@@ -8,6 +8,7 @@ import { getProxyAgent } from '../modules/utils/proxy.js'
 import { encodeRequestUrl } from '../utils/urlEncode'
 import { verifyUser } from './userAuth'
 import { getFlagFor, getIsolationFor, describeIsolationReason, describeGuardReasons, ISOLATION_AUTO_RELEASE_MS } from './sourceGuard'
+import { getThrottle } from './sourceGovernor'
 import { moveScriptToTrash, listTrash, takeFromTrash, purgeTrash, removeTrashCopies } from './sourceTrash'
 
 // 读取请求体
@@ -529,6 +530,22 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
                     autoReleaseAt: isolation.source === 'probe'
                         ? new Date((Date.parse(isolation.at) || Date.now()) + ISOLATION_AUTO_RELEASE_MS).toISOString()
                         : null,
+                }
+            }
+        } catch (e) { }
+
+        // 降速运行：慢但仍然可用的源。它不是故障（源照样能取链），所以不能标成「已停用」，
+        // 但要让人看得见 —— 否则用户会觉得「为什么这个源突然慢了一拍」。
+        try {
+            const throttle = getThrottle(source.owner, source.id)
+            if (throttle && throttle.until > Date.now()) {
+                source.throttled = {
+                    worstSyncMs: throttle.worstSyncMs,
+                    hits: throttle.hits,
+                    at: throttle.lastAt,
+                    autoRecoverAt: new Date(throttle.until).toISOString(),
+                    reasonText: `脚本同步处理耗时 ${Math.round(throttle.worstSyncMs)}ms，已降速运行`
+                        + `（同一时刻只处理一个请求、巡检排到队尾；不影响正常取链，到点自动恢复）`,
                 }
             }
         } catch (e) { }
