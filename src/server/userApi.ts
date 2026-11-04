@@ -6,6 +6,7 @@ import {
     markSourceBusy,
     reviewSourceScript,
     describeIsolationReason,
+    isolateSlowSource,
 } from './sourceGuard'
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure } from './sourceProbe'
@@ -215,6 +216,22 @@ const SLOW_TASK_HIT_WINDOW_MS = 30 * 60 * 1000
 /** 判定为「这个源根本处理不了这个量级」的硬阈值 */
 const SLOW_TASK_HARD_MS = 2000
 
+/**
+ * 慢源熔断：脚本自身同步重活（体积闸拦不住的那一类）连续命中就自动停用。
+ *
+ * 背景（2026-11-04 实测）：「非常刀」「西瓜聚合源」单条响应稳定卡 4.8~5.6 秒，
+ * 拆开看 parse 0ms / 深拷贝 3~12ms / **脚本回调 4.9~5.6 秒** —— 卡顿全部来自脚本自己的
+ * 同步逻辑，跟响应体大小无关，所以「降体积闸」这条路对它们完全无效（日志自己都写了「降闸无效」）。
+ * 但事件循环卡顿归因那套（sourceGuard 的 stall 判定）噪声太大、默认关闭，靠它只会误伤。
+ *
+ * 这里改成**按实测证据熔断**：同一个源在 30 分钟窗口内第 N 次单条响应同步处理超 2 秒，
+ * 就认定它扛不住，走隔离机制停用（隔离 = 强制跳过加载，但仍保留原因、可解除、24h 自动放行复核）。
+ * 只处理「回调为主因」的；体积为主因的继续走降闸，不该因为数据大就停掉一个正常源。
+ */
+const SLOW_SOURCE_ISOLATE_ENABLED = process.env.SOURCE_SLOW_ISOLATE !== '0'
+const SLOW_SOURCE_MIN_CALLBACK_MS = Number(process.env.SOURCE_SLOW_ISOLATE_MIN_MS) || 2000
+const SLOW_SOURCE_ISOLATE_STREAK = Math.max(2, Number(process.env.SOURCE_SLOW_ISOLATE_STREAK) || 3)
+
 /** 当前生效的响应体上限：默认值与该源的自适应上限取小。仅供测试调用 */
 export function effectiveBodyLimit(owner: string, id: string): number {
     const hit = adaptiveBodyLimits.get(`${owner}_${id}`)
@@ -272,15 +289,16 @@ export function reportSlowTask(meta: DqTaskMeta | undefined, cost: number, probe
     //   体积为主因（parse+拷贝超 1s）→ 当场降闸，下一次同量级响应在 parse 之前就被丢弃
     //   脚本自身重活 → 体积闸拦不住卡顿，只有「这个源处理这个量级就是不行」时（窗口内第 2 次
     //     超 2s）才降闸；一次偶发不动它，避免为一次性抖动牺牲一个正常音源
+    // 命中计数与响应体大小无关：脚本自己同步死循环时响应体可能只有几 KB，一样会卡住事件循环。
+    // 所以计数放在体积分支外面，两种成因共用同一份窗口计数。
+    const prev = slowTaskHits.get(key)
+    const hits = (!prev || now - prev.since > SLOW_TASK_HIT_WINDOW_MS)
+        ? { count: 1, since: now }
+        : { count: prev.count + 1, since: prev.since }
+    slowTaskHits.set(key, hits)
+
     let adapted = ''
     if (bytes > ADAPTIVE_LIMIT_FLOOR_BYTES && meta?.owner && meta?.id) {
-        const hitKey = key
-        const prev = slowTaskHits.get(hitKey)
-        const hits = (!prev || now - prev.since > SLOW_TASK_HIT_WINDOW_MS)
-            ? { count: 1, since: now }
-            : { count: prev.count + 1, since: prev.since }
-        slowTaskHits.set(hitKey, hits)
-
         const shouldShrink = bodyIsBlame
             ? true
             : (cost >= SLOW_TASK_HARD_MS && hits.count >= 2)
@@ -294,15 +312,39 @@ export function reportSlowTask(meta: DqTaskMeta | undefined, cost: number, probe
         }
     }
 
+    // 脚本自身同步重活 → 熔断停用。体积型不动：它降闸就够，且数据大不是源的错。
+    let isolated = ''
+    if (
+        SLOW_SOURCE_ISOLATE_ENABLED
+        && !bodyIsBlame
+        && callbackMs >= SLOW_SOURCE_MIN_CALLBACK_MS
+        && meta?.owner && meta?.id
+        && hits.count >= SLOW_SOURCE_ISOLATE_STREAK
+    ) {
+        const record = isolateSlowSource(
+            meta.owner,
+            meta.id,
+            meta.name || meta.id,
+            Math.round(callbackMs),
+            hits.count,
+        )
+        if (record) {
+            isolated = `；已自动停用该音源（${SLOW_TASK_HIT_WINDOW_MS / 60000} 分钟内第 ${hits.count} 次同步卡顿，`
+                + `可到「隔离记录」解除）`
+            // 停用后计数清零：解除隔离重新加载时重新累计，不带着旧账再被秒停
+            slowTaskHits.delete(key)
+        }
+    }
+
     if (now - (slowTaskLoggedAt.get(key) || 0) < SLOW_TASK_LOG_WINDOW_MS) return
     slowTaskLoggedAt.set(key, now)
 
     const verdict = bodyIsBlame
         ? '体积为主因'
-        : (callbackMs >= BODY_COST_SUSPECT_MS ? '脚本自身同步重活，非体积问题（降闸无效）' : '')
+        : (callbackMs >= BODY_COST_SUSPECT_MS ? '脚本自身同步重活（降闸无效，按次数熔断）' : '')
     const msg = `[响应处理] 单条响应同步耗时 ${cost}ms：${meta?.name || '未知源'}`
         + `（响应体 ${formatBytes(bytes)}｜parse ${parseMs}ms / 深拷贝 ${deconMs}ms / 脚本回调 ${callbackMs}ms`
-        + `${verdict ? `｜${verdict}` : ''}）${adapted}`
+        + `${verdict ? `｜${verdict}` : ''}｜窗口内第 ${hits.count} 次）${adapted}${isolated}`
     console.warn(msg)
     syncLog.warn(msg)
 }

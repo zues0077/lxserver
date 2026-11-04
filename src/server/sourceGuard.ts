@@ -513,6 +513,15 @@ export function describeIsolationReason(reason: string): string {
         return `定时器回调卡住事件循环 ${human}`
     }
 
+    // slow_sync:<毫秒>x<次数>：脚本自身同步逻辑过重，反复把单条响应处理卡住数秒
+    const slowSync = /^slow_sync:(\d+)msx(\d+)$/.exec(raw)
+    if (slowSync) {
+        const ms = Number(slowSync[1])
+        const times = Number(slowSync[2])
+        const human = ms >= 1000 ? `${(ms / 1000).toFixed(1)} 秒` : `${ms} 毫秒`
+        return `响应处理反复卡顿：半小时内第 ${times} 次单条同步处理耗时 ${human}，已自动停用（脚本自身逻辑过重，与响应体大小无关）`
+    }
+
     const parts = raw.split('+').map(s => s.trim()).filter(Boolean)
     return describeGuardReasons(parts) || raw
 }
@@ -679,6 +688,48 @@ export function isolateManually(owner: string, id: string, name: string): boolea
         console.warn(`[自检护栏] 手动隔离后卸载失败 ${name || id}:`, e?.message || e)
     }
     return true
+}
+
+/**
+ * 运行期「慢源」自动隔离。
+ *
+ * 与 isolateManually 的区别：那个是人看过特征后做的判断，这个是**实测证据**驱动的 ——
+ * 某个源在窗口内反复让单条响应同步处理卡住数秒，且时间明确花在脚本自己的回调里
+ * （parse/深拷贝都是几毫秒，所以降体积闸完全无效），说明它扛不住这个量级。
+ * 留在加载列表里只会间歇性拖住整个事件循环（一次 5 秒，期间所有请求一起排队）。
+ *
+ * source 固定 'probe'：属于运行期自动判定，必须享受 24h 自动放行复核，
+ * 否则一次误伤就变成永久停用。
+ */
+export function isolateSlowSource(
+    owner: string,
+    id: string,
+    name: string,
+    slowMs: number,
+    hits: number,
+): IsolateRecord | null {
+    if (!owner || !id) return null
+    const key = recordKey(owner, id)
+    // 已经在隔离里就不再重复写：用户还没处理时又被触发一次，不该刷掉原有记录的时间
+    if (getIsolationFor(owner, id)) return null
+    const record = recordIsolation(
+        { owner, id, name: name || id },
+        '',
+        'B',
+        `slow_sync:${slowMs}msx${hits}`,
+        'probe',
+    )
+    activeIsolations.set(key, record)
+    try {
+        guardDeps?.unload(owner, id)
+    } catch (e: any) {
+        /* 卸载失败不影响隔离记录：下次加载会被 shouldSkipSource 跳过 */
+        console.warn(`[自检护栏] 慢源熔断后卸载失败 ${name || id}:`, e?.message || e)
+    }
+    syncLog.warn(
+        `[自检护栏] 慢源熔断：${name || id}（${id}）30 分钟内第 ${hits} 次单条响应同步卡顿 ${slowMs}ms，已自动停用`,
+    )
+    return record
 }
 
 // ============================ 运行时状态 ============================
