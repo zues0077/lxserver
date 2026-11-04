@@ -289,9 +289,10 @@ async function boot(data: SourceWorkerData) {
         try {
             Promise.resolve(handler(input))
                 .then(value => post({ type: 'result', callId, ok: true, value: toTransferable(value) }))
-                .catch(e => post({ type: 'result', callId, ok: false, error: String(e?.message || e) }))
+                .catch(e => post({ type: 'result', callId, ok: false, fromScript: true, error: String(e?.message || e) }))
         } catch (e: any) {
-            post({ type: 'result', callId, ok: false, error: String(e?.message || e) })
+            // 脚本同步抛错同样是业务失败，不是 worker 故障
+            post({ type: 'result', callId, ok: false, fromScript: true, error: String(e?.message || e) })
         }
     })
 

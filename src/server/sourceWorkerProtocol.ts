@@ -28,8 +28,8 @@ export type MainToWorkerMessage =
 export type WorkerToMainMessage =
     | { type: 'ready'; sources: Record<string, any> }
     | { type: 'fatal'; message: string }
-    | { type: 'result'; callId: number; ok: true; value: any }
-    | { type: 'result'; callId: number; ok: false; error: string }
+    | { type: 'result'; callId: number; ok: true; value: any; fromScript?: false }
+    | { type: 'result'; callId: number; ok: false; error: string; fromScript?: boolean }
     | { type: 'log'; level: 'log' | 'info' | 'debug' | 'warn' | 'error'; text: string }
 
 export const WORKER_DEFAULTS = {
@@ -160,6 +160,28 @@ export function pickRequestParts(options: any): { method: string; data: any; jso
     if (safe.form !== undefined) return { method, data: safe.form, json: false }
     if (safe.formData !== undefined) return { method, data: safe.formData, json: false }
     return { method, data: safe.body, json: true }
+}
+
+export interface WorkerFailureDecision {
+    /** true = 结果由 worker 链路负责（抛给上层换源）；false = 落回主线程 vm2 路径 */
+    handled: boolean
+    /** 是否计入「worker 基础设施故障」熔断计数 */
+    countFailure: boolean
+    fallback: boolean
+}
+
+/**
+ * 区分「脚本业务失败」与「worker 基础设施故障」。
+ *
+ * 实机教训（test-r43）：脚本 handler reject('所有音源均失败') 是取链失败的**正常业务结果**，
+ * 与主线程 vm2 路径下抛出的错误完全等价。若把它算成 worker 故障，连续两次就会熔断并
+ * 回退主线程，慢源又跑回主线程继续卡 13s —— 隔离等于白做。
+ * 只有超时 / ready 失败 / worker 退出 / postMessage 失败才算基础设施故障。
+ */
+export function workerFailureDecision(err: any, fallbackToMain: boolean): WorkerFailureDecision {
+    const fromScript = !!(err && typeof err === 'object' && (err as any).fromScript === true)
+    if (fromScript) return { handled: true, countFailure: false, fallback: false }
+    return { handled: !fallbackToMain, countFailure: true, fallback: fallbackToMain }
 }
 
 export function configBool(cfg: Record<string, any>, key: string, fallback: boolean): boolean {

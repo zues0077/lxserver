@@ -17,6 +17,7 @@ import {
     plainify,
     scriptFingerprint,
     toTransferable,
+    workerFailureDecision,
 } from '../src/server/sourceWorkerProtocol'
 
 test('pickWorkerConfig: 只带白名单键，凭据类键一律不带', () => {
@@ -129,4 +130,24 @@ test('configBool/configNumber: 缺失与非法值走默认', () => {
     assert.equal(configNumber(cfg, 'd', 7), 42)
     assert.equal(configNumber(cfg, 'b', 7), 7)
     assert.equal(configNumber(cfg, 'c', 7), 7)
+})
+
+// test-r43 实机回归：脚本 reject('所有音源均失败') 是业务取链失败，
+// 曾被误计为 worker 故障 → 连败 2 次熔断 → 回退主线程继续卡 13s。
+test('workerFailureDecision: 脚本业务失败不熔断、不回退，原样交给上层换源', () => {
+    const scriptErr = Object.assign(new Error('所有音源均失败'), { fromScript: true })
+    for (const fallback of [true, false]) {
+        const d = workerFailureDecision(scriptErr, fallback)
+        assert.deepEqual(d, { handled: true, countFailure: false, fallback: false })
+    }
+})
+
+test('workerFailureDecision: worker 基础设施故障才计入熔断', () => {
+    const infra = new Error('worker 调用超时')
+    assert.deepEqual(workerFailureDecision(infra, true), { handled: false, countFailure: true, fallback: true })
+    assert.deepEqual(workerFailureDecision(infra, false), { handled: true, countFailure: true, fallback: false })
+    // 纯字符串/undefined 抛出物也按基础设施故障处理，不能被误认成业务失败
+    assert.equal(workerFailureDecision(undefined, true).countFailure, true)
+    assert.equal(workerFailureDecision('boom', true).countFailure, true)
+    assert.equal(workerFailureDecision({ fromScript: 1 }, true).countFailure, true)
 })

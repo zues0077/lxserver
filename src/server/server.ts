@@ -32,6 +32,7 @@ import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis,
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation, listIsolations, ISOLATION_MAX_AUTO_RELEASE } from './sourceGuard'
 import { hasHotSearchItems } from './hotSearchFallback'
+import { getWorkerStatus } from './sourceWorkerHost'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
@@ -2751,6 +2752,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         activeLongTimers: getActiveLongTimers(),
         sourceGuard: getSourceGuardStatus(),
         sourceProbe: getSourceProbeStatus(probeDetail),
+        // 慢源独立线程：哪些源进 worker、哪些已熔断、开关状态（r43 实机排障用）
+        sourceWorker: getWorkerStatus(),
         // 事件循环/内存/GC 诊断：卡顿归因三要素（配合 app.log 里的 [GC] 与慢定时器日志）
         diagnostics: getEventLoopStats(),
         // 音源活动账本：谁在发请求、谁刚回来响应、谁在加载、谁已被自动降速

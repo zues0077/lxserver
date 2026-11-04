@@ -20,6 +20,7 @@ import {
     pickWorkerConfig,
     scriptFingerprint,
     toTransferable,
+    workerFailureDecision,
 } from './sourceWorkerProtocol'
 
 const WORKER_START_TIMEOUT_MS = 20000
@@ -152,7 +153,7 @@ export class SourceWorkerHost {
                     this.pending.delete(msg.callId)
                     clearTimeout(p.timer)
                     if (msg.ok) p.resolve(fromTransferable(msg.value))
-                    else p.reject(new Error(msg.error))
+                    else p.reject(Object.assign(new Error(msg.error), { fromScript: msg.fromScript === true }))
                 }
             })
             this.worker.on('error', e => finish(new Error(`worker 异常: ${(e as any)?.message || String(e)}`)))
@@ -280,10 +281,14 @@ export async function tryWorkerCall(info: WorkerSourceInfo, action: string, sour
         return { handled: true, value }
     } catch (e: any) {
         const err = e instanceof Error ? e : new Error(String(e?.message || e))
+        const decision = workerFailureDecision(err, workerPolicy.fallbackToMain)
+        // 脚本业务失败（如「所有音源均失败」）等价于主线程路径的取链失败：
+        // 原样抛给上层换源，不熔断、不回退重跑同一份脚本。
+        if (!decision.countFailure) return { handled: true, error: err }
         const burnt = workerPolicy.noteFailure(info.owner, info.id)
-        console.warn(`[自定义源-worker] ${info.name} 调用失败（${err.message}）${burnt ? '，已停用该源的 worker' : ''}${workerPolicy.fallbackToMain ? '，回退主线程' : ''}`)
+        console.warn(`[自定义源-worker] ${info.name} 调用失败（${err.message}）${burnt ? '，已停用该源的 worker' : ''}${decision.fallback ? '，回退主线程' : ''}`)
         if (burnt) dropHost(info.owner, info.id)
-        if (workerPolicy.fallbackToMain) return { handled: false, error: err }
+        if (decision.fallback) return { handled: false, error: err }
         return { handled: true, error: err }
     }
 }
