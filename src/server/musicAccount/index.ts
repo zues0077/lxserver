@@ -1491,12 +1491,13 @@ let vipNextRunAt = 0
  * 算出下一次该跑的时间（毫秒时间戳）。
  *
  * 每天「startHour 起共 rounds 轮」，但**轮与轮之间是不等额（随机）间隔**——
- * 用当天日期做种子生成随机权重，把 24 小时切成 rounds-1 段随机长度，所以同一天内的排程稳定
+ * 用当天日期做种子生成随机权重，把 24 小时切成 rounds 段随机长度，所以同一天内的排程稳定
  * （重启不漂移），跨天自然变化，且不会出现「每 3 小时整点」这种一看就像脚本的固定节奏
  * （和账号之间随机错峰是同一套思路）。
  *
- * 每天第一轮固定在 startHour（当天锚点），最后一轮 ≈ startHour + 24h（即第二天第一轮），
- * 所以 24 小时被这 rounds 轮铺满、且跨过 0 点后的轮次也属于「上一天周期」——
+ * 每天第一轮固定在 startHour（当天锚点），24 小时被切成 rounds 段，
+ * 最后一轮落在「次日锚点之前」，之后留一段间隔回到第二天第一轮——
+ * 所以跨过 0 点后的轮次属于「上一天周期」，
  * 必须把昨天、今天、明天三个周期的刻度一起算进去取最小值，否则进程在凌晨重启会跳过
  * 上一天的最后一轮，会员就可能断档。
  *
@@ -1526,15 +1527,21 @@ function mulberry32(seed: number): () => number {
 
 /**
  * 某一天（以 startHour 为当天第一轮锚点）的 rounds 轮时间戳：第一轮 = baseMs，
- * 之后 rounds-1 个随机不等额间隔，合计约 24 小时。
+ * 之后 rounds-1 个随机不等额间隔。
+ *
+ * 关键：24 小时要切成 **rounds 段**（不是 rounds-1 段）。切 rounds-1 段时最后一段合计
+ * 正好 24h，最后一轮会落在「次日锚点」上被去重，结果设 3 轮/天实际只跑 2 次。
+ * 切成 rounds 段后，最后一轮之后还留着到次日锚点的一段，轮数与实际执行次数才对得上。
  * 导出是为了单测能直接复算、断言「下一次」一定落在这些点上。
  */
 export function dayRoundTimes(baseMs: number, rounds: number, seed: number): number[] {
   const n = Math.max(1, Math.floor(rounds))
   if (n <= 1) return [baseMs]
   const rnd = mulberry32(seed)
+  // 权重 [0.5, 1.5)：均值 1，段长在「平均间隔的 50%~150%」之间波动，
+  // 既明显不等额，又不会出现 24 轮时某两轮只隔几分钟这种极端值。
   const weights: number[] = []
-  for (let i = 0; i < n - 1; i++) weights.push(0.2 + rnd() * 0.8) // [0.2, 1.0]，天然不等额
+  for (let i = 0; i < n; i++) weights.push(0.5 + rnd())
   const sum = weights.reduce((a, b) => a + b, 0)
   const dayMs = 24 * 3600_000
   const times: number[] = [baseMs]

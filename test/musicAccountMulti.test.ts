@@ -206,7 +206,7 @@ test('nextAutoClaimAt：结果一定晚于当前时刻', () => {
   }
 })
 
-test('dayRoundTimes：轮数=1 只返回锚点；轮间不等额且合计≈24h', () => {
+test('dayRoundTimes：轮数=1 只返回锚点；轮数=8 给出 8 个点、轮间不等额', () => {
   const base = new Date(2026, 9, 28, 6, 0, 0, 0).getTime()
   assert.deepEqual(dayRoundTimes(base, 1, 123), [base])
   const t = dayRoundTimes(base, 8, seedForDate(new Date(2026, 9, 28)))
@@ -216,8 +216,31 @@ test('dayRoundTimes：轮数=1 只返回锚点；轮间不等额且合计≈24h'
   const gaps = t.slice(1).map((x, i) => x - t[i])
   const uniq = new Set(gaps.map(g => Math.round(g / 60000)))
   assert.ok(uniq.size > 1, '轮间间隔应是不等额的（随机）')
-  // 最后一轮 ≈ base + 24h
-  assert.ok(Math.abs(t[t.length - 1] - (base + 24 * 3600_000)) < 1000, '最后一轮应≈24h后')
+  // 最后一轮必须落在「次日锚点之前」，否则会和次日第一轮重合、被去重成少一轮
+  const last = t[t.length - 1]
+  assert.ok(last < base + 24 * 3600_000, '最后一轮必须在 24h 内，否则与次日第一轮重合')
+  // 它离次日锚点只该差「一段正常间隔」（平均 3h，最长 1.5 倍 + 1 秒余量）
+  assert.ok(
+    base + 24 * 3600_000 - last <= 3 * 3600_000 * 1.5 + 1000,
+    '最后一轮到次日锚点的空档应是一段正常间隔，不该几乎为 0',
+  )
+})
+
+test('dayRoundTimes：每日 N 轮就给出 N 个互不相同的时刻（3 轮/天不会只跑 2 次）', () => {
+  // 这条是回归测试：曾把 24h 切成 rounds-1 段，导致最后一轮正好等于次日锚点被去重，
+  // 用户设「3 轮/天」实际只执行 2 次。
+  for (const d of [new Date(2026, 9, 1), new Date(2026, 9, 15), new Date(2026, 9, 28)]) {
+    const base = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 1, 0, 0, 0).getTime()
+    for (const rounds of [2, 3, 6, 12]) {
+      const t = dayRoundTimes(base, rounds, seedForDate(d))
+      assert.equal(t.length, rounds, `rounds=${rounds} 应给出 ${rounds} 个时刻`)
+      assert.equal(new Set(t).size, rounds, `rounds=${rounds} 的时刻不能有重复`)
+      for (let i = 1; i < t.length; i++) {
+        assert.ok(t[i] > t[i - 1], `rounds=${rounds} 时刻必须递增`)
+      }
+      assert.ok(t[t.length - 1] < base + 24 * 3600_000, `rounds=${rounds} 最后一轮必须在 24h 内`)
+    }
+  }
 })
 
 test('旧版本回写 cookie 时，以旧字段为准（降级一致性）', () => {

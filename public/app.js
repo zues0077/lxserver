@@ -5465,50 +5465,46 @@ class App {
                    </label>`
                 : '';
 
-            // 自动领会员：默认收起，标题行给出摘要（几点开始 / 间隔 / 补足阈值）。
+            // 自动领会员：默认收起，标题行给出摘要（开始时间 / 轮数 / 轮间隔 / 账号间隔 / 补足阈值）。
+            // 展开后表单里这几项都是可见的，摘要会隐藏（见 toggleKugouLiteAuto），避免同屏说两遍。
             // 表单常驻 DOM（只是 display:none），这样 loadKugouLiteVip 回填时元素一定在，
             // 不用为了「展开后重新回填」再打一次接口。
             const autoCfg = this._kgliteAuto || {};
             const autoOpen = !!this._kgliteAutoOpen;
-            const autoSummary = autoCfg.autoClaim === false
-                ? '已关闭'
-                : `${String(typeof autoCfg.startHour === 'number' ? autoCfg.startHour : 6).padStart(2, '0')}:00 起`
-                  + ` · ${typeof autoCfg.rounds === 'number' ? autoCfg.rounds : 3} 轮/天`
-                  + ` · 间隔 ${this._gapText(autoCfg.gapMinSeconds, autoCfg.gapMaxSeconds)}`
-                  + ` · ${this._kgliteRemainText(autoCfg.minRemainHours)}`;
+            const autoSummary = this._kgliteAutoSummaryText(autoCfg);
             const autoSection = isKglite
                 ? `<div class="music-acc-section">
                        <div class="music-acc-section-title">
                            <span>自动领会员</span>
-                           <span class="music-acc-section-sub" id="kglite-auto-summary">${autoSummary}</span>
+                           <span class="music-acc-section-sub" id="kglite-auto-summary"${autoOpen ? ' style="display:none;"' : ''}>${autoSummary}</span>
                            <button type="button" class="music-acc-subtoggle" id="kglite-auto-toggle"
                                onclick="app.toggleKugouLiteAuto()">${autoOpen ? '收起 ▴' : '设置 ▾'}</button>
                        </div>
                        <div class="music-acc-auto-body" id="kglite-auto-body"${autoOpen ? '' : ' style="display:none;"'}>
                            <div class="music-acc-auto-grid">
                                <label class="music-acc-auto-field music-acc-auto-field--switch">
-                                   <input type="checkbox" id="kglite-auto-claim"> 每天自动领取
+                                   <input type="checkbox" id="kglite-auto-claim" onchange="app.refreshKugouLiteAutoSummary()"> 每天自动领取
                                </label>
                                <label class="music-acc-auto-field">开始时间
-                                   <select id="kglite-start-hour">
+                                   <select id="kglite-start-hour" onchange="app.refreshKugouLiteAutoSummary()">
                                        ${Array.from({ length: 24 }, (_, h) => `<option value="${h}">${String(h).padStart(2, '0')}:00</option>`).join('')}
                                    </select>
                                </label>
-                               <label class="music-acc-auto-field" title="每天自动领取跑几轮（每轮都把当日 8 次额度领满，所以 1 轮就够；多留几轮只是防容器重启错过那一轮）。默认 3 轮，范围 1~24">
+                               <label class="music-acc-auto-field" title="每天自动领取跑几轮。每轮会把当日额度领满（8 次 × 3 小时 = 一天），所以 1 轮就能续上；多几轮只是为了防容器重启错过某一轮。轮与轮之间是**随机不等额**间隔（不是固定每 X 小时），默认 3 轮，范围 1~24">
                                    每日领取轮数
-                                   <input type="number" id="kglite-rounds" min="1" max="24" step="1">
+                                   <input type="number" id="kglite-rounds" min="1" max="24" step="1" oninput="app.refreshKugouLiteAutoSummary()">
                                </label>
-                               <label class="music-acc-auto-field" title="账号之间的错峰等待，每次在区间里随机取一个值，避免固定节奏被风控认成脚本">
+                               <label class="music-acc-auto-field" title="同一轮里，账号与账号之间的错峰等待（秒级）；每次在区间里随机取一个值，避免固定节奏被风控认成脚本。这是账号间隔，不是轮间隔">
                                    账号间隔最短（秒）
-                                   <input type="number" id="kglite-gap-min" min="5" max="3600" step="5">
+                                   <input type="number" id="kglite-gap-min" min="5" max="3600" step="5" oninput="app.refreshKugouLiteAutoSummary()">
                                </label>
-                               <label class="music-acc-auto-field" title="账号之间的错峰等待，每次在区间里随机取一个值，避免固定节奏被风控认成脚本">
+                               <label class="music-acc-auto-field" title="同一轮里，账号与账号之间的错峰等待（秒级）；每次在区间里随机取一个值，避免固定节奏被风控认成脚本。这是账号间隔，不是轮间隔">
                                    账号间隔最长（秒）
-                                   <input type="number" id="kglite-gap-max" min="5" max="3600" step="5">
+                                   <input type="number" id="kglite-gap-max" min="5" max="3600" step="5" oninput="app.refreshKugouLiteAutoSummary()">
                                </label>
-                               <label class="music-acc-auto-field" title="只在会员快到期时才补领：剩余时长少于这个值才动手，够用就跳过，避免把每天 8 次额度全用掉。填 0 = 不限，不管剩多久每轮都补（时长只增不减，但每天都会跑满 8 轮任务）">
+                               <label class="music-acc-auto-field" title="只在会员快到期时才补领：剩余时长少于这个值才动手，够用就跳过，避免把每天额度全用掉。填 0 = 不限，不管剩多久每轮都补（时长只增不减，但天天都跑满轮任务）">
                                    VIP 剩余少于（小时才补，0=不限）
-                                   <input type="number" id="kglite-min-remain" min="0" max="720">
+                                   <input type="number" id="kglite-min-remain" min="0" max="720" oninput="app.refreshKugouLiteAutoSummary()">
                                </label>
                            </div>
                            <div class="music-acc-auto-actions">
@@ -5650,6 +5646,13 @@ class App {
         const btn = document.getElementById('kglite-auto-toggle');
         if (body) body.style.display = this._kgliteAutoOpen ? '' : 'none';
         if (btn) btn.textContent = this._kgliteAutoOpen ? '收起 ▴' : '设置 ▾';
+        // 展开时表单里「开始时间/轮数/账号间隔/阈值」全都看得见，摘要再说一遍是重复 → 隐藏；
+        // 收起时反过来，靠摘要一眼看配置，顺手按当前表单值刷一次，免得显示的是没保存前的旧值。
+        const summaryEl = document.getElementById('kglite-auto-summary');
+        if (summaryEl) {
+            summaryEl.style.display = this._kgliteAutoOpen ? 'none' : '';
+            if (!this._kgliteAutoOpen) this.refreshKugouLiteAutoSummary();
+        }
     }
 
     /** 通用小浮层：贴着按钮弹出，点外部 / 滚动 / 缩放都关闭。菜单项用函数引用，不拼 inline onclick */
@@ -5893,6 +5896,67 @@ class App {
     }
 
     /**
+     * 「自动领会员」标题行摘要：只在**收起**时展示（展开时表单里四项都在，再说一遍纯属重复）。
+     * 必须和 fillSettings / 表单实时联动共用同一份逻辑，否则用户改了开始时间，摘要还是旧值。
+     *
+     * 措辞要点：`账号间隔` 说的是**同一轮里不同账号之间的错峰**（秒级），
+     * 绝不能简写成「间隔」——那会被读成「轮与轮的间隔」，看起来像每天只跑几分钟就完事。
+     * 轮间隔单独用「轮间约 X 小时不等额」表达。
+     */
+    _kgliteAutoSummaryText(cfg) {
+        const c = cfg || {};
+        if (c.autoClaim === false) return '已关闭';
+        const hour = typeof c.startHour === 'number' ? c.startHour : 6;
+        const rounds = typeof c.rounds === 'number' && c.rounds >= 1 ? Math.floor(c.rounds) : 3;
+        let text = `${String(hour).padStart(2, '0')}:00 起 · ${rounds} 轮/天`;
+        if (rounds > 1) {
+            const avg = 24 / rounds;
+            text += avg >= 1
+                ? ` · 轮间约 ${Math.round(avg)} 小时不等额`
+                : ` · 轮间约 ${Math.round(avg * 60)} 分钟不等额`;
+        }
+        text += ` · 账号间隔 ${this._gapText(c.gapMinSeconds, c.gapMaxSeconds)}`
+            + ` · ${this._kgliteRemainText(c.minRemainHours)}`;
+        return text;
+    }
+
+    /** 距离某个时间点还有多久的人话（给「下一轮」做补充，不重复配置描述） */
+    _relTimeText(ms) {
+        const diff = Number(ms) - Date.now();
+        if (!Number.isFinite(diff) || diff <= 0) return '';
+        const minutes = Math.round(diff / 60000);
+        if (minutes < 60) return `约 ${Math.max(1, minutes)} 分钟后`;
+        const hours = Math.round(minutes / 60);
+        if (hours < 48) return `约 ${hours} 小时后`;
+        return `约 ${Math.round(hours / 24)} 天后`;
+    }
+
+    /**
+     * 表单改动时实时刷新摘要（不必等保存），收起后看到的立刻就是新值。
+     * 空输入框回落到服务端当前配置，避免闪成 0。
+     */
+    refreshKugouLiteAutoSummary() {
+        const el = document.getElementById('kglite-auto-summary');
+        if (!el) return;
+        const prev = this._kgliteAuto || {};
+        const numOf = (id, fallback) => {
+            const x = document.getElementById(id);
+            if (!x || String(x.value).trim() === '') return fallback;
+            const n = Number(x.value);
+            return Number.isFinite(n) ? n : fallback;
+        };
+        const autoEl = document.getElementById('kglite-auto-claim');
+        el.textContent = this._kgliteAutoSummaryText({
+            autoClaim: autoEl ? autoEl.checked : prev.autoClaim,
+            startHour: numOf('kglite-start-hour', prev.startHour),
+            rounds: numOf('kglite-rounds', prev.rounds),
+            gapMinSeconds: numOf('kglite-gap-min', prev.gapMinSeconds),
+            gapMaxSeconds: numOf('kglite-gap-max', prev.gapMaxSeconds),
+            minRemainHours: numOf('kglite-min-remain', prev.minRemainHours),
+        });
+    }
+
+    /**
      * 每日领取账本：鼠标停在某个账号那一行时，浮出这个号「昨天新增了多久会员」。
      *
      * 领取是凌晨 6 点起定时跑的，那时候界面根本没开，用户只能在第二天从日志里翻
@@ -5965,12 +6029,9 @@ class App {
             this._kgliteAuto = d || {};
             const summaryEl = document.getElementById('kglite-auto-summary');
             if (summaryEl) {
-                summaryEl.textContent = d.autoClaim === false
-                    ? '已关闭'
-                    : `${String(typeof d.startHour === 'number' ? d.startHour : 6).padStart(2, '0')}:00 起`
-                      + ` · ${typeof d.rounds === 'number' ? d.rounds : 3} 轮/天`
-                      + ` · 间隔 ${this._gapText(d.gapMinSeconds, d.gapMaxSeconds)}`
-                      + ` · ${this._kgliteRemainText(d.minRemainHours)}`;
+                summaryEl.textContent = this._kgliteAutoSummaryText(d);
+                // 展开时表单里四项都在，摘要纯重复 → 隐藏
+                summaryEl.style.display = this._kgliteAutoOpen ? 'none' : '';
             }
             const autoEl = document.getElementById('kglite-auto-claim');
             if (autoEl) autoEl.checked = d.autoClaim !== false;
@@ -5987,16 +6048,15 @@ class App {
             const nextEl = document.getElementById('kglite-next-run');
             if (nextEl) {
                 if (d.autoClaim === false) {
-                    nextEl.textContent = '自动领取已关闭';
+                    // 摘要已经写了「已关闭」，这里再写一遍是重复
+                    nextEl.textContent = '';
                 } else if (d.nextRunAt) {
                     const t = new Date(d.nextRunAt).toLocaleString('zh-CN', {
                         hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
                     });
-                    const roundsText = `共 ${typeof d.rounds === 'number' ? d.rounds : 3} 轮（每轮把当日额度领满）`
-                    nextEl.textContent = `下一轮：${t}（${roundsText}；`
-                        + `${typeof d.minRemainHours === 'number' && d.minRemainHours <= 0
-                            ? '不看剩余，每轮都补）'
-                            : `VIP 剩余少于 ${d.minRemainHours} 小时才补，够用就跳过）`}`;
+                    // 这一行只说「什么时候跑」，轮数/阈值/开始时间归摘要和表单管，不在这里重复
+                    const rel = this._relTimeText(d.nextRunAt);
+                    nextEl.textContent = `下一轮：${t}${rel ? ` · ${rel}` : ''}`;
                 } else {
                     nextEl.textContent = '';
                 }
