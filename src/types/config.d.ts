@@ -306,6 +306,11 @@ declare namespace LX {
     'musicAccount.kglite.startHour'?: number
 
     /**
+     * 酷狗概念版：每天自动领取跑几轮（每轮都把当日额度领满，所以 1 轮就够；多留几轮只是防容器重启错过那一轮，范围 1~24）
+     */
+    'musicAccount.kglite.rounds'?: number
+
+    /**
      * 酷狗概念版：多账号之间领 VIP 的错峰间隔（秒）下限。
      * 每两个账号之间在 [下限, 上限] 里随机取一个值，固定间隔会形成等差时间序列，更像脚本。
      */

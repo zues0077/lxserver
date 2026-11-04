@@ -94,7 +94,8 @@ const config: LX.Config = {
   'musicAccount.autoSwitch': {}, // 主号失效自动切换：{平台id: true}，默认空=全部关闭（多号漂移代价大）
   // 酷狗概念版 VIP 自动领取：多账号轮流做任务，每个账号每天可领 8 次（每次 3 小时）
   'musicAccount.kglite.autoClaim': true, // 是否开启定时自动领取
-  'musicAccount.kglite.startHour': 6, // 每天从几点开始跑（0-23）；之后每 3 小时一轮，共 8 轮
+  'musicAccount.kglite.startHour': 6, // 每天从几点开始跑（0-23）；之后每 3 小时一轮
+  'musicAccount.kglite.rounds': 3, // 每天自动领取跑几轮（每轮都把当日 8 次额度领满，1 轮就够；多留几轮只为防容器重启错过那一轮，范围 1~24）
   // 账号之间的错峰等待：每次在 [最短, 最长] 区间里随机取一个秒数，别用固定值
   // （固定间隔会形成等差时间序列，比人工操作更像脚本）
   'musicAccount.kglite.gapMinSeconds': 60,

@@ -10637,6 +10637,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'musicAccount.kglite.gapMinSeconds': musicAccount.getKugouLiteAutoClaimConfig().gapMinSeconds,
             'musicAccount.kglite.gapMaxSeconds': musicAccount.getKugouLiteAutoClaimConfig().gapMaxSeconds,
             'musicAccount.kglite.minRemainHours': global.lx.config['musicAccount.kglite.minRemainHours'] ?? 24,
+            'musicAccount.kglite.rounds': global.lx.config['musicAccount.kglite.rounds'] ?? 3,
             subsonicPortConflict: global.lx.subsonicPortConflict || null,
             localMusicIdentifyThreads: global.lx.config['localMusicIdentifyThreads'] ?? 2,
             configFilePath: global.lx.configPath || process.env.CONFIG_PATH || path.join(global.lx.dataPath, 'config.js'),
@@ -10900,6 +10901,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (newConfig['musicAccount.kglite.startHour'] !== undefined) {
                 const h = Number(newConfig['musicAccount.kglite.startHour'])
                 global.lx.config['musicAccount.kglite.startHour'] = Number.isFinite(h) ? Math.min(23, Math.max(0, Math.floor(h))) : 6
+                kgliteScheduleDirty = true
+              }
+              if (newConfig['musicAccount.kglite.rounds'] !== undefined) {
+                const r = Number(newConfig['musicAccount.kglite.rounds'])
+                global.lx.config['musicAccount.kglite.rounds'] = Number.isFinite(r) ? Math.min(24, Math.max(1, Math.floor(r))) : 3
                 kgliteScheduleDirty = true
               }
               // 账号间隔从「固定 N 秒」改成「区间内随机」：两个新键 + 旧键兼容
@@ -11713,6 +11719,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             if (typeof patch.kgliteMinRemainHours === 'number' && Number.isFinite(patch.kgliteMinRemainHours)) {
               global.lx.config['musicAccount.kglite.minRemainHours'] = Math.min(720, Math.max(0, Math.floor(patch.kgliteMinRemainHours)))
             }
+            if (typeof patch.kgliteRounds === 'number' && Number.isFinite(patch.kgliteRounds)) {
+              global.lx.config['musicAccount.kglite.rounds'] = Math.min(24, Math.max(1, Math.floor(patch.kgliteRounds)))
+              kgliteDirty = true
+            }
             if (kgliteDirty) musicAccount.rescheduleKugouLiteVipAutoClaim()
             if (typeof global.lx?.saveConfig === 'function') global.lx.saveConfig()
             const kgliteCfg = musicAccount.getKugouLiteAutoClaimConfig()
@@ -11727,6 +11737,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               kgliteGapMinSeconds: kgliteCfg.gapMinSeconds,
               kgliteGapMaxSeconds: kgliteCfg.gapMaxSeconds,
               kgliteMinRemainHours: global.lx.config['musicAccount.kglite.minRemainHours'] ?? 24,
+              kgliteRounds: global.lx.config['musicAccount.kglite.rounds'] ?? 3,
               autoSwitch: global.lx.config['musicAccount.autoSwitch'] || {},
               healthCheck: musicAccount.getHealthCheckState(),
             } }))

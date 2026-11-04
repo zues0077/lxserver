@@ -5473,6 +5473,7 @@ class App {
             const autoSummary = autoCfg.autoClaim === false
                 ? '已关闭'
                 : `${String(typeof autoCfg.startHour === 'number' ? autoCfg.startHour : 6).padStart(2, '0')}:00 起`
+                  + ` · ${typeof autoCfg.rounds === 'number' ? autoCfg.rounds : 3} 轮/天`
                   + ` · 间隔 ${this._gapText(autoCfg.gapMinSeconds, autoCfg.gapMaxSeconds)}`
                   + ` · ${this._kgliteRemainText(autoCfg.minRemainHours)}`;
             const autoSection = isKglite
@@ -5492,6 +5493,10 @@ class App {
                                    <select id="kglite-start-hour">
                                        ${Array.from({ length: 24 }, (_, h) => `<option value="${h}">${String(h).padStart(2, '0')}:00</option>`).join('')}
                                    </select>
+                               </label>
+                               <label class="music-acc-auto-field" title="每天自动领取跑几轮（每轮都把当日 8 次额度领满，所以 1 轮就够；多留几轮只是防容器重启错过那一轮）。默认 3 轮，范围 1~24">
+                                   每日领取轮数
+                                   <input type="number" id="kglite-rounds" min="1" max="24" step="1">
                                </label>
                                <label class="music-acc-auto-field" title="账号之间的错峰等待，每次在区间里随机取一个值，避免固定节奏被风控认成脚本">
                                    账号间隔最短（秒）
@@ -5963,6 +5968,7 @@ class App {
                 summaryEl.textContent = d.autoClaim === false
                     ? '已关闭'
                     : `${String(typeof d.startHour === 'number' ? d.startHour : 6).padStart(2, '0')}:00 起`
+                      + ` · ${typeof d.rounds === 'number' ? d.rounds : 3} 轮/天`
                       + ` · 间隔 ${this._gapText(d.gapMinSeconds, d.gapMaxSeconds)}`
                       + ` · ${this._kgliteRemainText(d.minRemainHours)}`;
             }
@@ -5976,6 +5982,8 @@ class App {
             if (gapMaxEl) gapMaxEl.value = typeof d.gapMaxSeconds === 'number' ? d.gapMaxSeconds : 600;
             const minEl = document.getElementById('kglite-min-remain');
             if (minEl) minEl.value = typeof d.minRemainHours === 'number' ? d.minRemainHours : 24;
+            const roundsEl = document.getElementById('kglite-rounds');
+            if (roundsEl) roundsEl.value = typeof d.rounds === 'number' ? d.rounds : 3;
             const nextEl = document.getElementById('kglite-next-run');
             if (nextEl) {
                 if (d.autoClaim === false) {
@@ -5984,7 +5992,8 @@ class App {
                     const t = new Date(d.nextRunAt).toLocaleString('zh-CN', {
                         hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
                     });
-                    nextEl.textContent = `下一轮：${t}（白天每 3 小时一轮，每轮把当日额度领满；`
+                    const roundsText = `共 ${typeof d.rounds === 'number' ? d.rounds : 3} 轮（每轮把当日额度领满）`
+                    nextEl.textContent = `下一轮：${t}（${roundsText}；`
                         + `${typeof d.minRemainHours === 'number' && d.minRemainHours <= 0
                             ? '不看剩余，每轮都补）'
                             : `VIP 剩余少于 ${d.minRemainHours} 小时才补，够用就跳过）`}`;
@@ -6186,6 +6195,7 @@ class App {
         const gapMinEl = document.getElementById('kglite-gap-min');
         const gapMaxEl = document.getElementById('kglite-gap-max');
         const minEl = document.getElementById('kglite-min-remain');
+        const roundsEl = document.getElementById('kglite-rounds');
         // 空输入不要当成 0（Number('') === 0），否则清空一下就把间隔拉成 5 秒
         const numOf = (el) => {
             if (!el || String(el.value).trim() === '') return undefined;
@@ -6209,7 +6219,12 @@ class App {
                     kgliteStartHour: hourEl ? Number(hourEl.value) : undefined,
                     kgliteGapMinSeconds: gapMin,
                     kgliteGapMaxSeconds: gapMax,
-                    kgliteMinRemainHours: numOf(minEl)
+                    kgliteMinRemainHours: numOf(minEl),
+                    kgliteRounds: (() => {
+                        const n = numOf(roundsEl);
+                        if (n === undefined) return undefined;
+                        return Math.min(24, Math.max(1, Math.floor(n)));
+                    })()
                 })
             });
             // 服务端已经重排定时器，这里重新读一次拿「下一轮」时间

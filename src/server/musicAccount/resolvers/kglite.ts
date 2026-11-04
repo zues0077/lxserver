@@ -786,13 +786,16 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
         b = r.body || {}
       } catch (e: any) {
         lastMessage = e?.message || String(e)
+        console.log(`[平台账号] 概念版广告领取请求异常：${lastMessage}`)
         break
       }
       const ok = Number(b.status) === 1
       if (!ok) {
         const code = Number(b?.error_code) || 0
         lastMessage = claimErrorText(b)
-        // 30002（次数用光）/ 130012（今日已领）都是正常终态，不算失败，直接停
+        // 把具体错误码打进后端日志：否则「某账号被平台风控（如 20028 人机验证）」只能靠前端截图定位。
+        // 30002（次数用光）/ 130012（今日已领）也是正常终态，照打便于核对是否真的领满。
+        console.log(`[平台账号] 概念版广告领取未成功：错误码 ${code}（${lastMessage}）`)
         break
       }
       const data = b?.data || {}

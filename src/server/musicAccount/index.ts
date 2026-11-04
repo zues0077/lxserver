@@ -1044,6 +1044,9 @@ async function runAccountKeepalive(): Promise<void> {
     keepaliveLastAt.set(plan.id, now)
     await keepaliveOne(plan.id)
     for (const it of row.accounts) {
+      // 主账号已由上面无 itemId 的 keepaliveOne 统一保活（记「主账号」）；
+      // 这里若再把 primary 迭代一遍，会让同一个主账号被续期两次（日志凭空多一条「子账号 <主号id>」）。
+      if (it.primary) continue
       if (it.configured) await keepaliveOne(plan.id, it.id)
     }
   }
@@ -1240,6 +1243,8 @@ export type KugouLiteVipState = kglite.LiteVipInfo & {
   gapMinSeconds: number
   gapMaxSeconds: number
   minRemainHours: number
+  /** 每天自动领取跑几轮（每轮都把当日额度领满，所以 1 轮就够） */
+  rounds: number
   /** 下一轮自动领取的时间戳（毫秒），没有排程时为 0 */
   nextRunAt: number
   /** 手动「立即全部领取」的进度：running=true 时前端继续轮询 */
@@ -1342,6 +1347,7 @@ export async function getKugouLiteVip(): Promise<KugouLiteVipState> {
     gapMinSeconds: cfg.gapMinSeconds,
     gapMaxSeconds: cfg.gapMaxSeconds,
     minRemainHours: cfg.minRemainHours,
+    rounds: cfg.rounds,
     nextRunAt: vipNextRunAt,
     claimAll: getKugouLiteClaimAllState(),
     claimReport: getKugouLiteClaimReport(),
@@ -1418,6 +1424,7 @@ export function getKugouLiteAutoClaimConfig(): {
   gapMinSeconds: number
   gapMaxSeconds: number
   minRemainHours: number
+  rounds: number
 } {
   const c = config()
   const num = (key: string, def: number, min: number, max: number) => {
@@ -1433,6 +1440,8 @@ export function getKugouLiteAutoClaimConfig(): {
     gapMaxSeconds: gap.max,
     // 0 = 不限阈值：不管还剩多久，每轮都补（填 0 是合法值，别再钳成 1）
     minRemainHours: num('musicAccount.kglite.minRemainHours', 24, 0, 24 * 30),
+    // 每天跑几轮：每轮都领满当日额度，所以 1 轮就够；多留几轮只是防容器重启错过那一轮（默认 3）
+    rounds: num('musicAccount.kglite.rounds', 3, 1, 24),
   }
 }
 
@@ -1483,22 +1492,24 @@ let vipNextRunAt = 0
 /**
  * 算出下一次该跑的时间（毫秒时间戳）。
  *
- * 每天的轮次是「startHour 起每 3 小时一轮、共 8 轮」，8×3=24 小时正好铺满一天，
- * 所以跨过 0 点之后还有 00:00 / 03:00 这种「属于上一天周期」的轮次 —— 计算时必须
+ * 每天的轮次是「startHour 起每 GAP 小时一轮、共 rounds 轮」，轮次在时间上均匀铺开
+ * （rounds×GAP 不要求等于 24：因为每轮都把当日额度领满，覆盖有空隙也不会断档，只是
+ * 少几轮空转）。跨过 0 点之后还有 00:00 / 03:00 这种「属于上一天周期」的轮次 —— 计算时必须
  * 把昨天、今天、明天三个周期的刻度一起算进去取最小值，否则进程如果在凌晨重启，
- * 03:00 那一轮会被整轮跳过，会员就可能断档。
+ * 那一轮会被整轮跳过，会员就可能断档。
  *
  * 单独导出是为了能写单测：时区与跨天边界最容易错，而错了只会表现为「会员莫名其妙到期」。
  */
-export function nextAutoClaimAt(startHour: number, now = Date.now()): number {
+export function nextAutoClaimAt(startHour: number, now = Date.now(), rounds = AUTO_CLAIM_ROUNDS): number {
   const hour = Math.min(23, Math.max(0, Math.floor(Number.isFinite(startHour) ? startHour : 6)))
   const stepMs = AUTO_CLAIM_ROUND_GAP_HOURS * 3600_000
   let next = Number.POSITIVE_INFINITY
+  const n = Math.max(1, Math.floor(rounds))
   for (let dayOffset = -1; dayOffset <= 1; dayOffset++) {
     const base = new Date(now)
     base.setDate(base.getDate() + dayOffset)
     base.setHours(hour, 0, 0, 0)
-    for (let k = 0; k < AUTO_CLAIM_ROUNDS; k++) {
+    for (let k = 0; k < n; k++) {
       const t = base.getTime() + k * stepMs
       if (t > now && t < next) next = t
     }
@@ -1657,7 +1668,7 @@ function scheduleNextAutoClaim(): void {
     console.log('[平台账号] 酷狗概念版 VIP 自动领取处于关闭状态（后台开启后会自动排程，无需重启）')
     return
   }
-  const at = nextAutoClaimAt(cfg.startHour)
+  const at = nextAutoClaimAt(cfg.startHour, Date.now(), cfg.rounds)
   vipNextRunAt = at
   const delay = Math.max(1000, at - Date.now())
   const timer = setTimeout(() => {
@@ -1673,7 +1684,7 @@ function scheduleNextAutoClaim(): void {
   const pad = (n: number) => String(n).padStart(2, '0')
   const when = new Date(at)
   console.log(
-    `[平台账号] 酷狗概念版 VIP 自动领取已排程：每天 ${pad(cfg.startHour)}:00 起，每 ${AUTO_CLAIM_ROUND_GAP_HOURS} 小时一轮（共 ${AUTO_CLAIM_ROUNDS} 轮，每轮把当日额度连领到满）；`
+    `[平台账号] 酷狗概念版 VIP 自动领取已排程：每天 ${pad(cfg.startHour)}:00 起，每 ${AUTO_CLAIM_ROUND_GAP_HOURS} 小时一轮（共 ${cfg.rounds} 轮，每轮把当日额度连领到满）；`
     + `${cfg.minRemainHours > 0 ? `剩余不足 ${cfg.minRemainHours} 小时才领` : '不看剩余、每轮都补'}，账号间隔 ${cfg.gapMinSeconds}~${cfg.gapMaxSeconds} 秒随机；`
     + `下一轮 ${when.getMonth() + 1}/${when.getDate()} ${pad(when.getHours())}:${pad(when.getMinutes())}`,
   )
