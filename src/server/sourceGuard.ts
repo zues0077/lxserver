@@ -400,6 +400,55 @@ export const ISOLATION_AUTO_RELEASE_MS = 24 * 3600_000
 /** 同一音源最多自动放行几次：放行了还犯满 3 次，就认定是真凶，不再放行 */
 const MAX_AUTO_RELEASE = 3
 
+/** 对外暴露的放行上限：管理面板要显示「剩余复核次数」 */
+export const ISOLATION_MAX_AUTO_RELEASE = MAX_AUTO_RELEASE
+
+/** 隔离记录总览条目：给管理面板用，原因已翻成人话，带剩余复核次数 */
+export interface IsolationOverview {
+    owner: string
+    id: string
+    name: string
+    reason: string
+    reasonText: string
+    level: GuardLevel
+    at: string
+    source: IsolateSource
+    /** 该音源已自动放行过几次 */
+    pardonCount: number
+    /** 还能自动放行几次（0 = 之后只能人工解除/信任） */
+    pardonsLeft: number
+    /** 下次自动放行复核时间（仅 probe 类） */
+    autoReleaseAt: string | null
+}
+
+/**
+ * 列出全部隔离记录（管理面板的「隔离总览」）。
+ * 注意不能用 activeIsolations：那是启动时载入的内存快照，新增/删除未必同步。
+ */
+export function listIsolations(): IsolationOverview[] {
+    const store = loadStore()
+    const pardons = store.autoReleased || {}
+    return store.isolated.map(item => {
+        const key = recordKey(item.owner, item.id)
+        const count = pardons[key] || 0
+        return {
+            owner: item.owner,
+            id: item.id,
+            name: item.name,
+            reason: item.reason,
+            reasonText: describeIsolationReason(item.reason),
+            level: item.level,
+            at: item.at,
+            source: item.source,
+            pardonCount: count,
+            pardonsLeft: item.source === 'probe' ? Math.max(0, MAX_AUTO_RELEASE - count) : 0,
+            autoReleaseAt: item.source === 'probe'
+                ? new Date((Date.parse(item.at) || Date.now()) + ISOLATION_AUTO_RELEASE_MS).toISOString()
+                : null,
+        }
+    })
+}
+
 /**
  * 该条隔离记录是否已到「自动放行复核」的条件。
  * 抽成纯函数是为了能单测：运行期判定（probe）有误判可能，24h 放行一次；
@@ -968,8 +1017,12 @@ const runProbe = async (deps: GuardDeps, baseline: number): Promise<void> => {
             const after = await sampleCpuOver(current.probeWindowMs)
             const drop = baseline - after
 
-            if (drop < Math.max(10, baseline * 0.4)) {
-                console.log(`[自检护栏] 复检排除: ${ref.name}，卸载后 CPU ${after.toFixed(1)}%（下降不明显），已恢复加载`)
+            // 判定门槛：卸载后 CPU 相对基线的降幅要足够大才算真凶。
+            // 原来用 max(10%, 基线×40%)，246 上实测偏松 —— 8 条隔离全由这条判据触发，
+            // 其中至少一例（全豆要）解除后 CPU 长期 0.4~0.6%、重启也未复发，属误判。
+            // 提到 max(15%, 基线×60%)：宁可漏一次（下一轮采样还会再报），也别把正常音源关掉。
+            if (drop < Math.max(15, baseline * 0.6)) {
+                console.log(`[自检护栏] 复检排除: ${ref.name}，卸载后 CPU ${after.toFixed(1)}%（降幅 ${drop.toFixed(1)}% 未达门槛 ${Math.max(15, baseline * 0.6).toFixed(1)}%），已恢复加载`)
                 await deps.reload(ref.owner, ref.id)
                 continue
             }

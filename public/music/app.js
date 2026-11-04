@@ -15197,6 +15197,8 @@ async function renderCustomSources() {
 
     // 缓存当前最新的源列表，供编辑模态框等快速查询
     window._currentCustomSourcesList = list || [];
+    // 隔离角标：复用列表里已经算好的 isolated 字段，省一次接口
+    updateIsolationBadge((list || []).filter(s => s && s.isolated).length);
 
     updateSourceScopeUI();
 
@@ -15773,6 +15775,176 @@ async function showSourceGuardMenuById(id, owner, name, level, reasons, reasonTe
     if (!choice) return;
     // 隔离中的源本来就没加载：信任后同样要重新加载一次才算真的回来
     await postGuardAction(choice, owner || 'open', id, name || id, level === 'isolated');
+}
+
+// ===== 自检护栏：隔离记录总览 =====
+// 逐条点卡片能处置，但隔离多了就看不到「一共关了几个、还剩几次复核机会、都因为什么」，
+// 这里做一个总览面板：逐条解除/信任，也能一次性全部解除。
+
+function isolationAuthHeaders() {
+    const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
+    const adminPass = localStorage.getItem('lx_admin_password');
+    if (adminPass) headers['x-frontend-auth'] = adminPass;
+    return headers;
+}
+
+function updateIsolationBadge(count) {
+    const badge = document.getElementById('source-isolation-badge');
+    if (!badge) return;
+    if (count > 0) {
+        badge.textContent = count > 99 ? '99+' : String(count);
+        badge.classList.remove('hidden');
+        badge.classList.add('flex');
+    } else {
+        badge.classList.add('hidden');
+        badge.classList.remove('flex');
+    }
+}
+
+async function fetchIsolationOverview(retried = false) {
+    const res = await fetch('/api/source-guard/isolations', { headers: isolationAuthHeaders() });
+    if (res.status === 403 && !retried) {
+        const authorized = await handleAdminAuth('查看隔离记录需要管理员身份');
+        if (authorized) return fetchIsolationOverview(true);
+        return null;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+}
+
+function isolationSourceLabel(src) {
+    return src === 'probe' ? '运行期判定' : src === 'static' ? '静态特征' : '手动隔离';
+}
+
+function renderIsolationOverview(data) {
+    const listEl = document.getElementById('source-isolation-list');
+    const countEl = document.getElementById('source-isolation-count');
+    if (!listEl) return;
+    const items = (data && data.list) || [];
+    const maxAuto = (data && data.maxAutoRelease) || 3;
+    if (countEl) countEl.textContent = `${items.length} 条`;
+
+    if (!items.length) {
+        listEl.innerHTML = `<div class="text-center text-xs t-text-muted py-10">
+            <i class="fas fa-check-circle text-emerald-500 text-2xl mb-2 block"></i>
+            当前没有被隔离的音源
+        </div>`;
+        return;
+    }
+
+    const fmt = (t) => {
+        if (!t) return '';
+        const d = new Date(t);
+        return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    };
+
+    listEl.innerHTML = items.map(it => {
+        const autoAt = fmt(it.autoReleaseAt);
+        const hint = it.source === 'probe'
+            ? (it.pardonsLeft > 0
+                ? `已自动放行 ${it.pardonCount}/${maxAuto} 次 · 下次放行 ${escapeHtmlText(autoAt || '—')}`
+                : `已用满 ${maxAuto} 次自动放行，之后只能人工解除`)
+            : '静态特征/手动隔离不会自动放行';
+        const at = fmt(it.at);
+        return `<div class="p-3 rounded-xl border t-border-main t-bg-panel">
+            <div class="flex items-start gap-2.5">
+                <span class="mt-0.5 w-6 h-6 rounded-lg bg-red-50 text-red-600 dark:bg-red-500/20 dark:text-red-400 flex items-center justify-center shrink-0">
+                    <i class="fas fa-lock text-[11px]"></i>
+                </span>
+                <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                        <span class="text-sm font-bold t-text-main truncate max-w-[240px]">${escapeHtmlText(it.name || it.id)}</span>
+                        <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-neutral-100 dark:bg-neutral-800 t-text-muted">${escapeHtmlText(isolationSourceLabel(it.source))}</span>
+                        ${it.owner && it.owner !== 'open' ? `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-300">${escapeHtmlText(it.owner)}</span>` : ''}
+                    </div>
+                    <div class="text-[11px] t-text-main mt-1 leading-relaxed">${escapeHtmlText(it.reasonText || it.reason || '未知原因')}</div>
+                    <div class="text-[10px] t-text-muted mt-0.5 font-mono break-all">原始判定：${escapeHtmlText(it.reason || '—')}${at ? ' · ' + escapeHtmlText(at) : ''}</div>
+                    <div class="text-[10px] mt-1 ${it.pardonsLeft > 0 ? 'text-amber-600 dark:text-amber-400' : 't-text-muted'}">${escapeHtmlText(hint)}</div>
+                </div>
+                <div class="flex flex-col gap-1 shrink-0">
+                    <button onclick="isolationAction('release', this)" data-owner="${escapeHtmlText(it.owner || 'open')}" data-id="${escapeHtmlText(it.id)}" data-name="${escapeHtmlText(it.name || it.id)}"
+                        class="px-2.5 py-1 text-[11px] font-medium bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap">
+                        解除并重载
+                    </button>
+                    <button onclick="isolationAction('trust', this)" data-owner="${escapeHtmlText(it.owner || 'open')}" data-id="${escapeHtmlText(it.id)}" data-name="${escapeHtmlText(it.name || it.id)}"
+                        class="px-2.5 py-1 text-[11px] font-medium t-bg-main t-text-muted border t-border-main rounded-lg hover:t-bg-item-hover transition-colors whitespace-nowrap">
+                        信任不再查
+                    </button>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function loadIsolationOverview() {
+    try {
+        const data = await fetchIsolationOverview();
+        if (!data) return;
+        window.__isolationOverviewCache = data.list || [];
+        renderIsolationOverview(data);
+        updateIsolationBadge(window.__isolationOverviewCache.length);
+    } catch (e) {
+        console.error('[隔离总览] 读取失败:', e);
+        showError(`读取隔离记录失败：${e.message}`);
+    }
+}
+
+async function openIsolationOverview() {
+    const modal = document.getElementById('source-isolation-modal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    await loadIsolationOverview();
+}
+
+function closeIsolationOverview() {
+    const modal = document.getElementById('source-isolation-modal');
+    if (modal) modal.classList.add('hidden');
+}
+
+/** 单条处置：解除（顺带重载）或信任（隔离中的源同样要重载才回来） */
+async function isolationAction(action, btn) {
+    const owner = (btn && btn.dataset.owner) || 'open';
+    const id = (btn && btn.dataset.id) || '';
+    const name = (btn && btn.dataset.name) || id;
+    if (!id) return;
+    if (btn) btn.disabled = true;
+    try {
+        // 复用统一入口：它已经处理了 403 复核、提示文案与重载
+        await postGuardAction(action, owner, id, name, true);
+    } finally {
+        if (btn) btn.disabled = false;
+        await loadIsolationOverview();
+    }
+}
+
+/** 全部解除：逐条清记录，最后统一重载，避免每清一条就重载一次 */
+async function releaseAllIsolations(btn) {
+    const items = (window.__isolationOverviewCache || []);
+    if (!items.length) {
+        showInfo('当前没有隔离记录');
+        return;
+    }
+    if (!(await showSelect('全部解除', `确定解除全部 ${items.length} 条隔离记录并重新加载吗？`, {}))) return;
+    if (btn) btn.disabled = true;
+    let ok = 0;
+    for (const it of items) {
+        try {
+            const res = await fetch('/api/source-guard/release', {
+                method: 'POST',
+                headers: isolationAuthHeaders(),
+                body: JSON.stringify({ owner: it.owner || 'open', id: it.id, name: it.name || it.id })
+            });
+            if (res.ok) ok++;
+        } catch (e) {
+            console.warn('[隔离总览] 解除失败:', it.id, e && e.message);
+        }
+    }
+    for (const it of items) {
+        try { await reloadSource(it.id); } catch (e) { }
+    }
+    showSuccess(`已解除 ${ok} 条隔离记录，正在重新加载音源…`);
+    if (btn) btn.disabled = false;
+    await loadIsolationOverview();
 }
 
 // 删除方式二选一：默认进回收站，也允许直接抹掉（不想让它在回收站里占地/碍眼时）

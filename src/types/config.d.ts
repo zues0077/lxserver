@@ -634,6 +634,10 @@ declare namespace LX {
      */
     'customSource.probe.removeMode'?: 'trash' | 'delete'
     /**
+     * 回收站保留天数 (默认 30;0 = 永不自动清理)。到期条目会被彻底删除,不可恢复。
+     */
+    'customSource.trash.retentionDays'?: number
+    /**
      * 新添加(上传/导入)的音源是否立即巡检一次 (默认 true)。
      */
     'customSource.probe.probeOnNewSource'?: boolean

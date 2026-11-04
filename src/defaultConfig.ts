@@ -159,6 +159,9 @@ const config: LX.Config = {
   'customSource.probe.autoDisablePlatform': true, // 不可用是否自动关闭该平台
   'customSource.probe.autoRemoveSource': true, // 全平台不可用是否自动移除音源
   'customSource.probe.removeMode': 'trash', // 移除方式：trash 移入回收站 / delete 直接删除
+  // 回收站保留天数：只增不减会把 NAS 盘慢慢吃满，而多数人不会回头翻。
+  // 0 = 永不自动清理（想长期留档时用）。到期条目被彻底删除，不可恢复。
+  'customSource.trash.retentionDays': 30,
   'customSource.probe.probeOnNewSource': true, // 新增音源是否立即巡检
   // 已关闭平台「快速复检」：只探被自动关闭的平台、每平台 1 首，成功即恢复，不做定罪。
   // 全量巡检 6 小时一轮，被误关或平台临时故障的源原本要等这么久才能复活；

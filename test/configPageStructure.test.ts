@@ -65,6 +65,7 @@ const REQUIRED_FIELDS = [
   'customSource.probe.concurrency', 'customSource.probe.failThreshold',
   'customSource.probe.autoDisablePlatform', 'customSource.probe.autoRemoveSource',
   'customSource.probe.removeMode',
+  'customSource.trash.retentionDays',
   'system.allowUnsafeVM', 'singer.sourcePriority',
 ]
 
@@ -198,8 +199,39 @@ test('配置页双版式：默认卡片，行列表版本的分组导航固定�
   assert.match(appJs, /view\.classList\.toggle\('cfg-rows'/, '导航条所在的视图也要打上版式 class')
 
   const css = fs.readFileSync(path.join(ROOT, 'public/style.css'), 'utf8')
-  const pinned = sliceBetween(css, '#view-config.cfg-rows .config-subnav {', '}')
+  const pinned = sliceBetween(css, '#view-config.cfg-rows .config-toolbar {', '}')
   assert.match(pinned, /position:\s*sticky/, '行列表版本的分组导航必须吸顶固定')
   assert.match(pinned, /top:\s*0/, '吸顶不能留偏移，否则会压住第一组标题')
   assert.match(css, /#view-config\.cfg-rows \.config-group \{\s*scroll-margin-top/, '跳转后分组标题要避开固定条')
+})
+
+test('配置项搜索：工具栏吸顶、筛选只加 class 不动结构', () => {
+  // 导航条与搜索框同处一条吸顶工具栏，避免「导航钉住、搜索框滚走」
+  const css = fs.readFileSync(path.join(ROOT, 'public/style.css'), 'utf8')
+  const toolbar = sliceBetween(css, '.config-toolbar {', '}')
+  assert.match(toolbar, /position:\s*sticky/, '工具栏必须吸顶')
+  const subnav = sliceBetween(css, '.config-subnav {', '}')
+  assert.match(subnav, /position:\s*static/, '导航本体不再自己吸顶，交给工具栏')
+
+  // 搜索框不能放进 <form>，否则会成为表单字段白提交给后端
+  assert.match(configSection, /id="config-search-input"/, '缺少搜索输入框')
+  assert.ok(configSection.indexOf('id="config-search-input"') < configSection.indexOf('<form id="config-form"'),
+    '搜索框必须留在表单之外')
+
+  assert.match(appJs, /initConfigSearch\(\)/, '未绑定搜索框')
+  assert.match(appJs, /applyConfigSearch\(/, '未实现筛选逻辑')
+  // 筛选只能加 class：一旦改成删 DOM 或 disabled，就会丢字段/丢配置
+  assert.match(appJs, /classList\.add\('cfg-hidden'\)/, '隐藏项应只加 class')
+  assert.doesNotMatch(appJs, /removeChild\(.*config-field/, '不能通过删节点来筛选')
+  assert.match(css, /\.cfg-hidden\s*\{/, '缺少隐藏样式')
+})
+
+test('回收站保留天数：配置字段、默认值、清理入口三处对齐', () => {
+  assert.equal(countField(formBlock, 'customSource.trash.retentionDays'), 1)
+  const defaultTs = fs.readFileSync(path.join(ROOT, 'src/defaultConfig.ts'), 'utf8')
+  assert.match(defaultTs, /'customSource\.trash\.retentionDays': 30/)
+  const indexTs = fs.readFileSync(path.join(ROOT, 'src/index.ts'), 'utf8')
+  assert.match(indexTs, /startTrashJanitor\(/, '启动时应挂上回收站清理定时器')
+  // 0 是合法值（永不清理），读配置时不能被 || 兜底成 30
+  assert.doesNotMatch(indexTs, /customSource\.trash\.retentionDays'\] \|\| 30/, '0 不能被 || 吞掉')
 })

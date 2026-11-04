@@ -2760,6 +2760,11 @@ class App {
             if (form.elements['customSource.probe.removeMode']) {
                 form.elements['customSource.probe.removeMode'].value = config['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash';
             }
+            if (form.elements['customSource.trash.retentionDays']) {
+                // 0 是合法值（永不清理），不能用 || 兜底成 30
+                form.elements['customSource.trash.retentionDays'].value =
+                    String(config['customSource.trash.retentionDays'] ?? 30);
+            }
 
             // URL路径配置
             if (form.elements['admin.path']) {
@@ -2954,6 +2959,7 @@ class App {
     // ===== 系统配置页：分组导航 / 依赖锁定 / 页内跳转 =====
     initConfigPageUi() {
         this.applyConfigLayout();
+        this.initConfigSearch();
         // 吸顶偏移必须相对「滚动容器」算，不能按顶栏高度算：
         // .content-wrapper 自己 overflow-y:auto 就是滚动容器，而 .top-bar 在它外面
         // （并且已经 sticky 在 top:0）。把顶栏高度再加进来，等于让导航条在滚动容器里
@@ -3021,6 +3027,104 @@ class App {
                 if (cb.name) cb.addEventListener('change', () => this.refreshConfigDependentLocks());
             });
         }
+    }
+
+    // ===== 系统配置页：配置项搜索 =====
+
+    /** 一个设置项参与匹配的文本：可见文案 + 字段 name（方便按 config key 搜） */
+    configItemSearchText(item) {
+        if (!item.dataset.searchText) {
+            const names = Array.from(item.querySelectorAll('[name]'))
+                .map(el => el.getAttribute('name') || '')
+                .join(' ');
+            item.dataset.searchText = ((item.textContent || '') + ' ' + names).toLowerCase();
+        }
+        return item.dataset.searchText;
+    }
+
+    /** 绑定搜索框：输入即筛，Esc 清空，回车跳到第一个命中项 */
+    initConfigSearch() {
+        const input = document.getElementById('config-search-input');
+        if (!input || input.dataset.bound) return;
+        input.dataset.bound = '1';
+        let timer = null;
+        input.addEventListener('input', () => {
+            clearTimeout(timer);
+            // 防抖：每敲一个字都重排 90 多个设置项没必要
+            timer = setTimeout(() => this.applyConfigSearch(input.value), 180);
+        });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                input.value = '';
+                this.applyConfigSearch('');
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                const first = document.querySelector('#config-form .cfg-hit');
+                if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        });
+    }
+
+    /**
+     * 按关键词筛选配置项。
+     * 只加/删 class（隐藏 + 高亮），不动 DOM 结构、不动 name —— 隐藏的字段照样随表单提交，
+     * 所以搜索中途保存也不会丢配置。
+     */
+    applyConfigSearch(rawQuery) {
+        const form = document.getElementById('config-form');
+        if (!form) return;
+        const countEl = document.getElementById('config-search-count');
+        const q = String(rawQuery || '').trim().toLowerCase();
+
+        form.querySelectorAll('.cfg-hit, .cfg-hidden').forEach(el => el.classList.remove('cfg-hit', 'cfg-hidden'));
+        if (!q) {
+            if (countEl) countEl.textContent = '';
+            return;
+        }
+
+        const ITEM_SEL = '.config-card-body > .config-field, .config-card-body > .config-toggle-row,'
+            + ' .config-card-body > .config-field-row, .config-card-body > .config-link-row';
+        let hits = 0;
+        let firstHit = null;
+
+        Array.from(form.children)
+            .filter(el => el.classList.contains('config-group'))
+            .forEach(group => {
+                let visibleCards = 0;
+                group.querySelectorAll('.config-card').forEach(card => {
+                    const headText = (card.querySelector('.config-card-header')?.textContent || '').toLowerCase();
+                    const headMatched = headText.includes(q);
+                    const items = Array.from(card.querySelectorAll(ITEM_SEL));
+                    let cardVisible = false;
+
+                    items.forEach(item => {
+                        if (headMatched || this.configItemSearchText(item).includes(q)) {
+                            item.classList.add('cfg-hit');
+                            cardVisible = true;
+                            hits++;
+                            if (!firstHit) firstHit = item;
+                        } else {
+                            item.classList.add('cfg-hidden');
+                        }
+                    });
+
+                    // 没有标准设置项的卡片（纯说明/危险操作块）退回整卡文本判断
+                    if (!items.length) cardVisible = (card.textContent || '').toLowerCase().includes(q);
+                    if (cardVisible) {
+                        // 分割线与小标题在筛选态下没有意义，留着只会显示成一堆空行
+                        card.querySelectorAll('.config-card-body > .config-divider, .config-card-body > .config-subhead')
+                            .forEach(el => el.classList.add('cfg-hidden'));
+                    }
+                    card.classList.toggle('cfg-hidden', !cardVisible);
+                    if (cardVisible) visibleCards++;
+                });
+                group.classList.toggle('cfg-hidden', visibleCards === 0);
+            });
+
+        if (countEl) countEl.textContent = hits > 0 ? `${hits} 项` : '无匹配';
+        // 只剩一项时直接带用户过去，省得自己找
+        if (hits === 1 && firstHit) firstHit.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
     setConfigSubnavActive(id) {
@@ -3513,6 +3617,11 @@ class App {
             'customSource.probe.autoDisablePlatform': formData.get('customSource.probe.autoDisablePlatform') === 'on',
             'customSource.probe.autoRemoveSource': formData.get('customSource.probe.autoRemoveSource') === 'on',
             'customSource.probe.removeMode': formData.get('customSource.probe.removeMode') || 'trash',
+            // 保留天数：0 = 永不清理；非法输入回落 30，别因为手滑变成永久留档
+            'customSource.trash.retentionDays': (() => {
+                const days = parseInt(formData.get('customSource.trash.retentionDays'));
+                return Number.isFinite(days) ? Math.min(3650, Math.max(0, days)) : 30;
+            })(),
             'admin.path': adminPath,
             'player.path': playerPath,
             'subsonic.enable': formData.get('subsonic.enable') === 'on',

@@ -997,6 +997,18 @@ if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
   })
 }
 
+// [回收站] 过期清理：默认保留 30 天（0 = 不清理）。
+// 回收站只增不减，巡检每轮都可能往里丢脚本；不清的话 NAS 的盘迟早被吃满。
+// 每次执行都重读配置，改完设置不用重启。
+{
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { startTrashJanitor } = require('@/server/sourceTrash')
+  startTrashJanitor(() => {
+    const raw = Number(global.lx.config['customSource.trash.retentionDays'])
+    return Number.isFinite(raw) ? raw : 30
+  })
+}
+
 // [音源巡检] 自定义源「平台可用性巡检」。
 // 定时探测每个音源声明的各个平台是否还能解析出可用链接：
 // 不可用平台自动关闭其解析（写 states.json，与面板的平台开关同源），

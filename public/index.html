@@ -903,16 +903,28 @@
                 <!-- 系统配置视图 -->
                 <div id="view-config" class="view">
 
-                    <!-- 分组快速导航 -->
-                    <div class="config-subnav" id="config-subnav">
-                        <button type="button" class="config-subnav-item active" data-target="cfg-basic">基础</button>
-                        <button type="button" class="config-subnav-item" data-target="cfg-access">访问与账号</button>
-                        <button type="button" class="config-subnav-item" data-target="cfg-permission">权限与缓存</button>
-                        <button type="button" class="config-subnav-item" data-target="cfg-storage">存储与备份</button>
-                        <button type="button" class="config-subnav-item" data-target="cfg-webdav-group">WebDAV</button>
-                        <button type="button" class="config-subnav-item" data-target="cfg-network">网络代理</button>
-                        <button type="button" class="config-subnav-item" data-target="cfg-subsonic">Subsonic</button>
-                        <button type="button" class="config-subnav-item" data-target="cfg-advanced">高级</button>
+                    <!-- 分组快速导航 + 配置项搜索 -->
+                    <div class="config-toolbar" id="config-toolbar">
+                        <div class="config-subnav" id="config-subnav">
+                            <button type="button" class="config-subnav-item active" data-target="cfg-basic">基础</button>
+                            <button type="button" class="config-subnav-item" data-target="cfg-access">访问与账号</button>
+                            <button type="button" class="config-subnav-item" data-target="cfg-permission">权限与缓存</button>
+                            <button type="button" class="config-subnav-item" data-target="cfg-storage">存储与备份</button>
+                            <button type="button" class="config-subnav-item" data-target="cfg-webdav-group">WebDAV</button>
+                            <button type="button" class="config-subnav-item" data-target="cfg-network">网络代理</button>
+                            <button type="button" class="config-subnav-item" data-target="cfg-subsonic">Subsonic</button>
+                            <button type="button" class="config-subnav-item" data-target="cfg-advanced">高级</button>
+                        </div>
+                        <div class="config-search">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                stroke-width="2" aria-hidden="true">
+                                <circle cx="11" cy="11" r="7" />
+                                <path d="M20 20l-3.5-3.5" />
+                            </svg>
+                            <input id="config-search-input" type="search" class="config-search-input"
+                                placeholder="搜索配置项（代理 / 缓存 / WebDAV …）" autocomplete="off" spellcheck="false" />
+                            <span class="config-search-count" id="config-search-count"></span>
+                        </div>
                     </div>
 
                     <form id="config-form" class="config-page">
@@ -2300,6 +2312,14 @@
                                                     「移入回收站」和手动删除的音源，都会出现在 Web 播放器「音源管理 → 回收站」里，可以恢复或彻底删除。
                                                 </small>
                                             </div>
+                                        </div>
+                                        <div class="config-divider"></div>
+                                        <div class="config-subhead">回收站</div>
+                                        <div class="config-field">
+                                            <label class="config-label">自动清理超过（天）</label>
+                                            <input type="number" name="customSource.trash.retentionDays"
+                                                class="form-input config-input" value="30" min="0" max="3650" />
+                                            <small class="config-hint">默认 30 天，填 0 表示永不自动清理。到期条目会被彻底删除（不可恢复）</small>
                                         </div>
                                     </div>
                                 </div>

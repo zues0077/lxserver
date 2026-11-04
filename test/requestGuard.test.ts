@@ -170,3 +170,27 @@ test('默认配置开启护栏', () => {
     const src = fs.readFileSync(file, 'utf-8')
     assert.match(src, /'customSource\.blockPrivateNetwork':\s*true/)
 })
+
+test('隔离总览：接口、入口按钮与处置动作都在', () => {
+    const serverTs = fs.readFileSync(path.join(process.cwd(), 'src/server/server.ts'), 'utf8')
+    assert.match(serverTs, /pathname === '\/api\/source-guard\/isolations'/, '缺少隔离总览只读接口')
+    assert.match(serverTs, /listIsolations\(\)/, '接口应调用 listIsolations')
+    // 只读接口同样要管理员身份：隔离记录会暴露音源清单
+    assert.match(serverTs, /api\/source-guard\/isolations'[\s\S]{0,400}?admin\.password/, '总览接口必须校验管理员')
+
+    const musicHtml = fs.readFileSync(path.join(process.cwd(), 'public/music/index.html'), 'utf8')
+    assert.match(musicHtml, /openIsolationOverview\(\)/, '音源管理页缺少隔离记录入口')
+    assert.match(musicHtml, /id="source-isolation-modal"/, '缺少隔离总览弹窗')
+
+    const app = fs.readFileSync(path.join(process.cwd(), 'public/music/app.js'), 'utf8')
+    assert.match(app, /async function openIsolationOverview\(/)
+    assert.match(app, /async function releaseAllIsolations\(/)
+    assert.match(app, /updateIsolationBadge\(/)
+})
+
+test('CPU 复检门槛已收紧到 max(15, 基线×60%)', () => {
+    const guard = fs.readFileSync(path.join(process.cwd(), 'src/server/sourceGuard.ts'), 'utf8')
+    // 旧判据 max(10, baseline*0.4) 在 246 上把正常音源也判成空转（全豆要误判）
+    assert.match(guard, /Math\.max\(15, baseline \* 0\.6\)/)
+    assert.ok(!/Math\.max\(10, baseline \* 0\.4\)/.test(guard), '旧门槛应已移除')
+})

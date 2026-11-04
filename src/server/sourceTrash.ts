@@ -259,3 +259,64 @@ export function removeTrashCopies(owner: string, sourceId: string): number {
     }
     return removed
 }
+
+/**
+ * 清理过期回收站。
+ * 回收站只增不减：每轮巡检都可能往里丢脚本，NAS 的盘迟早被吃满，而多数人根本不会回头翻。
+ * @param retentionDays 保留天数，<=0 表示不清理（用户想长期留档）
+ */
+export function purgeExpiredTrash(
+    retentionDays: number,
+    now = Date.now(),
+): { removed: number; scanned: number } {
+    const days = Number(retentionDays)
+    if (!Number.isFinite(days) || days <= 0) return { removed: 0, scanned: 0 }
+    const cutoff = now - days * 24 * 3600_000
+
+    let owners: string[] = []
+    try {
+        owners = fs.readdirSync(sourceRoot())
+    } catch {
+        return { removed: 0, scanned: 0 }
+    }
+
+    let removed = 0
+    let scanned = 0
+    for (const dir of owners) {
+        if (dir.startsWith('.')) continue
+        const owner = dir === '_open' ? 'open' : dir
+        for (const item of listTrash(owner)) {
+            scanned++
+            const at = Date.parse(item.trashedAt)
+            // 时间读不出来就不动它：删文件是不可逆动作，不能拿脏数据当依据
+            if (!Number.isFinite(at) || at > cutoff) continue
+            if (purgeTrash(owner, item.file) > 0) removed++
+        }
+    }
+    return { removed, scanned }
+}
+
+let trashJanitor: NodeJS.Timeout | null = null
+
+/**
+ * 回收站过期清理定时器：启动 5 分钟后跑一次（避开启动负载），之后每 12 小时一次。
+ * @param getRetentionDays 每次执行时重新读配置，改完配置不用重启就生效
+ */
+export function startTrashJanitor(getRetentionDays: () => number): void {
+    if (trashJanitor) return
+    const run = () => {
+        try {
+            const days = getRetentionDays()
+            const { removed, scanned } = purgeExpiredTrash(days)
+            if (scanned > 0) {
+                console.log(`[回收站] 过期清理：保留 ${days} 天，扫描 ${scanned} 项，删除 ${removed} 项`)
+            }
+        } catch (e: any) {
+            console.warn(`[回收站] 过期清理失败: ${e?.message || e}`)
+        }
+    }
+    const boot = setTimeout(run, 5 * 60_000)
+    if (typeof boot.unref === 'function') boot.unref()
+    trashJanitor = setInterval(run, 12 * 3600_000)
+    if (typeof trashJanitor.unref === 'function') trashJanitor.unref()
+}

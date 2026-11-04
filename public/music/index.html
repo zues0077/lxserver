@@ -4865,6 +4865,13 @@
                     class="flex items-center gap-2 px-4 py-2.5 bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400 border border-amber-100 dark:border-amber-500/30 rounded-xl hover:bg-amber-100 dark:hover:bg-amber-500/25 transition-colors font-medium whitespace-nowrap">
                     <i class="fas fa-stethoscope"></i>立即巡检
                 </button>
+                <button onclick="openIsolationOverview()" id="btn-source-isolation"
+                    title="被自检护栏隔离的音源都在这里：看原因、解除隔离或标记为可信"
+                    class="relative flex items-center gap-2 px-4 py-2.5 t-bg-main t-text-muted border t-border-main rounded-xl hover:t-bg-item-hover transition-colors font-medium whitespace-nowrap">
+                    <i class="fas fa-shield-alt"></i>隔离记录
+                    <span id="source-isolation-badge"
+                        class="hidden absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold items-center justify-center leading-[18px] text-center"></span>
+                </button>
                 <button onclick="openSourceTrash()" id="btn-source-trash"
                     title="删除的音源和被巡检移除的音源都在这里，可恢复或彻底删除"
                     class="relative flex items-center gap-2 px-4 py-2.5 t-bg-main t-text-muted border t-border-main rounded-xl hover:t-bg-item-hover transition-colors font-medium whitespace-nowrap">
@@ -4903,6 +4910,43 @@
             <!-- List -->
             <div class="flex-1 overflow-y-auto p-4 t-bg-main custom-scrollbar" id="custom-sources-list">
                 <!-- 列表将在此处渲染 -->
+            </div>
+        </div>
+    </div>
+
+    <!-- 自检护栏：隔离记录总览（逐个解除/信任，或一次全部解除） -->
+    <div id="source-isolation-modal"
+        class="fixed inset-0 bg-black/60 z-[80] hidden flex items-center justify-center backdrop-blur-sm">
+        <div class="t-bg-panel rounded-2xl w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl mx-4 overflow-hidden">
+            <div class="p-5 border-b t-border-main flex justify-between items-start t-bg-main">
+                <div class="min-w-0 pr-3">
+                    <div class="flex items-center gap-2">
+                        <span class="p-1.5 rounded-lg bg-red-50 text-red-600 dark:bg-red-500/20 dark:text-red-400">
+                            <i class="fas fa-shield-alt text-sm"></i>
+                        </span>
+                        <h3 class="text-base font-bold t-text-main">隔离记录</h3>
+                        <span id="source-isolation-count"
+                            class="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-neutral-100 dark:bg-neutral-800 t-text-muted"></span>
+                    </div>
+                    <p class="text-[11px] t-text-muted mt-1 leading-relaxed">
+                        被自检护栏隔离的音源不会加载、取不到链。运行期判定（CPU 复检/卡顿归因）属采样推断，
+                        满 24 小时会自动放行复核一次；静态特征判定则建议确认后「信任」，否则解除后会立刻被再拦。
+                    </p>
+                </div>
+                <button type="button" onclick="closeIsolationOverview()"
+                    class="p-1.5 rounded-lg t-text-muted hover:t-bg-item-hover transition-colors shrink-0" title="关闭">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div id="source-isolation-list" class="flex-1 overflow-y-auto p-4 space-y-2 t-bg-main custom-scrollbar">
+                <!-- 列表在此渲染 -->
+            </div>
+            <div class="p-3 border-t t-border-main flex items-center justify-end gap-2">
+                <button type="button" onclick="releaseAllIsolations(this)"
+                    id="source-isolation-release-all"
+                    class="px-3 py-1.5 text-xs font-medium bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400 rounded-lg hover:bg-emerald-100 dark:hover:bg-emerald-500/25 transition-colors">
+                    <i class="fas fa-unlock mr-1"></i>全部解除
+                </button>
             </div>
         </div>
     </div>

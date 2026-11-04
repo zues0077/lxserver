@@ -30,7 +30,7 @@ import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
 import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, describeError } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
-import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation } from './sourceGuard'
+import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation, listIsolations, ISOLATION_MAX_AUTO_RELEASE } from './sourceGuard'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
@@ -10322,6 +10322,23 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
+      // ===== 自检护栏：隔离记录总览（只读）=====
+      // 之前只能逐个在卡片上点开，隔离多了不知道一共关了几个、还剩几次复核机会。
+      if (pathname === '/api/source-guard/isolations' && req.method === 'GET') {
+        if (req.headers['x-frontend-auth'] !== global.lx.config['admin.password']) {
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, error: '权限不足：查看隔离记录需要管理员身份。' }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          success: true,
+          maxAutoRelease: ISOLATION_MAX_AUTO_RELEASE,
+          list: listIsolations(),
+        }))
+        return
+      }
+
       // ===== 自检护栏：可疑音源的手动处置 =====
       // 静态特征只是「可疑」不是「恶意」，自动禁用会误杀混淆过的正常音源，
       // 所以这里只提供处置接口，由用户在面板上决定信任还是隔离。
@@ -10631,6 +10648,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'customSource.probe.autoDisablePlatform': global.lx.config['customSource.probe.autoDisablePlatform'] !== false,
             'customSource.probe.autoRemoveSource': global.lx.config['customSource.probe.autoRemoveSource'] !== false,
             'customSource.probe.removeMode': global.lx.config['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash',
+            // 回收站保留天数：0 是合法值（永不清理），不能用 || 兜底
+            'customSource.trash.retentionDays': Number.isFinite(Number(global.lx.config['customSource.trash.retentionDays']))
+              ? Number(global.lx.config['customSource.trash.retentionDays']) : 30,
             // 快速复检 / 节流 / 单轮预算：0 是合法值（关闭），不能用 || 兜底
             'customSource.probe.restoreIntervalMinutes': Number.isFinite(Number(global.lx.config['customSource.probe.restoreIntervalMinutes']))
               ? Number(global.lx.config['customSource.probe.restoreIntervalMinutes']) : 30,
@@ -10712,6 +10732,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
               if (newConfig['customSource.probe.removeMode'] !== undefined) {
                 global.lx.config['customSource.probe.removeMode'] = newConfig['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash'
+              }
+              // 回收站保留天数：0 = 永不清理；非法输入回落到默认 30，别因为手滑变成「永久留档」
+              if (newConfig['customSource.trash.retentionDays'] !== undefined) {
+                const days = parseInt(newConfig['customSource.trash.retentionDays'])
+                global.lx.config['customSource.trash.retentionDays'] = Number.isFinite(days)
+                  ? Math.min(3650, Math.max(0, days))
+                  : 30
               }
               // 已关闭平台快速复检：间隔 0 = 关闭该功能（下限 0、上限 1440 分钟）
               if (newConfig['customSource.probe.restoreIntervalMinutes'] !== undefined) {
