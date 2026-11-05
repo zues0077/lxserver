@@ -148,6 +148,12 @@ export function buildRequestOptions(options: any, cfg: { requestMaxMs: number; b
             Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : cfg.requestMaxMs,
             cfg.requestMaxMs,
         ),
+        // 与主线程路径同源的问题：needle 默认 read_timeout=0（永不超时），
+        // 响应头回来、body 传到一半对端不再发字节时会永久挂起。worker 内同样要设。
+        read_timeout: Math.min(
+            Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : cfg.requestMaxMs,
+            cfg.requestMaxMs,
+        ),
         // 让 needle 按二进制返回，交给 worker 自行判体积/parse，避免它自己做一次深拷贝
         compressed: true,
     }

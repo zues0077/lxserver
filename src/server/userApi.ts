@@ -737,6 +737,16 @@ async function createLxRequest(
                 CUSTOM_SOURCE_REQUEST_MAX_MS
             ),
         }
+        /**
+         * read_timeout 必须显式设：needle 默认是 0（永不超时）。
+         *
+         * response_timeout 只覆盖「等响应头」这一段；一旦响应头回来了、body 传到一半
+         * 对端不再发字节（聚合源里很常见：子接口返回一半就断、或 CDN 卡住），
+         * 这个请求就永久挂在 socket 上：真实请求早死了，服务端还以为它「在飞」。
+         * 246 实测（2026-11-06 02:05）Hei Music聚合源 requests 120 / callbacks 55，
+         * inflight 卡在 65 静默 70 秒纹丝不动，同时 rss 冲到 1.07GB（挂起的 body 都还在内存里）。
+         */
+        requestOptions.read_timeout = requestOptions.response_timeout
 
         if (agentHttps && /^https:/i.test(String(url))) requestOptions.agent = agentHttps
         else if (agentHttp) requestOptions.agent = agentHttp

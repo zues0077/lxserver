@@ -111,6 +111,12 @@ test('buildRequestOptions: 超时帽生效、follow_max 必须为 -1', () => {
     const c = buildRequestOptions({}, { requestMaxMs: 5000, blockPrivateNetwork: true })
     assert.equal(c.response_timeout, 5000)
     assert.equal(WORKER_DEFAULTS.maxBodyBytes, 8 * 1024 * 1024)
+
+    // read_timeout 必须显式设：needle 默认 0 = 永不超时，响应头回来但 body 断流就永久挂起
+    // （246 实测 Hei Music inflight 卡 65 不动、rss 1.07GB）
+    assert.equal(a.read_timeout, 30000)
+    assert.equal(b.read_timeout, 1200)
+    assert.equal(c.read_timeout, 5000)
 })
 
 test('pickRequestParts: form / formData 优先于 body，且关闭 json', () => {
