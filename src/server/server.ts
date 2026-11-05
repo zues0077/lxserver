@@ -839,6 +839,24 @@ const MUSIC_URL_PROBE_TIMEOUT_MS = (() => {
   const raw = Number(process.env.MUSIC_URL_PROBE_MS)
   return Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : 1500
 })()
+/**
+ * 换源阶段的整体预算。
+ *
+ * 以前 switchToOtherSource 完全没有总闸：逐个候选调 resolveSwitchCandidate，
+ * 而每个候选内部又会把几十个自定义源串行问一遍（西瓜聚合源失败一次要 40~60 秒）。
+ * 实测汽水《诀爱》强制现取 **80.7 秒**才返回 —— 汽水本尊只花 1.4 秒就判失败，
+ * 剩下 74 秒全耗在换源池上；浏览器/音箱早就超时了，这段等待是纯浪费。
+ * 现在每个候选单独套硬闸，整体也不超过本预算，最坏情况变成「预算内尽力，超时给明确结论」。
+ */
+const MUSIC_SWITCH_BUDGET_MS = (() => {
+  const raw = Number(process.env.MUSIC_SWITCH_BUDGET_MS)
+  return Number.isFinite(raw) && raw >= 3000 ? Math.round(raw) : 12000
+})()
+/** 单个换源候选的时间上限：避免第一个慢候选把整体预算一次吃光，后面的候选没机会 */
+const MUSIC_SWITCH_CANDIDATE_MS = (() => {
+  const raw = Number(process.env.MUSIC_SWITCH_CANDIDATE_MS)
+  return Number.isFinite(raw) && raw >= 1000 ? Math.round(raw) : 5000
+})()
 const musicUrlFailures = new Map<string, { at: number; message: string; attempts: any[] }>()
 /**
  * 同歌并发取链合并（single-flight）：key → 先到请求的最终响应。
@@ -2546,13 +2564,32 @@ const switchToOtherSource = async (
     : await findServerSourceMatches(originalSong, username)
   // 探测要花时间，这里给个总闸：超过 5 秒就不再探，剩下的候选按老行为直接采用（当作未知）。
   // 换源阶段本身只有 9 秒预算（首次 25 秒），不能为了验活把时间吃光。
-  const probeDeadline = Date.now() + 5000
+  // 总闸同时受换源整体预算约束：别让「探测」比整个换源预算还长。
+  const switchDeadline = Date.now() + MUSIC_SWITCH_BUDGET_MS
+  const probeDeadline = Math.min(Date.now() + 5000, switchDeadline)
+  let skippedByBudget = 0
   for (const rawCandidate of matches) {
     const candidate = normalizeSongInfo({ ...rawCandidate })
     const source = candidate?.source
     if (!source || !isPlatformUsableForSwitch(source, username)) continue
+    const remain = switchDeadline - Date.now()
+    if (remain <= 800) {
+      skippedByBudget++
+      continue
+    }
     try {
-      const result = await resolveSwitchCandidate(candidate, requestedQuality, username)
+      // 逐个候选套硬闸：resolveSwitchCandidate 内部会把自定义源串行问一遍，
+      // 只在外层 for 循环上看 deadline 掐不住（单次调用就能超预算好几倍）
+      const candidateBudget = Math.min(remain, MUSIC_SWITCH_CANDIDATE_MS)
+      const result = await withHardBudget(
+        resolveSwitchCandidate(candidate, requestedQuality, username),
+        candidateBudget,
+        `换源 ${source} 取链`,
+      )
+      if (result === null) {
+        console.warn(`[换源] 候选 ${source} 取链超出 ${candidateBudget}ms，跳过：${originalSong.name}`)
+        continue
+      }
       if (!result?.url) continue
       // 「取链成功」不等于「能播」：自定义源会把错误页当成链接返回。
       // 2026-11-05 实测：汽水《诀爱》只有 30 秒试听 → 换源到 wy → 回避聚合 返回
@@ -2577,6 +2614,9 @@ const switchToOtherSource = async (
     } catch {
       // 单个候选失败继续试下一个
     }
+  }
+  if (skippedByBudget > 0) {
+    console.warn(`[换源] 预算 ${MUSIC_SWITCH_BUDGET_MS}ms 用尽，${skippedByBudget} 个候选未试：${originalSong.name}`)
   }
   return null
 }

@@ -2698,11 +2698,18 @@ async function doSearch(page = 1, append = false) {
             let renderTimer = null;
             let lastPaintAt = 0;
             let lastSorted = [];
+            // 最后一个源到齐时 schedulePaint(true) 会画一次，Promise.all 之后还会再补一次 paint(true)。
+            // 两次列表完全一样，不拦的话等于白白全量重绘一遍（上千条时几十毫秒的 DOM 活 + 滚动位置复位）
+            let finalPainted = false;
 
             const paint = (final) => {
                 if (mySeq !== searchSeq) return lastSorted;
                 // 第一批还没回来时保持 loading，别先闪一下「未找到相关结果」
                 if (!final && flat.length === 0) return lastSorted;
+                if (final) {
+                    if (finalPainted) return lastSorted;
+                    finalPainted = true;
+                }
                 lastSorted = renderAggregate(flat);
                 if (pageInfoEl) {
                     const remain = SOURCES.length - arrived;
