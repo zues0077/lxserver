@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
+import { runSingleFlight } from './singleFlight'
 
 /**
  * 音频转 mp3 封装（ffmpeg）。
@@ -229,7 +231,17 @@ export interface TranscodeResult {
  * 把本地音频文件转成 mp3 并落盘（原子写：先写 .part 再 rename，避免半成品被读走）。
  * dest 已存在且是合法 mp3 时直接复用。
  */
-export const transcodeFileToMp3 = async (
+/**
+ * 转码临时文件路径：必须每次唯一。
+ *
+ * 旧实现写死 `${destPath}.part`，同一首歌并发转码时两个 ffmpeg 打开同一个 inode：
+ * 先完成的一方 rename 走文件后，另一方的 fd 仍指向该 inode，会继续往已投送的文件里写；
+ * 另一方 rename 时又因 `.part` 已被挪走报 ENOENT，触发整首重转并覆盖产物（P-1140）。
+ */
+export const buildTranscodePartPath = (destPath: string): string =>
+  `${destPath}.${process.pid}.${randomUUID().slice(0, 8)}.part`
+
+const doTranscodeFileToMp3 = async (
   sourcePath: string,
   destPath: string,
   options: TranscodeOptions = {},
@@ -246,9 +258,10 @@ export const transcodeFileToMp3 = async (
     return { ok: false, error: `创建目录失败：${error?.message || error}`, transcoded: false }
   }
 
-  const partPath = `${destPath}.part`
-
   const runOnce = (opts: TranscodeOptions): Promise<TranscodeResult> => {
+    // 每次尝试用独立的临时文件：标准转码与宽容重试之间也不共用，
+    // 避免「重试把上一次的产物/半成品踩掉」。
+    const partPath = buildTranscodePartPath(destPath)
     const args = [...buildFfmpegArgs(sourcePath, opts), '-y', partPath]
     const startedAt = Date.now()
     return new Promise<TranscodeResult>(resolve => {
@@ -276,6 +289,23 @@ export const transcodeFileToMp3 = async (
           resolve({ ok: false, error: `落盘失败：${error?.message || error}`, transcoded: false })
           return
         }
+        // 产物必须真的可播：0 字节或头不是 mp3 一律算失败，交给上层换源/降档重取。
+        // 绝不能把半截文件推给音箱——设备拉到坏数据只会静默不播，用户看到的是「推了没声音」。
+        let size = 0
+        try {
+          size = fs.statSync(destPath).size
+        } catch {
+          size = 0
+        }
+        if (size <= 0 || !isMp3File(destPath)) {
+          try {
+            fs.unlinkSync(destPath)
+          } catch {
+            /* 忽略 */
+          }
+          resolve({ ok: false, error: `转码产物不可用（${size}B）`, transcoded: false })
+          return
+        }
         const elapsed = Date.now() - startedAt
         const tag = opts.tolerant ? '（宽容模式）' : ''
         console.log(`[XiaoAi] 转码完成${tag} → ${path.basename(destPath)}（${(elapsed / 1000).toFixed(1)}s）`)
@@ -296,6 +326,20 @@ export const transcodeFileToMp3 = async (
   if (second.ok) return second
   return { ok: false, error: `标准转码失败：${first.error || ''}；宽容模式也失败：${second.error || ''}`, transcoded: false }
 }
+
+/**
+ * 转码 mp3（带进程内单飞）。
+ *
+ * 同一 destPath 的并发调用只真正跑一次 ffmpeg，后来者复用同一个 Promise。
+ * 这样即使前端补点、自动续播、多端同时投送撞在一起，也不会出现
+ * 「两个 ffmpeg 抢同一个产物路径 → 把正在投送给设备的文件写坏」（P-1140）。
+ */
+export const transcodeFileToMp3 = (
+  sourcePath: string,
+  destPath: string,
+  options: TranscodeOptions = {},
+): Promise<TranscodeResult> =>
+  runSingleFlight(`transcode:${path.resolve(destPath)}`, () => doTranscodeFileToMp3(sourcePath, destPath, options))
 
 export interface Mp3Transcoder {
   /** 转码后的 mp3 数据流 */

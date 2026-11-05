@@ -322,7 +322,7 @@ test('拉流但不播 → 先换新地址重推，仍不播再走纯直链', asy
     log: () => {},
     delays: { probe: 0, gap: 0, after: 0, silentWindow: 1 },
   })
-  assert.equal(action, 'url')
+  assert.equal(action, 'failed', '两轮补救都没起播必须如实上报 failed，不能假装成功（P-1141 A2）')
   assert.deepEqual(retried, ['fresh', 'url'], '第一招必须是换新地址重推，第二招才是纯直链')
 })
 
@@ -344,6 +344,28 @@ test('拉流但不播 → 换新地址起播就收手，不再降级', async () 
   })
   assert.equal(action, 'fresh')
   assert.deepEqual(retried, ['fresh'])
+})
+
+test('拉流但不播 → 换新地址没起来、改纯直链后起播，仍返回 url 而不是 failed', async () => {
+  const retried: string[] = []
+  let played = false
+  const action = await runPullGuard({
+    isPulled: () => true,
+    isStale: () => false,
+    getStatus: async () => (played ? PULLED_PLAYING : PULLED_SILENT),
+    expectedDurationMs: 225000,
+    expectedAudioId: 'A',
+    isStreaming: () => false,
+    pushedAt: Date.now() - 30000,
+    retry: async mode => {
+      retried.push(mode)
+      if (mode === 'url') played = true
+    },
+    log: () => {},
+    delays: { probe: 0, gap: 0, after: 0, silentWindow: 1 },
+  })
+  assert.equal(action, 'url', '第二招救活了就必须报 url，不能误报 failed 让用户去重启音箱')
+  assert.deepEqual(retried, ['fresh', 'url'])
 })
 
 test('拉流且正常播放 → 守门不插手', async () => {

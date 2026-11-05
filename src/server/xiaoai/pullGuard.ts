@@ -146,7 +146,15 @@ export function detectLibraryPreview(
   return { hit: false, reason: '' }
 }
 
-export type PullGuardAction = 'none' | 'fresh' | 'placeholder' | 'url'
+/**
+ * 守门结论：
+ *  - none      没发现异常，或异常已被自行恢复
+ *  - fresh     换新签名地址重推后起播
+ *  - placeholder 换默认封面 audioID 后起播
+ *  - url       改走 player_play_url 后起播
+ *  - failed    两轮补救都没起播（设备多处于脏状态，只能重启音箱，前端必须如实提示）
+ */
+export type PullGuardAction = 'none' | 'fresh' | 'placeholder' | 'url' | 'failed'
 
 export interface PullGuardDeps {
   /** 本次投送之后音箱有没有来拉我们的流 */
@@ -305,8 +313,10 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
     }
     await sleep(after)
     if (await playingNow()) return 'url'
-    deps.log('[XiaoAi] 两轮补救都没起播：留给前端提示，不再反复打扰设备')
-    return 'url'
+    // 两轮都没起来：设备多半停在「暂停 + 位置 0」的脏状态（P-1131），代码救不回来，
+    // 只能重启音箱。这里必须如实上报 failed，让前端停止假装「播放中」并给出可执行提示。
+    deps.log('[XiaoAi] 两轮补救都没起播：设备无响应，需重启音箱')
+    return 'failed'
   }
   if (firstHit.kind !== 'preview') return 'none'
 

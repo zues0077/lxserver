@@ -933,6 +933,52 @@ const sweepExpiredIsolations = (): void => {
 const windowAvg = (): number =>
     samples.length === 0 ? 0 : samples.reduce((sum, value) => sum + value, 0) / samples.length
 
+/**
+ * 尖峰归因快照。
+ *
+ * 旧日志只有一句「单次采样 89%」，事后要定位只能人肉对照 GC 与源定时器日志，经常对不上。
+ * 这里在尖峰当刻把三类信号一起打出来（都是已有埋点，不额外采样）：
+ *   - 慢定时器回调 TOP3（同步阻塞的直接来源，耗时≈事件循环停顿时长）
+ *   - 活跃沙箱定时器（周期性尖峰的嫌疑对象）
+ *   - 15s 内有活动的音源（请求/回调/加载，行为级证据）
+ * 下次再出现尖峰，看这一条就能锁定对象，不必再猜一轮。
+ */
+let lastSpikeSnapshotAt = 0
+const SPIKE_SNAPSHOT_MIN_INTERVAL_MS = 10_000
+
+const buildSpikeSnapshot = (): string => {
+    const mem = process.memoryUsage()
+    const mb = (n: number) => (n / 1024 / 1024).toFixed(1)
+    const parts = [`rss ${mb(mem.rss)}MB / 堆已用 ${mb(mem.heapUsed)}MB / 外部 ${mb(mem.external)}MB`]
+
+    const slow = guardDeps?.getRecentSlowTimers?.() || []
+    if (slow.length) {
+        const top = [...slow].sort((a, b) => b.costMs - a.costMs).slice(0, 3)
+        parts.push(
+            '慢回调 TOP' + top.length + '：' +
+            top.map(t => `${t.name}/${t.kind} ${Math.round(t.costMs)}ms（${Math.round((Date.now() - t.at) / 1000)}s 前）`).join('；')
+        )
+    } else {
+        parts.push('慢回调：无')
+    }
+
+    const timers = guardDeps?.getTrackedTimers?.() || []
+    if (timers.length) {
+        const near = [...timers].sort((a, b) => (a.intervalMs || 0) - (b.intervalMs || 0)).slice(0, 3)
+        parts.push(`活跃定时器 ${timers.length} 个（间隔最短）：` + near.map(t => `${t.name} ${t.intervalMs}ms`).join('；'))
+    }
+
+    const activity = guardDeps?.getRecentActivity?.(15000) || []
+    if (activity.length) {
+        const busy = activity
+            .slice(0, 3)
+            .map(a => `${a.name}[${a.kinds.join('/')}] 回调${a.callbacks} 在飞${a.inflight} 加载${Math.round(a.loadCostMs)}ms`)
+        parts.push('15s 内活跃音源：' + busy.join('；'))
+    }
+
+    return parts.join(' | ')
+}
+
 const scheduleSampler = (): void => {
     if (sampler || probing || !cfg().enabled) return
     lastCpu = process.cpuUsage()
@@ -961,6 +1007,16 @@ const tick = (): void => {
             '短尖峰会被窗口均值稀释故单独记录，归因请对照同刻的 [GC] 与 [自定义源-*] 定时器耗时日志'
         console.warn(msg)
         syncLog.warn(msg)
+        // 归因快照：同刻的慢回调 / 活跃定时器 / 活跃音源一起打，10 秒内只打一次避免刷屏。
+        // 有了这一条，下次尖峰不用再靠"对照 GC 日志猜"（P-1139 记录的教训）。
+        if (Date.now() - lastSpikeSnapshotAt >= SPIKE_SNAPSHOT_MIN_INTERVAL_MS) {
+            lastSpikeSnapshotAt = Date.now()
+            try {
+                syncLog.warn(`[自检护栏] 尖峰快照：${buildSpikeSnapshot()}`)
+            } catch (error: any) {
+                syncLog.warn(`[自检护栏] 尖峰快照生成失败：${error?.message || error}`)
+            }
+        }
     }
 
     const capacity = Math.max(2, Math.round(current.windowMs / current.sampleIntervalMs))

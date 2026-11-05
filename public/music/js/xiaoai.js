@@ -912,9 +912,15 @@
         // 这条优先于 unplayableCode 判断——用户会看到封面退回默认，得给个解释。
         const guard = status && status.streamGuardAction;
         if (guard) {
-            el.textContent = guard === 'url'
-                ? 'ℹ️ 音箱曲库里的这一版是 VIP 资源、放不了，已自动改用纯直链重发（触屏会退回默认封面）。'
-                : 'ℹ️ 音箱曲库里的这一版是 VIP 资源、放不了，已自动改用默认封面并重发本机直链。';
+            if (guard === 'failed') {
+                // 两轮补救都没起播：设备处于脏状态，代码救不回来，只能重启音箱。
+                // 这时绝不能再显示「播放中」，否则用户以为在放、实际没声音。
+                el.textContent = '⚠️ 音箱没有响应（已自动重推两次都没起播），请重启小爱音箱后再试。';
+            } else if (guard === 'url') {
+                el.textContent = 'ℹ️ 音箱曲库里的这一版是 VIP 资源、放不了，已自动改用纯直链重发（触屏会退回默认封面）。';
+            } else {
+                el.textContent = 'ℹ️ 音箱曲库里的这一版是 VIP 资源、放不了，已自动改用默认封面并重发本机直链。';
+            }
             el.classList.remove('hidden');
             return;
         }
@@ -1588,7 +1594,13 @@
             const guard = data.streamGuardAction || '';
             if (guard && guard !== state.guardNoticed) {
                 state.guardNoticed = guard;
-                if (typeof window.showToast === 'function') {
+                if (guard === 'failed') {
+                    // 两轮补救都没起播：别再假装播放中，停下守望并让用户重启音箱（P-1131）
+                    if (typeof window.showToast === 'function') {
+                        window.showToast('error', '音箱没有响应：已自动重推两次都没起播，请重启小爱音箱后再试', 10000);
+                    }
+                    stopWatch();
+                } else if (typeof window.showToast === 'function') {
                     window.showToast('info', '音箱曲库里的这版是 VIP 放不了，已自动改用本机直链重发', 6000);
                 }
             }

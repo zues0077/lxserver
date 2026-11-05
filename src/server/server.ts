@@ -75,6 +75,7 @@ import {
   getCachedTrack,
   getCachedTrackUrl,
   setCachedTrackUrl,
+  deleteCachedTrackBySong,
   retireStreams,
   markDrainOnly,
   setReplayBlockedHook,
@@ -1099,8 +1100,13 @@ const resolveXiaoAiTrackRaw = async (
   }
 
   // 4. 预解析缓存：自动续播切歌时走这条，省掉音源解析耗时；但地址可能已失效，要探测
+  //    skipCache=true（转码失败换源）时必须连它一起跳过并删除：旧实现只跳过本地文件缓存，
+  //    playCache 里的坏地址照样命中，等于「换了源又拿回同一个坏地址」，自愈链实际是空的（P-1137）。
   const cacheKey = buildTrackKey(songInfo, quality)
-  const cachedTrack = getCachedTrack(cacheKey)
+  if (options.skipCache && cacheKey && deleteCachedTrackBySong(songInfo, quality)) {
+    syncLog.warn(`[XiaoAi] 转码失败换源：已清除预解析地址缓存 ${cacheKey}`)
+  }
+  const cachedTrack = options.skipCache ? { url: '', durationMs: 0 } : getCachedTrack(cacheKey)
   if (cachedTrack.url) {
     const probe = await probeAudioCached(cachedTrack.url)
     if (probe.ok) {
@@ -1373,6 +1379,8 @@ const resolveXiaoAiTrack = async (
       /* 文件已被清理/占用时忽略，换源仍可继续 */
     }
   }
+  // 坏缓存背后往往钉着同一条预解析地址：不清它，下一次投送还会命中同一个坏地址（P-1137）
+  deleteCachedTrackBySong(songInfo, quality)
   console.warn(`[XiaoAi] 转码失败，换源重取：${target.filename}（${String(unified.transcodeError).slice(0, 120)}）`)
   const retry = await resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, '', { skipCache: true })
   const retryUnified = await applyMp3Unification(retry, songInfo, quality, verifiedUsername)
