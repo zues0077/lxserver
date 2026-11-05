@@ -43,6 +43,7 @@ import { request } from '../musicAccount/http'
 import * as store from '../musicAccount/store'
 import * as pending from './pending'
 import * as signer from './signer'
+import * as sodaProxy from './sodaProxy'
 import { registerSodaKey, getSodaKey, resolveAudioKey, isHexKey, sodaTrackIdOf } from '../utils/sodaDecrypt'
 import { isEncryptedRemoteStream } from '../utils/streamEncryption'
 import { extractSodaKey } from './sodaKey'
@@ -836,6 +837,51 @@ async function completePlainFetch(fetch: PlainFetch, cookie: string, trackId: st
   return fetch
 }
 
+/**
+ * 取链代理通道（sodaProxy）：手机端 App 自己签名取链，每档都带 `spade_a`。
+ *
+ * 与另外三条通道的区别：签名器/明文通道拿到的受限曲只有 60 秒试听且**没有密钥**，
+ * 而代理返回的是手机端 video_model，既有整曲直链也有密钥 —— 所以它是**唯一**能
+ * 让受限曲也整曲播放的通道（解密仍走 sodaKey 现成管线）。
+ *
+ * 这里只走 `fast=1`（查设备上的播放队列缓存，实测 1~7 秒）。慢路径要 60~90 秒，
+ * 由 `warmUp()` 在后台跑，下次点同一首就能命中 —— 见 getAudioUrl 末尾的失败分支。
+ */
+async function tryProxyStream(trackId: string, songInfo: any, quality: string): Promise<{
+  url: string
+  quality: string
+  via: string
+  ext: string
+  key?: string
+} | null> {
+  if (!sodaProxy.isConfigured()) return null
+  // 先过探活（60 秒缓存）：设备/服务挂掉时不必每首歌都白等 9 秒超时
+  const st = await sodaProxy.status().catch(() => null)
+  if (!st?.online) return null
+  const name = String(songInfo?.name || songInfo?.title || '')
+  const res = await sodaProxy.resolveStreams(trackId, { name, fast: true }).catch(() => null)
+  if (!res?.ok || !res.streams.length) return null
+
+  // 复用明文通道的选择器：代理返回的档位与 video_list 同构（quality/bitrate/size）
+  const items: SodaVideoItem[] = res.streams.map(s => ({
+    main_url: s.mainUrl,
+    video_meta: { quality: s.quality, bitrate: s.bitrate, size: s.size, vtype: s.vtype || 'm4a' },
+  }))
+  const chosen = chooseStream(items, quality)
+  if (!chosen) return null
+  const hit = res.streams.find(s => s.mainUrl === chosen.main_url)
+  if (!hit) return null
+
+  const bitrate = Math.round(hit.bitrate / 1000)
+  return {
+    url: hit.mainUrl,
+    quality: SIGNED_QUALITY[hit.quality]?.label || QUALITY_LABEL[hit.quality] || '320k',
+    via: `proxy:${hit.quality || '?'}(${bitrate}k)`,
+    ext: String(hit.vtype || 'm4a'),
+    key: hit.spadeA || undefined,
+  }
+}
+
 type PlainOutcome =
   | { ok: true; url: string; quality: string; via: string; ext: string; key?: string }
   | { ok: false; reason: 'preview'; seconds: number; full: number }
@@ -903,6 +949,17 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   const trackId = sodaTrackIdOf(songInfo)
   if (!isSodaId(trackId)) throw new Error(`汽水歌曲 id 不合法（${trackId || '空'}）`)
 
+  // ⓪ 取链代理：唯一能拿到「整曲 + spade_a」的通道（手机端 App 自己签名取链）。
+  //    必须排在「仅试听」负缓存之前 —— 后台预热成功后要靠这一步翻身，
+  //    否则会一直被 5 分钟前的旧判定挡住，表现为「明明预热好了还是报试听」。
+  const proxyName = String(songInfo?.name || songInfo?.title || '')
+  const proxied = await tryProxyStream(trackId, songInfo, quality).catch(() => null)
+  if (proxied) {
+    pending.remove(`soda:${trackId}`)
+    previewVerdictByTrack.delete(trackId)
+    return proxied
+  }
+
   // 5 分钟内已经判过「只有试听」：直接按同一句话失败，不再把 25 秒重花一遍
   const cachedVerdict = readPreviewVerdict(trackId)
   if (cachedVerdict) {
@@ -948,9 +1005,16 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   }
 
   const reason = plain.reason === 'preview' ? 'preview-only' : 'no-stream'
-  const msg = plain.reason === 'preview'
+  let msg = plain.reason === 'preview'
     ? `汽水电脑端仅提供 ${plain.seconds} 秒试听（该曲完整 ${plain.full} 秒；平台对电脑端不下发整曲密钥，与会员身份无关），${await hintForMissing(cookie)}`
     : '汽水未返回可用音频流（该曲可能已下架或仅支持客户端播放）'
+
+  // 配了取链代理就顺手把这首丢到后台预热：慢路径要 60~90 秒，绝不能在这里同步等，
+  // 但「等一次、下次秒出」是划算的 —— 用户按提示重试就能拿到整曲。
+  if (sodaProxy.isConfigured()) {
+    sodaProxy.warmUp(trackId, proxyName)
+    msg += '；已在后台通过取链代理预热，约 1 分钟后重新点击可播整曲'
+  }
   // 记待补：等签名器在线时自动补，不让用户凭记忆重新找歌
   pending.add(songInfo, reason, msg, username)
   // 只有试听：记 5 分钟，后续同一首直接判失败，把时间让给换源
@@ -1024,6 +1088,12 @@ export interface SodaStreamDiagnosis {
   signerOnline: boolean
   /** 签名通道不可用时的具体原因 */
   signerError: string
+  /** 是否配置了取链代理地址（sodaProxy） */
+  hasProxy: boolean
+  /** 取链代理是否在线 */
+  proxyOnline: boolean
+  /** 取链代理通道的探测结果（可直接展示） */
+  proxyMessage: string
   /** 两条明文通道各自的探测结果 */
   channels: Array<{ tag: string; ok: boolean; items: number; streamDuration: number; error: string }>
   /** 人话结论，可直接展示给终端用户 */
@@ -1048,6 +1118,9 @@ export async function diagnoseStream(songInfo: any, quality = '320k', cookie = '
     hasSigner: false,
     signerOnline: false,
     signerError: '',
+    hasProxy: false,
+    proxyOnline: false,
+    proxyMessage: '',
     channels: [],
     hint: '',
   }
@@ -1071,7 +1144,27 @@ export async function diagnoseStream(songInfo: any, quality = '320k', cookie = '
     }
   }
 
-  // ① 签名链路状态
+  // ① 取链代理（唯一能拿整曲 + 密钥的通道）。诊断口径与 getAudioUrl 一致：
+  //    先看它有没有命中，命中就是天花板。
+  report.hasProxy = sodaProxy.isConfigured()
+  let proxyPick: { url: string; quality: string; ext: string; key?: string } | null = null
+  if (report.hasProxy) {
+    try {
+      const st = await sodaProxy.status(true)
+      report.proxyOnline = !!st?.online
+      report.proxyMessage = String(st?.message || '')
+      if (report.proxyOnline) {
+        proxyPick = await tryProxyStream(trackId, songInfo, 'flac24bit')
+        report.proxyMessage = proxyPick
+          ? '代理队列已命中（整曲 + spade_a 密钥）'
+          : '代理在线，但播放队列里没有该曲（需搜索兜底预热，重试可取到）'
+      }
+    } catch (e: any) {
+      report.proxyMessage = `取链代理探测失败：${e?.message || e}`
+    }
+  }
+
+  // ② 签名链路状态
   report.hasSigner = signer.isConfigured()
   if (!report.hasSigner) {
     report.signerError = '未配置签名器地址（qishui.signerUrl）'
@@ -1134,7 +1227,16 @@ export async function diagnoseStream(songInfo: any, quality = '320k', cookie = '
     else report.signerError = '签名器返回的是 CENC 加密流且无密钥，浏览器无法播放，已退回明文通道'
   }
 
-  if (signedUsable) {
+  if (proxyPick) {
+    // 代理命中就是天花板：整曲 + 密钥，另外三条通道都拿不到这个
+    report.source = 'proxy'
+    report.quality = proxyPick.quality
+    report.url = proxyPick.url
+    report.isPreview = false
+    report.isLossless = String(proxyPick.quality).startsWith('flac') || proxyPick.ext === 'flac'
+    report.trackDurationSeconds = Math.round(best?.got.trackDuration || 0)
+    report.streamDurationSeconds = 0
+  } else if (signedUsable) {
     report.source = 'signer'
     report.quality = signedUsable.quality
     report.url = signedUsable.url
@@ -1174,6 +1276,9 @@ export function buildHint(r: SodaStreamDiagnosis): string {
 
   if (!r.url) {
     if (accountDead) return `账号 Cookie 已失效${accountDetail}，汽水连明文试听流都没返回；请重新从 PC 客户端导出 Cookie`
+    if (r.hasProxy && !r.proxyOnline) {
+      return `汽水各通道都没解析到播放流，且取链代理不可达（${r.proxyMessage || '未知原因'}）`
+    }
     return r.hasSigner && !r.signerOnline
       ? `汽水两条免签名通道都没解析到播放流，且签名器离线（${r.signerError || '未知原因'}）`
       : '汽水两条免签名通道都没解析到播放流，请检查曲目 ID 与网络连通性'
@@ -1192,6 +1297,9 @@ export function buildHint(r: SodaStreamDiagnosis): string {
   }
   if (r.requiresVip && r.signerOnline) {
     return `签名器在线但仍只拿到 ${shown} 秒试听，通常是签名器与设备指纹不匹配，或该账号对此曲没有整曲权益`
+  }
+  if (r.hasProxy && r.proxyOnline) {
+    return `只拿到 ${shown} 秒试听（整曲 ${r.trackDurationSeconds} 秒）；取链代理在线但队列里还没这首，后台预热完成后重试即可整曲`
   }
   return `只拿到 ${shown} 秒试听片段（整曲 ${r.trackDurationSeconds} 秒），该曲在汽水侧受版权限制`
 }
