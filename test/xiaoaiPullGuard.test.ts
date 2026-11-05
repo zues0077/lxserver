@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { detectLibraryPreview, runPullGuard, sampleFromStatus } from '../src/server/xiaoai/pullGuard'
+import { detectLibraryPreview, detectPulledButSilent, runPullGuard, sampleFromStatus } from '../src/server/xiaoai/pullGuard'
 
 /** 曲库 VIP：设备上报 92s、本曲 256s、进度还在往前 */
 const VIP_STATUS = {
@@ -219,6 +219,95 @@ test('读状态失败时不判定（避免把云抖动画成故障）', async ()
     retry: async mode => { retried.push(mode) },
     log: () => {},
     delays: { probe: 0, gap: 0, after: 0 },
+  })
+  assert.equal(action, 'none')
+  assert.deepEqual(retried, [])
+})
+
+// ---- 拉了流但根本没播（2026-11-05 实测 LX04：只拉 1MB 起播缓冲就断开）----
+
+/** 设备拉了流，但一直 paused / pos=0 */
+const PULLED_SILENT = {
+  playing: false,
+  paused: true,
+  durationMs: 0,
+  positionMs: 0,
+  raw: { play_song_detail: { audio_id: 'A', duration: 0, unplayableCode: 2 } },
+}
+/** 设备拉了流并正常播放 */
+const PULLED_PLAYING = {
+  playing: true,
+  durationMs: 225000,
+  positionMs: 12000,
+  raw: { play_song_detail: { audio_id: 'A', duration: 225000 } },
+}
+
+test('detectPulledButSilent：拉过流、两次都 pos=0 且服务端已停推、过了窗口 → 命中', () => {
+  const first = sample(PULLED_SILENT, true)
+  const second = sample(PULLED_SILENT, true)
+  const signal = detectPulledButSilent(first, second, {
+    elapsedSincePushMs: 20000,
+    streaming: false,
+  })
+  assert.equal(signal.hit, true)
+})
+
+test('detectPulledButSilent：还在起播窗口内不判定', () => {
+  const signal = detectPulledButSilent(sample(PULLED_SILENT, true), sample(PULLED_SILENT, true), {
+    elapsedSincePushMs: 6000,
+    streaming: false,
+  })
+  assert.equal(signal.hit, false)
+})
+
+test('detectPulledButSilent：服务端还在推流（缓冲中）不判定', () => {
+  const signal = detectPulledButSilent(sample(PULLED_SILENT, true), sample(PULLED_SILENT, true), {
+    elapsedSincePushMs: 30000,
+    streaming: true,
+  })
+  assert.equal(signal.hit, false)
+})
+
+test('detectPulledButSilent：播过（pos>0）就绝不判定，用户暂停不会被重发打断', () => {
+  const pausedAfterPlay = { playing: false, durationMs: 225000, positionMs: 40000, raw: PULLED_SILENT.raw }
+  const signal = detectPulledButSilent(sample(pausedAfterPlay, true), sample(pausedAfterPlay, true), {
+    elapsedSincePushMs: 60000,
+    streaming: false,
+  })
+  assert.equal(signal.hit, false)
+})
+
+test('拉流但不播 → 守门跳过占位，直接纯直链重发', async () => {
+  const retried: string[] = []
+  const action = await runPullGuard({
+    isPulled: () => true,
+    isStale: () => false,
+    getStatus: async () => PULLED_SILENT,
+    expectedDurationMs: 225000,
+    expectedAudioId: 'A',
+    isStreaming: () => false,
+    pushedAt: Date.now() - 30000,
+    retry: async mode => { retried.push(mode) },
+    log: () => {},
+    delays: { probe: 0, gap: 0, after: 0, silentWindow: 1 },
+  })
+  assert.equal(action, 'url')
+  assert.deepEqual(retried, ['url'], '占位那一级对「拉了不播」无效，应直接走纯直链')
+})
+
+test('拉流且正常播放 → 守门不插手', async () => {
+  const retried: string[] = []
+  const action = await runPullGuard({
+    isPulled: () => true,
+    isStale: () => false,
+    getStatus: async () => PULLED_PLAYING,
+    expectedDurationMs: 225000,
+    expectedAudioId: 'A',
+    isStreaming: () => true,
+    pushedAt: Date.now() - 30000,
+    retry: async mode => { retried.push(mode) },
+    log: () => {},
+    delays: { probe: 0, gap: 0, after: 0, silentWindow: 1 },
   })
   assert.equal(action, 'none')
   assert.deepEqual(retried, [])

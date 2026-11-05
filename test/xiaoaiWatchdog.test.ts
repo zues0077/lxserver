@@ -79,3 +79,24 @@ test('时长未知：设备不上报进度，靠持续停止确认播完（不�
     const d = evaluate(state, sample(16000, { hasProgress: false, progressRatio: -1 }), { knownDurationMs: 0 });
     assert.equal(d.action, 'none', `应为 none，实际 ${d.action}/${d.reason}`);
 });
+
+// ---- 2026-11-05：设备把 status 瞬时报成 paused 时误跳歌 ----
+
+test('设备报 paused 但位置仍在推进 → 不跳歌（position-advancing）', () => {
+    let st: any = playingState();
+    st.lastPlayingAt = BASE - 60000;
+    // evaluate 返回的是新 state（内部 Object.assign 副本），必须链式传下去
+    st = evaluate(st, sample(3000, { playing: false, hasProgress: false, positionMs: 1000 }), {}).state;
+    const d = evaluate(st, sample(10000, { playing: false, hasProgress: false, positionMs: 7000 }), {});
+    assert.equal(d.action, 'none', `应为 none，实际 ${d.action}/${d.reason}`);
+    assert.equal(d.reason, 'position-advancing');
+});
+
+test('设备报 paused 且位置一直为 0 → 满 6 秒仍按播完兜底（兜底不能丢）', () => {
+    let st: any = playingState();
+    st.lastPlayingAt = BASE - 60000;
+    st = evaluate(st, sample(3000, { playing: false, hasProgress: false, positionMs: 0 }), {}).state;
+    const d = evaluate(st, sample(12000, { playing: false, hasProgress: false, positionMs: 0 }), {});
+    assert.equal(d.action, 'advance', `应为 advance，实际 ${d.action}/${d.reason}`);
+    assert.equal(d.reason, 'finished-without-progress');
+});

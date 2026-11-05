@@ -156,6 +156,8 @@
             durationMs: 0,
             idleSince: null,
             failCount: 0,
+            /** 上一次采样到的设备位置（ms）：用来识别「设备报 paused 但位置还在推进」 */
+            lastPositionMs: 0,
         };
     };
 
@@ -279,6 +281,18 @@
 
         // 5. 有进度且已到末尾 —— 播放完毕
         if (hasRatio && ratio >= opts.endRatio) return done('advance', 'finished');
+
+        // 5.5 设备报「未播放」但位置仍在推进 → 声音其实还在走，绝不能按「无进度=播完」跳歌。
+        //     固件会把 status 瞬时报成 paused，或 position 闪回 0；原逻辑只有 playing=true
+        //     才重置 idleSince，于是「停止」计时一路累加，满 6 秒就误切下一首
+        //     （2026-11-05 用户反馈「有时候自动切歌」）。
+        const prevPositionMs = Number(state.lastPositionMs) || 0;
+        if (positionMs > 0) state.lastPositionMs = positionMs;
+        if (positionMs > 0 && positionMs - prevPositionMs >= 500) {
+            state.idleSince = null;
+            state.lastPlayingAt = now;
+            return done('none', 'position-advancing');
+        }
 
         // 6. 设备不上报进度：只能靠「持续停止」判断，门槛更保守
         // 三重护栏（手册 P-1110 续）：

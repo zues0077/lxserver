@@ -945,6 +945,13 @@ const upstreamSilenceMs = (): number => {
 const PACING_FACTOR = 1.1
 /** 起播预灌多少音频：这是设备抗抖动的安全垫，太小（3s）一点风浪就断 */
 const PACING_LEAD_MS = 30000
+/**
+ * 码率可信度上限（B/ms）。转码产物最高 320kbps≈0.04，给 2.5 倍余量。
+ * 超过就说明传入的时长不可信，按 PACING_FALLBACK_RATE 兜底，避免垫子被算成几十 MB 灌爆设备。
+ */
+const PACING_MAX_RATE = 0.1
+/** 码率不可信时的兜底码率：320kbps 实时，只保证「不灌爆」，慢一点也无所谓 */
+const PACING_FALLBACK_RATE = 0.04
 /** 上限：设备明显跟不上时，允许把垫子抬到这么厚 */
 const PACING_LEAD_MAX_MS = 90000
 /** 队列剩余不足这么多字节，说明我们把音箱饿着了（节流压太狠），需要放宽 */
@@ -1078,9 +1085,16 @@ export const pumpDownstream = (
         upstream.headers['content-length'] ||
         0,
     )
-    const ratePerMs = durationMs > 0 && totalBytes > 0 ? totalBytes / durationMs : 0
+    let ratePerMs = durationMs > 0 && totalBytes > 0 ? totalBytes / durationMs : 0
     // 真实音频是几十 bytes/ms（320kbps≈40），原来写的 `ratePerMs < 1` 会把所有真歌都挡在节流之外，
     // 退化成纯背压，于是「断断续续」。这里只挡住 0 与明显异常的超大值（>2000≈1.6Mbps，远超任何音源）。
+    //
+    // 再补一道「码率可信度」上限（2026-11-05）：转码产物最高 320kbps≈0.04 B/ms，
+    // 给 2.5 倍余量到 0.1。超过说明传进来的 durationMs 不可信——实测 225s 的歌在
+    // 「回到开头」时被算成剩余 36s，码率被放大 8 倍，30 秒垫子一次灌 10MB，
+    // 直接把音箱缓冲灌爆，表现为「拉流但不播放、点屏幕播放键也起不来」。
+    // 这种情况夹回 320k 码率：宁可喂慢一点，也绝不能灌爆。
+    if (ratePerMs > PACING_MAX_RATE) ratePerMs = PACING_FALLBACK_RATE
     if (ratePerMs > 0.001 && ratePerMs < 2000) paceLeadMs = PACING_LEAD_MS
 
     const settle = () => {

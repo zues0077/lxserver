@@ -397,6 +397,15 @@ let lastXiaoAiTrack: {
   target: XiaoAiTrackTarget
   /** 整首时长（毫秒），seek 时用它算剩余时长 */
   durationMs: number
+  /**
+   * 这一首的**整首**时长（毫秒），投送时锁定，之后任何 seek/探测都不许改写。
+   *
+   * 为什么单独存一份：`durationMs` 会被「时长探测失败时补探」等路径写回，
+   * 一旦被写成一个残值，后续「拖回开头」算出来的剩余时长就会离谱
+   * （实测：225s 的歌在回到开头时被算成剩余 36s）。剩余时长直接决定
+   * 平滑下发的码率——码率被放大数倍就会把音箱缓冲灌爆，表现为「拉流但不播放」。
+   */
+  totalDurationMs: number
 } | null = null
 /** 当前这一路流从第几秒开始：前端据此把设备上报的「流内位置」换算成「曲内位置」 */
 let lastXiaoAiSeekSec = 0
@@ -8926,6 +8935,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   deviceIds: Array.isArray(deviceIds) ? [...deviceIds] : [],
                   target,
                   durationMs: Number(target.durationMs) || 0,
+                  totalDurationMs: Number(target.durationMs) || 0,
                 }
                 // 定时关机（按曲数模式）：每成功投送一首扣一次
                 try {
@@ -8957,6 +8967,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     expectedDurationMs: Number(target.durationMs) || 0,
                     // 本次实际下发的曲库 audioID：设备若还在报别的 id，说明推送没落地
                     expectedAudioId: guardAudioId,
+                    // 「拉了流但没播」判定需要两个额外信号（P-1131 实测：LX04 只拉 1MB 起播缓冲就断开）
+                    isStreaming: () => Date.now() - lastXiaoAiSentAt < 6000,
+                    pushedAt: pushAt,
                     retry: async mode => {
                       if (mode === 'placeholder') {
                         await xiaoAiService.replayWithPlaceholder({ deviceIds: [guardDeviceId], streamUrl })
@@ -9124,10 +9137,18 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               // 时长三档兜底：投送时探测到的 → 现场再探一次（探测偶发失败时会补回来）
               // → 设备上报的曲目时长。三者都没有就不夹取，按用户拖的位置直接跳，
               // 也好过退化成「从头重播」。
-              if (track.durationMs <= 0 && track.target.path) {
-                track.durationMs = probeLocalFileDuration(track.target.path)
-              }
-              const knownMs = track.durationMs > 0 ? track.durationMs : lastXiaoAiDeviceDurationMs
+              // 整首时长以投送时锁定的 totalDurationMs 为准，不要用 track.durationMs：
+              // 后者会被各种兜底路径写回残值（实测 225s 的歌「回到开头」时算出剩余 36s），
+              // 而剩余时长直接决定平滑下发码率——码率放大数倍会把音箱缓冲灌爆，
+              // 表现就是「拉流但不播放、连点屏幕播放键也起不来」（2026-11-05）。
+              let knownMs = Number(track.totalDurationMs) > 0
+                ? Number(track.totalDurationMs)
+                : Number(track.durationMs) > 0
+                  ? Number(track.durationMs)
+                  : 0
+              // 确实不知道整首时长时才现场补探一次；**不写回 track**（写回会污染后续 seek）
+              if (knownMs <= 0 && track.target.path) knownMs = probeLocalFileDuration(track.target.path)
+              if (knownMs <= 0) knownMs = lastXiaoAiDeviceDurationMs
               const totalSec = knownMs > 0 ? knownMs / 1000 : 0
               // 贴到结尾会切出 0.5 秒碎片，夹到 duration-3（songloft 同款守卫）
               const maxSec = totalSec > 4 ? Math.floor(totalSec - 3) : Math.max(0, Math.floor(totalSec))
@@ -9169,8 +9190,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 }
                 how = sliced.reused ? '切片复用' : '切片'
               } else if (seekSec === 0) {
-                // 拖回开头：直接用原音源重投，不留切片
-                nextTarget = { ...base, durationMs: track.durationMs || base.durationMs, seekSec: 0 }
+                // 拖回开头：直接用原音源重投，不留切片。时长必须是整首（knownMs），
+                // 用残值会让平滑下发按错误码率灌流。
+                nextTarget = { ...base, durationMs: knownMs || base.durationMs, seekSec: 0 }
                 how = '回到开头'
               } else {
                 // 远端源 / 本地非 mp3：只能边转边发（`-ss` 在 -i 前），同时 tee 到 seek 目录

@@ -8838,6 +8838,10 @@ function fadeVolume(targetVolume, duration = 800) {
 
 // Audio Events
 audio.addEventListener('timeupdate', () => {
+    // 投送小爱音箱时声音走音箱、本地 audio 本应暂停；但恢复/切源等路径可能让它短暂推进，
+    // 这时它画进度条会和投送模式的 ticker 抢同一个进度条，表现为「进度条左右自己动」。
+    // 投送期间进度条统一交给 XiaoAi 的 ticker（按设备上报位置 + 墙钟补帧）负责。
+    if (isRoutingToXiaoAi()) return;
     if (audio.currentTime > 0) lastKnownPlaybackTime = audio.currentTime;
     if (playbackStallDetectionTimer && audio.currentTime > 0) {
         clearTimeout(playbackStallDetectionTimer);

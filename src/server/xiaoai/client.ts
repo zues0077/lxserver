@@ -230,12 +230,20 @@ export class MinaClient {
     }
 
     const r = await this.playMusicUrlDetailed(deviceId, url, hardware, { keepLight, audioId: options.audioId })
-    return {
-      ok: r.ok,
-      via: 'player_play_music',
-      audioId: options.audioId && options.audioId !== DEFAULT_MUSIC_AUDIO_ID ? options.audioId : defaultCoverAudioId(),
-      error: r.ok ? undefined : r.reason,
+    if (r.ok) {
+      return {
+        ok: true,
+        via: 'player_play_music',
+        audioId: options.audioId && options.audioId !== DEFAULT_MUSIC_AUDIO_ID ? options.audioId : defaultCoverAudioId(),
+      }
     }
+    // 最后一级兜底：宁可没有封面歌词，也要能出声（与歌词模式的第四级保持一致）。
+    // 原实现在这里直接返回失败——触屏机型没开歌词模式时，player_play_music 一旦被弹回，
+    // 整首就投不出去，而 player_play_url 本来是能放的。
+    console.warn(`[XiaoAi] 设备 ${deviceId} player_play_music 失败，回退 player_play_url：${r.reason}`)
+    const final = await playUrl()
+    if (final.ok) return final
+    return { ...final, error: [r.reason, final.error].filter(Boolean).join(' / ') || '设备未受理' }
   }
 
   /**

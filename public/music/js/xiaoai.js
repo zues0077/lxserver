@@ -91,7 +91,31 @@
          */
         devicePositionMs: 0,
         deviceDurationMs: 0,
+        /**
+         * 进度条平滑锚点：最近一次采样到的「设备位置 + 采样时刻」。
+         * 设备 3 秒才上报一次位置，两次之间靠墙钟补；锚点存在时进度条以它为基准，
+         * 不再直接用「投送至今」的墙钟（两者基准不同会让进度条来回跳）。
+         */
+        paintAnchorAt: 0,
+        paintAnchorPosMs: 0,
+        /** 设备明确没在播（协商/被外部暂停）时冻结进度条，不让墙钟继续往前推 */
+        paintFrozen: false,
+        /** 连续「设备非播放」的采样次数：起播协商期不算，避免误冻结 */
+        nonPlayingSamples: 0,
     };
+
+    /**
+     * 进度条已经画到的秒数（单调递增，只在切歌/拖动时重置）。
+     * 目的：设备位置每 3 秒校准一次，若校准值比上一帧小，绝不能把进度条往回拉
+     * （否则用户会看到「进度条左右自己动」）。
+     */
+    let progressFloorSec = 0;
+
+    /**
+     * 投送/拖动之后的「起播宽限期」：这段时间设备可能还没上报位置，
+     * 进度条保持不动，不要用墙钟硬推（否则切歌后进度条会先跑偏再被修正）。
+     */
+    const PROGRESS_START_GRACE_MS = 15000;
 
     const $ = id => document.getElementById(id);
 
@@ -942,16 +966,50 @@
     };
 
     /**
+     * 当前应该画到第几秒（曲内位置）。
+     *
+     * 优先级：设备上报位置（真相）> 墙钟推算（兜底）。
+     * 设备上报的是「流内位置」，加 seekOffset 才是曲内位置（P-1116）。
+     * 设备明确没在播时冻结，不让墙钟继续往前推——否则会出现「页面进度在走、音箱没声音」的假象。
+     */
+    const progressSecNow = () => {
+        const offset = (Number(state.seekOffsetMs) || 0) / 1000;
+        if (watch.paintFrozen) return progressFloorSec;
+        const anchorPos = Number(watch.paintAnchorPosMs);
+        const anchorAt = Number(watch.paintAnchorAt);
+        if (anchorPos > 0 && anchorAt > 0) {
+            // 两次采样之间用墙钟补：设备 3 秒才上报一次，不补就会「3 秒一跳」
+            return offset + (anchorPos + Math.max(0, Date.now() - anchorAt)) / 1000;
+        }
+        // 还没拿到设备位置（刚切歌/刚拖动）：起播协商期内不要用墙钟硬推。
+        // 墙钟是从「投送时刻」起算的，而设备要过几秒才真正出声——硬推会让进度条先跑到十几秒，
+        // 等设备第一次上报再被单调守卫挡住，用户看到的就是「切歌后要等一会才定到正确位置」。
+        // 宽限期过后仍无位置（老固件根本不上报）才退回墙钟，免得进度条彻底不走。
+        const deliveredAt = Number(watch.lastDeliveryAt) || 0;
+        if (deliveredAt > 0 && Date.now() - deliveredAt < PROGRESS_START_GRACE_MS) return progressFloorSec;
+        return offset + watchElapsedMs() / 1000;
+    };
+
+    /**
      * 投送模式进度条：音箱独立播放，<audio> 被 pause，timeupdate 不触发，
-     * 进度条会一直停在 00:00。这里起一个独立 ticker，按「seek 偏移 + 本地已播时长」
+     * 进度条会一直停在 00:00。这里起一个独立 ticker，按「设备位置锚点 + 墙钟补帧」
      * 平滑刷新进度条（与 3s 一次的设备轮询解耦，避免一跳一跳）。只在投送且守望活跃时画。
+     *
+     * 只前进不回退：设备位置每 3 秒校准一次，帧间隔内墙钟可能短暂超前，
+     * 校准回来时会小于上一帧。直接画就会出现「进度条左右自己动」，
+     * 所以这里维护 progressFloorSec，比它小的一律不画（等下一帧追上）。
      */
     let progressTicker = null;
     const startProgressTicker = () => {
         if (progressTicker) return;
         progressTicker = setInterval(() => {
             if (state.target !== 'xiaoai' || !watch.active) return;
-            paintProgress((Number(state.seekOffsetMs) || 0) / 1000 + watchElapsedMs() / 1000);
+            let sec = progressSecNow();
+            const totalSec = durationMs() / 1000;
+            if (totalSec > 0 && sec > totalSec) sec = totalSec;
+            if (!(sec > progressFloorSec + 0.05)) return;
+            progressFloorSec = sec;
+            paintProgress(sec);
         }, 500);
     };
     const stopProgressTicker = () => {
@@ -977,6 +1035,12 @@
         watch.state = watchdog.createState(Date.now());
         watch.prefetchedKey = '';
         watch.polling = false;
+        // 重新守望时设备锚点作废（旧锚点属于上一段播放），单调守卫的起点由
+        // setTimelineOffset / 投送入口负责设置，这里不动 progressFloorSec
+        watch.paintAnchorAt = 0;
+        watch.paintAnchorPosMs = 0;
+        watch.paintFrozen = false;
+        watch.nonPlayingSamples = 0;
         startHeartbeat();
         startProgressTicker();
         setWatchHint('自动续播监听中…');
@@ -1012,6 +1076,13 @@
     const setTimelineOffset = positionSec => {
         const sec = Math.max(0, Math.floor(Number(positionSec) || 0));
         state.seekOffsetMs = sec * 1000;
+        // 拖动/断点续播后进度条基准整体平移：单调守卫的起点也必须跟着移到新位置，
+        // 否则会被「只前进」挡住，进度条卡在切歌前的旧位置
+        progressFloorSec = sec;
+        watch.paintAnchorAt = 0;
+        watch.paintAnchorPosMs = 0;
+        watch.paintFrozen = false;
+        watch.nonPlayingSamples = 0;
         if (!state.trackDurationMs && Number(watch.audioDurationMs) > 0) {
             state.trackDurationMs = Number(watch.audioDurationMs);
         }
@@ -1337,6 +1408,28 @@
             // 记下设备上报值：服务端时长缺失 / 状态机还没建立基准时，进度条靠它兜底，
             // 否则会一直显示 00:00 不动（实际设备在正常播）
             watch.devicePositionMs = Number(data.positionMs) > 0 ? Number(data.positionMs) : 0;
+            // 进度条锚点：设备确实在播时，用它上报的位置重设「设备位置 + 采样时刻」。
+            // 两次采样之间的 3 秒由 ticker 用墙钟补，避免「3 秒一跳」。
+            // 设备明确没在播时：起播协商期不干预，持续非播放才冻结进度条
+            // （否则墙钟会把进度条继续往前推，出现「页面在走、音箱没声」的假象）。
+            if (data.playing === true) {
+                watch.nonPlayingSamples = 0;
+                // 防御：设备偶发把秒当毫秒之类的错位上报，位置会明显超出曲长。
+                // 这种脏值一旦当了锚点，进度条会被一次推到曲尾、之后再也回不来（单调守卫不会退）。
+                const totalMsForPos = durationMs();
+                const posInTrack = watch.devicePositionMs + Number(state.seekOffsetMs || 0);
+                const sanePos = watch.devicePositionMs > 0
+                    && (totalMsForPos <= 0 || posInTrack <= totalMsForPos + 5000);
+                if (sanePos) {
+                    watch.paintFrozen = false;
+                    watch.paintAnchorPosMs = watch.devicePositionMs;
+                    watch.paintAnchorAt = Date.now();
+                }
+            } else {
+                watch.nonPlayingSamples = (Number(watch.nonPlayingSamples) || 0) + 1;
+                const settled = Number(watch.lastDeliveryAt) > 0 && Date.now() - Number(watch.lastDeliveryAt) > 15000;
+                if (settled && watch.nonPlayingSamples >= 2) watch.paintFrozen = true;
+            }
             if (deviceDuration > 0) watch.deviceDurationMs = deviceDuration;
             // 走 player_play_music 的机型，上报的时长取的是云端曲目元数据，未必是我们推的这首；
             // 歌曲元数据里的 interval 才是这次真正在放的音频长度，所以优先用它。
@@ -1498,6 +1591,12 @@
         state.streamFailedNoticed = false;
         watch.devicePositionMs = 0;
         watch.deviceDurationMs = 0;
+        // 换歌后进度条基准归零：单调守卫与设备锚点都必须清掉，否则新歌进度条会卡在上一首的位置
+        progressFloorSec = 0;
+        watch.paintAnchorAt = 0;
+        watch.paintAnchorPosMs = 0;
+        watch.paintFrozen = false;
+        watch.nonPlayingSamples = 0;
         if (typeof paintProgress === 'function') paintProgress(0);
         // 投送到音箱时停掉浏览器本地播放，避免两边同时出声
         try {

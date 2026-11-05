@@ -54,6 +54,38 @@ export interface LibraryPreviewSignal {
 }
 
 /**
+ * 「拉过流但根本没播」判定（2026-11-05）。
+ *
+ * 原实现里 `isPulled()` 是一票否决：设备只要拉过一次我们的流，守门就直接放弃。
+ * 实测（LX04 触屏）存在这种形态：投送成功、设备确实来拉，但只拉 0.2~0.8 秒
+ * （约 1MB，正好是起播缓冲）就主动断开，`/status` 一直 `paused / positionMs=0`，
+ * 屏上显示暂停三角、点屏幕播放键也起不来。守门因为「拉过流」直接不判，
+ * watchdog 又拿不到进度，最后按「无进度=播完」跳下一首 → 死循环跳歌。
+ *
+ * 判据刻意收紧，只在「明确没播」时才命中，避免打断正常播放或用户主动暂停：
+ *   - 设备拉过流，且
+ *   - 两次采样都 `playing=false`、`positionMs=0`（从没播到过 1 秒），且
+ *   - 服务端最近一段时间已不再向下游写字节（不是还在缓冲），且
+ *   - 距本次投送已超过 minElapsedMs（给足起播/协商时间）
+ */
+export function detectPulledButSilent(
+  first: StatusSample,
+  second: StatusSample,
+  opts: { elapsedSincePushMs: number; streaming: boolean; minElapsedMs?: number },
+): LibraryPreviewSignal {
+  const minElapsed = Number(opts.minElapsedMs) > 0 ? Number(opts.minElapsedMs) : 18000
+  if (!second || !second.pulled) return { hit: false, reason: '' }
+  if (Number(opts.elapsedSincePushMs) < minElapsed) return { hit: false, reason: '' }
+  if (opts.streaming) return { hit: false, reason: '' }
+  if (first?.playing || second.playing) return { hit: false, reason: '' }
+  if (Number(first?.positionMs) > 0 || Number(second.positionMs) > 0) return { hit: false, reason: '' }
+  return {
+    hit: true,
+    reason: `已拉流但 ${Math.round(minElapsed / 1000)}s 内始终未播放（playing=false, pos=0，服务端也已停止推送）`,
+  }
+}
+
+/**
  * 判断设备是不是在播「小米曲库那一版」而不是我们的直链。
  *
  * @param first  第一次采样
@@ -118,11 +150,15 @@ export interface PullGuardDeps {
   expectedDurationMs: number
   /** 本次下发给设备的曲库 audioID，用于判断设备是不是还在播别的曲目（可选） */
   expectedAudioId?: string
+  /** 服务端最近是否仍在向下游写字节（可选，缺省视为在写，即不判「拉流但不播」） */
+  isStreaming?: () => boolean
+  /** 本次投送时刻（ms，可选）：用于判断「拉了流但一直没播」持续了多久 */
+  pushedAt?: number
   /** 补救重发：placeholder=换默认封面 audioID，url=纯直链模式 */
   retry: (mode: 'placeholder' | 'url') => Promise<void>
   log: (message: string) => void
-  /** 等待时间：首次探测 / 两次采样间隔 / 补救后的复查。单测全传 0 */
-  delays?: { probe?: number; gap?: number; after?: number }
+  /** 等待时间：首次探测 / 两次采样间隔 / 补救后的复查 / 「拉了不播」判定窗口。单测传很小的值 */
+  delays?: { probe?: number; gap?: number; after?: number; silentWindow?: number }
 }
 
 /**
@@ -147,19 +183,39 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
     }
   }
 
-  interface InspectResult { kind: 'pulled' | 'preview' | 'unknown'; reason: string; unplayableCode: number }
+  interface InspectResult {
+    kind: 'pulled' | 'preview' | 'silent' | 'unknown'
+    reason: string
+    unplayableCode: number
+  }
   const unknown = (code = 0): InspectResult => ({ kind: 'unknown', reason: '', unplayableCode: code })
+  /** 「拉了流但没播」的判定窗口：要给足设备起播与缓冲的时间，太短会打断正常播放 */
+  const silentWindowMs = Number(deps.delays?.silentWindow) > 0 ? Number(deps.delays?.silentWindow) : 18000
   /** kind='preview' 表示拿到了「它在播另一版」的证据；unplayableCode 透传给调用方判 VIP */
   const inspect = async (): Promise<InspectResult> => {
     if (deps.isStale()) return unknown()
-    if (deps.isPulled()) return unknown()
     const first = await readSample()
     if (!first) return unknown()
-    if (deps.isPulled()) return unknown()
     await sleep(gap)
     if (deps.isStale()) return unknown()
-    if (deps.isPulled()) return unknown()
     const second = (await readSample()) || first
+
+    // 设备拉过流：多数情况说明它确实在放我们这一路。但实测有固件只拉起播缓冲
+    // （0.2~0.8 秒、约 1MB）就断开，之后一直 paused/pos=0。原实现到这里直接放弃，
+    // 于是「拉了但不播」永远判不出来，watchdog 只能按「无进度=播完」跳歌。
+    if (first.pulled || second.pulled) {
+      const silent = detectPulledButSilent(first, second, {
+        elapsedSincePushMs: deps.pushedAt ? Date.now() - deps.pushedAt : 0,
+        streaming: deps.isStreaming ? deps.isStreaming() : true,
+        minElapsedMs: silentWindowMs,
+      })
+      if (silent.hit) {
+        deps.log(`[XiaoAi] 守门：${silent.reason}`)
+        return { kind: 'silent', reason: silent.reason, unplayableCode: second.unplayableCode }
+      }
+      return unknown(second.unplayableCode)
+    }
+
     const signal = detectLibraryPreview(first, second, deps.expectedDurationMs, deps.expectedAudioId)
     if (!signal.hit) {
       // 排障用：拿不到「在播别的曲目」的证据时留一行现场，否则这类「设备不动」永远无法复盘。
@@ -179,7 +235,28 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
   }
 
   await sleep(probe)
-  const firstHit = await inspect()
+  let firstHit = await inspect()
+  // 设备已经拉过流，但还没到「拉了不播」的判定窗口（3.5s 才起探，窗口是 18s）：
+  // 这里补等到窗口再判一次，否则守门 4 秒就收工，这类故障永远抓不到。
+  // 正常播放的设备只多几次 /status 请求（后台异步，不影响投送响应）。
+  if (firstHit.kind === 'unknown' && deps.isPulled() && Number(deps.pushedAt) > 0) {
+    const elapsed = Date.now() - Number(deps.pushedAt)
+    if (elapsed < silentWindowMs) {
+      await sleep(silentWindowMs - elapsed + gap)
+      if (deps.isStale()) return 'none'
+      firstHit = await inspect()
+    }
+  }
+  if (firstHit.kind === 'silent') {
+    // 占位 audioID 那一级对「拉流但不播」实测无效（换成占位曲一样不出声），直接走纯直链
+    deps.log('[XiaoAi] 已拉流但未播放，跳过占位，直接 player_play_url 纯直链重发')
+    try {
+      await deps.retry('url')
+    } catch (error: any) {
+      deps.log(`[XiaoAi] 纯直链重发失败：${error?.message || error}`)
+    }
+    return 'url'
+  }
   if (firstHit.kind !== 'preview') return 'none'
 
   // 曲库明确判 VIP 不可播（unplayableCode=2）：换默认封面那级基本救不回（实测仍「投送未生效」），
