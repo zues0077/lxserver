@@ -19,6 +19,24 @@
  * 3) 所以「账号」对汽水的意义：能拿到登录态（Cookie/扫码都支持），
  *    但**会员无损整曲依然卡在签名**上；免费可播曲匿名就能放。
  *    对外文案必须说清「版权试听」与「未实现签名器」两件事，不要让用户以为是网速问题。
+ *
+ * 4) **2026-11-06 补充实测：电脑端受限曲的根因是「不下发密钥」，与会员身份无关。**
+ *    - 手机端 App 播放受限曲时，`track.player_info.video_model.video_list[].encrypt_info.spade_a`
+ *      会随流下发（52 字符）；用 `utils/sodaDecrypt.ts` 的 `resolveAudioKey` 可直接解出
+ *      32 位 hex AES 密钥。实测 12 首 × 5~6 档全部有效；151.7s 的 CENC 整曲端到端解出
+ *      6536 帧 AAC，帧首元素 100% 合法（P-0920 判据）。
+ *    - **电脑端三条通道（h5 / seo / 火山 GetPlayInfo）对同一首受限曲只给 60.001s、
+ *      `PlayAuth` 长度恒为 0** —— 所以「电脑端解不开」是平台策略（不给电脑端密钥），
+ *      不是会员到期、也不是账号没权益。据此，`hintForMissing` / 取流失败文案已同步改准。
+ *    - 手机端按 **`vid`**（形如 `v0300fg10000cvdb...`，与数字 `track_id` 是两套 ID）
+ *      把 video_model 缓存在本地 `player_info` 表（Room：`mediaId/urlPlayerInfo/expireAt/
+ *      videoModelString/videoModelType`），播放走**预取队列**。
+ *      → 因此没有「按 track_id 单曲取链」的免签接口；`/luna/track/player` 路径存在，
+ *      但裸调返回 `1000006 ERR_REQUEST_FORBIDDEN`（需 mssdk 签名），
+ *      `/luna/feed/song-tab` 免签可调但**只下发元数据**（含 `vid` / `bit_rates` /
+ *      `playable_range`），不下发 `video_list`。
+ *    - 结论：要让 lxserver 播受限曲整曲，终点仍是「让官方 App 自己完成取链」的代理方案，
+ *      而不是把手机端凭证移植进电脑端链路。
  */
 
 import { request } from '../musicAccount/http'
@@ -931,7 +949,7 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
 
   const reason = plain.reason === 'preview' ? 'preview-only' : 'no-stream'
   const msg = plain.reason === 'preview'
-    ? `汽水电脑端仅提供 ${plain.seconds} 秒试听（该曲完整 ${plain.full} 秒；手机端可听全，电脑端需会员或客户端授信），${await hintForMissing(cookie)}`
+    ? `汽水电脑端仅提供 ${plain.seconds} 秒试听（该曲完整 ${plain.full} 秒；平台对电脑端不下发整曲密钥，与会员身份无关），${await hintForMissing(cookie)}`
     : '汽水未返回可用音频流（该曲可能已下架或仅支持客户端播放）'
   // 记待补：等签名器在线时自动补，不让用户凭记忆重新找歌
   pending.add(songInfo, reason, msg, username)
@@ -963,7 +981,7 @@ async function hintForMissing(cookie: string): Promise<string> {
   } catch (e: any) {
     message = e?.message || String(e)
   }
-  if (online) return '签名器模拟的是电脑客户端，汽水对电脑端只给试听（手机端可听全曲，平台端策略差异）'
+  if (online) return '签名器模拟的是电脑客户端，而汽水对电脑端不下发整曲密钥（只给 60 秒），与会员身份无关'
   return `签名器已配置但离线（${message || '无法连接'}），请检查 Windows 侧签名器是否启动`
 }
 
