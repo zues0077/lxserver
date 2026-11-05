@@ -1401,7 +1401,11 @@
 
         // 这一路流根本没内容（转码彻底失败，源音频损坏）：设备只会播小米占位曲。
         // 不能继续显示「播放中 + 进度不动」，直接提示并停下守望，让用户自己换歌（手册 P-1118）。
-        if (sample.ok && sample.streamFailed === true && !state.streamFailedNoticed) {
+        // 设备已经报出位置 = 这路流确实有音频内容（真坏了只会播占位曲、位置恒 0）。
+        // 服务端标记有极小的串曲机会（失败与本次投送的时序竞争），这一步用设备实况兜底，
+        // 绝不把「明明在唱」的一首判成「放不出来」并停掉守望（2026-11-06 实测）。
+        const deviceAudible = Number(sample.positionMs) > 0;
+        if (sample.ok && sample.streamFailed === true && !state.streamFailedNoticed && !deviceAudible) {
             state.streamFailedNoticed = true;
             stopWatch();
             updatePlayButtonSafe(false);

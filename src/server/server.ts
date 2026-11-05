@@ -9407,7 +9407,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 serverSending: Date.now() - lastXiaoAiSentAt < 5000,
                 // 这路流转码彻底失败（源音频损坏）：设备拿不到音频只会播占位曲，
                 // 前端据此提示失败并停守望，别再显示成「播放中 + 进度不动」（手册 P-1118）
-                streamFailed: Date.now() - lastXiaoAiStreamFailedAt < 60000,
+                //
+                // **必须绑定「本次投送」**：失败时刻要晚于本次投送时刻才算这一首的失败。
+                // 原来只用一个 60 秒时间窗，结果上一首坏了、用户切到下一首时窗口还没过，
+                // 下一首明明在正常出声却被前端判成「音源损坏」并停掉守望
+                // （2026-11-06 00:07 实测：梦的翅膀转码 0B 失败 → 切 บักคนซั่ว 已播到 91s，
+                // 界面仍弹「这首歌放不出来」，播放键还被置成暂停）。
+                streamFailed: lastXiaoAiStreamFailedAt > lastXiaoAiPushAt,
                 // 设备在线：status=-1 表示读不到播放状态（设备离线 / 登录态失效）。
                 // 新增字段不影响既有语义，老前端忽略即可。
                 online: Number((result as any)?.status) >= 0,
