@@ -1285,6 +1285,9 @@
                 streamReplay: data.streamReplay === true,
                 // 实测「投送完成 → 音箱来拉流」的延迟，watchdog 用它把切歌提前量调准
                 startDelayMs: Number(data.startDelayMs) || 0,
+                // 服务端最近 5 秒是否仍在向下游写字节：推流进行中时，设备「无进度」多半是瞬断，
+                // 不让 watchdog 误判放完（手册 P-1110）
+                serverSending: data.serverSending === true,
                 userPaused: !!state.remotePaused,
             };
             // 版权闸门提示：unplayableCode=2 时结合「是否已拉流」判断到底有没有声音
@@ -1399,6 +1402,10 @@
         const caller = explicitCaller || state.nextCaller || 'manual';
         state.nextCaller = '';
         console.info(`[小爱] 投送准备：${song && song.name}｜索引=${index}｜来源=${caller}`);
+        // 切歌立刻把进度条 / 时间文案归零（手册 P-1110）：旧歌的位置会在 /play 异步返回前残留几秒，
+        // 不立即归零会让客户端把上一首的进度（甚至误发成 seek）带进下一首。
+        state.seekOffsetMs = 0;
+        if (typeof paintProgress === 'function') paintProgress(0);
         // 投送到音箱时停掉浏览器本地播放，避免两边同时出声
         try {
             if (typeof audio !== 'undefined' && audio && !audio.paused) audio.pause();

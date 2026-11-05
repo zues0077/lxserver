@@ -29,6 +29,7 @@ export {
   isDrainOnly,
   setReplayBlockedHook,
   hasActiveStream,
+  setStreamSentProbe,
 } from './stream'
 export { detectAudioDurationMs, id3v2Size } from './audioMeta'
 export { loadConfig as loadXiaoAiConfig } from './config'

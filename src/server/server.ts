@@ -78,6 +78,7 @@ import {
   retireStreams,
   markDrainOnly,
   setReplayBlockedHook,
+  setStreamSentProbe,
   sleepTimer,
   mp3CachePath,
   isMp3File,
@@ -360,6 +361,8 @@ let lastXiaoAiStreamSid = ''
 let lastXiaoAiPushAt = 0
 /** 本次这一路流「第一次被音箱请求」的时刻 */
 let lastXiaoAiStreamAt = 0
+/** 服务端最近一次向下游（音箱）写出数据的时刻：/status 据此判断「是否仍在推流」（手册 P-1110） */
+let lastXiaoAiSentAt = 0
 /**
  * 拉流守门最后一次实际执行的补救动作（'' / placeholder / url）。
  *
@@ -1303,6 +1306,10 @@ sleepTimer.setStopHandler(() => xiaoAiService.stop())
 // 曲库把某些 audioID 标成「试听资源」，但音箱只要拉了本机流就是在放我们推的音频，
 // 不能仅凭元数据就告警「正在播试听片段」把用户引去关歌词开关。
 xiaoAiService.setStreamPulledProbe(() => lastXiaoAiStreamAt > lastXiaoAiPushAt)
+// 每次向下游写出数据都刷新「最近推流时刻」：/status 据此暴露 serverSending（手册 P-1110）
+setStreamSentProbe(() => {
+  lastXiaoAiSentAt = Date.now()
+})
 
 /**
  * 拒拉后让设备真正停下。
@@ -8974,7 +8981,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const totalSec = knownMs > 0 ? knownMs / 1000 : 0
               // 贴到结尾会切出 0.5 秒碎片，夹到 duration-3（songloft 同款守卫）
               const maxSec = totalSec > 4 ? Math.floor(totalSec - 3) : Math.max(0, Math.floor(totalSec))
-              const seekSec =
+              let seekSec =
                 totalSec > 0 ? Math.max(0, Math.min(Math.floor(requested), maxSec)) : Math.max(0, Math.floor(requested))
               // 剩余时长：平滑下发按它算码率，传整首会让数据喂得比播放慢 → 卡顿
               const remainingMs = knownMs > 0 ? Math.max(1000, knownMs - seekSec * 1000) : 0
@@ -8982,6 +8989,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
               let nextTarget: XiaoAiTrackTarget
               let how = ''
+              // 切歌后位置未归零的兜底（手册 P-1110）：刚投完新歌就被发来一个远超本首已播时长的
+              // positionSec，多半是上一首的残留位置；强制从头播，避免把上一首进度切进新歌。
+              // 只对「投送后极短窗口」生效，超过该窗口则视为用户主动跳转（本地文件可任意拖），不拦。
+              const sincePushSec = (Date.now() - lastXiaoAiPushAt) / 1000
+              const SEEK_STALE_SLACK_SEC = 5
+              if (seekSec > sincePushSec + SEEK_STALE_SLACK_SEC && sincePushSec < 8) {
+                seekSec = 0
+                how = '位置过期，回到开头'
+              }
               if (base.path && seekSec > 0 && isMp3File(base.path)) {
                 // 本地完整 mp3：切一段（`-ss` + copy，不重编码），走原来的本地直发链路
                 const slicePath = seekSlicePath(track.username, track.songInfo, track.quality, seekSec)
@@ -9125,6 +9141,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 // 实测曲库命中 VIP 歌时音箱照样拉我们的直链、正常播放。
                 // 前端据此区分「曲库版权标记」与「真的不出声」。
                 streamPulled: lastXiaoAiStreamAt > lastXiaoAiPushAt,
+                // 服务端最近 5 秒内是否还在向下游写字节：等于「推流仍在进行」。
+                // 设备上报「无进度 / 未播放」而服务端仍在发流时，多半是缓冲协商的瞬断，
+                // 前端 watchdog 据此不要误判「放完了」→ 自动跳歌（手册 P-1110）。
+                serverSending: Date.now() - lastXiaoAiSentAt < 5000,
                 // 设备在线：status=-1 表示读不到播放状态（设备离线 / 登录态失效）。
                 // 新增字段不影响既有语义，老前端忽略即可。
                 online: Number((result as any)?.status) >= 0,

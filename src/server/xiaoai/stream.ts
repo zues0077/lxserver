@@ -206,6 +206,18 @@ const notifyReplayBlocked = (sid?: string) => {
 export const hasActiveStream = (): boolean => liveStreams.size > 0
 
 /**
+ * 每次向下游（音箱）写出一截数据后回调，供 /status 判断「服务端是否仍在推流」。
+ *
+ * 背景（手册 P-1110）：本地直发时若设备暂停 / 慢读超过阈值，下游静默检测会把这路流掐断，
+ * 设备断流后上报「无进度 / 未播放」，前端 watchdog 据此误判成「这首歌放完了」→ 自动跳下一首。
+ * 加一个「服务端最近是否在发字节」的信号，让前端在推流进行中不要误跳。
+ */
+let streamSentProbe: (() => void) | null = null
+export const setStreamSentProbe = (fn: (() => void) | null) => {
+  streamSentProbe = fn
+}
+
+/**
  * 标记「这一路流又开了一轮请求」。
  *
  * 音箱播完一遍后会立刻重拉同一个 URL（songloft-plugin-miot 的 issue #437 记录过同一现象）。
@@ -370,7 +382,7 @@ const serveLocalFile = (
       })
       // Range 只传了整首的一部分，码率要按比例折算，否则节流会把这一段摊到整首的时长上
       const scaledMs = durationMs > 0 && total > 0 ? (durationMs * slice.length) / total : 0
-      const stats = await pumpDownstream(readable, res, Math.round(scaledMs))
+      const stats = await pumpDownstream(readable, res, Math.round(scaledMs), { isLocalFile: true })
       if (pendingBytes > 0) {
         addStreamBytes(sid, pendingBytes)
         pendingBytes = 0
@@ -984,7 +996,12 @@ interface PumpStats {
  *     能让它一直保持有货、又不至于被灌爆。
  *  3. **两边要分开算**：读上游按「攒够多少」，写下游按「过了多少时间」。
  */
-const pumpDownstream = (upstream: http.IncomingMessage, res: ServerResponse, durationMs = 0) =>
+const pumpDownstream = (
+  upstream: http.IncomingMessage,
+  res: ServerResponse,
+  durationMs = 0,
+  opts: { isLocalFile?: boolean } = {},
+) =>
   new Promise<PumpStats>(resolve => {
     const startedAt = Date.now()
     /** 从上游收到的总字节（日志与 Range 统计用） */
@@ -1073,6 +1090,8 @@ const pumpDownstream = (upstream: http.IncomingMessage, res: ServerResponse, dur
         }
         sentBytes += chunk.length
         lastConsumedAt = Date.now()
+        // 心跳：每次成功写出数据都通知 /status，标记「服务端仍在推流」（见 setStreamSentProbe）
+        if (streamSentProbe) streamSentProbe()
         let ok = true
         try {
           ok = res.write(chunk)
@@ -1138,6 +1157,10 @@ const pumpDownstream = (upstream: http.IncomingMessage, res: ServerResponse, dur
       // 判据是「多久没写出数据」，而不是「上游什么时候读完」——
       // 后者在本地缓存路径里是瞬间的事，会把正常播放的歌误杀（曾导致每首 180s 被掐断）。
       if (upstreamEnded && pendingBytes > 0 && Date.now() - lastConsumedAt > downstreamGiveupMs()) {
+        // 本地文件：我们握着整首，设备暂停 / 慢读**不该**掐断——否则设备被饿死 → 上报「无进度」
+        // → 前端 watchdog 误判「放完了」→ 自动跳下一首（手册 P-1110）。
+        // 保留连接，设备恢复读取时 continue 把剩余字节发完；设备彻底断开会由 res 'close' → settle 收尾。
+        if (opts.isLocalFile) return
         try {
           res.destroy()
         } catch {

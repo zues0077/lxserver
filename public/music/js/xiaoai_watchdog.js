@@ -268,8 +268,12 @@
         if (hasRatio && ratio >= opts.endRatio) return done('advance', 'finished');
 
         // 6. 设备不上报进度：只能靠「持续停止」判断，门槛更保守
+        // 新增 serverSending 护栏（手册 P-1110）：服务端最近仍在向下游写字节（推流进行中）时，
+        // 设备「无进度 / 未播放」多半是缓冲协商的瞬断，不是真的放完了，本分支不成立 → 落到下方返回 'none'，
+        // 绝不自动跳歌。真正放完应由 streamReplay 信号驱动（见上方）。
         if (
             sample.hasProgress !== true &&
+            sample.serverSending !== true &&
             now - state.idleSince >= opts.idleConfirmMs &&
             now - state.lastPlayingAt >= opts.idleConfirmMinPlayMs
         ) {
