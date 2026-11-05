@@ -2486,6 +2486,17 @@ const resolveSwitchCandidate = async (candidate: any, quality: string, username:
   return { url: result.url, quality: result.type, sourceName: result.sourceName }
 }
 
+/**
+ * 探测结论里「确定拉不动」的那几种。超时 / 网络错误 / 5xx 不算 —— 慢 CDN 抽风不能据此判死。
+ * 只有这里的结论才有判决权，可以直接否掉一个候选或一条地址。
+ */
+const isDefinitelyUnplayable = (probe: { ok: boolean; reason?: string }) =>
+  !probe.ok && (
+    probe.reason === 'not-audio'
+    || probe.reason === 'too-many-redirects'
+    || String(probe.reason || '').startsWith('http-')
+  )
+
 const switchToOtherSource = async (
   originalSong: any,
   requestedQuality: string,
@@ -2495,6 +2506,9 @@ const switchToOtherSource = async (
   const matches = precomputedMatches && precomputedMatches.length
     ? precomputedMatches
     : await findServerSourceMatches(originalSong, username)
+  // 探测要花时间，这里给个总闸：超过 5 秒就不再探，剩下的候选按老行为直接采用（当作未知）。
+  // 换源阶段本身只有 9 秒预算（首次 25 秒），不能为了验活把时间吃光。
+  const probeDeadline = Date.now() + 5000
   for (const rawCandidate of matches) {
     const candidate = normalizeSongInfo({ ...rawCandidate })
     const source = candidate?.source
@@ -2502,6 +2516,18 @@ const switchToOtherSource = async (
     try {
       const result = await resolveSwitchCandidate(candidate, requestedQuality, username)
       if (!result?.url) continue
+      // 「取链成功」不等于「能播」：自定义源会把错误页当成链接返回。
+      // 2026-11-05 实测：汽水《诀爱》只有 30 秒试听 → 换源到 wy → 回避聚合 返回
+      // https://music.163.com/404，取链算"成功"，拉流拿到的是 text/html。
+      // 这里逐个探测，确定拉不动的候选直接跳过，别把死链当备选源交出去
+      // （否则前端会「解析成功 → 播放失败 → 换源 → 又拿回同一条」死循环）。
+      if (MUSIC_URL_PROBE_TIMEOUT_MS > 0 && Date.now() < probeDeadline && /^https?:\/\//i.test(String(result.url))) {
+        const probe = await probePlayableUrl(result.url, MUSIC_URL_PROBE_TIMEOUT_MS)
+        if (isDefinitelyUnplayable(probe)) {
+          console.warn(`[换源] 候选 ${result.sourceName || source} 返回的不是音频（${probe.reason} ${probe.status}），跳过：${originalSong.name}`)
+          continue
+        }
+      }
       return {
         url: result.url,
         quality: result.quality || requestedQuality,
@@ -9666,9 +9692,25 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     }
                   }
                   if (!switchedOk) {
-                    // 换不到就**不判死**：探测只是「早一步发现问题并换源」的手段，
-                    // 不具备判决权（有些源单次 Range 探测会抽风，直接抛错会把能播的歌变成报错）。
-                    // 原地址照旧返回，前端若真放不出来会进入换源/跳过流程。
+                    // 探测结论分两类，判决权不同（2026-11-05 修正）：
+                    //   ① 确定拉不动 —— not-audio（200 却拿到 text/html / json 错误页）、http-4xx、
+                    //      重定向环。这是硬结论，**不能把死链交出去**。实测：汽水《诀爱》换源到 wy 后
+                    //      回避聚合 返回 https://music.163.com/404，前端「解析成功 → 播放失败 → 换源 →
+                    //      又拿回同一条」死循环，界面卡在 00:00；更糟的是因为「返回了结果」不会写进
+                    //      失败缓存，每次都按首次点播的 25 秒宽预算重跑一遍（日志里连刷「超出 25 秒预算」）。
+                    //      这里直接抛错：前端走正常失败流程换平台/跳下一首，失败也会被记住，
+                    //      下次重试收紧到 9 秒。
+                    //   ② 超时 / 网络错误 / 5xx —— 仍不判死，照旧返回原地址（可能是慢 CDN 抽风）。
+                    if (isDefinitelyUnplayable(probe)) {
+                      // 显式记一次失败：这条路径已经拿到 result 了，走不到下面按"没结果"记失败的 branch，
+                      // 不记的话同一首歌会一直按首次点播的 25 秒宽预算重跑。
+                      rememberMusicUrlFailure(
+                        failKey,
+                        `${failedName} 返回的地址不是音频（${probe.reason} ${probe.status}）`,
+                        attempts,
+                      )
+                      throw new Error(`${failedName} 返回的地址不是音频（${probe.reason} ${probe.status}），已跳过该源`)
+                    }
                     console.warn(`[歌曲播放] 地址探测不可用但换源也没命中，仍返回原地址：${songInfo.name}（${failedName}）`)
                   }
                 }
