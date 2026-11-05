@@ -931,7 +931,7 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
 
   const reason = plain.reason === 'preview' ? 'preview-only' : 'no-stream'
   const msg = plain.reason === 'preview'
-    ? `汽水该曲仅有 ${plain.seconds} 秒试听（版权限制，完整 ${plain.full} 秒需官方客户端签名），${await hintForMissing(cookie)}`
+    ? `汽水电脑端仅提供 ${plain.seconds} 秒试听（该曲完整 ${plain.full} 秒；手机端可听全，电脑端需会员或客户端授信），${await hintForMissing(cookie)}`
     : '汽水未返回可用音频流（该曲可能已下架或仅支持客户端播放）'
   // 记待补：等签名器在线时自动补，不让用户凭记忆重新找歌
   pending.add(songInfo, reason, msg, username)
@@ -953,7 +953,7 @@ function trackRequiresVip(track: any): boolean {
 /** 拿不到整曲时，告诉用户「还差什么」—— 签名器缺了就直说缺签名器 */
 async function hintForMissing(cookie: string): Promise<string> {
   const hasSigner = signer.isConfigured()
-  if (!hasSigner) return '如需整曲请在管理后台「平台账号 → 汽水签名器」填入签名器地址'
+  if (!hasSigner) return '如需整曲可配置汽水签名器（仅对可免费播的曲目有效，电脑端受限曲仍只有试听）'
   let online = false
   let message = ''
   try {
@@ -963,7 +963,7 @@ async function hintForMissing(cookie: string): Promise<string> {
   } catch (e: any) {
     message = e?.message || String(e)
   }
-  if (online) return '签名器在线但仍只有试听，请确认签名器设备指纹与账号权益'
+  if (online) return '签名器模拟的是电脑客户端，汽水对电脑端只给试听（手机端可听全曲，平台端策略差异）'
   return `签名器已配置但离线（${message || '无法连接'}），请检查 Windows 侧签名器是否启动`
 }
 

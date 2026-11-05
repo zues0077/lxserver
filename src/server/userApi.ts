@@ -1565,6 +1565,19 @@ export const withTimeout = <T>(promise: Promise<T>, ms: number, message: string)
  * 403 / 401 / 405 更可能是防盗链或 upstream 不支持 HEAD，一律放行，绝不误杀可用的源。
  * 网络错误与超时同样放行 —— 我们只是在做一次尽力的复核。
  */
+/**
+ * content-type 是否明确是「网页/文本」而不是音频。
+ *
+ * 用途：识别「源把错误页当成直链返回」这种假成功（实测 `https://music.163.com/404`）。
+ * 只认明确列出的文本类型；`application/octet-stream`、`audio/*`、`text/plain`、空值一律不算 ——
+ * 大量正常音频直链的 content-type 并不规范（无扩展名文件常被标 text/plain），宁可放过也不能误杀。
+ */
+export const isTextualContentType = (contentType: unknown): boolean => {
+    const t = String(contentType || '').toLowerCase().trim()
+    if (!t) return false
+    return /^(text\/html|text\/xml|application\/json|application\/xml)\b/.test(t)
+}
+
 export const verifyUrlPlayable = async (url: string, sourceName: string, timeoutMs?: number): Promise<string | null> => {
     if ((global.lx && global.lx.config as any) && (global.lx.config as any)['customSource.verifyPlayable'] === false) {
         return null
@@ -1582,7 +1595,7 @@ export const verifyUrlPlayable = async (url: string, sourceName: string, timeout
     // 复核自身可用的时间预算：取链整体有硬预算，前面的源已经耗掉大部分时，
     // 这里若仍按满额 3s×2 去校验，就会出现「链接已经拿到、却因为复核超时而整条请求判失败」。
     const verifyTimeout = Math.max(500, Math.min(VERIFY_TIMEOUT_MS, Math.round(timeoutMs ?? VERIFY_TIMEOUT_MS)))
-    const request = async (method: 'head' | 'get'): Promise<number | undefined> => {
+    const request = async (method: 'head' | 'get'): Promise<{ code?: number; contentType: string }> => {
         const resp: any = await needle(method, safeUrl, null, {
             follow_max: 2,
             response_timeout: verifyTimeout,
@@ -1593,21 +1606,38 @@ export const verifyUrlPlayable = async (url: string, sourceName: string, timeout
             lookup: privateNetLookup,
             headers: method === 'get' ? { ...headers, Range: 'bytes=0-0' } : headers,
         })
-        return typeof resp?.statusCode === 'number' ? resp.statusCode : undefined
+        const contentType = String((resp?.headers as any)?.['content-type'] || '').toLowerCase()
+        return {
+            code: typeof resp?.statusCode === 'number' ? resp.statusCode : undefined,
+            contentType,
+        }
     }
     // 只把「确定取不到」判为失败：404 / 410 / 5xx。
     // 403 / 401 / 405 更可能是防盗链或 upstream 不支持 HEAD，一律放行，绝不误杀可用的源。
     // 网络错误与超时同样放行 —— 我们只是在做一次尽力的复核。
     try {
-        const headCode = await request('head')
-        if (!isUnplayableStatusCode(headCode)) return null
-        // HEAD 判死不可尽信：不少 CDN / 防盗链只认 GET，HEAD 一律回 404 或 405。
-        // 所以再拿 1 字节的 Range GET 复核一次，两次都说取不到才判失败。
-        const getCode = await request('get')
-        if (!isUnplayableStatusCode(getCode)) return null
-        return typeof getCode === 'number' && getCode >= 500
-            ? `音源 [${sourceName}] 返回的链接源站报错（HTTP ${getCode}）`
-            : `音源 [${sourceName}] 返回的链接实际不存在（HTTP ${getCode}）`
+        const head = await request('head')
+        // ① 状态码判死（老逻辑）：HEAD 判死不可尽信 —— 不少 CDN / 防盗链只认 GET，
+        //    HEAD 一律回 404 或 405，所以再拿 1 字节的 Range GET 复核一次。
+        if (isUnplayableStatusCode(head.code)) {
+            const get = await request('get')
+            if (!isUnplayableStatusCode(get.code)) return null
+            return typeof get.code === 'number' && get.code >= 500
+                ? `音源 [${sourceName}] 返回的链接源站报错（HTTP ${get.code}）`
+                : `音源 [${sourceName}] 返回的链接实际不存在（HTTP ${get.code}）`
+        }
+        // ② 状态码 200 也可能根本不是音频（2026-11-05 实测）：
+        //    自定义源「回避聚合」对拿不到的歌直接返回 https://music.163.com/404，
+        //    那是网易的 404 页面，HTTP 200 + text/html。只查状态码等于放行，
+        //    结果「取链成功」→ 前端拉流拿到网页 → 播放失败 → 换源 → 又拿回同一条，死循环。
+        //    这里只认**明确的文本类型**（html/json/xml/plain），二进制类型和缺失一律放行，
+        //    避免误杀 content-type 不规范的正常音频直链。
+        if (isTextualContentType(head.contentType)) {
+            const get = await request('get')
+            if (!isTextualContentType(get.contentType)) return null
+            return `音源 [${sourceName}] 返回的不是音频文件（content-type: ${get.contentType || head.contentType}）`
+        }
+        return null
     } catch {
         // 网络不通、超时、不支持 HEAD —— 一律当作可用，避免误伤
         return null

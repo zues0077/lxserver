@@ -300,6 +300,10 @@ const HARD_FAILURE_PATTERN = new RegExp([
   'Unknown cipher', 'unsupported cipher', 'digital envelope',
   'HTTP\\s*5\\d\\d', '\\b5\\d\\d\\b\\s*(?:错误|Error)',
   '已废弃', '已停用', '已下线', '已关闭', '请升级',
+  // 「取链成功但返回的是网页」——由 verifyUrlPlayable 的 content-type 判定产生。
+  // 这类不是「这首歌没版权」（那种应该返回空/报错），而是音源脚本自身坏了，
+  // 属于硬故障，必须能进巡检账本，否则它会一直假成功、永远不到处置阈值。
+  '不是音频',
 ].join('|'), 'i')
 
 /** 失败信息是否属于音源自身的硬故障（而非测试曲目不可播这类软失败） */
