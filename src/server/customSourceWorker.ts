@@ -278,7 +278,9 @@ async function boot(data: SourceWorkerData) {
         const { callId } = msg
         const handler = requestHandler
         if (!handler) {
-            post({ type: 'result', callId, ok: false, error: `源 ${name} 未注册 request 处理器` })
+            // 源没注册 request 处理器是「源本身的业务/配置问题」，不是 worker 基础设施故障——
+            // 标记 fromScript，避免误计入熔断把 worker 停掉（手册 P-1113 排查）。
+            post({ type: 'result', callId, ok: false, fromScript: true, error: `源 ${name} 未注册 request 处理器` })
             return
         }
         // 纯净化原型链：原生 vm 下脚本对宿主 realm 对象做 instanceof 会失败
