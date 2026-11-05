@@ -277,6 +277,37 @@ test('detectPulledButSilent：播过（pos>0）就绝不判定，用户暂停不
   assert.equal(signal.hit, false)
 })
 
+// ---- 2026-11-05：《有些》实测「每 10.6 秒重连一次、每次读 2.2MB 就断、pos 恒 0」----
+// 这种形态下服务端一直在推字节（每次重连都重推），按「是否在推」判定永远不命中。
+
+test('反复重连（≥2 次）且 pos 恒 0 → 即使服务端还在推字节也要判「拉了不播」', () => {
+  const signal = detectPulledButSilent(sample(PULLED_SILENT, true), sample(PULLED_SILENT, true), {
+    elapsedSincePushMs: 22000,
+    streaming: true,
+    connections: 2,
+  })
+  assert.equal(signal.hit, true, '这正是设备卡死的形态，必须能兜底重发')
+})
+
+test('只连了 1 次且服务端在推字节 → 仍按缓冲中处理，不判', () => {
+  const signal = detectPulledButSilent(sample(PULLED_SILENT, true), sample(PULLED_SILENT, true), {
+    elapsedSincePushMs: 22000,
+    streaming: true,
+    connections: 1,
+  })
+  assert.equal(signal.hit, false)
+})
+
+test('反复重连但播过（pos>0）→ 不判，别打断正常播放', () => {
+  const played = { playing: false, durationMs: 230000, positionMs: 12000, raw: PULLED_SILENT.raw }
+  const signal = detectPulledButSilent(sample(played, true), sample(played, true), {
+    elapsedSincePushMs: 22000,
+    streaming: true,
+    connections: 4,
+  })
+  assert.equal(signal.hit, false)
+})
+
 test('拉流但不播 → 守门跳过占位，直接纯直链重发', async () => {
   const retried: string[] = []
   const action = await runPullGuard({

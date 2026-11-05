@@ -102,6 +102,21 @@
         paintFrozen: false,
         /** 连续「设备非播放」的采样次数：起播协商期不算，避免误冻结 */
         nonPlayingSamples: 0,
+        /**
+         * 拖动进度条后「等设备换流」的时刻（ms）。
+         * 拖动会重新投送一条从目标秒开始的新流，但设备在换流前仍会继续上报**上一条流**
+         * 的流内位置（比如 225 秒）。把它当锚点会算成「目标 + 旧位置」，
+         * 进度条直接冲到曲尾并卡死（实测：拖到 100 秒后页面显示满格、音箱在正常播）。
+         */
+        awaitReplayAt: 0,
+        /** 拖动前设备上报的流内位置，用来判断设备是否已经换成新流（换流后位置必然变小） */
+        seekBaseDevicePos: 0,
+        /**
+         * 起播宽限期（ms）：这段时间设备可能还没上报位置，进度条保持不动，
+         * 不用墙钟硬推。投送新歌协议长（15s）；拖动只是重签一条流，1~3 秒就出声，
+         * 用 15 秒会让用户以为「拖了之后进度条死了」。
+         */
+        startGraceMs: 15000,
     };
 
     /**
@@ -116,6 +131,35 @@
      * 进度条保持不动，不要用墙钟硬推（否则切歌后进度条会先跑偏再被修正）。
      */
     const PROGRESS_START_GRACE_MS = 15000;
+
+    /**
+     * 拖动进度条后的「等换流」窗口：这段时间设备上报的位置可能还属于上一条流，
+     * 一律不当锚点（新流的位置从 0 重新开始，换流成功的判据见 tick）。
+     */
+    const SEEK_REPLAY_WINDOW_MS = 20000;
+
+    /**
+     * 一次 status 采样能不能当进度锚点。
+     *
+     * 拖动进度条会重投一条「从目标秒开始」的新流，但设备换流前仍会继续上报**上一条流**
+     * 的流内位置（例如 225 秒）。拿它当锚点就会被算成「目标 100 + 旧位置 225」，
+     * 进度条一把冲到曲尾，之后又被「只前进不回退」的守卫钉死，再也回不来。
+     * 新流的位置从 0 重新开始，所以「位置明显变小」就是换流完成的判据。
+     *
+     * @returns 'accept' 可以用 | 'wait' 还在等换流（丢弃本次采样）| 'expired' 等超时了，只能用
+     */
+    const judgeAnchorSample = (positionMs, awaitReplayAt, seekBaseDevicePos, now) => {
+        const startedAt = Number(awaitReplayAt) || 0;
+        if (startedAt <= 0) return 'accept';
+        if (Number(now) - startedAt >= SEEK_REPLAY_WINDOW_MS) return 'expired';
+        const pos = Number(positionMs) || 0;
+        const base = Number(seekBaseDevicePos) || 0;
+        // 新流刚起播，位置必然从 0 附近开始
+        if (pos <= 3000) return 'accept';
+        // 换流后位置会掉回比拖动前更小的值
+        if (pos + 3000 < base) return 'accept';
+        return 'wait';
+    };
 
     const $ = id => document.getElementById(id);
 
@@ -986,7 +1030,8 @@
         // 等设备第一次上报再被单调守卫挡住，用户看到的就是「切歌后要等一会才定到正确位置」。
         // 宽限期过后仍无位置（老固件根本不上报）才退回墙钟，免得进度条彻底不走。
         const deliveredAt = Number(watch.lastDeliveryAt) || 0;
-        if (deliveredAt > 0 && Date.now() - deliveredAt < PROGRESS_START_GRACE_MS) return progressFloorSec;
+        const graceMs = Number(watch.startGraceMs) > 0 ? Number(watch.startGraceMs) : PROGRESS_START_GRACE_MS;
+        if (deliveredAt > 0 && Date.now() - deliveredAt < graceMs) return progressFloorSec;
         return offset + watchElapsedMs() / 1000;
     };
 
@@ -1084,7 +1129,9 @@
         watch.paintFrozen = false;
         watch.nonPlayingSamples = 0;
         if (!state.trackDurationMs && Number(watch.audioDurationMs) > 0) {
-            state.trackDurationMs = Number(watch.audioDurationMs);
+            // 兜底也不能直接用 watch.audioDurationMs —— 拖动后它已经被换成「剩余时长」，
+            // 写进整首时长会让下一次拖动的百分比换算整体偏短（越拖越短）。
+            state.trackDurationMs = Number(watch.audioDurationMs) + sec * 1000;
         }
         const totalMs = Number(state.trackDurationMs) > 0 ? Number(state.trackDurationMs) : 0;
         const remainingMs = totalMs > 0 ? Math.max(1000, totalMs - sec * 1000) : 0;
@@ -1132,41 +1179,92 @@
      * 小爱没有 seek 指令，服务端只能复用 /play 时解析好的音源，重签一个「从第 N 秒开头」的
      * token 再投送一次，所以中间会有 0.3~1s 断音——这是设备能力上限，songloft 同样如此。
      */
-    const seek = async positionSec => {
+    /**
+     * 拖动进度条请求的串行化闸门。
+     *
+     * 触屏上快速连拖会并发发出多个 /seek，而每次 seek 都要重新切片+投送，耗时不同，
+     * 响应回来的顺序未必等于请求顺序：先发的（例如 225s）晚回来就会把后发的（0s）覆盖掉，
+     * 结果就是「页面按 225 秒显示、音箱从 0 秒在播」。
+     * 这里保证同一时刻只有一个 /seek 在飞，排队期间的新目标只保留最后一次。
+     */
+    let seekSeq = 0;
+    let seekChain = Promise.resolve();
+
+    /**
+     * 服务端返回的 seekSec 归一化（与服务端 xiaoai/seekGuard.ts 的 resolveSeekOffsetSec 同义）。
+     * 服务端可能把目标改小（位置过期守卫 / 贴尾夹取），前端必须照它的结果走；
+     * 只有字段缺失才退回请求值 —— 0 是合法结果，不能当假值。
+     */
+    const normalizeSeekSec = (serverSeekSec, requestedSec) => {
+        const missing = serverSeekSec === null || serverSeekSec === undefined || serverSeekSec === '';
+        const raw = Number(serverSeekSec);
+        if (!missing && Number.isFinite(raw) && raw >= 0) return raw;
+        const fallback = Number(requestedSec);
+        return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+    };
+
+    const seek = positionSec => {
         const sec = Math.max(0, Math.floor(Number(positionSec) || 0));
-        if (!shouldRoute()) return { success: false, message: '当前不是小爱播放' };
-        const wasPaused = !!state.remotePaused;
-        try {
-            const result = await request('/seek', { positionSec: sec });
-            if (result && result.success) {
-                const done = Math.max(0, Number(result.seekSec) || sec);
-                const stamp = `${Math.floor(done / 60)}:${String(done % 60).padStart(2, '0')}`;
-                if (wasPaused) {
-                    // 保持原来的暂停态：重新投送会让音箱开始播，补一次 pause
-                    setTimelineOffset(done);
-                    // 拖动后仍是暂停态，断点位置要跟着更新，否则恢复时会续到拖动前的位置（P-1116）
-                    state.pausePositionSec = done;
-                    try {
-                        await request('/pause', {});
-                    } catch (e) {
-                        /* 暂停失败就让音箱继续播，比卡住好 */
+        if (!shouldRoute()) return Promise.resolve({ success: false, message: '当前不是小爱播放' });
+        const seq = ++seekSeq;
+        const task = seekChain.then(async () => {
+            // 排队期间又拖了一次：这次目标已成中间值，直接丢掉，只做最后一次
+            if (seq !== seekSeq) return { success: false, superseded: true };
+            const wasPaused = !!state.remotePaused;
+            // 记下拖动前的流内位置：设备换流后位置会明显变小，用它判断新流是否已开始
+            watch.seekBaseDevicePos = Number(watch.devicePositionMs) || 0;
+            try {
+                const result = await request('/seek', { positionSec: sec });
+                // 响应回来时已有更新的拖动：旧结果一律不落地（否则会把新位置覆盖掉）
+                if (seq !== seekSeq) return { success: false, superseded: true };
+                if (result && result.success) {
+                    // 必须尊重服务端给的位置（服务端会做残留守卫、贴尾夹取）。
+                    // 不能用 `Number(...) || sec`：服务端明确回 0 时 0 是假值，会被退回 sec，
+                    // 前端 offset 多算 sec 秒，进度条直接冲到曲尾卡死（实测 23:14）。
+                    const done = normalizeSeekSec(result.seekSec, sec);
+                    const stamp = `${Math.floor(done / 60)}:${String(done % 60).padStart(2, '0')}`;
+                    // 拖动 = 一次新的投送：重置起播宽限期、等换流窗口与设备位置缓存，
+                    // 否则 tick 会拿上一条流的位置当锚点，进度条瞬间跑满
+                    watch.lastDeliveryAt = Date.now();
+                    watch.awaitReplayAt = Date.now();
+                    // 拖动只重签一条流，1~3 秒就出声；宽限期用 4 秒，别让进度条干等 15 秒
+                    watch.startGraceMs = 4000;
+                    watch.devicePositionMs = 0;
+                    watch.deviceDurationMs = 0;
+                    watch.paintAnchorAt = 0;
+                    watch.paintAnchorPosMs = 0;
+                    watch.paintFrozen = false;
+                    watch.nonPlayingSamples = 0;
+                    if (wasPaused) {
+                        // 保持原来的暂停态：重新投送会让音箱开始播，补一次 pause
+                        setTimelineOffset(done);
+                        // 拖动后仍是暂停态，断点位置要跟着更新，否则恢复时会续到拖动前的位置（P-1116）
+                        state.pausePositionSec = done;
+                        try {
+                            await request('/pause', {});
+                        } catch (e) {
+                            /* 暂停失败就让音箱继续播，比卡住好 */
+                        }
+                        stopWatch();
+                        setWatchHint(`已跳转到 ${stamp}（保持暂停）`);
+                    } else {
+                        resetTimeline(done);
+                        setWatchHint(`已跳转到 ${stamp}`);
                     }
-                    stopWatch();
-                    setWatchHint(`已跳转到 ${stamp}（保持暂停）`);
+                    paintProgress(done);
                 } else {
-                    resetTimeline(done);
-                    setWatchHint(`已跳转到 ${stamp}`);
+                    setWatchHint((result && result.message) || '跳转失败');
                 }
-                paintProgress(done);
-            } else {
-                setWatchHint((result && result.message) || '跳转失败');
+                return result || { success: false };
+            } catch (e) {
+                console.warn('[小爱] 跳转失败', e);
+                setWatchHint(`跳转失败：${e && e.message ? e.message : e}`);
+                return { success: false, message: String((e && e.message) || e) };
             }
-            return result || { success: false };
-        } catch (e) {
-            console.warn('[小爱] 跳转失败', e);
-            setWatchHint(`跳转失败：${e && e.message ? e.message : e}`);
-            return { success: false, message: String((e && e.message) || e) };
-        }
+        }, () => undefined);
+        // 链上任何一次失败都不能把后续拖动卡死
+        seekChain = task.catch(() => undefined);
+        return task;
     };
 
     /** 播放器自身暂停时不让守望继续判定，避免用户暂停被当成「播完」 */
@@ -1414,14 +1512,25 @@
             // （否则墙钟会把进度条继续往前推，出现「页面在走、音箱没声」的假象）。
             if (data.playing === true) {
                 watch.nonPlayingSamples = 0;
-                // 防御：设备偶发把秒当毫秒之类的错位上报，位置会明显超出曲长。
-                // 这种脏值一旦当了锚点，进度条会被一次推到曲尾、之后再也回不来（单调守卫不会退）。
+                // 设备确实在播就解冻。位置能不能当锚点是另一回事：换流瞬间 positionMs 还是 0，
+                // 原来把「解冻」和「有有效位置」绑在一起，导致拖完进度条卡住不动。
+                watch.paintFrozen = false;
+                // 拖动后设备换流前上报的位置仍属于上一条流（如 225s），不能当锚点，
+                // 否则会被算成「目标 100 + 旧位置 225」，进度条冲到曲尾后因单调守卫再也退不回来。
+                // 新流的位置从 0 重新开始，所以「位置明显变小」就是换流完成的信号。
+                const anchorVerdict = judgeAnchorSample(
+                    watch.devicePositionMs,
+                    watch.awaitReplayAt,
+                    watch.seekBaseDevicePos,
+                    Date.now(),
+                );
+                if (anchorVerdict !== 'wait') watch.awaitReplayAt = 0;
+                const acceptAnchor = anchorVerdict !== 'wait';
                 const totalMsForPos = durationMs();
                 const posInTrack = watch.devicePositionMs + Number(state.seekOffsetMs || 0);
-                const sanePos = watch.devicePositionMs > 0
+                const sanePos = acceptAnchor && watch.devicePositionMs > 0
                     && (totalMsForPos <= 0 || posInTrack <= totalMsForPos + 5000);
                 if (sanePos) {
-                    watch.paintFrozen = false;
                     watch.paintAnchorPosMs = watch.devicePositionMs;
                     watch.paintAnchorAt = Date.now();
                 }
@@ -1583,6 +1692,10 @@
         // 记录本次(重)投递时刻：拉流守门 fallback / URL 直链模式音箱缓冲都需要协商时间，
         // watchdog 在冷却期内即使设备无进度也绝不误判「放完了」跳歌（手册 P-1110 续）。
         watch.lastDeliveryAt = Date.now();
+        // 新歌投送协议更长（曲库检索/取链/协商），宽限期恢复成 15 秒
+        watch.startGraceMs = PROGRESS_START_GRACE_MS;
+        watch.awaitReplayAt = 0;
+        watch.seekBaseDevicePos = 0;
         // 切歌立刻把进度条 / 时间文案归零（手册 P-1110）：旧歌的位置会在 /play 异步返回前残留几秒，
         // 不立即归零会让客户端把上一首的进度（甚至误发成 seek）带进下一首。
         // 同时作废上一首的断点续播位置（P-1116），否则「暂停 A → 换歌 B → 点播放」会拿 A 的位置去续 B。

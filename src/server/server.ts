@@ -91,6 +91,7 @@ import {
   pruneSeekSlices,
 } from './xiaoai'
 import { runPullGuard } from './xiaoai/pullGuard'
+import { isStaleSeekPosition } from './xiaoai/seekGuard'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
 /** 当前生效的 dislike 匹配选项，下发给前端保证前后端判定一致 */
@@ -362,6 +363,14 @@ let lastXiaoAiStreamSid = ''
 let lastXiaoAiPushAt = 0
 /** 本次这一路流「第一次被音箱请求」的时刻 */
 let lastXiaoAiStreamAt = 0
+/**
+ * 本次投送以来，同一路流被设备请求了几次。
+ *
+ * 用途：设备「拉了不播」时会反复 Range 重连（实测每 10.6 秒一次、每次只读 2.2MB
+ * 就断开，位置恒 0），而这种重连会让服务端看起来「一直在推字节」，
+ * 于是按「是否仍在推」判定的守门永远不命中。连接次数是更可靠的副证据。
+ */
+let lastXiaoAiStreamConns = 0
 /** 服务端最近一次向下游（音箱）写出数据的时刻：/status 据此判断「是否仍在推流」（手册 P-1110） */
 let lastXiaoAiSentAt = 0
 /** 最近一次「转码彻底失败」的时刻：源音频损坏导致这路流等于没内容（手册 P-1118） */
@@ -409,6 +418,14 @@ let lastXiaoAiTrack: {
 } | null = null
 /** 当前这一路流从第几秒开始：前端据此把设备上报的「流内位置」换算成「曲内位置」 */
 let lastXiaoAiSeekSec = 0
+/**
+ * 最近一次「拖动进度条」的时刻。
+ * 用途：残留位置守卫（P-1110）只管「切歌后把上一首位置发过来」，
+ * 但用户连拖两下时第二次拖动同样满足「位置 > 已播 + 5 秒且投送后不足 8 秒」，
+ * 会被误判成残留打回 0 秒（实测：拖到 100s 实际从 0s 播，页面显示满格）。
+ * 拖动过后放宽守卫，用户主动跳转一律放行。
+ */
+let lastXiaoAiSeekAt = 0
 /**
  * 音箱/云端上报的曲目时长（毫秒），从 /status 的 play_song_detail 里捞。
  *
@@ -8679,8 +8696,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           // 音箱第一次来要这一路流的时间点：减去投送时刻就是「投送→开始拉流」的真实延迟。
           // 自动切歌的提前量必须覆盖它（还要加上设备起播缓冲），否则新歌总是慢半步，
           // 用户就会听到上一首被重头播了几秒。
-          if (streamPayload.sid && streamPayload.sid === lastXiaoAiStreamSid && !lastXiaoAiStreamAt) {
-            lastXiaoAiStreamAt = Date.now()
+          if (streamPayload.sid && streamPayload.sid === lastXiaoAiStreamSid) {
+            // 同一路流的连接次数：设备「拉了不播」会反复 Range 重连，
+            // 这是「服务端是否在推字节」之外更可靠的判据
+            lastXiaoAiStreamConns += 1
+            if (!lastXiaoAiStreamAt) lastXiaoAiStreamAt = Date.now()
           }
           void serveXiaoAiStream(req, res, streamPayload)
         } catch (error: any) {
@@ -8926,8 +8946,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (result.success) {
                 lastXiaoAiPushAt = Date.now()
                 lastXiaoAiStreamAt = 0
+                lastXiaoAiStreamConns = 0
                 // 记下这次投送的音源，供后续拖动进度条复用（不重新取链）
                 lastXiaoAiSeekSec = 0
+                // 新的一次投送：之前那首歌的拖动记录作废，残留位置守卫重新生效
+                lastXiaoAiSeekAt = 0
                 lastXiaoAiTrack = {
                   songInfo,
                   quality,
@@ -8969,6 +8992,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     expectedAudioId: guardAudioId,
                     // 「拉了流但没播」判定需要两个额外信号（P-1131 实测：LX04 只拉 1MB 起播缓冲就断开）
                     isStreaming: () => Date.now() - lastXiaoAiSentAt < 6000,
+                    // 反复重连是「设备拉了不播」的直接证据：每次重连服务端都会重新推字节，
+                    // 单看「是否在推」会把这种死循环当成正常缓冲
+                    getConnections: () => lastXiaoAiStreamConns,
                     pushedAt: pushAt,
                     retry: async mode => {
                       if (mode === 'placeholder') {
@@ -9149,13 +9175,27 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               // 确实不知道整首时长时才现场补探一次；**不写回 track**（写回会污染后续 seek）
               if (knownMs <= 0 && track.target.path) knownMs = probeLocalFileDuration(track.target.path)
               if (knownMs <= 0) knownMs = lastXiaoAiDeviceDurationMs
+              // 上界校正：连续拖动时实测见过 knownMs 掉成「切片剩余」（259s 的歌报 34s），
+              // 一旦掉下去，之后每次「回到开头」的剩余时长都是错的，码率估算也跟着错。
+              // 只在「明显偏小」时用设备上报的整首时长拉回：设备报的可能是整首、
+              // 也可能是当前切片（短流），所以要求设备值超过 60 秒且大于已知值的 1.5 倍，
+              // 正常情况两者接近，这条永远不会误触。
+              if (
+                lastXiaoAiDeviceDurationMs > 60000
+                && knownMs > 0
+                && lastXiaoAiDeviceDurationMs > knownMs * 1.5
+              ) {
+                console.warn(
+                  `[XiaoAi] 跳转时长校正：knownMs=${Math.round(knownMs / 1000)}s 明显偏小，`
+                  + `按设备上报整首 ${Math.round(lastXiaoAiDeviceDurationMs / 1000)}s 修正`,
+                )
+                knownMs = lastXiaoAiDeviceDurationMs
+              }
               const totalSec = knownMs > 0 ? knownMs / 1000 : 0
               // 贴到结尾会切出 0.5 秒碎片，夹到 duration-3（songloft 同款守卫）
               const maxSec = totalSec > 4 ? Math.floor(totalSec - 3) : Math.max(0, Math.floor(totalSec))
               let seekSec =
                 totalSec > 0 ? Math.max(0, Math.min(Math.floor(requested), maxSec)) : Math.max(0, Math.floor(requested))
-              // 剩余时长：平滑下发按它算码率，传整首会让数据喂得比播放慢 → 卡顿
-              const remainingMs = knownMs > 0 ? Math.max(1000, knownMs - seekSec * 1000) : 0
               const base = track.target
 
               let nextTarget: XiaoAiTrackTarget
@@ -9165,12 +9205,26 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               // 只对「投送后极短窗口」生效，超过该窗口则视为用户主动跳转（本地文件可任意拖），不拦。
               // 带 expectSongName 的是「断点续播」（P-1116）：调用方已校验是同一首歌，位置是用户暂停时
               // 的真实位置，不是残留，必须放行，否则刚投送不久暂停再恢复会被错误地打回开头。
+              //
+              // 另加一道「刚拖过就放行」：用户连拖两下时，第二次拖动同样满足
+              // 「位置 > 已播 + 5 秒且投送后不足 8 秒」，会被误判成残留打回 0 秒。
+              // 实测就是「拖到 100s、音箱从 0s 播、页面进度直接跑满」（2026-11-05）。
               const sincePushSec = (Date.now() - lastXiaoAiPushAt) / 1000
-              const SEEK_STALE_SLACK_SEC = 5
-              if (!expectName && seekSec > sincePushSec + SEEK_STALE_SLACK_SEC && sincePushSec < 8) {
+              const sinceSeekSec = lastXiaoAiSeekAt > 0 ? (Date.now() - lastXiaoAiSeekAt) / 1000 : Number.POSITIVE_INFINITY
+              if (
+                isStaleSeekPosition({
+                  hasExpectName: !!expectName,
+                  seekSec,
+                  sincePushSec,
+                  sinceSeekSec,
+                })
+              ) {
                 seekSec = 0
                 how = '位置过期，回到开头'
               }
+              // 剩余时长必须在 seekSec 定稿之后再算：被守卫改成 0 后若沿用旧值，
+              // 会按「只剩 N 秒」估算码率，而实际下发的是整首 —— 码率放大数倍照样灌爆音箱缓冲。
+              const remainingMs = knownMs > 0 ? Math.max(1000, knownMs - seekSec * 1000) : 0
               if (base.path && seekSec > 0 && isMp3File(base.path)) {
                 // 本地完整 mp3：切一段（`-ss` + copy，不重编码），走原来的本地直发链路
                 const slicePath = seekSlicePath(track.username, track.songInfo, track.quality, seekSec)
@@ -9230,8 +9284,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 return
               }
               lastXiaoAiSeekSec = seekSec
+              lastXiaoAiSeekAt = Date.now()
               lastXiaoAiPushAt = Date.now()
               lastXiaoAiStreamAt = 0
+              lastXiaoAiStreamConns = 0
               // 跳转是新的一次投送：上一首的守门结论作废
               lastXiaoAiGuardAction = ''
               try {
@@ -9241,8 +9297,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 lastXiaoAiStreamSid = ''
               }
               const songLabel = `${track.songInfo.name || ''}${track.songInfo.singer ? ' - ' + track.songInfo.singer : ''}`
-              console.log(`[XiaoAi] 跳转 ${seekSec}s（${how}｜剩余 ${Math.round(remainingMs / 1000)}s）：${songLabel}`)
-              syncLog.info(`[XiaoAi] 跳转 ${seekSec}s（${how}｜剩余 ${Math.round(remainingMs / 1000)}s）：${songLabel}`)
+              // 带上总时长：连续拖动时靠它一眼看出 knownMs 是否被写成了残值
+              const seekTrace = `${how}｜总 ${Math.round(knownMs / 1000)}s｜剩余 ${Math.round(remainingMs / 1000)}s`
+              console.log(`[XiaoAi] 跳转 ${seekSec}s（${seekTrace}）：${songLabel}`)
+              syncLog.info(`[XiaoAi] 跳转 ${seekSec}s（${seekTrace}）：${songLabel}`)
               sendJson({ success: true, seekSec, durationMs: remainingMs, streamUrl, via: how })
             } catch (error: any) {
               failed(error, '跳转失败')
@@ -9315,6 +9373,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 // 实测曲库命中 VIP 歌时音箱照样拉我们的直链、正常播放。
                 // 前端据此区分「曲库版权标记」与「真的不出声」。
                 streamPulled: lastXiaoAiStreamAt > lastXiaoAiPushAt,
+                // 本次投送以来同一路流被设备请求了几次。
+                // 正常播放一般只连 1 次；「拉了不播」会每 10 秒左右重连一次、位置恒 0，
+                // 而每次重连都让服务端看起来仍在推字节，所以这个计数是判断设备卡死的可靠证据。
+                streamConnections: lastXiaoAiStreamConns,
                 // 服务端最近 5 秒内是否还在向下游写字节：等于「推流仍在进行」。
                 // 设备上报「无进度 / 未播放」而服务端仍在发流时，多半是缓冲协商的瞬断，
                 // 前端 watchdog 据此不要误判「放完了」→ 自动跳歌（手册 P-1110）。

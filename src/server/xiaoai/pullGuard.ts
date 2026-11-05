@@ -71,17 +71,26 @@ export interface LibraryPreviewSignal {
 export function detectPulledButSilent(
   first: StatusSample,
   second: StatusSample,
-  opts: { elapsedSincePushMs: number; streaming: boolean; minElapsedMs?: number },
+  opts: { elapsedSincePushMs: number; streaming: boolean; minElapsedMs?: number; connections?: number },
 ): LibraryPreviewSignal {
   const minElapsed = Number(opts.minElapsedMs) > 0 ? Number(opts.minElapsedMs) : 18000
   if (!second || !second.pulled) return { hit: false, reason: '' }
   if (Number(opts.elapsedSincePushMs) < minElapsed) return { hit: false, reason: '' }
-  if (opts.streaming) return { hit: false, reason: '' }
+  // 「服务端还在往下游写字节」通常意味着还在正常缓冲，不能判故障。
+  // 但设备反复 Range 重连（每 10 秒一次、每次只读 2MB 就断）时，服务端看起来一直在推，
+  // 实际是设备既不播也不消费。这一形态实测过（2026-11-05：《有些》9 次重连、pos 恒 0），
+  // 所以「重连 ≥3 次」要越过这条限制。
+  const connections = Number(opts.connections) || 0
+  // 重连 2 次仍没起播就足够说明问题：正常播放只连 1 次，重连是断流后才有的事
+  const repeatedReconnect = connections >= 2
+  if (opts.streaming && !repeatedReconnect) return { hit: false, reason: '' }
   if (first?.playing || second.playing) return { hit: false, reason: '' }
   if (Number(first?.positionMs) > 0 || Number(second.positionMs) > 0) return { hit: false, reason: '' }
+  const reconnects = repeatedReconnect ? `，已重连 ${connections} 次仍未起播` : ''
   return {
     hit: true,
-    reason: `已拉流但 ${Math.round(minElapsed / 1000)}s 内始终未播放（playing=false, pos=0，服务端也已停止推送）`,
+    reason: `已拉流但 ${Math.round(minElapsed / 1000)}s 内始终未播放`
+      + `（playing=false, pos=0${reconnects}）`,
   }
 }
 
@@ -152,6 +161,8 @@ export interface PullGuardDeps {
   expectedAudioId?: string
   /** 服务端最近是否仍在向下游写字节（可选，缺省视为在写，即不判「拉流但不播」） */
   isStreaming?: () => boolean
+  /** 本次投送以来同一路流被设备请求了几次（可选）：反复重连说明设备既不播也不消费 */
+  getConnections?: () => number
   /** 本次投送时刻（ms，可选）：用于判断「拉了流但一直没播」持续了多久 */
   pushedAt?: number
   /** 补救重发：placeholder=换默认封面 audioID，url=纯直链模式 */
@@ -189,8 +200,10 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
     unplayableCode: number
   }
   const unknown = (code = 0): InspectResult => ({ kind: 'unknown', reason: '', unplayableCode: code })
-  /** 「拉了流但没播」的判定窗口：要给足设备起播与缓冲的时间，太短会打断正常播放 */
-  const silentWindowMs = Number(deps.delays?.silentWindow) > 0 ? Number(deps.delays?.silentWindow) : 18000
+  // 「拉了流但没播」的判定窗口：要给足设备起播与缓冲的时间，太短会打断正常播放。
+  // 取 22 秒是有依据的：设备「拉了不播」的典型节奏是「连 10 秒读 2MB → 断开 → 再连」，
+  // 22 秒正好覆盖两轮，能拿到「重连 2 次仍 pos=0」这个硬证据（实测 2026-11-05）。
+  const silentWindowMs = Number(deps.delays?.silentWindow) > 0 ? Number(deps.delays?.silentWindow) : 22000
   /** kind='preview' 表示拿到了「它在播另一版」的证据；unplayableCode 透传给调用方判 VIP */
   const inspect = async (): Promise<InspectResult> => {
     if (deps.isStale()) return unknown()
@@ -207,6 +220,7 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
       const silent = detectPulledButSilent(first, second, {
         elapsedSincePushMs: deps.pushedAt ? Date.now() - deps.pushedAt : 0,
         streaming: deps.isStreaming ? deps.isStreaming() : true,
+        connections: deps.getConnections ? deps.getConnections() : 0,
         minElapsedMs: silentWindowMs,
       })
       if (silent.hit) {
@@ -240,11 +254,16 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
   // 这里补等到窗口再判一次，否则守门 4 秒就收工，这类故障永远抓不到。
   // 正常播放的设备只多几次 /status 请求（后台异步，不影响投送响应）。
   if (firstHit.kind === 'unknown' && deps.isPulled() && Number(deps.pushedAt) > 0) {
-    const elapsed = Date.now() - Number(deps.pushedAt)
-    if (elapsed < silentWindowMs) {
-      await sleep(silentWindowMs - elapsed + gap)
+    const pushedAt = Number(deps.pushedAt)
+    // 分两轮复查：设备「拉了不播」的节奏是「连 10 秒 → 断 → 再连」，
+    // 单次采样很容易正好落在重连间隙或正在推字节的瞬间，什么都判不出来。
+    for (const at of [silentWindowMs * 0.7, silentWindowMs]) {
+      const wait = pushedAt + at - Date.now()
+      if (wait <= 0) continue
+      await sleep(wait + gap)
       if (deps.isStale()) return 'none'
       firstHit = await inspect()
+      if (firstHit.kind !== 'unknown') break
     }
   }
   if (firstHit.kind === 'silent') {
