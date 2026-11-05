@@ -946,12 +946,32 @@ const PACING_FACTOR = 1.1
 /** 起播预灌多少音频：这是设备抗抖动的安全垫，太小（3s）一点风浪就断 */
 const PACING_LEAD_MS = 30000
 /**
- * 码率可信度上限（B/ms）。转码产物最高 320kbps≈0.04，给 2.5 倍余量。
- * 超过就说明传入的时长不可信，按 PACING_FALLBACK_RATE 兜底，避免垫子被算成几十 MB 灌爆设备。
+ * 码率可信度上限（**B/ms**，不是 B/ms 的千分之一）。转码产物最高 320kbps = 40 B/ms，
+ * 给 2.5 倍余量到 100（≈800kbps，仍高于任何音源）。
+ *
+ * 超过它才说明传入的时长不可信，按 PACING_FALLBACK_RATE 兜底，
+ * 避免「225s 的歌被算成剩 36s」时码率放大 8 倍、30 秒垫子一次灌 10MB 灌爆设备（P-1132）。
+ *
+ * 坑（2026-11-05 实机）：这里曾写成 0.1，等于 800bps，把**所有正常歌曲**（≈40 B/ms）
+ * 都判成不可信夹到 0.04 B/ms，一路流只够发 1 个 64KB 分块（≈1.6 秒音频）就卡死，
+ * 设备断开后 Range 续传再拿 1.6 秒——听感就是「响一两秒、一直断断续续」。
+ * 单位换算必须显式写成 `kbps / 8`，不要再手算小数。
  */
-const PACING_MAX_RATE = 0.1
-/** 码率不可信时的兜底码率：320kbps 实时，只保证「不灌爆」，慢一点也无所谓 */
-const PACING_FALLBACK_RATE = 0.04
+const PACING_MAX_RATE = (800 * 1024) / 8 / 1000 // 800kbps → 102.4 B/ms
+/** 码率不可信时的兜底码率：320kbps 实时（40 B/ms），只保证「不灌爆」，慢一点也无所谓 */
+const PACING_FALLBACK_RATE = (320 * 1024) / 8 / 1000 // 40.96 B/ms
+
+/**
+ * 把「总字节 / 时长」算出的原始码率校正成可用的节流码率。
+ * 抽成纯函数是因为这里的单位错会让整条播放链路瘫痪，必须能被单测按住。
+ */
+export const resolvePacingRate = (rawRate: number): number => {
+  if (!Number.isFinite(rawRate) || rawRate <= 0) return 0
+  // 明显异常的超大值（>2000 ≈ 16Mbps）或过小值（<0.001 ≈ 8bps）都判定时长不可信
+  if (rawRate > PACING_MAX_RATE) return PACING_FALLBACK_RATE
+  if (rawRate < 0.001) return 0
+  return rawRate
+}
 /** 上限：设备明显跟不上时，允许把垫子抬到这么厚 */
 const PACING_LEAD_MAX_MS = 90000
 /** 队列剩余不足这么多字节，说明我们把音箱饿着了（节流压太狠），需要放宽 */
@@ -1085,17 +1105,11 @@ export const pumpDownstream = (
         upstream.headers['content-length'] ||
         0,
     )
-    let ratePerMs = durationMs > 0 && totalBytes > 0 ? totalBytes / durationMs : 0
-    // 真实音频是几十 bytes/ms（320kbps≈40），原来写的 `ratePerMs < 1` 会把所有真歌都挡在节流之外，
-    // 退化成纯背压，于是「断断续续」。这里只挡住 0 与明显异常的超大值（>2000≈1.6Mbps，远超任何音源）。
-    //
-    // 再补一道「码率可信度」上限（2026-11-05）：转码产物最高 320kbps≈0.04 B/ms，
-    // 给 2.5 倍余量到 0.1。超过说明传进来的 durationMs 不可信——实测 225s 的歌在
-    // 「回到开头」时被算成剩余 36s，码率被放大 8 倍，30 秒垫子一次灌 10MB，
-    // 直接把音箱缓冲灌爆，表现为「拉流但不播放、点屏幕播放键也起不来」。
-    // 这种情况夹回 320k 码率：宁可喂慢一点，也绝不能灌爆。
-    if (ratePerMs > PACING_MAX_RATE) ratePerMs = PACING_FALLBACK_RATE
-    if (ratePerMs > 0.001 && ratePerMs < 2000) paceLeadMs = PACING_LEAD_MS
+    const rawRate = durationMs > 0 && totalBytes > 0 ? totalBytes / durationMs : 0
+    // 真实音频是几十 bytes/ms（320kbps≈40）。这里只做「时长是否可信」的校正，
+    // 具体数值见 resolvePacingRate（单位必须按 B/ms 算，历史上在这里错过 1000 倍）。
+    const ratePerMs = resolvePacingRate(rawRate)
+    if (ratePerMs > 0) paceLeadMs = PACING_LEAD_MS
 
     const settle = () => {
       if (settled) return
