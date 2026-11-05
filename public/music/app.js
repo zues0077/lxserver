@@ -2502,8 +2502,61 @@ window.toggleLocalFirstSearch = toggleLocalFirstSearch;
 window.syncLocalFirstButton = syncLocalFirstButton;
 
 
+// ===== 聚合搜索：渐进渲染 + 结果短缓存 =====
+/** 每次搜索的序号：旧搜索的慢请求回来时不能把新搜索的结果冲掉 */
+let searchSeq = 0;
+/** 聚合搜索每个源只取这么多条（8 个源一起扇出，取全量首屏载荷会到 1.3MB） */
+const AGGREGATE_MAX_ITEMS = 300;
+/** 渐进渲染的最小重绘间隔，避免 8 个源陆续返回时反复重排 */
+const SEARCH_PAINT_INTERVAL_MS = 200;
+
+/** 同一关键词 60 秒内再搜一次直接复用上次结果。只存未排序的原始结果：命中时重排一次，改了「本地优先」也还是对的 */
+const SEARCH_CACHE_TTL_MS = 60 * 1000;
+const SEARCH_CACHE_MAX = 8;
+const searchResultCache = new Map();
+
+function searchCacheKey(type, source, keyword) {
+    return `${type}|${source}|${String(keyword || '').trim().toLowerCase()}`;
+}
+
+function readSearchCache(key) {
+    if (!key) return null;
+    const hit = searchResultCache.get(key);
+    if (!hit) return null;
+    if (Date.now() - hit.at >= SEARCH_CACHE_TTL_MS) {
+        searchResultCache.delete(key);
+        return null;
+    }
+    return hit;
+}
+
+function writeSearchCache(key, list) {
+    if (!key || !Array.isArray(list) || list.length === 0) return;
+    // 先删再插：让 Map 的插入顺序天然成为 LRU 顺序
+    searchResultCache.delete(key);
+    searchResultCache.set(key, { at: Date.now(), list });
+    while (searchResultCache.size > SEARCH_CACHE_MAX) {
+        const oldest = searchResultCache.keys().next().value;
+        if (oldest === undefined) break;
+        searchResultCache.delete(oldest);
+    }
+}
+
+/** 找到元素真正在滚动的祖先容器（渐进重排后要恢复滚动位置，否则用户视线里的行会被挪走） */
+function findScrollParent(el) {
+    let p = el ? el.parentElement : null;
+    while (p && p !== document.body && p !== document.documentElement) {
+        const style = getComputedStyle(p);
+        if (/(auto|scroll|overlay)/.test(style.overflowY)) return p;
+        p = p.parentElement;
+    }
+    return null;
+}
+
 //搜索歌曲
 async function doSearch(page = 1, append = false) {
+    // 每次搜索取一个序号：聚合搜索是渐进渲染的，旧关键词的慢请求回来时必须能认出「我过期了」
+    const mySeq = ++searchSeq;
     const typeEl = document.getElementById('search-type');
     const type = typeEl ? typeEl.value : 'song';
 
@@ -2610,27 +2663,109 @@ async function doSearch(page = 1, append = false) {
         const pageInfoEl = document.getElementById('page-info');
         let list = [];
         if (source === 'all') {
-            // Aggregate Search (Only supported for songs)
-            if (pageInfoEl) pageInfoEl.innerText = '聚合搜索 (各源并发取全量)...';
+            // —— 聚合搜索：8 个源并发，谁先回来先渲染谁 ——
+            // 原来是 Promise.all 等最慢的那个（soda 3.3 秒），5 个源 1.3 秒内就回来了却只能干等。
+            const cacheKey = searchCacheKey(type, source, input);
+            const renderAggregate = (flat) => {
+                const sorted = typeof window.sortSearchResults === 'function'
+                    ? window.sortSearchResults(flat, input, type === 'song')
+                    : flat.slice();
+                const container = document.getElementById('search-results');
+                const scroller = findScrollParent(container);
+                const keepTop = scroller ? scroller.scrollTop : 0;
+                renderResults(sorted);
+                if (scroller && keepTop > 0) scroller.scrollTop = keepTop;
+                return sorted;
+            };
 
-            const promises = SOURCES.map(s =>
-                fetch(`${API_BASE}/search?name=${encodeURIComponent(input)}&source=${s}&page=1&type=${type}`, { headers })
+            const cached = readSearchCache(cacheKey);
+            if (cached) {
+                const ageSec = Math.max(1, Math.round((Date.now() - cached.at) / 1000));
+                if (pageInfoEl) pageInfoEl.innerText = `聚合搜索 · 复用 ${ageSec} 秒前的结果 · ${cached.list.length} 条`;
+                const sorted = renderAggregate(cached.list);
+                if (type === 'song') rememberAggregatedResults(sorted);
+                window.savedNetworkSearchState = {
+                    keyword: input, source, type, list: sorted,
+                    page: currentPage, meta: null, serverPagedSearch: false,
+                };
+                return;
+            }
+
+            if (pageInfoEl) pageInfoEl.innerText = `聚合搜索 · 正在并发搜索 ${SOURCES.length} 个音源…`;
+
+            const flat = [];
+            let arrived = 0;
+            let renderTimer = null;
+            let lastPaintAt = 0;
+            let lastSorted = [];
+
+            const paint = (final) => {
+                if (mySeq !== searchSeq) return lastSorted;
+                // 第一批还没回来时保持 loading，别先闪一下「未找到相关结果」
+                if (!final && flat.length === 0) return lastSorted;
+                lastSorted = renderAggregate(flat);
+                if (pageInfoEl) {
+                    const remain = SOURCES.length - arrived;
+                    pageInfoEl.innerText = final
+                        ? `聚合搜索 · ${arrived} 个源 · ${lastSorted.length} 条`
+                        : `聚合搜索 · 已到 ${arrived}/${SOURCES.length} 个源 · ${lastSorted.length} 条，还有 ${remain} 个在搜索…`;
+                }
+                return lastSorted;
+            };
+
+            const schedulePaint = (final) => {
+                if (mySeq !== searchSeq) return;
+                if (final) {
+                    if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+                    paint(true);
+                    return;
+                }
+                // 用户已经在往下看了就不再流式重排（会把视线里的行挪走），收尾时统一重排一次
+                const scroller = findScrollParent(document.getElementById('search-results'));
+                if (scroller && scroller.scrollTop > 0) return;
+                const now = Date.now();
+                if (now - lastPaintAt >= SEARCH_PAINT_INTERVAL_MS) {
+                    lastPaintAt = now;
+                    paint(false);
+                    return;
+                }
+                if (!renderTimer) {
+                    renderTimer = setTimeout(() => {
+                        renderTimer = null;
+                        lastPaintAt = Date.now();
+                        paint(false);
+                    }, SEARCH_PAINT_INTERVAL_MS);
+                }
+            };
+
+            await Promise.all(SOURCES.map(s => {
+                // maxItems：聚合只要首屏能翻的条数，别把每个平台的全量（kw 一家 1200 条 482KB）都拖回来
+                const searchUrl = `${API_BASE}/search?name=${encodeURIComponent(input)}&source=${s}&page=1&type=${type}&maxItems=${AGGREGATE_MAX_ITEMS}`;
+                return fetch(searchUrl, { headers })
                     .then(res => res.json())
-                    .then(data => (data.list || []).map(item => ({ ...item, source: s })))
+                    .then(data => {
+                        const items = (data.list || []).map(item => ({ ...item, source: s }));
+                        if (items.length) flat.push(...items);
+                    })
                     .catch(e => {
                         console.warn(`[聚合搜索] ${s} 源失败:`, e);
-                        return [];
                     })
-            );
-            const results = await Promise.all(promises);
-            const flatList = results.flat();
+                    .finally(() => {
+                        arrived++;
+                        schedulePaint(arrived >= SOURCES.length);
+                    });
+            }));
+
+            if (mySeq !== searchSeq) return; // 期间用户又搜了别的词，这份结果作废
+            const finalList = paint(true);
             // 留一份给换源用：同一首歌在你手上已经有 8 个平台的版本，不必再全网搜一遍
-            if (type === 'song') rememberAggregatedResults(flatList);
-            if (typeof window.sortSearchResults === 'function') {
-                list = window.sortSearchResults(flatList, input, type === 'song');
-            } else {
-                list = flatList;
-            }
+            if (type === 'song') rememberAggregatedResults(finalList);
+            writeSearchCache(cacheKey, finalList);
+            window.savedNetworkSearchState = {
+                keyword: input, source, type, list: finalList,
+                page: currentPage, meta: null, serverPagedSearch: false,
+            };
+            return;
         } else {
             if (pageInfoEl && type === 'song') pageInfoEl.innerText = '正在取该平台全部结果...';
             const res = await fetch(`${API_BASE}/search?name=${encodeURIComponent(input)}&source=${source}&type=${type}&page=${page}`, { headers });

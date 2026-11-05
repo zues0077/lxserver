@@ -840,6 +840,13 @@ const MUSIC_URL_PROBE_TIMEOUT_MS = (() => {
   return Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : 1500
 })()
 const musicUrlFailures = new Map<string, { at: number; message: string; attempts: any[] }>()
+/**
+ * 同歌并发取链合并（single-flight）：key → 先到请求的最终响应。
+ *
+ * 「用户点播」和「汽水待补 / 失败重试」会同时打同一首歌，以前两个请求各自把 30+ 音源问一遍、
+ * 再同时拉同一路流（日志里两次取链 + socket hang up 就是这么来的）。后来者直接复用先到者的响应。
+ */
+const inflightMusicUrls = new Map<string, Promise<{ status: number; headers: Record<string, any>; body: string }>>()
 /** key → 最近一次失败时刻：决定这一首用紧预算还是宽预算 */
 const musicUrlRecentFails = new Map<string, number>()
 /** 全站最近的取链失败时刻（熔断用：音源整体挂了就别再让每一首都死等 25 秒） */
@@ -869,6 +876,37 @@ const buildMusicUrlFailKey = (songInfo: any, quality: string, username: string):
   const id = String(songInfo?.songmid || songInfo?.id || songInfo?.hash || songInfo?.name || '')
   // 必须带用户名：不同用户的可用音源/平台账号不一样，A 取不到不代表 B 取不到
   return `${username || ''}|${String(songInfo?.source || '')}|${id}|${quality || ''}`
+}
+
+/**
+ * 并发取链合并的键（single-flight）。
+ *
+ * 只有「同用户 + 同平台 + 同曲 ID + 同音质 + 同排除清单」才允许合并：
+ * 带 excludeApiSources 的重试请求和不带的一次请求语义完全不同，合并会拿到错的结果。
+ * 曲 ID 缺失时返回空串 —— 宁可各自走一遍，也不要把一堆无名请求撮到一起。
+ */
+const buildMusicUrlFlightKey = (payload: any, username: string): string => {
+  const song = payload?.songInfo || {}
+  const id = String(song.songmid || song.id || song.hash || '')
+  if (!id) return ''
+  const excludes = Array.isArray(payload?.excludeApiSources)
+    ? payload.excludeApiSources.map((n: any) => String(n)).sort().join(',')
+    : ''
+  return [
+    username || '',
+    String(song.source || ''),
+    id,
+    String(payload?.quality || ''),
+    excludes,
+    payload?.noCache ? 'nocache' : '',
+  ].join('|')
+}
+
+/** 搜索条数上限：默认 1200（单平台全量）；聚合搜索传 maxItems 收紧，夹在 50~1200 之间防误传 */
+const clampSearchMaxItems = (raw: any): number => {
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return 1200
+  return Math.min(Math.max(Math.round(n), 50), 1200)
 }
 
 const readMusicUrlFailure = (key: string) => {
@@ -8208,6 +8246,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             const pageSize: number = singlePage
               ? Math.min(requestedLimit, api.limit || 20)
               : (api.limit || 20)
+            // 前端「聚合搜索」是 8 个源同时扇出，每源都取全量会让首屏载荷到 1.3MB（kw 一家 482KB）。
+            // 它只渲染前几页（本地分页 20 条/页），所以显式传 maxItems 收紧条数上限；
+            // 单平台搜索/第三方调用不传，行为完全不变。
+            const requestedMaxItems = urlObj.searchParams.has('maxItems')
+              ? clampSearchMaxItems(urlObj.searchParams.get('maxItems'))
+              : 0
             const startedAt = Date.now()
             const first: any = await searchWithRetry(`${source} 搜索`, () => api.search(name, startPage, pageSize))
             const firstList: any[] = (first && first.list) || []
@@ -8218,7 +8262,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 平台自报的 total/allPage 不可全信（tx 报 45206 条 = 754 页，实测取不到那么多），
             // 所以取数上限是「allPage 推算 + 页数墙 + 条数预算 + 时间预算」四重收紧，而不是照 total 硬翻页。
             const SEARCH_PAGE_CAP = 60
-            const SEARCH_MAX_ITEMS = 1200
+            // 默认 1200（单平台搜索：用户明确选了某个平台，想要更长的可翻页列表）；
+            // 聚合搜索由前端传 maxItems 收紧到 300 条，翻页预算同步减少，首屏载荷从 1.3MB 降到 ~850KB。
+            const SEARCH_MAX_ITEMS = requestedMaxItems > 0 ? requestedMaxItems : 1200
             // 首屏搜索的时间预算。原来是 15000ms，实测「晴天」这种大词要串行翻十几到几十页：
             // wy 300 条 5.9s、tx 1000 条 8.0s、kw 3556 条 5.7s、mg 437 条 8.7s，
             // 而平台单页只要 0.1~0.7s —— 用户干等 6~9 秒才看到第一屏，代价太大。
@@ -9258,6 +9304,58 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         const reqId = req.headers['x-req-id'] as string | undefined
 
         void readBody(req).then(async body => {
+          // —— 同一首歌的并发取链合并（single-flight）——
+          let flightKey = ''
+          try {
+            flightKey = buildMusicUrlFlightKey(JSON.parse(body || '{}'), verifiedUsername)
+          } catch { flightKey = '' }
+
+          if (flightKey) {
+            const pending = inflightMusicUrls.get(flightKey)
+            if (pending) {
+              // 给等待设上限：先到的请求万一卡在慢源上，后来者也不能无限挂住（超时就自己走一遍）
+              const shared = await Promise.race([
+                pending.catch(() => null),
+                new Promise<null>(resolve => {
+                  const timer = setTimeout(() => resolve(null), 30000)
+                  if (typeof (timer as any).unref === 'function') (timer as any).unref()
+                }),
+              ])
+              if (shared) {
+                console.log(`[歌曲播放] 合并并发取链请求（复用先到结果）: ${String(JSON.parse(body || '{}')?.songInfo?.name || '')}`)
+                res.writeHead(shared.status, shared.headers)
+                res.end(shared.body)
+                return
+              }
+            } else {
+              let resolveFlight!: (v: { status: number; headers: Record<string, any>; body: string }) => void
+              const flight = new Promise<{ status: number; headers: Record<string, any>; body: string }>(resolve => {
+                resolveFlight = resolve
+              })
+              inflightMusicUrls.set(flightKey, flight)
+              // 捕获本请求最终写出的响应（状态码 + 头 + 体），供等待者原样复用
+              let flightStatus = 200
+              let flightHeaders: Record<string, any> = { 'Content-Type': 'application/json' }
+              const rawWriteHead = (res as any).writeHead.bind(res) as (status: number, headers?: any) => any
+              const rawEnd = (res as any).end.bind(res) as (chunk?: any, ...rest: any[]) => any
+              ;(res as any).writeHead = (status: number, headers?: any) => {
+                flightStatus = status
+                if (headers && typeof headers === 'object') flightHeaders = headers
+                return rawWriteHead(status, headers as any)
+              }
+              ;(res as any).end = (chunk?: any, ...rest: any[]) => {
+                try {
+                  const text = typeof chunk === 'string'
+                    ? chunk
+                    : (Buffer.isBuffer(chunk) ? chunk.toString('utf8') : '')
+                  resolveFlight({ status: flightStatus, headers: flightHeaders, body: text })
+                } catch { /* 捕获失败不能影响正常响应 */ }
+                if (inflightMusicUrls.get(flightKey) === flight) inflightMusicUrls.delete(flightKey)
+                return rawEnd(chunk, ...rest)
+              }
+            }
+          }
+
           // 辅助：通过 SSE 推送进度（内置竞态重试，最多等 600ms 让 SSE 连接就绪）
           let sseFailed = false
           const pushProgress = async (attempt: any, retries = 10): Promise<void> => {
