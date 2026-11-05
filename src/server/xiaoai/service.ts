@@ -84,6 +84,8 @@ export interface XiaoAiPublicConfig {
   fadeOutSec: number
   /** 上一次设置的音量（0-100），界面回填用；真值以设备上报为准 */
   volume: number
+  /** 兜底封面用的曲库 audioID（曲库没命中时用它那首歌的封面兜底） */
+  defaultCoverAudioId: string
   /** ffmpeg 是否可用（不可用时 mp3 统一自动降级，界面据此提示） */
   ffmpegAvailable: boolean
   disabledModels: string[]
@@ -206,6 +208,7 @@ class XiaoAiService {
       songTransitionOffset: config.songTransitionOffset || 0,
       fadeOutSec: config.fadeOutSec ?? 1.5,
       volume: Number.isFinite(Number(config.volume)) ? Number(config.volume) : 50,
+      defaultCoverAudioId: config.defaultCoverAudioId || DEFAULT_MUSIC_AUDIO_ID,
       ffmpegAvailable: this.ffmpegReady,
       touchscreenLyrics: config.touchscreenLyrics === true,
       disabledModels: config.disabledModels,
@@ -232,6 +235,9 @@ class XiaoAiService {
     if (patch.songTransitionOffset !== undefined) next.songTransitionOffset = Number(patch.songTransitionOffset) || 0
     if (patch.fadeOutSec !== undefined) next.fadeOutSec = Number(patch.fadeOutSec) || 0
     if (patch.volume !== undefined) next.volume = Number(patch.volume)
+    if (patch.defaultCoverAudioId !== undefined) {
+      next.defaultCoverAudioId = String(patch.defaultCoverAudioId || '').trim() || DEFAULT_MUSIC_AUDIO_ID
+    }
     if (patch.disabledModels !== undefined) next.disabledModels = Array.isArray(patch.disabledModels) ? patch.disabledModels.map(String) : []
     if (patch.selectedDeviceIds !== undefined) {
       next.selectedDeviceIds = Array.isArray(patch.selectedDeviceIds) ? patch.selectedDeviceIds.map(String) : []
@@ -457,15 +463,17 @@ class XiaoAiService {
   async replayWithPlaceholder(params: { deviceIds?: string[]; streamUrl: string }) {
     if (!String(params.streamUrl || '').trim()) throw new Error('缺少可投送的播放地址')
     const config = loadConfig()
+    // 换「默认封面」也用用户在设置里选的兜底 audioID（默认 Theme Of Loft）
+    const coverAudioId = String(config.defaultCoverAudioId || '').trim() || DEFAULT_MUSIC_AUDIO_ID
     const results = await this.fanOut(params.deviceIds, 'play', async (client, deviceId, hardware) => {
       const outcome = await client.playUrlDetailed(deviceId, params.streamUrl, hardware, {
         keepLight: config.keepLight !== false,
         disabledModels: config.disabledModels,
-        audioId: DEFAULT_MUSIC_AUDIO_ID,
+        audioId: coverAudioId,
         lyricsMode: false,
       })
       if (outcome.ok) {
-        const line = `[XiaoAi] 补救重发 ${outcome.via}（）audioID=${DEFAULT_MUSIC_AUDIO_ID} → ${deviceId}`
+        const line = `[XiaoAi] 补救重发 ${outcome.via}（）audioID=${coverAudioId} → ${deviceId}`
         console.log(line)
         syncLog.warn(line)
       }

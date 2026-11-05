@@ -3959,6 +3959,28 @@
                                             onchange="xiaoAiSaveConfig()">
                                     </div>
 
+                                    <!-- 兜底封面 -->
+                                    <div
+                                        class="t-bg-panel rounded-xl border t-border-main p-4 flex items-start justify-between gap-3">
+                                        <div>
+                                            <h4 class="text-sm font-bold t-text-main">兜底封面</h4>
+                                            <p class="text-xs t-text-muted mt-1">
+                                                曲库没匹配到这首歌时，用这张封面兜底（都是曲库歌曲的封面）。匹配到歌曲时，仍优先显示这首歌自己的封面。需开启上方「触屏显示封面歌词」才生效。
+                                            </p>
+                                        </div>
+                                        <select id="xiaoai-default-cover-select"
+                                            class="t-bg-panel border t-border-main rounded-lg text-xs px-2 py-1.5 flex-shrink-0 cursor-pointer"
+                                            onchange="xiaoAiSaveConfig()">
+                                            <option value="1732418460076477549">默认（Theme Of Loft）</option>
+                                            <option value="1674523777320369892">所念皆星河（星月夜空）</option>
+                                            <option value="1674534003709877174">鲸落（深蓝鲸鱼）</option>
+                                            <option value="3264809016614715474">仲夏涟漪（霓虹小提琴）</option>
+                                            <option value="1674515823022049397">橘子海（蓝色极简）</option>
+                                            <option value="3494953668847862107">唱片（黑胶唱片）</option>
+                                            <option value="3406680456885698628">星辰炒漫（暖金林间）</option>
+                                        </select>
+                                    </div>
+
                                     <!-- 先缓存再投送 -->
                                     <div
                                         class="t-bg-panel rounded-xl border t-border-main p-4 flex items-center justify-between">

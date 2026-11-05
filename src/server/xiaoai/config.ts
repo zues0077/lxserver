@@ -70,6 +70,12 @@ export interface XiaoAiConfig {
    * 离线或查询失败时用这个值兜底，避免界面永远显示 HTML 里写死的 50 那种假状态。
    */
   volume: number
+  /**
+   * 兜底封面用的曲库 audioID：曲库搜不到这首歌时，用它的封面当默认封面。
+   * 默认 `1732418460076477549`（Theme Of Loft）。设置里可换成曲库任意一首歌的封面
+   * （UI 提供若干预设；本质是"用哪首曲库歌的封面兜底"，不是上传自定义图）。
+   */
+  defaultCoverAudioId: string
   /** 选中的设备（支持多选同时播放） */
   selectedDeviceIds: string[]
   /** 上一次拉取到的设备列表 */
@@ -93,6 +99,7 @@ const DEFAULT_CONFIG: XiaoAiConfig = {
   songTransitionOffset: 0,
   fadeOutSec: 1.5,
   volume: 50,
+  defaultCoverAudioId: '1732418460076477549',
   selectedDeviceIds: [],
   devices: [],
   account: '',
@@ -155,6 +162,7 @@ export const loadConfig = (): XiaoAiConfig => {
       songTransitionOffset: clampNumber(raw.songTransitionOffset, -30, 30, 0),
       fadeOutSec: clampNumber(raw.fadeOutSec, 0, 6, 1.5),
       volume: Math.round(clampNumber(raw.volume, 0, 100, DEFAULT_CONFIG.volume)),
+      defaultCoverAudioId: String(raw.defaultCoverAudioId || DEFAULT_CONFIG.defaultCoverAudioId).trim(),
       disabledModels: Array.isArray(raw.disabledModels)
         ? raw.disabledModels.map((item: unknown) => String(item).trim().toUpperCase()).filter(Boolean)
         : [],
@@ -185,6 +193,10 @@ export const saveConfig = (patch: Partial<XiaoAiConfig>): XiaoAiConfig => {
       patch.volume !== undefined
         ? Math.round(clampNumber(patch.volume, 0, 100, prev.volume))
         : prev.volume,
+    defaultCoverAudioId:
+      patch.defaultCoverAudioId !== undefined
+        ? String(patch.defaultCoverAudioId).trim() || prev.defaultCoverAudioId
+        : prev.defaultCoverAudioId,
     disabledModels: patch.disabledModels
       ? patch.disabledModels.map(item => String(item).trim().toUpperCase()).filter(Boolean)
       : prev.disabledModels,

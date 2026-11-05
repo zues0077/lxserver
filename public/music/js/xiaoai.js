@@ -342,6 +342,9 @@
         const mp3Select = $('xiaoai-mp3-policy');
         const mp3Policy = cfg.mp3Policy || (cfg.unifyMp3 === false ? 'off' : 'auto');
         if (mp3Select) mp3Select.value = mp3Policy;
+        // 兜底封面（曲库没命中时用哪个 audioID 的封面）
+        const coverSelect = $('xiaoai-default-cover-select');
+        if (coverSelect) coverSelect.value = cfg.defaultCoverAudioId || '1732418460076477549';
         const mp3Hint = $('xiaoai-mp3-hint');
         if (mp3Hint) {
             if (cfg.ffmpegAvailable === false) {
@@ -1550,6 +1553,7 @@
             touchscreenLyrics: $('xiaoai-lyrics-toggle') ? !!$('xiaoai-lyrics-toggle').checked : false,
             cacheBeforePlay: $('xiaoai-cache-toggle') ? !!$('xiaoai-cache-toggle').checked : false,
             mp3Policy: $('xiaoai-mp3-policy') ? $('xiaoai-mp3-policy').value : 'auto',
+            defaultCoverAudioId: $('xiaoai-default-cover-select') ? $('xiaoai-default-cover-select').value : undefined,
             songTransitionOffset: Number($('xiaoai-transition-offset-input')?.value || 0),
             fadeOutSec: Number($('xiaoai-fadeout-input')?.value || 0),
         }),

@@ -12,6 +12,21 @@ import type { TokenInfo } from './auth'
 import { generateRequestId } from './crypto'
 import { encodeForm, httpRequest, parseJson } from './http'
 import { buildSearchQueries, pickMusicCandidate, resolveMatchTarget, type MusicCandidate } from './musicMatch'
+import { loadConfig } from './config'
+
+/**
+ * 播放时实际使用的「兜底封面 audioID」：优先取用户配置的 defaultCoverAudioId
+ * （曲库任意一首歌的封面），否则用内置 Theme Of Loft。
+ * 注意：`searchAudioId` 的「未命中」哨兵仍是 DEFAULT_MUSIC_AUDIO_ID，与此无关。
+ */
+const defaultCoverAudioId = (): string => {
+  try {
+    const v = String(loadConfig().defaultCoverAudioId || '').trim()
+    return v || DEFAULT_MUSIC_AUDIO_ID
+  } catch {
+    return DEFAULT_MUSIC_AUDIO_ID
+  }
+}
 
 /** 小爱设备 */
 export interface MinaDevice {
@@ -175,7 +190,8 @@ export class MinaClient {
 
     if (!useMusicApi || options.forceUrlMode) return playUrl()
 
-    const fallbackAudioId = options.audioId || DEFAULT_MUSIC_AUDIO_ID
+    const fallbackAudioId =
+      options.audioId && options.audioId !== DEFAULT_MUSIC_AUDIO_ID ? options.audioId : defaultCoverAudioId()
     /** 逐级回退过程中最后一次失败原因，全失败时带回去 */
     let lastReason = ''
 
@@ -217,7 +233,7 @@ export class MinaClient {
     return {
       ok: r.ok,
       via: 'player_play_music',
-      audioId: options.audioId || DEFAULT_MUSIC_AUDIO_ID,
+      audioId: options.audioId && options.audioId !== DEFAULT_MUSIC_AUDIO_ID ? options.audioId : defaultCoverAudioId(),
       error: r.ok ? undefined : r.reason,
     }
   }
@@ -244,7 +260,8 @@ export class MinaClient {
     _hardware = '',
     options: { keepLight?: boolean; audioId?: string; audioType?: 'MUSIC' | '' } = {},
   ): Promise<{ ok: boolean; reason: string }> {
-    const finalAudioId = options.audioId || DEFAULT_MUSIC_AUDIO_ID
+    const finalAudioId =
+      options.audioId && options.audioId !== DEFAULT_MUSIC_AUDIO_ID ? options.audioId : defaultCoverAudioId()
     const audioType = options.audioType !== undefined ? options.audioType : options.keepLight ? 'MUSIC' : ''
     const music = {
       payload: {
