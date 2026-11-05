@@ -250,8 +250,12 @@ export function shouldRouteToWorker(owner: string, id: string): boolean {
  * 预热让 worker 内的脚本 eval（实测可达 6s）提前在独立线程跑完，首次取链不必等启动；
  * 预热失败静默留痕，真正调用时由 tryWorkerCall 重试或按 fallbackToMain 回退。
  */
-export function markWorkerEligible(owner: string, id: string, info?: WorkerSourceInfo): void {
-    if (!isThrottled(owner, id)) return
+export function markWorkerEligible(owner: string, id: string, info?: WorkerSourceInfo, force = false): void {
+    // force=true 时无视「是否已降速」：单次同步块已经实测过门槛（见 userApi 的
+    // WORKER_PROMOTE_SYNC_MS），没必要再等 governor 攒到 2 次/2500ms 才动手 ——
+    // 等的这一段就是用户实际吃到的卡顿（246 实测：非常刀 5326ms 判降速 → 下一次巡检
+    // 才进 worker，中间又叠出一次 11888ms）。
+    if (!force && !isThrottled(owner, id)) return
     if (!workerPolicy.markEligible(owner, id)) return
     if (info) void getSourceWorker(info).ready.catch(() => { /* 调用时重试/回退 */ })
 }

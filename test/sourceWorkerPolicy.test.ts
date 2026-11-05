@@ -4,7 +4,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert'
-import { WorkerPolicy } from '../src/server/sourceWorkerHost'
+import { WorkerPolicy, workerPolicy, markWorkerEligible } from '../src/server/sourceWorkerHost'
 
 const baseCfg = (over: Record<string, any> = {}) => ({
     'customSource.governor.worker.enabled': true,
@@ -115,4 +115,34 @@ test('snapshot 可用于 /health 观测', () => {
     assert.deepEqual(p.snapshot().disabledKeys, ['b_2'])
     p.resetForTest()
     assert.deepEqual(p.snapshot(), { workerKeys: [], disabledKeys: [] })
+})
+
+/**
+ * 2026-11-06：单次同步块实测超门槛就提前进 worker。
+ *
+ * 246 实测：非常刀 单次同步块 5326ms 才判降速，而判完还要等下一次调用；
+ * 这一轮里它和西瓜聚合源、1010🎵音源 的同步块串成一次 11888ms 的停转。
+ * force 让「已经实测卡过」的源不必再等 governor 攒第 2 次。
+ */
+test('markWorkerEligible: force=true 时未降速也直接进 worker', () => {
+    const g: any = global as any
+    const prev = g.lx
+    g.lx = { config: baseCfg() }
+    try {
+        workerPolicy.resetForTest()
+        // 未降速 + 不强制 → 不进 worker（保持原有行为）
+        markWorkerEligible('u', 'slowcall', undefined, false)
+        assert.equal(workerPolicy.isWorkerSource('u', 'slowcall'), false)
+        // 强制 → 当场登记，下一次调用即走独立线程
+        markWorkerEligible('u', 'slowcall', undefined, true)
+        assert.equal(workerPolicy.isWorkerSource('u', 'slowcall'), true)
+        // 总开关关掉时 force 也不能绕过
+        g.lx = { config: baseCfg({ 'customSource.governor.worker.enabled': false }) }
+        workerPolicy.resetForTest()
+        markWorkerEligible('u', 'x', undefined, true)
+        assert.equal(workerPolicy.isWorkerSource('u', 'x'), false)
+    } finally {
+        workerPolicy.resetForTest()
+        g.lx = prev
+    }
 })

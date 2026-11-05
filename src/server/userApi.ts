@@ -219,6 +219,23 @@ const SLOW_TASK_HIT_WINDOW_MS = 30 * 60 * 1000
 const SLOW_TASK_HARD_MS = 2000
 
 /**
+ * 单次「脚本同步块」达到这个时长就直接把该源搬进独立线程（worker），
+ * 不必等 sourceGovernor 攒够 2 次/2500ms 才判降速。
+ *
+ * 实测依据（246，2026-11-06 01:15）：非常刀 单次同步块 5326ms → 判降速；
+ * 但判完还要等「下一次调用」才走 worker，而这一轮巡检里它和西瓜聚合源、
+ * 1010🎵音源 的响应接连回来，串行 dq 队列把三段同步块连成一次 **11888ms** 的主线程停转。
+ * 正常源的单次同步块都在几十毫秒（同轮 /health 里 lastLoadCostMs 7~203ms），
+ * 门槛设在 1.2s 不会误伤；真被搬走的源功能不受影响，只是换个线程跑。
+ * `CUSTOM_SOURCE_WORKER_PROMOTE_MS` 可调，设 0 关闭提前提升。
+ */
+const WORKER_PROMOTE_SYNC_MS = (() => {
+    const raw = Number(process.env.CUSTOM_SOURCE_WORKER_PROMOTE_MS)
+    if (Number.isFinite(raw) && raw >= 0) return Math.round(raw)
+    return 1200
+})()
+
+/**
  * 慢源熔断：脚本自身同步重活（体积闸拦不住的那一类）连续命中就自动停用。
  *
  * 背景（2026-11-04 实测）：「非常刀」「西瓜聚合源」单条响应稳定卡 4.8~5.6 秒，
@@ -745,13 +762,30 @@ async function createLxRequest(
         }
         if (tracked) noteRequest(owner, id, name)
 
+        /**
+         * inflight 记账必须与 noteRequest 严格配对，且只能减一次。
+         *
+         * 原来只在 handleResponse 里 noteCallback：脚本自己调 abort、或请求还在
+         * acquireRequestSlot 排队时源被卸载/禁用，needle 从未真正发出请求，
+         * handleResponse 永远不会来 —— inflight 只增不减。
+         * 246 实测（2026-11-06 01:24）Hei Music聚合源 requests 111 / callbacks 53，
+         * inflight 虚高 58，/health 里的「活跃音源/在飞请求」全部失真，
+         * 归因时会把一个根本没在跑的源算成嫌疑。
+         */
+        let inflightClosed = false
+        const closeInflightOnce = () => {
+            if (inflightClosed) return
+            inflightClosed = true
+            if (tracked) noteCallback(owner, id, name)
+        }
+
         const launch = () => {
             // 排队期间实例可能已被卸载（禁用/重载/隔离），此时发起请求会让回调
             // 写进已释放的 VM2 沙箱——实测会直接 SIGSEGV 崩掉整个进程
-            if (cancelled || isDisposed?.()) { releaseSlotOnce(); return }
+            if (cancelled || isDisposed?.()) { closeInflightOnce(); releaseSlotOnce(); return }
                 const handleResponse = (err: any, resp: any, body: any) => {
                     // 响应回来的时刻是卡顿归因的关键锚点，必须抢在任何同步处理之前记下
-                    if (tracked) noteCallback(owner, id, name)
+                    closeInflightOnce()
                     if (abortHolder.fn) pendingAborts?.delete(abortHolder.fn)
 
                     // 体积闸门：必须在 JSON.parse / decontextify 之前判，否则内存尖峰与同步阻塞
@@ -930,6 +964,8 @@ async function createLxRequest(
                 abortHolder.fn()
                 pendingAborts?.delete(abortHolder.fn)
             }
+            // 主动 abort 后 needle 可能不再回调错误，靠这里把 inflight 收口
+            closeInflightOnce()
             releaseSlotOnce()
         }
     }
@@ -1331,22 +1367,25 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                             // 慢网络不等于重脚本，用它只会把一堆正常源打成慢源。
                             const syncStartedAt = Date.now()
                             const pending = handler(inputData)
+                            const syncCost = Date.now() - syncStartedAt
                             noteScriptSyncCost(
                                 fullApiInfo.owner,
                                 apiInfo.id,
                                 fullApiInfo.name,
-                                Date.now() - syncStartedAt,
+                                syncCost,
                             )
                             // 一旦这次同步块把源判成降速，当场登记为 worker 常驻并预热。
                             // 不能等「下一次调用再用 shouldRouteToWorker 判定」：复检在循环开头
                             // 就跳过降速源，该源往往整轮只被调用一次，worker 永远等不到机会；
                             // governor TTL 过期后下一次巡检又会回到主线程卡十几秒。
+                            // 另外：单次同步块超过「提升阈值」就直接进 worker，不必等 governor 的
+                            // 2 次/2500ms 判降速 —— 那段时间里它还会在主线程再卡一遍。
                             markWorkerEligible(fullApiInfo.owner, apiInfo.id, {
                                 owner: fullApiInfo.owner,
                                 id: apiInfo.id,
                                 name: fullApiInfo.name,
                                 script: fullApiInfo.script,
-                            })
+                            }, syncCost >= WORKER_PROMOTE_SYNC_MS)
                             return decontextify(await pending)
                         },
                     )
