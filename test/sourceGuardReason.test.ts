@@ -38,6 +38,20 @@ test('describeIsolationReason：CPU 复检结论翻成人话，并保留数值�
   assert.match(text, /误判/)
 })
 
+/**
+ * 2026-11-06：旧文案只报「卸载后残留 CPU」，8 条隔离记录的说明全都写成
+ * 「卸载它之后 CPU 仍占 0.4%」，读起来像「它明明没占 CPU 却被关掉」，
+ * 用户据此判断为误判。新格式把 baseline / after / drop 三个数一起给出来。
+ */
+test('describeIsolationReason：新格式带出「从多少降到多少」，不再是只看残留', () => {
+  const text = describeIsolationReason('cpu_probe:drop=13.2,after=3.5,base=16.7')
+  assert.match(text, /16\.7%/)
+  assert.match(text, /3\.5%/)
+  assert.match(text, /降幅 13\.2%/)
+  assert.doesNotMatch(text, /仍占/)   // 旧文案的误导性措辞不能再出现
+  assert.match(text, /解除/)
+})
+
 test('describeIsolationReason：卡顿归因的毫秒数换成可读时长', () => {
   assert.match(describeIsolationReason('stall:1200ms'), /1\.2 秒/)
   assert.match(describeIsolationReason('stall:12000ms'), /12 秒/)

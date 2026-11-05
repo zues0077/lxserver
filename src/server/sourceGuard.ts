@@ -505,6 +505,13 @@ export function describeIsolationReason(reason: string): string {
         return `疑似空转：卸载它之后 CPU 仍占 ${cpu[1]}%（推断结论，可能误判）`
     }
 
+    // 新格式：cpu_probe:drop=13.2,after=3.5,base=16.7 —— 三个数一起给，便于复核误判
+    const cpuDetail = /^cpu_probe:drop=([\d.]+),after=([\d.]+),base=([\d.]+)$/.exec(raw)
+    if (cpuDetail) {
+        return `空闲 CPU 偏高：卸载它之后 CPU 从 ${cpuDetail[3]}% 降到 ${cpuDetail[2]}%`
+            + `（降幅 ${cpuDetail[1]}%，达判定门槛）；如仍怀疑误判，可在音源管理中解除`
+    }
+
     const stall = /^stall:(\d+)ms$/.exec(raw)
     if (stall) {
         const ms = Number(stall[1])
@@ -1092,6 +1099,22 @@ const runProbe = async (deps: GuardDeps, baseline: number): Promise<void> => {
         highStreak = 0
         return
     }
+    /**
+     * 宿主自己在跑批量动作（典型是音源巡检 sourceProbe）时不能做卸载复检。
+     *
+     * 判据是 `drop = baseline - after`：巡检本身把 baseline 抬起来，等它跑完 CPU 自然回落，
+     * 此时卸载**任意**一个源都会得到「明显降幅」，把无辜的音源判成热点。246 上现有 8 条
+     * `cpu_probe` 隔离记录的 reason 全是「卸载它之后 CPU 仍占 0.4%~10.3%」——卸载后残留
+     * 这么高本身就说明 baseline 被别的东西撑起来了（悬停测量污染），是误判的典型痕迹。
+     */
+    const hostActive = getActiveHostActivities()
+    const probeBusy = hostActive.find(h => h.kind === 'sourceProbe')
+    if (probeBusy) {
+        console.log(`[自检护栏] 音源巡检进行中（${Math.round(probeBusy.elapsedMs / 1000)}s），跳过本轮 CPU 复检`
+            + '（避免把巡检负载算到音源头上）')
+        highStreak = 0
+        return
+    }
     probing = true
     // 复检期间暂停常规采样，避免两套测量互相污染
     if (sampler) {
@@ -1139,7 +1162,10 @@ const runProbe = async (deps: GuardDeps, baseline: number): Promise<void> => {
             confirmed.push(ref.name)
             if (current.mode === 'isolate') {
                 const script = readSourceScript(ref)
-                const reason = `cpu_probe:${after.toFixed(1)}%`
+                // reason 里记全三个数：降幅 / 卸载后残留 / 探测前基线。
+                // 只记 after 会写成「卸载它之后 CPU 仍占 0.4%」，读起来像「它没占 CPU 却被判了」，
+                // 实际判据是降幅；三个数都给出来，用户自己能复核是不是误判。
+                const reason = `cpu_probe:drop=${drop.toFixed(1)},after=${after.toFixed(1)},base=${baseline.toFixed(1)}`
                 const record = recordIsolation(ref, script ? fingerprintOf(script) : '', 'A', reason, 'probe')
                 activeIsolations.set(recordKey(ref.owner, ref.id), record)
                 console.warn(`[自检护栏] ✓ 复检确认热点并已隔离: ${ref.name} (${ref.id})，卸载后 CPU ${after.toFixed(1)}%（基线 ${baseline.toFixed(1)}%）`)
