@@ -218,6 +218,18 @@ export const setStreamSentProbe = (fn: (() => void) | null) => {
 }
 
 /**
+ * 转码彻底失败（源音频损坏、ffmpeg 解码不出东西）时的回调。
+ *
+ * 这种流等于没内容：设备拿不到音频，会退回播小米曲库的占位曲（Theme Of Loft 72s 循环），
+ * 而前端只看 `playing=true` 会一直显示「播放中 + 进度不动」，用户完全无从判断。
+ * 通知上层让 `/status` 下发 `streamFailed`，前端据此提示并停守望（手册 P-1118）。
+ */
+let streamFailedProbe: (() => void) | null = null
+export const setStreamFailedProbe = (fn: (() => void) | null) => {
+  streamFailedProbe = fn
+}
+
+/**
  * 标记「这一路流又开了一轮请求」。
  *
  * 音箱播完一遍后会立刻重拉同一个 URL（songloft-plugin-miot 的 issue #437 记录过同一现象）。
@@ -580,6 +592,15 @@ const serveTranscodedMp3 = async (
       )
     } else {
       syncLog.warn(`[XiaoAi] mp3 流式转码中断 ${filename}：已发 ${sent}B ｜${outcome.error || '未知原因'}`)
+      // 只发出极少字节就中断 = 这首根本放不出来（实测：[aac] channel element 3.12 is not allocated）。
+      // 通知上层，让前端别再把它显示成「播放中」，而是明确提示失败。
+      if (sent < 64 * 1024) {
+        try {
+          streamFailedProbe?.()
+        } catch {
+          /* 探针异常不能影响收尾 */
+        }
+      }
     }
   }
   void finish()

@@ -52,6 +52,8 @@
          * 记下这个位置，恢复时走 /seek 从断点续播（手册 P-1116）。
          */
         pausePositionSec: 0,
+        /** 已经提示过「这一路流转码失败、放不出来」，避免每次采样都弹一次 */
+        streamFailedNoticed: false,
         lastVolume: 50,
         /** 当前这一路流从第几秒开始（拖动进度条后非 0）：设备上报的是流内位置，加上它才是曲内位置 */
         seekOffsetMs: 0,
@@ -82,6 +84,13 @@
         lastDeliveryAt: 0,
         /** 服务端解析出的本首真实时长（毫秒）；比歌曲元数据 interval 可靠，优先用它 */
         audioDurationMs: 0,
+        /**
+         * 设备上报的进度/时长（毫秒）最近一次采样值。
+         * 用途：投送后若服务端没给出时长、watchdog 也还没建立时间基准，进度条会算成 0 秒、
+         * 一直显示 00:00 不动（实际设备在正常播）。用设备上报值兜底让进度立刻跟上。
+         */
+        devicePositionMs: 0,
+        deviceDurationMs: 0,
     };
 
     const $ = id => document.getElementById(id);
@@ -281,7 +290,34 @@
         return Math.round(Number(state.lastVolume) || 0);
     };
 
+    /**
+     * 投送模式下强制静音本机 <audio>。
+     *
+     * 声音应该只从音箱出。但实测出现过「切歌后本机也出声」：某些路径（自动恢复播放、
+     * 提前预加载）会把这个 audio 拉回播放态。这里按路由状态统一兜一层静音，
+     * 只还原我们自己加的那次静音，不动用户手动点的静音。
+     */
+    let localMutedByCast = false;
+    const syncLocalMute = () => {
+        try {
+            if (typeof audio === 'undefined' || !audio) return;
+            if (state.target === 'xiaoai') {
+                if (!audio.muted) {
+                    audio.muted = true;
+                    localMutedByCast = true;
+                }
+            } else if (localMutedByCast) {
+                audio.muted = false;
+                localMutedByCast = false;
+            }
+        } catch (e) {
+            /* 播放器未暴露 audio 时忽略 */
+        }
+    };
+
     const renderRouteBadge = () => {
+        // 每次路由渲染都同步一次本机静音态（投送=静音、本机=还原）
+        syncLocalMute();
         if (state.target !== 'xiaoai') {
             if (routeBadge.el && routeBadge.el.parentNode) routeBadge.el.parentNode.removeChild(routeBadge.el);
             routeBadge.el = null;
@@ -956,7 +992,11 @@
         const total = Number(state.trackDurationMs) > 0 ? Number(state.trackDurationMs) : 0;
         if (total > 0) return total;
         const streamed = Number(watch.audioDurationMs) > 0 ? Number(watch.audioDurationMs) : 0;
-        return streamed > 0 ? streamed + Number(state.seekOffsetMs || 0) : 0;
+        if (streamed > 0) return streamed + Number(state.seekOffsetMs || 0);
+        // 服务端没给出时长时用设备上报值兜底：否则 durationMs()=0，paintProgress 直接 return，
+        // 进度条永远不动（实际设备在正常播，表现为「播放栏无进度」）
+        const device = Number(watch.deviceDurationMs) > 0 ? Number(watch.deviceDurationMs) : 0;
+        return device > 0 ? device + Number(state.seekOffsetMs || 0) : 0;
     };
 
     /**
@@ -1190,6 +1230,20 @@
         const watchdog = window.XiaoAiWatchdog;
         if (!watchdog) return;
 
+        // 这一路流根本没内容（转码彻底失败，源音频损坏）：设备只会播小米占位曲。
+        // 不能继续显示「播放中 + 进度不动」，直接提示并停下守望，让用户自己换歌（手册 P-1118）。
+        if (sample.ok && sample.streamFailed === true && !state.streamFailedNoticed) {
+            state.streamFailedNoticed = true;
+            stopWatch();
+            updatePlayButtonSafe(false);
+            setWatchHint('投送失败：这首歌的音源已损坏（转码失败），音箱没有收到音频');
+            if (typeof setPlayerStatus === 'function') setPlayerStatus('投送失败：音源损坏', false);
+            if (typeof window.showToast === 'function') {
+                window.showToast('error', '这首歌放不出来（音源损坏），请换一首或换个音源', 7000);
+            }
+            return;
+        }
+
         // 切歌提前量偏移由用户在设置里调（秒 → 毫秒），叠加在服务端实测的自适应提前量上
         const offsetSec = Number(state.config && state.config.songTransitionOffset);
         const decision = watchdog.evaluate(watch.state, sample, {
@@ -1249,6 +1303,10 @@
     /** 本首已播时长（毫秒）：有 playingSince 用它，否则退回「投送至今」 */
     const watchElapsedMs = () => {
         const state = watch.state;
+        // 设备已经上报过位置就跟着它走：首次采样前/状态机未建立基准时，进度条否则会一直停在 00:00
+        if (Number(watch.devicePositionMs) > 0) {
+            if (!state || !state.playingSince) return Number(watch.devicePositionMs);
+        }
         if (!state) return 0;
         if (state.playingSince) return Math.max(0, Date.now() - state.playingSince);
         const startedAt = Number(state.startedAt);
@@ -1276,6 +1334,10 @@
         try {
             const data = await request(`/status?deviceId=${encodeURIComponent(watch.deviceId)}`);
             const deviceDuration = Number(data.durationMs) > 0 ? Number(data.durationMs) : 0;
+            // 记下设备上报值：服务端时长缺失 / 状态机还没建立基准时，进度条靠它兜底，
+            // 否则会一直显示 00:00 不动（实际设备在正常播）
+            watch.devicePositionMs = Number(data.positionMs) > 0 ? Number(data.positionMs) : 0;
+            if (deviceDuration > 0) watch.deviceDurationMs = deviceDuration;
             // 走 player_play_music 的机型，上报的时长取的是云端曲目元数据，未必是我们推的这首；
             // 歌曲元数据里的 interval 才是这次真正在放的音频长度，所以优先用它。
             const metaDuration = parseIntervalMs(watch.song && watch.song.interval);
@@ -1308,6 +1370,9 @@
                 // 拉流守门正在进行中（曲库 VIP 版不可播 → 服务端自动改直链重发）：
                 // 这段时间设备短暂无进度/暂停是正常协商期，watchdog 据此不误判「放完了」跳歌。
                 guardBusy: data.streamGuardBusy === true,
+                // 这一路流转码彻底失败（源音频损坏）：设备只会播占位曲，
+                // 不能继续当成「播放中」糊着（手册 P-1118）
+                streamFailed: data.streamFailed === true,
                 userPaused: !!state.remotePaused,
             };
             // 版权闸门提示：unplayableCode=2 时结合「是否已拉流」判断到底有没有声音
@@ -1430,6 +1495,9 @@
         // 同时作废上一首的断点续播位置（P-1116），否则「暂停 A → 换歌 B → 点播放」会拿 A 的位置去续 B。
         state.seekOffsetMs = 0;
         state.pausePositionSec = 0;
+        state.streamFailedNoticed = false;
+        watch.devicePositionMs = 0;
+        watch.deviceDurationMs = 0;
         if (typeof paintProgress === 'function') paintProgress(0);
         // 投送到音箱时停掉浏览器本地播放，避免两边同时出声
         try {

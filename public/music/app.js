@@ -102,7 +102,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // Settings & Batch Selection
 const DEFAULT_SETTINGS = {
     itemsPerPage: 20, // Default 20 items per page, can be 'all'
-    defaultEntry: 'favorites', // 默认入口: 'search' | 'songlist' | 'leaderboard' | 'favorites' | 'localmusic'
+    defaultEntry: 'search', // 默认入口: 'search' | 'songlist' | 'leaderboard' | 'favorites' | 'localmusic'
     preferredQuality: 'flac', // 默认音质偏好
     enablePublicSources: true, // 是否显示公开源
     enableProxyPlayback: false, // 播放音乐代理
@@ -1679,7 +1679,17 @@ function startDragging(e, type) {
     handleDragMove(e);
 }
 
+let lastDragStopAt = 0; // touchend / mouseup 双触发去重
 function stopDragging() {
+    // 触屏设备上一次拖动常同时触发 touchend + 合成 mouseup：第二次进来时
+    // dragPercentage 可能已被后续 mousemove 改成 0，会多发一次 seek(0) 把歌打回开头
+    // （表现为「拉到底又从头播、于是不自动切歌」，手册 P-1118）。300ms 内只认第一次。
+    const nowStop = Date.now();
+    if (nowStop - lastDragStopAt < 300) {
+        isDragging = null;
+        return;
+    }
+    lastDragStopAt = nowStop;
     if (isDragging === 'progress' && Number.isFinite(dragPercentage)) {
         if (isRoutingToXiaoAi()) {
             // 投送模式：改 audio.currentTime 对音箱没有任何作用（audio 已 pause），
@@ -1687,7 +1697,14 @@ function stopDragging() {
             // 所以只在松手时发一次，拖动过程中一次都不发。
             const duration = uiDurationSec();
             if (duration > 0 && typeof window.XiaoAi.seek === 'function') {
-                void window.XiaoAi.seek(Math.max(0, Math.min(1, dragPercentage)) * duration);
+                const targetSec = Math.max(0, Math.min(1, dragPercentage)) * duration;
+                // 诊断：记录本次松手的三个关键值。复现「拉到底却跳回 0s」时一眼能看出
+                // 是拖动比例异常（dragPct≈0）还是时长异常（duration≈0），不用再猜。
+                console.info(
+                    `[小爱] 进度条松手 → seek ${Math.round(targetSec)}s`
+                    + `（dragPct=${dragPercentage.toFixed(3)}｜duration=${Math.round(duration)}s）`,
+                );
+                void window.XiaoAi.seek(targetSec);
             }
         } else if (Math.abs(dragPercentage - lastSeekPct) > 0.001) {
             // 只有当最终位置与上次 seek 的位置差异较大时，才执行最后一次 seek
@@ -15441,12 +15458,17 @@ async function renderCustomSources() {
 
             // 平台级关闭的汇总：徽标只是划线，数量多了不容易一眼看出关了几个
             const platformOffText = (() => {
-                const off = (disabledSources || []).filter(s => {
-                    const info = { kg: '酷狗', kw: '酷我', tx: 'QQ', wy: '网易', mg: '咪咕' }[s];
-                    return !!info;
-                });
+                const PLATFORM_NAMES = { kg: '酷狗', kw: '酷我', tx: 'QQ', wy: '网易', mg: '咪咕' };
+                const ALL_PLATFORMS = Object.keys(PLATFORM_NAMES);
+                const off = (disabledSources || []).filter(s => !!PLATFORM_NAMES[s]);
                 if (!off.length) return '';
-                const names = off.map(s => ({ kg: '酷狗', kw: '酷我', tx: 'QQ', wy: '网易', mg: '咪咕' }[s])).join('、');
+                const names = off.map(s => PLATFORM_NAMES[s]).join('、');
+                // 5 个平台全被关：源本身仍是「已启用」，但已经不会参与任何取链，
+                // 只写「已启用」会让人以为它还能用。这里单独醒目提示（不改源状态，也不删源）。
+                if (off.length >= ALL_PLATFORMS.length) {
+                    return `<span class="text-[9px] md:text-[10px] text-red-600 dark:text-red-400 font-medium whitespace-nowrap"
+                            title="该音源的 5 个平台全部被关闭（多为巡检判定平台不可用后自动关闭）。源与配置仍保留，平台恢复后巡检会自动重新开启；如需立刻恢复可点右侧「已启用」进入源设置手动打开平台。"><i class="fas fa-ban mr-1"></i>全部平台已关闭（${names}）· 当前不参与取链</span>`;
+                }
                 return `<span class="text-[9px] md:text-[10px] text-amber-600 dark:text-amber-400 whitespace-nowrap"
                         title="这些平台已在此音源中关闭，不会把取链请求交给它">· 已关 ${off.length} 个平台（${names}）</span>`;
             })();

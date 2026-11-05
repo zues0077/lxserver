@@ -79,6 +79,7 @@ import {
   markDrainOnly,
   setReplayBlockedHook,
   setStreamSentProbe,
+  setStreamFailedProbe,
   sleepTimer,
   mp3CachePath,
   isMp3File,
@@ -363,6 +364,8 @@ let lastXiaoAiPushAt = 0
 let lastXiaoAiStreamAt = 0
 /** 服务端最近一次向下游（音箱）写出数据的时刻：/status 据此判断「是否仍在推流」（手册 P-1110） */
 let lastXiaoAiSentAt = 0
+/** 最近一次「转码彻底失败」的时刻：源音频损坏导致这路流等于没内容（手册 P-1118） */
+let lastXiaoAiStreamFailedAt = 0
 /**
  * 拉流守门最后一次实际执行的补救动作（'' / placeholder / url）。
  *
@@ -1316,6 +1319,11 @@ xiaoAiService.setStreamPulledProbe(() => lastXiaoAiStreamAt > lastXiaoAiPushAt)
 // 每次向下游写出数据都刷新「最近推流时刻」：/status 据此暴露 serverSending（手册 P-1110）
 setStreamSentProbe(() => {
   lastXiaoAiSentAt = Date.now()
+})
+// 转码彻底失败（源音频损坏）时记一笔：/status 据此暴露 streamFailed，
+// 前端才能提示「这首歌放不出来」而不是假装还在播（手册 P-1118）
+setStreamFailedProbe(() => {
+  lastXiaoAiStreamFailedAt = Date.now()
 })
 
 /**
@@ -9177,6 +9185,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 // 设备上报「无进度 / 未播放」而服务端仍在发流时，多半是缓冲协商的瞬断，
                 // 前端 watchdog 据此不要误判「放完了」→ 自动跳歌（手册 P-1110）。
                 serverSending: Date.now() - lastXiaoAiSentAt < 5000,
+                // 这路流转码彻底失败（源音频损坏）：设备拿不到音频只会播占位曲，
+                // 前端据此提示失败并停守望，别再显示成「播放中 + 进度不动」（手册 P-1118）
+                streamFailed: Date.now() - lastXiaoAiStreamFailedAt < 60000,
                 // 设备在线：status=-1 表示读不到播放状态（设备离线 / 登录态失效）。
                 // 新增字段不影响既有语义，老前端忽略即可。
                 online: Number((result as any)?.status) >= 0,
