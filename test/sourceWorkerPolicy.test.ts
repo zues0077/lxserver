@@ -79,6 +79,34 @@ test('配置读取：老配置缺键时按默认 true', () => {
     assert.equal(p.shouldUse('u', 'x'), true)
 })
 
+test('markEligible: 降速当场登记，开关关闭/已熔断时不登记', () => {
+    const p = new WorkerPolicy(() => baseCfg(), () => false)
+    assert.equal(p.markEligible('u', 'slow'), true)
+    assert.equal(p.markEligible('u', 'slow'), false) // 幂等
+    assert.equal(p.isWorkerSource('u', 'slow'), true)
+
+    const off = new WorkerPolicy(() => baseCfg({ 'customSource.governor.worker.enabled': false }), () => true)
+    assert.equal(off.markEligible('u', 'x'), false)
+    assert.equal(off.isWorkerSource('u', 'x'), false)
+
+    const burnt = new WorkerPolicy(() => baseCfg(), () => true)
+    burnt.noteFailure('u', 'y'); burnt.noteFailure('u', 'y')
+    assert.equal(burnt.markEligible('u', 'y'), false)
+})
+
+test('test-r44 回归：降速后无后续调用、governor TTL 过期，worker 仍常驻', () => {
+    let throttled = false
+    const p = new WorkerPolicy(() => baseCfg(), () => throttled)
+    // 模拟一次主线程同步块把源判成降速，随后立刻登记
+    throttled = true
+    p.markEligible('u', 'feidao')
+    // 30 分钟后 governor 的 throttle 过期（巡检又会带上该源）
+    throttled = false
+    assert.equal(p.shouldUse('u', 'feidao'), true)
+    assert.equal(p.isWorkerSource('u', 'feidao'), true)
+    // 且这次巡检调用会直接走 worker，不会再回主线程卡事件循环
+})
+
 test('snapshot 可用于 /health 观测', () => {
     const p = new WorkerPolicy(() => baseCfg(), () => true)
     p.shouldUse('a', '1'); p.shouldUse('b', '2')

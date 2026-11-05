@@ -11,7 +11,7 @@ import {
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure } from './sourceProbe'
 import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor } from './sourceGovernor'
-import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker } from './sourceWorkerHost'
+import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible } from './sourceWorkerHost'
 import { syncLog } from '../utils/log4js'
 
 /**
@@ -1337,6 +1337,16 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
                                 fullApiInfo.name,
                                 Date.now() - syncStartedAt,
                             )
+                            // 一旦这次同步块把源判成降速，当场登记为 worker 常驻并预热。
+                            // 不能等「下一次调用再用 shouldRouteToWorker 判定」：复检在循环开头
+                            // 就跳过降速源，该源往往整轮只被调用一次，worker 永远等不到机会；
+                            // governor TTL 过期后下一次巡检又会回到主线程卡十几秒。
+                            markWorkerEligible(fullApiInfo.owner, apiInfo.id, {
+                                owner: fullApiInfo.owner,
+                                id: apiInfo.id,
+                                name: fullApiInfo.name,
+                                script: fullApiInfo.script,
+                            })
                             return decontextify(await pending)
                         },
                     )

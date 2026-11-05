@@ -72,6 +72,21 @@ export class WorkerPolicy {
     isWorkerSource(owner: string, id: string): boolean { return this.workerKeys.has(keyOf(owner, id)) }
     isDisabled(owner: string, id: string): boolean { return this.disabledKeys.has(keyOf(owner, id)) }
 
+    /**
+     * 降速事件发生时**主动**登记，不依赖「降速后是否还有下一次调用」。
+     *
+     * test-r44 实机：非常刀在复检轮次中途被判降速，而复检在循环开头就跳过降速源、
+     * 该源整轮只被调用一次 → shouldRouteToWorker 永远没机会命中；governor 的 30 分钟
+     * TTL 一过期，下次巡检又回主线程卡 13s。必须在判降速的同一刻把 key 定下来。
+     */
+    markEligible(owner: string, id: string): boolean {
+        if (!this.enabled) return false
+        const key = keyOf(owner, id)
+        if (this.disabledKeys.has(key) || this.workerKeys.has(key)) return false
+        this.workerKeys.add(key)
+        return true
+    }
+
     /** 返回 true 表示已连续失败到阈值，该源本次进程内不再尝试 worker。 */
     noteFailure(owner: string, id: string): boolean {
         const key = keyOf(owner, id)
@@ -228,6 +243,17 @@ function buildWorkerData(info: WorkerSourceInfo): SourceWorkerData {
 /** callRequest 前置判定：命中时完全脱离 governor 的慢源互斥闸，让多个慢源真正并行。 */
 export function shouldRouteToWorker(owner: string, id: string): boolean {
     return workerPolicy.shouldUse(owner, id)
+}
+
+/**
+ * 脚本同步块记账后调用：governor 一旦判定降速，立刻登记为 worker 常驻并异步预热。
+ * 预热让 worker 内的脚本 eval（实测可达 6s）提前在独立线程跑完，首次取链不必等启动；
+ * 预热失败静默留痕，真正调用时由 tryWorkerCall 重试或按 fallbackToMain 回退。
+ */
+export function markWorkerEligible(owner: string, id: string, info?: WorkerSourceInfo): void {
+    if (!isThrottled(owner, id)) return
+    if (!workerPolicy.markEligible(owner, id)) return
+    if (info) void getSourceWorker(info).ready.catch(() => { /* 调用时重试/回退 */ })
 }
 
 /** 取（或懒创建）该源的 worker；脚本指纹变化时先销毁旧的再重建。 */
