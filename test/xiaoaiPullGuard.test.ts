@@ -16,6 +16,20 @@ const NORMAL_STATUS = {
   positionMs: 8000,
   raw: { play_song_detail: { audio_id: 'x', duration: 256000 } },
 }
+/** 曲库那版时长不对，但**不是** VIP 闸门（unplayableCode≠2）：占位重发有机会救回 */
+const SHORT_NOT_VIP = {
+  playing: true,
+  durationMs: 92055,
+  positionMs: 21000,
+  raw: { play_song_detail: { audio_id: 'A', duration: 92055 } },
+}
+/** 曲库明确判 VIP 不可播（unplayableCode=2），时长与本曲一致 → 应跳过占位直接纯直链 */
+const GATE_VIP = {
+  playing: true,
+  durationMs: 256000,
+  positionMs: 21000,
+  raw: { play_song_detail: { audio_id: 'B', duration: 256000, unplayableCode: 2 } },
+}
 
 const sample = (status: any, pulled: boolean, positionMs?: number) => {
   const s = sampleFromStatus(status, pulled)
@@ -83,13 +97,13 @@ test('已正常拉流：守门不动手', async () => {
   assert.deepEqual(retried, [])
 })
 
-test('未拉流且是曲库试听：先换默认封面，重发后拉到流就停在这一级', async () => {
+test('非 VIP 的曲库试听：先换默认封面，重发后拉到流就停在这一级', async () => {
   const retried: string[] = []
   let pulled = false
   const action = await runPullGuard({
     isPulled: () => pulled,
     isStale: () => false,
-    getStatus: async () => VIP_STATUS,
+    getStatus: async () => SHORT_NOT_VIP,
     expectedDurationMs: 256000,
     retry: async mode => {
       retried.push(mode)
@@ -102,11 +116,18 @@ test('未拉流且是曲库试听：先换默认封面，重发后拉到流就�
   assert.deepEqual(retried, ['placeholder'])
 })
 
-test('换默认封面仍不拉流：升级到纯直链 player_play_url', async () => {
+test('非 VIP 换默认封面仍不拉流：升级到纯直链 player_play_url', async () => {
   const retried: string[] = []
-  const action = await runGuard({ pulled: () => false, status: VIP_STATUS, retried })
+  const action = await runGuard({ pulled: () => false, status: SHORT_NOT_VIP, retried })
   assert.equal(action, 'url')
   assert.deepEqual(retried, ['placeholder', 'url'])
+})
+
+test('曲库判 VIP（unplayableCode=2）：跳过默认封面，直接纯直链（省一轮 ~5s）', async () => {
+  const retried: string[] = []
+  const action = await runGuard({ pulled: () => false, status: GATE_VIP, retried })
+  assert.equal(action, 'url')
+  assert.deepEqual(retried, ['url'])
 })
 
 test('状态正常（不是曲库试听）时不打扰：宁可等慢启动', async () => {

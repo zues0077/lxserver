@@ -147,16 +147,18 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
     }
   }
 
-  /** 返回 'preview' 表示拿到了「它在播另一版」的证据 */
-  const inspect = async (): Promise<'pulled' | 'preview' | 'unknown'> => {
-    if (deps.isStale()) return 'unknown'
-    if (deps.isPulled()) return 'pulled'
+  interface InspectResult { kind: 'pulled' | 'preview' | 'unknown'; reason: string; unplayableCode: number }
+  const unknown = (code = 0): InspectResult => ({ kind: 'unknown', reason: '', unplayableCode: code })
+  /** kind='preview' 表示拿到了「它在播另一版」的证据；unplayableCode 透传给调用方判 VIP */
+  const inspect = async (): Promise<InspectResult> => {
+    if (deps.isStale()) return unknown()
+    if (deps.isPulled()) return unknown()
     const first = await readSample()
-    if (!first) return 'unknown'
-    if (deps.isPulled()) return 'pulled'
+    if (!first) return unknown()
+    if (deps.isPulled()) return unknown()
     await sleep(gap)
-    if (deps.isStale()) return 'unknown'
-    if (deps.isPulled()) return 'pulled'
+    if (deps.isStale()) return unknown()
+    if (deps.isPulled()) return unknown()
     const second = (await readSample()) || first
     const signal = detectLibraryPreview(first, second, deps.expectedDurationMs, deps.expectedAudioId)
     if (!signal.hit) {
@@ -170,26 +172,32 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
           + ` audio=${second.audioId || '-'} 期望 audio=${deps.expectedAudioId || '-'}）`,
         )
       }
-      return 'unknown'
+      return unknown(second.unplayableCode)
     }
     deps.log(`[XiaoAi] 投送后未拉取本机流：${signal.reason}`)
-    return 'preview'
+    return { kind: 'preview', reason: signal.reason, unplayableCode: second.unplayableCode }
   }
 
   await sleep(probe)
-  if ((await inspect()) !== 'preview') return 'none'
+  const firstHit = await inspect()
+  if (firstHit.kind !== 'preview') return 'none'
 
-  deps.log('[XiaoAi] 换默认封面 audioID 重发（曲库那版不可播）')
-  try {
-    await deps.retry('placeholder')
-  } catch (error: any) {
-    deps.log(`[XiaoAi] 默认封面重发失败：${error?.message || error}`)
+  // 曲库明确判 VIP 不可播（unplayableCode=2）：换默认封面那级基本救不回（实测仍「投送未生效」），
+  // 直接跳过占位、走纯直链，省掉一轮 ~5s 协商（手册 P-1113 优化）。非 VIP 的其他证据仍走两级。
+  const vipGate = firstHit.unplayableCode === 2 || /unplayableCode=2/.test(firstHit.reason)
+  if (!vipGate) {
+    deps.log('[XiaoAi] 换默认封面 audioID 重发（曲库那版不可播）')
+    try {
+      await deps.retry('placeholder')
+    } catch (error: any) {
+      deps.log(`[XiaoAi] 默认封面重发失败：${error?.message || error}`)
+    }
+    await sleep(after)
+    if ((await inspect()).kind !== 'preview') return 'placeholder'
+    deps.log('[XiaoAi] 默认封面仍未拉流，改走 player_play_url 纯直链重发')
+  } else {
+    deps.log('[XiaoAi] 曲库判 VIP（unplayableCode=2），跳过默认封面直接 player_play_url 纯直链重发')
   }
-
-  await sleep(after)
-  if ((await inspect()) !== 'preview') return 'placeholder'
-
-  deps.log('[XiaoAi] 默认封面仍未拉流，改走 player_play_url 纯直链重发')
   try {
     await deps.retry('url')
   } catch (error: any) {
