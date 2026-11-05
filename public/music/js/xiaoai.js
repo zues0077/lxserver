@@ -72,6 +72,8 @@
         polling: false,
         prefetchedKey: '',
         lastAdvanceAt: 0,
+        /** 最近一次(重)投递时刻（ms）：投递后协商冷却期内即使设备无进度也绝不误判跳歌 */
+        lastDeliveryAt: 0,
         /** 服务端解析出的本首真实时长（毫秒）；比歌曲元数据 interval 可靠，优先用它 */
         audioDurationMs: 0,
     };
@@ -1185,6 +1187,10 @@
             // 不含设备上报的时长——抖音等源设备常报错误/0 时长，拿它当已知时长会误判曲尾。
             // 时长未知时护栏据此禁用按比值/墙钟的提前切歌，只认权威的「流被重拉」信号。
             knownDurationMs: Number(sample.knownDurationMs) > 0 ? Number(sample.knownDurationMs) : 0,
+            // 拉流守门进行中 / 刚(重)投递后的协商冷却：设备短暂无进度时绝不误判跳歌（手册 P-1110 续）
+            guardBusy: sample.guardBusy === true,
+            minDeliverySettleMs: 25000,
+            deliveryAt: watch.lastDeliveryAt || 0,
         });
         watch.state = decision.state;
 
@@ -1288,6 +1294,9 @@
                 // 服务端最近 5 秒是否仍在向下游写字节：推流进行中时，设备「无进度」多半是瞬断，
                 // 不让 watchdog 误判放完（手册 P-1110）
                 serverSending: data.serverSending === true,
+                // 拉流守门正在进行中（曲库 VIP 版不可播 → 服务端自动改直链重发）：
+                // 这段时间设备短暂无进度/暂停是正常协商期，watchdog 据此不误判「放完了」跳歌。
+                guardBusy: data.streamGuardBusy === true,
                 userPaused: !!state.remotePaused,
             };
             // 版权闸门提示：unplayableCode=2 时结合「是否已拉流」判断到底有没有声音
@@ -1402,6 +1411,9 @@
         const caller = explicitCaller || state.nextCaller || 'manual';
         state.nextCaller = '';
         console.info(`[小爱] 投送准备：${song && song.name}｜索引=${index}｜来源=${caller}`);
+        // 记录本次(重)投递时刻：拉流守门 fallback / URL 直链模式音箱缓冲都需要协商时间，
+        // watchdog 在冷却期内即使设备无进度也绝不误判「放完了」跳歌（手册 P-1110 续）。
+        watch.lastDeliveryAt = Date.now();
         // 切歌立刻把进度条 / 时间文案归零（手册 P-1110）：旧歌的位置会在 /play 异步返回前残留几秒，
         // 不立即归零会让客户端把上一首的进度（甚至误发成 seek）带进下一首。
         state.seekOffsetMs = 0;

@@ -372,6 +372,13 @@ let lastXiaoAiSentAt = 0
  */
 let lastXiaoAiGuardAction = ''
 /**
+ * 拉流守门（runPullGuard）正在进行中的截止时刻（ms）。
+ * 守门期间（曲库 VIP 版不可播 → 自动降级 placeholder → URL 直链重发）设备短暂无进度/暂停是
+ * 正常协商期，给前端一个明确信号，否则 watchdog 会误判 finished-without-progress 跳歌（手册 P-1110 续）。
+ * 窗口给足 35s（守门本身 ~10s + URL 直链模式音箱缓冲余量）。
+ */
+let xiaoAiGuardBusyUntil = 0
+/**
  * 最近一次 /play 解析好的音源与时长（拖动进度条时复用）。
  *
  * 小爱没有 seek 指令，跳转只能「产出一条从第 N 秒开头的流 + 重新投送一次」。
@@ -8819,6 +8826,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 const guardAudioId = guardDeviceId ? (result as any).audioIds?.[guardDeviceId] || '' : ''
                 if (guardDeviceId && guardAudioId) {
                   lastXiaoAiGuardAction = ''
+                  // 拉流守门进行中：给前端一个「正在 fallback 重发」的明确信号，
+                  // 否则 watchdog 会在此期间判 finished-without-progress 误跳歌（手册 P-1110 续）。
+                  xiaoAiGuardBusyUntil = Date.now() + 35000
                   void runPullGuard({
                     isPulled: () => lastXiaoAiStreamAt > pushAt,
                     // 期间切歌 / 拖动进度都会改写 lastXiaoAiPushAt，那就别插手新的一次投送
@@ -8841,9 +8851,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   })
                     .then(action => {
                       if (action !== 'none' && lastXiaoAiPushAt === pushAt) lastXiaoAiGuardAction = action
+                      xiaoAiGuardBusyUntil = 0
                     })
                     .catch(error => {
                       syncLog.warn(`[XiaoAi] 拉流守门异常：${error?.message || error}`)
+                      xiaoAiGuardBusyUntil = 0
                     })
                 }
               }
@@ -9156,6 +9168,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 // 拉流守门做过哪一级补救（'' / placeholder / url）：
                 // 非空说明「曲库那一版不可播，已自动改用直链重发」，前端据此解释封面变默认的原因
                 streamGuardAction: lastXiaoAiGuardAction,
+                // 拉流守门正在进行中（曲库 VIP 版不可播 → 自动改直链重发）：
+                // 这段时间设备短暂无进度/暂停是正常协商期，前端 watchdog 据此不要误判「放完了」跳歌。
+                streamGuardBusy: Date.now() < xiaoAiGuardBusyUntil,
               })
             })
             .catch((error: any) => failed(error, '查询小爱状态失败'))

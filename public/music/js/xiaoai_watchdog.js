@@ -109,6 +109,13 @@
          * 给个下限兜底：不到这个时间点的重拉一律视为播放中重连，忽略。
          */
         streamReplayMinPlayedMs: 20000,
+        /**
+         * 投送（含拉流守门 fallback）后的「协商冷却」：这段时间设备短暂无进度/暂停是正常现象
+         * （曲库 VIP 版被拦 → 服务端降级 placeholder → URL 直链重发，音箱还要缓冲），
+         * 绝不能让 watchdog 误判「放完了」跳歌。真正播完由 streamReplay 信号驱动（见上方）。
+         * 覆盖：守门全链路 ~10s + URL 直链模式音箱起播余量。
+         */
+        minDeliverySettleMs: 25000,
     };
 
     /**
@@ -207,7 +214,13 @@
                 state.durationMs > 0 && elapsed >= state.durationMs - lead - opts.positionDriftToleranceMs;
             const rewoundToStart = positionMs > 0 && positionMs < 3000 && elapsed > 15000;
             if (positionMs > 0 && !nearEnd && !rewoundToStart && positionMs + opts.positionDriftToleranceMs < elapsed) {
-                state.playingSince = now - positionMs;
+                // 防御：设备上报的 positionMs 单位错乱（把秒当毫秒、或反过来）会算出
+                // 90:02 / 05:20 这种夸张的「流内位置」。真实流内位置绝不可能超过本曲时长，
+                // 超过就是脏数据，跳过重锚（否则 playingSince 被拉到很久以前，进度条错乱）。
+                const knownDur = state.durationMs > 0 ? state.durationMs : (Number(opts.knownDurationMs) || 0);
+                if (knownDur <= 0 || positionMs <= knownDur + opts.positionDriftToleranceMs) {
+                    state.playingSince = now - positionMs;
+                }
             }
 
             state.phase = 'playing';
@@ -268,16 +281,25 @@
         if (hasRatio && ratio >= opts.endRatio) return done('advance', 'finished');
 
         // 6. 设备不上报进度：只能靠「持续停止」判断，门槛更保守
-        // 新增 serverSending 护栏（手册 P-1110）：服务端最近仍在向下游写字节（推流进行中）时，
-        // 设备「无进度 / 未播放」多半是缓冲协商的瞬断，不是真的放完了，本分支不成立 → 落到下方返回 'none'，
-        // 绝不自动跳歌。真正放完应由 streamReplay 信号驱动（见上方）。
+        // 三重护栏（手册 P-1110 续）：
+        //   - serverSending: 服务端最近仍在向下游写字节（推流进行中）；
+        //   - guardBusy: 拉流守门正在进行 fallback（曲库 VIP 版不可播 → 自动改直链重发）；
+        //   - deliveryAt: 刚（重）投递不久，仍在协商冷却内。
+        // 三者任一为真都说明设备「无进度/未播放」是正常协商期，绝不自动跳歌；
+        // 真正放完应由 streamReplay 信号驱动（见上方）。
         if (
             sample.hasProgress !== true &&
             sample.serverSending !== true &&
-            now - state.idleSince >= opts.idleConfirmMs &&
-            now - state.lastPlayingAt >= opts.idleConfirmMinPlayMs
+            sample.guardBusy !== true
         ) {
-            return done('advance', 'finished-without-progress');
+            const settleMs = Number(opts.minDeliverySettleMs) || 0;
+            const deliveryAt = Number(opts.deliveryAt) || 0;
+            if (deliveryAt > 0 && now - deliveryAt < settleMs) {
+                return done('none', 'delivery-settling');
+            }
+            if (now - state.idleSince >= opts.idleConfirmMs && now - state.lastPlayingAt >= opts.idleConfirmMinPlayMs) {
+                return done('advance', 'finished-without-progress');
+            }
         }
 
         // 7. 长时间不播（外部暂停/打断后无人恢复）→ 收工
