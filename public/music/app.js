@@ -6109,6 +6109,81 @@ function getSongDurationDiff(item, song) {
 }
 
 /**
+ * 换源第 0 档：本地已有这首歌（**任意平台**）就直接播本地文件。
+ *
+ * 之前缓存索引的 key 是 `source_原生ID`（fileCache.normalizeSongId），跨平台必然查不到：
+ * 「网易下过、现在从汽水歌单点」照样要全网搜一遍再取链（实测 4~7 秒），而文件其实就在硬盘上。
+ *
+ * 匹配复用换源同一套规则，不另起一套：
+ *   getSongMatchScore（歌名/歌手/时长）≥ 12，且不是版本词（Live/伴奏/翻唱/remix…）。
+ * 命中后拿**该条目自己的 source+id** 去 /api/music/cache/check 取真实地址 ——
+ * 那是索引里真实存在的 key，必定命中，还能拿到服务端确认过的音质和所在目录。
+ */
+async function pickLocalCachedCandidate(song) {
+    if (!song || !song.name || !song.singer) return null;
+    if (!window.ServerFileState || typeof window.ServerFileState.all !== 'function') return null;
+
+    let entries = [];
+    try {
+        await window.ServerFileState.ensure();
+        entries = window.ServerFileState.all();
+    } catch (e) {
+        return null;
+    }
+    if (!entries.length) return null;
+
+    let best = null;
+    let bestScore = 0;
+    for (const item of entries) {
+        const candidate = {
+            id: item.songmid || item.id,
+            songmid: item.songmid,
+            source: item.source,
+            name: item.name,
+            singer: item.singer,
+            interval: item.interval,
+        };
+        const score = getSongMatchScore(candidate, song);
+        if (score < 12) continue;                                // 与 rankSourceCandidates 同一门槛
+        if (isVersionMismatch(item.name, song.name)) continue;    // 本地是 Live/伴奏，网上点的是原曲
+        // 同分时下载目录优先（不会被清理），其次保持先出现的
+        const better = score > bestScore
+            || (score === bestScore && best && item.folder === 'music' && best.folder !== 'music');
+        if (better) { best = item; bestScore = score; }
+    }
+    if (!best) return null;
+
+    try {
+        const key = best.songmid || best.id;
+        const hit = await checkServerCache(
+            { id: key, songmid: key, songId: key, source: best.source, name: best.name, singer: best.singer },
+            best.quality,
+        );
+        if (!hit || !hit.exists || hit.isCollision || !hit.url) return null;
+        const actualQuality = hit.quality || best.quality;
+        console.log(`[AutoSource] 本地已有：${best.name} - ${best.singer}（${best.source}/${actualQuality}，${hit.folder || best.folder}）`);
+        return {
+            ...song,
+            id: key,
+            songmid: key,
+            source: best.source,
+            name: best.name,
+            singer: best.singer,
+            interval: best.interval || song.interval,
+            quality: actualQuality,
+            isLocal: true,
+            url: hit.url,
+            _matchScore: bestScore,
+            _tier: 0,
+            _localHit: true,
+        };
+    } catch (e) {
+        console.warn('[AutoSource] 本地命中校验失败:', e && e.message);
+        return null;
+    }
+}
+
+/**
  * 跨平台寻找相同歌曲的匹配逻辑
  * 基本规则：歌名+歌手+时长匹配
  */
@@ -6119,6 +6194,17 @@ async function findOtherSourceMatch(song, isSilent = false) {
 
 async function findOtherSourceMatches(song, isSilent = false, options = {}) {
     if (!song.name || !song.singer) return [];
+
+    // 第 0 档：本地已有同一首歌（任意平台）→ 直接给本地候选，省掉全网搜索 + 取链。
+    // 只在「换源 / 播放恢复」流程里走这里（正常播放的 fetchSongUrl 有自己的同平台缓存检查）。
+    // skipLocal 由调用方在「本地候选已经试过并且失败」时置真，避免同一条本地文件反复顶上来。
+    if (!options.skipLocal) {
+        const localHit = await pickLocalCachedCandidate(song);
+        if (localHit) {
+            if (!isSilent) showInfo('本地已有这首歌，直接播放');
+            return [localHit];
+        }
+    }
 
     try {
         // 1. 获取当前自定义源支持解析的平台（支持的平台）
@@ -6208,6 +6294,13 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
             console.log(`[AutoSource] 复用聚合搜索缓存 ${cachedAll.length} 条，跳过 ${coveredSources.size} 个平台的重复搜索`);
         }
 
+        // B站 / 汽水匿名的搜索**与五平台同时发起，但采用顺序完全不变**：
+        // 只有前面各档全 0 匹配时才用它们的结果。服务端小爱投送早就这么做了 ——
+        // 原来串行去搜 B站，五平台 2~6 秒 + B站 再 1 秒，BV 号到手时换源时间片已经用完。
+        // 这两档本来就只在「哪个平台都没有」时才被采用，提前搜不会改变最终选源结果，只省等待。
+        const biliPromise = fallbackSources.length ? Promise.all(fallbackSources.map(searchOne)) : null;
+        const anonPromise = anonymousOnlySources.length ? Promise.all(anonymousOnlySources.map(searchOne)) : null;
+
         // 一级：常规平台并发搜（缓存已覆盖的平台跳过）；一个都没命中才进下一级。
         // B站（视频音轨）放最后：一是它有 412 风控，没必要每次换源都多打一次；
         // 二是视频音轨经常带对白/解说，能不用就不用。
@@ -6229,7 +6322,7 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
         if (matches.length === 0 && (fallbackSources.length > 0 || cachedVideo.length > 0)) {
             console.log(`[AutoSource] 仍未匹配，尝试直连音源兜底: ${fallbackSources.join(',') || '缓存'}`);
             if (!isSilent && fallbackSources.length > 0) showInfo('仍在尝试 B站...');
-            const fallbackResults = (await Promise.all(fallbackSources.map(searchOne))).flat();
+            const fallbackResults = biliPromise ? (await biliPromise).flat() : [];
             matches = rankSourceCandidates([...cachedVideo, ...fallbackResults], song, { memberSources });
         }
 
@@ -6238,7 +6331,7 @@ async function findOtherSourceMatches(song, isSilent = false, options = {}) {
         if (matches.length === 0 && anonymousOnlySources.length > 0) {
             console.log(`[AutoSource] 前面各档全未命中，最后尝试匿名通道: ${anonymousOnlySources.join(',')}`);
             if (!isSilent) showInfo('最后尝试汽水匿名通道（可能仅 60 秒试听）...');
-            const anonResults = (await Promise.all(anonymousOnlySources.map(searchOne))).flat();
+            const anonResults = anonPromise ? (await anonPromise).flat() : [];
             const anonCached = cachedAll.filter(c => anonymousOnlySources.includes(c.source));
             matches = rankSourceCandidates([...anonCached, ...anonResults], song, { memberSources });
         }
@@ -6286,6 +6379,20 @@ function safeHostOf(url) {
     try { return new URL(url, window.location.href).hostname.toLowerCase(); } catch (_) { return ''; }
 }
 
+/**
+ * 已知「直接连不上」的域名 → 记忆过期时间（会话级，刷新即清空）。
+ *
+ * 网易/QQ 的 CDN 域名永远不返回 Access-Control-Allow-Origin，浏览器必然拦下探测 ——
+ * 同一个域名每播一首歌都重探一遍，等于每首歌白花一个 RTT，还要在控制台刷两条红色跨域错误
+ * （实时观察：播 40 首就是 79 条 error，全来自这里）。
+ * 失败过就记住，30 分钟内直接走服务端回源；探测一旦成功会立刻撤销记忆。
+ */
+const proxyProbeBlockedHosts = new Map();
+const PROXY_PROBE_MEMORY_MS = 30 * 60 * 1000;
+function rememberProxyProbeBlocked(host) {
+    if (host) proxyProbeBlockedHosts.set(host, Date.now() + PROXY_PROBE_MEMORY_MS);
+}
+
 async function applyAutoProxy(url, song) {
     if (!url) return url;
 
@@ -6323,28 +6430,39 @@ async function applyAutoProxy(url, song) {
         // 探测流程：检测该 URL 是否能被当前浏览器直接访问
         // 如果是 HTTPS 环境下的 HTTP 链接，先尝试升级 https 探测，否则直接探测原链接
         const probeUrl = (isHttpsEnv && isHttpLink) ? url.replace('http://', 'https://') : url;
+        const probeHost = safeHostOf(probeUrl);
+        const knownBlocked = !!probeHost && (proxyProbeBlockedHosts.get(probeHost) || 0) > Date.now();
 
-        console.log(`[Proxy] Auto-proxy evaluating (CORS/Safety probe): ${song.name}`);
+        if (knownBlocked) {
+            // 同一域名刚探测失败过：不再重探，省一个 RTT，也不再刷控制台红字
+            console.log(`[Proxy] 域名 ${probeHost} 已知不能直连，跳过探测直接回源: ${song.name}`);
+        } else {
+            console.log(`[Proxy] Auto-proxy evaluating (CORS/Safety probe): ${song.name}`);
 
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 2000); // 2秒探测超时
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 2000); // 2秒探测超时
 
-            // 如果此处 fetch 报错（如 CORS policy block），则会进入 catch
-            const response = await fetch(probeUrl, {
-                method: 'GET',
-                headers: { 'Range': 'bytes=0-1' }, // 轻量探测
-                signal: controller.signal
-            });
-            clearTimeout(timeoutId);
+                // 如果此处 fetch 报错（如 CORS policy block），则会进入 catch
+                const response = await fetch(probeUrl, {
+                    method: 'GET',
+                    headers: { 'Range': 'bytes=0-1' }, // 轻量探测
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
 
-            if (response.ok) {
-                console.log(`[Proxy] Probe Success (Direct Play): ${song.name} via ${probeUrl}`);
-                return probeUrl;
+                if (response.ok) {
+                    // 之前失败过但这次通了（CDN 加了 ACAO / 换了落地域名）→ 撤销记忆
+                    if (probeHost) proxyProbeBlockedHosts.delete(probeHost);
+                    console.log(`[Proxy] Probe Success (Direct Play): ${song.name} via ${probeUrl}`);
+                    return probeUrl;
+                }
+                rememberProxyProbeBlocked(probeHost);
+            } catch (e) {
+                // 探测失败：可能是跨域拦截、证书错误、或者源不支持 HTTPS
+                rememberProxyProbeBlocked(probeHost);
+                console.warn(`[Proxy] Probe failed (CORS risk or unreachable), falling back to server proxy: ${song.name}`, e.message);
             }
-        } catch (e) {
-            // 探测失败：可能是跨域拦截、证书错误、或者源不支持 HTTPS
-            console.warn(`[Proxy] Probe failed (CORS risk or unreachable), falling back to server proxy: ${song.name}`, e.message);
         }
 
         // 回退逻辑：探测失败后根据设置启用自定义代理或服务器代理
@@ -7449,7 +7567,11 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
         }
     } else if (currentStep === 'switch_platform') {
         RecoveryToast.show(state.originalSong, '原平台所有音源均无法播放，正在全网搜索备选源...');
-        const matches = await findOtherSourceMatches(state.originalSong);
+        const matches = await findOtherSourceMatches(state.originalSong, false, {
+            // 本地已有这首歌时（第 0 档）会直接返回本地候选；它上次试过且失败的话就不再顶上来，
+            // 否则同一条本地文件会在恢复流程里反复循环。
+            skipLocal: state.triedPlatforms.includes('__local__'),
+        });
 
         if (state !== currentRecoveryState) {
             console.log('[Recovery] Aborted because user played another song during findOtherSourceMatches.');
@@ -7460,6 +7582,7 @@ async function runRecoveryFlow(error, savedResumeTime, state = currentRecoverySt
         // B站是视频音轨（常带对白/解说），只在其它平台都没有可用匹配时才兜底使用
         const matchedSong = available.find(s => s.source !== 'bili') || available.find(s => s.source === 'bili');
         if (matchedSong) {
+            if (matchedSong._localHit) state.triedPlatforms.push('__local__');
             // 播放失败后换平台成功：同步把队列/列表里那条换成新平台（仅会话内存，刷新即失效）
             commitSwitchedSong(state.originalSong, matchedSong);
             state.currentSong = matchedSong;

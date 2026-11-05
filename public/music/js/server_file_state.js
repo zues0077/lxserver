@@ -8,6 +8,8 @@ const LOCAL_FIRST_KEY = 'lx_search_local_first';
 
 window.ServerFileState = {
     bySong: new Map(),
+    /** 原始条目（保留 name/singer/interval/source/quality/folder），供跨平台「本地已有」匹配用 */
+    entries: [],
     lastLoad: 0,
     loading: null,
     unavailable: false,
@@ -53,6 +55,21 @@ window.ServerFileState = {
                     map.get(id)[quality] = { folder: item.folder === 'music' ? 'music' : 'cache', filename: item.filename };
                 }
                 this.bySong = map;
+                // 跨平台「本地已有」匹配要按 歌名+歌手+时长 判断，所以原始条目也留一份。
+                // 只留必要字段，避免把 135 条完整对象长期驻留内存。
+                this.entries = data.data
+                    .filter(item => item && item.filename && item.name && item.singer)
+                    .map(item => ({
+                        id: item.id || this.songKey(item),
+                        songmid: item.songmid || '',
+                        name: item.name,
+                        singer: item.singer,
+                        interval: item.interval || '',
+                        source: item.source || '',
+                        quality: item.quality || 'unknown',
+                        folder: item.folder === 'music' ? 'music' : 'cache',
+                        filename: item.filename,
+                    }));
                 this.unavailable = false;
                 this.lastLoad = Date.now();
                 return true;
@@ -101,6 +118,11 @@ window.ServerFileState = {
     hasLocal(song) {
         const folders = this.foldersFor(song);
         return !!folders && Object.keys(folders).length > 0;
+    },
+
+    /** 全量原始条目（未加载/不可用时返回空数组）。匹配逻辑交给调用方，避免两处各写一套规则 */
+    all() {
+        return this.unavailable ? [] : (this.entries || []);
     },
 
     /**
