@@ -907,6 +907,12 @@ const DOWNSTREAM_STALL_MS = 6000
 /** 上游连续这么久一个字节都没有（且不是我们主动暂停的）→ 判定回源死了 */
 const UPSTREAM_SILENCE_MS = 60 * 1000
 
+/** 实际使用的回源静默阈值：允许用环境变量调短（测试用，避免每个用例都等 60 秒） */
+const upstreamSilenceMs = (): number => {
+  const v = Number(process.env.XIAOAI_UPSTREAM_SILENCE_MS)
+  return Number.isFinite(v) && v > 0 ? v : UPSTREAM_SILENCE_MS
+}
+
 /**
  * 平滑下发的目标倍速。
  *
@@ -922,19 +928,26 @@ const PACING_LEAD_MS = 30000
 const PACING_LEAD_MAX_MS = 90000
 /** 队列剩余不足这么多字节，说明我们把音箱饿着了（节流压太狠），需要放宽 */
 const PACING_HUNGRY_BYTES = 64 * 1024
-/** 上游读完了但下游一直没读完（音箱不再读也不断开）：超过这么久强制收尾 */
-const DOWNSTREAM_IDLE_GIVEUP_MS = 3 * 60 * 1000
 
 /**
- * 「音箱不读了」的判定阈值（毫秒）。
+ * 远端源（回源直发）的「设备不读」硬上限。
  *
- * 判据是「多久没能往 res 写出数据」，不是「上游什么时候读完」——
- * 后者在本地缓存路径里是瞬间的事，早先按它计时会把正常播放的歌误杀
- * （表现为每首超过 180 秒的歌都在第 180 秒被掐断，尾巴丢掉 → 音箱重拉 → 回放）。
+ * 远端源和本地文件不一样：本地文件我们握着整首，设备暂停多久都能等；
+ * 远端源的上游是一次性 HTTP 流，早就读完了，剩余字节全在我们自己的内存队列里。
+ * 之前的实现过了 3 分钟就把 res 掐掉 —— 设备只是缓冲一下 / 用户暂停久一点，
+ * 回来时连接已经没了，只能等 watchdog 重投，听感就是「播到一半突然停了」（手册 P-1117）。
+ *
+ * 现在按本地文件同样的思路保留连接（数据就在内存里，等设备恢复读取即可），
+ * 只保留一个很宽松的硬上限，避免设备永久暂停时白占连接与缓冲。
  */
-const downstreamGiveupMs = (): number => {
-  const v = Number(process.env.XIAOAI_DOWNSTREAM_GIVEUP_MS)
-  return Number.isFinite(v) && v > 0 ? v : DOWNSTREAM_IDLE_GIVEUP_MS
+const DOWNSTREAM_REMOTE_IDLE_GIVEUP_MS = 15 * 60 * 1000
+
+const remoteDownstreamGiveupMs = (): number => {
+  // 兼容旧变量 XIAOAI_DOWNSTREAM_GIVEUP_MS（以前本地/远端共用同一阈值）
+  const v =
+    Number(process.env.XIAOAI_DOWNSTREAM_REMOTE_GIVEUP_MS) ||
+    Number(process.env.XIAOAI_DOWNSTREAM_GIVEUP_MS)
+  return Number.isFinite(v) && v > 0 ? v : DOWNSTREAM_REMOTE_IDLE_GIVEUP_MS
 }
 
 /**
@@ -996,11 +1009,18 @@ interface PumpStats {
  *     能让它一直保持有货、又不至于被灌爆。
  *  3. **两边要分开算**：读上游按「攒够多少」，写下游按「过了多少时间」。
  */
-const pumpDownstream = (
+export const pumpDownstream = (
   upstream: http.IncomingMessage,
   res: ServerResponse,
   durationMs = 0,
-  opts: { isLocalFile?: boolean } = {},
+  opts: {
+    isLocalFile?: boolean
+    /**
+     * 远端源专供：上游长时间静默（卡死）时，用 Range 从「已收到 N 字节」处重新拉一次。
+     * 返回 null 表示源站不支持续传（非 206）或请求失败，调用方按原逻辑放弃。
+     */
+    reopen?: (offsetBytes: number) => Promise<http.IncomingMessage | null>
+  } = {},
 ) =>
   new Promise<PumpStats>(resolve => {
     const startedAt = Date.now()
@@ -1024,6 +1044,12 @@ const pumpDownstream = (
     /** 待下发的数据（服务端自己的缓冲区，和 res 的写队列分开算） */
     const pending: Buffer[] = []
     let pendingBytes = 0
+    /** 当前在读的上游流：Range 续传成功后换成新的一条（手册 P-1117） */
+    let current: http.IncomingMessage = upstream
+    /** 已经绑定过监听的上游流，settle 时统一解绑（续传会留下多条） */
+    const sources: http.IncomingMessage[] = []
+    let reopenTries = 0
+    let reopening = false
 
     // 只有拿到「总字节 + 真实时长」才谈得上匀速喂；否则退回纯背压
     const totalBytes = Number(
@@ -1041,10 +1067,12 @@ const pumpDownstream = (
       settled = true
       clearInterval(monitor)
       if (paceTimer) clearTimeout(paceTimer)
-      upstream.removeListener('data', onData)
       res.removeListener('finish', onFinish)
       res.removeListener('drain', onDrain)
-      for (const event of ['end', 'close', 'error']) upstream.removeListener(event, onUpstreamGone)
+      for (const src of sources) {
+        src.removeListener('data', onData)
+        for (const event of ['end', 'close', 'error']) src.removeListener(event, onUpstreamGone)
+      }
       res.removeListener('close', settle)
       resolve({
         bytes,
@@ -1060,8 +1088,23 @@ const pumpDownstream = (
 
     const syncUpstreamPause = () => {
       // 自己的缓冲攒够了就暂停回源，消化一部分再放开；下游写阻塞由 pumpWrites 自己等
-      if (pausedByBuffer) upstream.pause()
-      else upstream.resume()
+      if (pausedByBuffer) current.pause()
+      else current.resume()
+    }
+
+    function attachSource(src: http.IncomingMessage) {
+      src.on('data', onData)
+      src.on('end', onUpstreamGone)
+      src.on('close', onUpstreamGone)
+      src.on('error', onUpstreamGone)
+      sources.push(src)
+    }
+
+    function detachSource(src: http.IncomingMessage) {
+      src.removeListener('data', onData)
+      for (const event of ['end', 'close', 'error']) src.removeListener(event, onUpstreamGone)
+      const i = sources.indexOf(src)
+      if (i >= 0) sources.splice(i, 1)
     }
 
     /** 尽力把缓冲里的数据按预算写出去；预算用完就定个闹钟，一有 drain 也立刻续上 */
@@ -1148,19 +1191,60 @@ const pumpDownstream = (
     }
     // 每秒看一眼：缓冲长期不消化 = 音箱那头没在读；上游长期不出数 = 回源死了
     const monitor = setInterval(() => {
-      if (!pausedByBuffer && !upstreamEnded && Date.now() - lastDataAt > UPSTREAM_SILENCE_MS) {
-        upstream.destroy(new Error('回源长时间无数据'))
+      if (!pausedByBuffer && !upstreamEnded && Date.now() - lastDataAt > upstreamSilenceMs()) {
+        // 手册 P-1117：上游静默 60s = 这条回源连接死了。远端源没有本地文件可退，
+        // 直接 destroy 会让整首停在中途（设备再拉还是同一段），所以先试 Range 续传。
+        if (opts.reopen && !reopening && reopenTries < 2 && !settled) {
+          reopening = true
+          reopenTries += 1
+          const fromOffset = bytes
+          syncLog.warn(`[XiaoAi] 回源静默 ${Math.round(upstreamSilenceMs() / 1000)}s，尝试从 ${fromOffset}B 续传（第 ${reopenTries} 次）`)
+          void opts
+            .reopen(fromOffset)
+            .then(next => {
+              reopening = false
+              if (settled) {
+                try {
+                  next?.destroy()
+                } catch {
+                  /* 已断开 */
+                }
+                return
+              }
+              if (!next) {
+                syncLog.warn('[XiaoAi] 续传不可用（源站不支持 Range 或请求失败），放弃本条流')
+                current.destroy(new Error('回源长时间无数据'))
+                return
+              }
+              detachSource(current)
+              current = next
+              attachSource(next)
+              lastDataAt = Date.now()
+              syncLog.warn(`[XiaoAi] 回源已从 ${fromOffset}B 续传成功`)
+              syncUpstreamPause()
+            })
+            .catch(() => {
+              reopening = false
+              current.destroy(new Error('回源长时间无数据'))
+            })
+          return
+        }
+        current.destroy(new Error('回源长时间无数据'))
         return
       }
       // 上游已经读完、还有数据没发出去，而我们已经很久没能写出任何东西
       // → 音箱那边不读了（或连接已经半死）：这时才放弃，别白占着连接。
       // 判据是「多久没写出数据」，而不是「上游什么时候读完」——
       // 后者在本地缓存路径里是瞬间的事，会把正常播放的歌误杀（曾导致每首 180s 被掐断）。
-      if (upstreamEnded && pendingBytes > 0 && Date.now() - lastConsumedAt > downstreamGiveupMs()) {
+      if (upstreamEnded && pendingBytes > 0) {
+        const idleMs = Date.now() - lastConsumedAt
         // 本地文件：我们握着整首，设备暂停 / 慢读**不该**掐断——否则设备被饿死 → 上报「无进度」
         // → 前端 watchdog 误判「放完了」→ 自动跳下一首（手册 P-1110）。
         // 保留连接，设备恢复读取时 continue 把剩余字节发完；设备彻底断开会由 res 'close' → settle 收尾。
         if (opts.isLocalFile) return
+        // 远端源同理（手册 P-1117）：上游早已读完，剩余字节就在我们自己的内存队列里，
+        // 设备暂停 / 缓冲恢复后还能接着读。原来 3 分钟就掐断连接，设备回来时流已经没了。
+        if (idleMs <= remoteDownstreamGiveupMs()) return
         try {
           res.destroy()
         } catch {
@@ -1181,10 +1265,7 @@ const pumpDownstream = (
       else maxStallMs = Math.max(maxStallMs, Date.now() - stalledSince)
     }, 1000)
 
-    upstream.on('data', onData)
-    upstream.on('end', onUpstreamGone)
-    upstream.on('close', onUpstreamGone)
-    upstream.on('error', onUpstreamGone)
+    attachSource(upstream)
     res.on('finish', onFinish)
     res.on('close', settle)
   })
@@ -1245,7 +1326,32 @@ const serveRemoteUrl = async (
     beginStreamRound(sid, fullSize, range)
 
     res.writeHead(status === 206 ? 206 : 200, outHeaders)
-    const stats = await pumpDownstream(upstream, res, Number(durationMs) || 0)
+    // 上游中途静默（回源连接被 CDN 掐了 / 卡死）时，用 Range 从已收到的位置续传一次。
+    // 只接受 206 且 content-range 起点正好是 offset 的响应，否则宁可不续——从头重放会毁掉整首。
+    const reopenUpstream = async (offset: number): Promise<http.IncomingMessage | null> => {
+      try {
+        const again = await fetchUpstream(upstreamUrl, `bytes=${offset}-`)
+        try {
+          again.request.setTimeout(0)
+        } catch {
+          /* 已结束的连接忽略 */
+        }
+        const cr = String(again.response.headers['content-range'] || '')
+        const start = Number(/bytes\s+(\d+)-/.exec(cr)?.[1])
+        if (again.status !== 206 || !Number.isFinite(start) || start !== offset) {
+          try {
+            again.response.destroy()
+          } catch {
+            /* 已断开 */
+          }
+          return null
+        }
+        return again.response
+      } catch {
+        return null
+      }
+    }
+    const stats = await pumpDownstream(upstream, res, Number(durationMs) || 0, { reopen: reopenUpstream })
     // Range 请求的这一段传完就结束，计数用上面算好的整首大小
     recordStreamRound(sid, stats.bytes, fullSize, pullsFromStart(range, fullSize))
     const stall = stats.maxStallMs >= DOWNSTREAM_STALL_MS ? ` ｜音箱侧最长停顿 ${Math.round(stats.maxStallMs / 1000)}s` : ''
