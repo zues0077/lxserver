@@ -46,6 +46,12 @@
         remotePaused: false,
         /** 暂停被降级为 stop（该机型不支持暂停），恢复时需重新投送 */
         remoteStopped: false,
+        /**
+         * 暂停时的曲内位置（秒，0 = 没有可续播的位置）。
+         * 该机型 pause 会降级成 stop、媒体上下文丢失，恢复时若直接重投只能整首从头；
+         * 记下这个位置，恢复时走 /seek 从断点续播（手册 P-1116）。
+         */
+        pausePositionSec: 0,
         lastVolume: 50,
         /** 当前这一路流从第几秒开始（拖动进度条后非 0）：设备上报的是流内位置，加上它才是曲内位置 */
         seekOffsetMs: 0,
@@ -1027,6 +1033,8 @@
                 if (wasPaused) {
                     // 保持原来的暂停态：重新投送会让音箱开始播，补一次 pause
                     setTimelineOffset(done);
+                    // 拖动后仍是暂停态，断点位置要跟着更新，否则恢复时会续到拖动前的位置（P-1116）
+                    state.pausePositionSec = done;
                     try {
                         await request('/pause', {});
                     } catch (e) {
@@ -1419,7 +1427,9 @@
         watch.lastDeliveryAt = Date.now();
         // 切歌立刻把进度条 / 时间文案归零（手册 P-1110）：旧歌的位置会在 /play 异步返回前残留几秒，
         // 不立即归零会让客户端把上一首的进度（甚至误发成 seek）带进下一首。
+        // 同时作废上一首的断点续播位置（P-1116），否则「暂停 A → 换歌 B → 点播放」会拿 A 的位置去续 B。
         state.seekOffsetMs = 0;
+        state.pausePositionSec = 0;
         if (typeof paintProgress === 'function') paintProgress(0);
         // 投送到音箱时停掉浏览器本地播放，避免两边同时出声
         try {
@@ -1474,7 +1484,7 @@
         try {
             if (state.remotePaused) {
                 if (state.remoteStopped) {
-                    // 该机型暂停被降级为 stop，媒体上下文已丢失，只能重新投送
+                    // 该机型暂停被降级为 stop，媒体上下文已丢失
                     const song = watch.song
                         || (typeof window.getCurrentSong === 'function' && window.getCurrentSong())
                         || (typeof currentPlaylist !== 'undefined' && currentIndex >= 0 ? currentPlaylist[currentIndex] : null);
@@ -1482,6 +1492,37 @@
                         setMessage('没有可恢复的歌曲，请重新选择播放', true);
                         return;
                     }
+                    // 断点续播（手册 P-1116）：媒体上下文没了，直接重投只能整首从头。
+                    // 这里复用 /seek——服务端用上次 /play 解析好的音源重签「从断点开头」的流，
+                    // 一次下发直接从暂停位置继续。音源已过期（期间换过别的歌）会返回 STALE_TRACK，回退整投。
+                    const resumeSec = Math.max(0, Math.floor(Number(state.pausePositionSec) || 0));
+                    if (resumeSec >= 3) {
+                        try {
+                            const ret = await request('/seek', {
+                                positionSec: resumeSec,
+                                expectSongName: String(song.name || ''),
+                            });
+                            if (ret && ret.success) {
+                                const done = Math.max(0, Math.floor(Number(ret.seekSec) || resumeSec));
+                                state.remoteStopped = false;
+                                state.pausePositionSec = 0;
+                                markRemotePaused(false);
+                                updatePlayButtonSafe(true);
+                                // 时间轴基准换成「从 done 秒开始」：watchdog 用墙钟算已播时长，
+                                // 不同步会把断点位置当成已播，立刻误判曲尾切歌（P-1110 同款坑）。
+                                setTimelineOffset(done);
+                                watch.song = song;
+                                startWatch(song, watch.audioDurationMs);
+                                paintProgress(done);
+                                if (typeof setPlayerStatus === 'function') setPlayerStatus('正在小爱音箱播放', true);
+                                setWatchHint(`已从 ${Math.floor(done / 60)}:${String(done % 60).padStart(2, '0')} 继续播放`);
+                                return;
+                            }
+                        } catch (e) {
+                            console.warn('[小爱] 断点续播失败，回退整首重投:', e.message);
+                        }
+                    }
+                    // 回退：没有断点 / 断点太靠前 / 音源已过期 → 整首重投
                     await playSongViaXiaoAi(
                         song,
                         typeof currentIndex === 'number' ? currentIndex : -1,
@@ -1502,13 +1543,20 @@
                 const states = Array.isArray(data && data.results) ? data.results.map(item => item.state) : [];
                 // 触屏/部分固件不支持 pause，服务端已降级为 stop，提示用户恢复时会重新投送
                 state.remoteStopped = states.length > 0 && states.every(item => item === 'stopped');
+                // 记下暂停位置供「断点续播」用（手册 P-1116）：pause 成功时设备停在原地，
+                // 降级成 stop 时媒体上下文丢失、恢复只能按这个位置重签流。
+                // 必须赶在 stopWatch() 之前算——它会停掉 ticker，墙钟基准随即失效。
+                state.pausePositionSec = Math.max(
+                    0,
+                    Math.floor((Number(state.seekOffsetMs) || 0) / 1000 + watchElapsedMs() / 1000),
+                );
                 markRemotePaused(true);
                 updatePlayButtonSafe(false);
                 stopWatch();
                 if (typeof setPlayerStatus === 'function') setPlayerStatus('已暂停', false);
                 setWatchHint(
                     state.remoteStopped
-                        ? '该机型不支持暂停，已停止播放（点播放会重新投送这首）'
+                        ? '该机型不支持暂停，已停止播放（点播放会从当前进度继续）'
                         : '已暂停，点播放恢复后继续自动续播'
                 );
             }

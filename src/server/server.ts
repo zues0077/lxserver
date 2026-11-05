@@ -8974,6 +8974,24 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 sendJson({ success: false, message: '还没有投送过歌曲，无法跳转' }, 400)
                 return
               }
+              // 断点续播（手册 P-1116）：前端「暂停→恢复」时复用本接口，用上次 /play 解析好的音源
+              // 重签「从断点开头」的流，一次下发直接从断点续播——避免整首从头重投。
+              // 但 lastXiaoAiTrack 可能是别的歌，必须由调用方声明期望歌名并校验，否则会投错歌。
+              const expectName = typeof payload.expectSongName === 'string' ? payload.expectSongName.trim() : ''
+              if (expectName) {
+                const trackName = String(track.songInfo.name || track.songInfo.title || '').trim()
+                if (trackName && trackName !== expectName) {
+                  sendJson(
+                    {
+                      success: false,
+                      code: 'STALE_TRACK',
+                      message: `缓存的音源是「${trackName}」，不是「${expectName}」，需要重新投送`,
+                    },
+                    409,
+                  )
+                  return
+                }
+              }
               const rawPosition = payload.positionSec
               // Number(null)=0、Number('')=0 都是「有限非负数」，会让 null/空串静默退化成「跳到 0 秒」
               const missingPosition = rawPosition === null || rawPosition === undefined || rawPosition === ''
@@ -9004,9 +9022,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               // 切歌后位置未归零的兜底（手册 P-1110）：刚投完新歌就被发来一个远超本首已播时长的
               // positionSec，多半是上一首的残留位置；强制从头播，避免把上一首进度切进新歌。
               // 只对「投送后极短窗口」生效，超过该窗口则视为用户主动跳转（本地文件可任意拖），不拦。
+              // 带 expectSongName 的是「断点续播」（P-1116）：调用方已校验是同一首歌，位置是用户暂停时
+              // 的真实位置，不是残留，必须放行，否则刚投送不久暂停再恢复会被错误地打回开头。
               const sincePushSec = (Date.now() - lastXiaoAiPushAt) / 1000
               const SEEK_STALE_SLACK_SEC = 5
-              if (seekSec > sincePushSec + SEEK_STALE_SLACK_SEC && sincePushSec < 8) {
+              if (!expectName && seekSec > sincePushSec + SEEK_STALE_SLACK_SEC && sincePushSec < 8) {
                 seekSec = 0
                 how = '位置过期，回到开头'
               }
