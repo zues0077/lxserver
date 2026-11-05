@@ -308,7 +308,7 @@ test('反复重连但播过（pos>0）→ 不判，别打断正常播放', () =>
   assert.equal(signal.hit, false)
 })
 
-test('拉流但不播 → 守门跳过占位，直接纯直链重发', async () => {
+test('拉流但不播 → 先换新地址重推，仍不播再走纯直链', async () => {
   const retried: string[] = []
   const action = await runPullGuard({
     isPulled: () => true,
@@ -323,7 +323,27 @@ test('拉流但不播 → 守门跳过占位，直接纯直链重发', async () 
     delays: { probe: 0, gap: 0, after: 0, silentWindow: 1 },
   })
   assert.equal(action, 'url')
-  assert.deepEqual(retried, ['url'], '占位那一级对「拉了不播」无效，应直接走纯直链')
+  assert.deepEqual(retried, ['fresh', 'url'], '第一招必须是换新地址重推，第二招才是纯直链')
+})
+
+test('拉流但不播 → 换新地址起播就收手，不再降级', async () => {
+  const retried: string[] = []
+  let calls = 0
+  const action = await runPullGuard({
+    isPulled: () => true,
+    isStale: () => false,
+    // 前两次采样（判定阶段）仍是没播，重发之后才起播
+    getStatus: async () => (++calls > 2 ? PULLED_PLAYING : PULLED_SILENT),
+    expectedDurationMs: 225000,
+    expectedAudioId: 'A',
+    isStreaming: () => false,
+    pushedAt: Date.now() - 30000,
+    retry: async mode => { retried.push(mode) },
+    log: () => {},
+    delays: { probe: 0, gap: 0, after: 0, silentWindow: 1 },
+  })
+  assert.equal(action, 'fresh')
+  assert.deepEqual(retried, ['fresh'])
 })
 
 test('拉流且正常播放 → 守门不插手', async () => {

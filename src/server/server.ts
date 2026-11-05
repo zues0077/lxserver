@@ -8997,10 +8997,34 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     getConnections: () => lastXiaoAiStreamConns,
                     pushedAt: pushAt,
                     retry: async mode => {
-                      if (mode === 'placeholder') {
-                        await xiaoAiService.replayWithPlaceholder({ deviceIds: [guardDeviceId], streamUrl })
+                      // 补救重发一律换「新的签名地址」：设备卡在预取死循环后，重发同一个 URL
+                      // 它照旧不理（2026-11-05 23:57 实机对照：同 URL 的占位/直链重发都无效，
+                      // 换新地址 3 秒起播）。换地址同时把旧流作废，免得它拿旧地址继续空转。
+                      const freshUrl = (): string => {
+                        const url = buildStreamUrl(baseUrl, streamPath, target)
+                        try {
+                          const tokenStr = decodeURIComponent(url.split('token=')[1] || '')
+                          const sidNow = parseStreamToken(tokenStr).sid || ''
+                          retireStreams(sidNow)
+                          lastXiaoAiStreamSid = sidNow
+                          lastXiaoAiStreamAt = 0
+                          lastXiaoAiStreamConns = 0
+                        } catch {
+                          /* 记不上不影响重发 */
+                        }
+                        return url
+                      }
+                      if (mode === 'fresh') {
+                        // 与正常投送同一条路径（曲库/歌词模式照旧），只是地址是新的
+                        await xiaoAiService.play({
+                          streamUrl: freshUrl(),
+                          deviceIds: [guardDeviceId],
+                          song: { name: songName, singer },
+                        })
+                      } else if (mode === 'placeholder') {
+                        await xiaoAiService.replayWithPlaceholder({ deviceIds: [guardDeviceId], streamUrl: freshUrl() })
                       } else {
-                        await xiaoAiService.replayWithUrlMode({ deviceIds: [guardDeviceId], streamUrl })
+                        await xiaoAiService.replayWithUrlMode({ deviceIds: [guardDeviceId], streamUrl: freshUrl() })
                       }
                     },
                     log: message => {

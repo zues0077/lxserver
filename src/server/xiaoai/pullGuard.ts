@@ -146,7 +146,7 @@ export function detectLibraryPreview(
   return { hit: false, reason: '' }
 }
 
-export type PullGuardAction = 'none' | 'placeholder' | 'url'
+export type PullGuardAction = 'none' | 'fresh' | 'placeholder' | 'url'
 
 export interface PullGuardDeps {
   /** 本次投送之后音箱有没有来拉我们的流 */
@@ -165,8 +165,17 @@ export interface PullGuardDeps {
   getConnections?: () => number
   /** 本次投送时刻（ms，可选）：用于判断「拉了流但一直没播」持续了多久 */
   pushedAt?: number
-  /** 补救重发：placeholder=换默认封面 audioID，url=纯直链模式 */
-  retry: (mode: 'placeholder' | 'url') => Promise<void>
+  /**
+   * 补救重发：
+   *  - fresh=换一个新的签名地址，按正常投送再推一遍（曲库/歌词模式照旧）
+   *  - placeholder=换默认封面 audioID（新地址）
+   *  - url=纯直链 player_play_url（新地址）
+   *
+   * **必须换新地址**：2026-11-05 23:57 实机对照（我怀念的）——设备卡进「预取 45 秒 → 断开 →
+   * 再从 0 预取」的死循环后，重发同一个 URL 无论走占位还是纯直链都救不回来；
+   * 用全新的签名地址再推一次，3 秒内起播（同一首歌、同一音源）。
+   */
+  retry: (mode: 'fresh' | 'placeholder' | 'url') => Promise<void>
   log: (message: string) => void
   /** 等待时间：首次探测 / 两次采样间隔 / 补救后的复查 / 「拉了不播」判定窗口。单测传很小的值 */
   delays?: { probe?: number; gap?: number; after?: number; silentWindow?: number }
@@ -178,9 +187,11 @@ export interface PullGuardDeps {
  * 全程静默失败，绝不影响主流程；返回实际做了哪一级补救。
  */
 export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction> {
-  const probe = deps.delays?.probe ?? 3500
+  // 起探从 3.5s 提前到 1.8s：设备「拉了不播」是每 ~10.6 秒重连一次的死循环，
+  // 越早发现越少让用户干等（2026-11-05 实测：用户在这条链上白等了 50 秒）。
+  const probe = deps.delays?.probe ?? 1800
   const gap = deps.delays?.gap ?? 900
-  const after = deps.delays?.after ?? 5000
+  const after = deps.delays?.after ?? 3000
   const sleep = defaultSleep
   /** 一次守门只记一行「证据不足」现场，避免三级探测刷屏 */
   let loggedUnknown = false
@@ -194,6 +205,12 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
     }
   }
 
+  /** 设备是否已经真的出声（playing 或位置推过 0）——补救后用它决定要不要继续降级 */
+  const playingNow = async (): Promise<boolean> => {
+    const sample = await readSample()
+    return !!(sample && (sample.playing || sample.positionMs > 0))
+  }
+
   interface InspectResult {
     kind: 'pulled' | 'preview' | 'silent' | 'unknown'
     reason: string
@@ -201,9 +218,10 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
   }
   const unknown = (code = 0): InspectResult => ({ kind: 'unknown', reason: '', unplayableCode: code })
   // 「拉了流但没播」的判定窗口：要给足设备起播与缓冲的时间，太短会打断正常播放。
-  // 取 22 秒是有依据的：设备「拉了不播」的典型节奏是「连 10 秒读 2MB → 断开 → 再连」，
-  // 22 秒正好覆盖两轮，能拿到「重连 2 次仍 pos=0」这个硬证据（实测 2026-11-05）。
-  const silentWindowMs = Number(deps.delays?.silentWindow) > 0 ? Number(deps.delays?.silentWindow) : 22000
+  // 取 12 秒：设备「拉了不播」的节奏是「连 10 秒读 3MB → 断开 → 再连」，
+  // 12 秒刚好覆盖一轮重连 + 一次复查，能拿到「重连 2 次仍 pos=0」这个硬证据。
+  // （原为 22 秒，2026-11-05 实测让用户白等近 50 秒才看到补救。）
+  const silentWindowMs = Number(deps.delays?.silentWindow) > 0 ? Number(deps.delays?.silentWindow) : 12000
   /** kind='preview' 表示拿到了「它在播另一版」的证据；unplayableCode 透传给调用方判 VIP */
   const inspect = async (): Promise<InspectResult> => {
     if (deps.isStale()) return unknown()
@@ -267,13 +285,27 @@ export async function runPullGuard(deps: PullGuardDeps): Promise<PullGuardAction
     }
   }
   if (firstHit.kind === 'silent') {
-    // 占位 audioID 那一级对「拉流但不播」实测无效（换成占位曲一样不出声），直接走纯直链
-    deps.log('[XiaoAi] 已拉流但未播放，跳过占位，直接 player_play_url 纯直链重发')
+    // 「拉了不播」的第一招是换新地址重推（与正常投送完全同一条路径）：
+    // 设备会卡在「预取 45 秒 → 断 → 从 0 再来」的循环里，把同一个 URL 再发一遍它照旧不理，
+    // 换一个全新签名地址才认（2026-11-05 23:59 实机对照，3 秒起播）。
+    deps.log('[XiaoAi] 已拉流但未播放，换新地址重推一次')
+    try {
+      await deps.retry('fresh')
+    } catch (error: any) {
+      deps.log(`[XiaoAi] 换新地址重推失败：${error?.message || error}`)
+    }
+    await sleep(after)
+    if (await playingNow()) return 'fresh'
+
+    deps.log('[XiaoAi] 换新地址仍未起播，改走 player_play_url 纯直链重发（同样换新地址）')
     try {
       await deps.retry('url')
     } catch (error: any) {
       deps.log(`[XiaoAi] 纯直链重发失败：${error?.message || error}`)
     }
+    await sleep(after)
+    if (await playingNow()) return 'url'
+    deps.log('[XiaoAi] 两轮补救都没起播：留给前端提示，不再反复打扰设备')
     return 'url'
   }
   if (firstHit.kind !== 'preview') return 'none'

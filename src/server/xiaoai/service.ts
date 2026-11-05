@@ -1,6 +1,6 @@
 import os from 'node:os'
 import { MinaAuth, type LoginResult, type QRPollResult, type TokenInfo } from './auth'
-import { MinaClient, PLAY_STATUS_PAUSED, type MinaDevice } from './client'
+import { MinaClient, PLAY_STATUS_PAUSED, type MinaDevice, type PlayOutcome } from './client'
 import { DEFAULT_MUSIC_AUDIO_ID, needUseMusicApi } from './constants'
 import { isFfmpegAvailable } from './transcode'
 import { syncLog } from '../../utils/log4js'
@@ -98,6 +98,14 @@ export interface XiaoAiPublicConfig {
 const AUDIO_ID_CACHE_TTL_MS = 30 * 60 * 1000
 const AUDIO_ID_CACHE_MAX = 300
 
+/**
+ * 同一设备 + 同一首歌的重复投送去重窗口。
+ * 前端一次点击会在 200ms 内打出两三个 /play（每次签新地址，所以只能按曲目去重），
+ * 重复下发会把音箱刚起的拉流打断（见 recentPushes 注释）。
+ * 取 3 秒：足以吞掉并发重复，又不会把「用户手动再点一次重播」误合并。
+ */
+const PUSH_DEDUPE_MS = 3000
+
 /** 是否私有网段 IPv4（10/8、172.16-31、192.168/16） */
 const isPrivateIPv4 = (ip: string) => {
   const parts = String(ip || '').split('.').map(item => Number(item))
@@ -163,6 +171,24 @@ class XiaoAiService {
    * 前者只是元数据，后者才会导致播错歌。
    */
   private streamPulledProbe: (() => boolean) | null = null
+
+  /**
+   * 重复投送合并账本：`设备ID|歌名|歌手` → 上次下发结果。
+   *
+   * 背景（2026-11-05 246 实测）：前端一次点击会并发打出 2~3 个 /play（实测间隔 229ms、
+   * 另有 9s 后缓存就绪再打一个）。音箱收到第二次 player_play_music 会把刚起来的拉流
+   * 作废重来，最坏直接卡进「拉了不播」——/status 长期 paused + pos=0，设备每 10 秒
+   * 重连一次、每次只读 3.4MB 就断，屏上最后报「播放遇到问题，稍后再试」。用户听感就是
+   * 「切歌半天还是上一首」。同一地址 3 秒内只下发一次即可避免这种自伤。
+   */
+  private recentPushes = new Map<string, { at: number; outcome: PlayOutcome }>()
+
+  private sweepRecentPushes() {
+    const now = Date.now()
+    for (const [key, item] of this.recentPushes) {
+      if (now - item.at > PUSH_DEDUPE_MS) this.recentPushes.delete(key)
+    }
+  }
 
   setStreamPulledProbe(fn: () => boolean) {
     this.streamPulledProbe = fn
@@ -393,6 +419,7 @@ class XiaoAiService {
   async play(params: { streamUrl: string; deviceIds?: string[]; song?: { name?: string; singer?: string } }) {
     const streamUrl = String(params.streamUrl || '').trim()
     if (!streamUrl) throw new Error('缺少可投送的播放地址')
+    this.sweepRecentPushes()
     const config = loadConfig()
     const songName = String(params.song?.name || '').trim()
     const singer = String(params.song?.singer || '').trim()
@@ -401,6 +428,21 @@ class XiaoAiService {
     /** 设备 → 实际下发的曲库 audioID，拉流守门要知道「有没有带曲库 ID」 */
     const audioIds: Record<string, string> = {}
     const results = await this.fanOut(params.deviceIds, 'play', async (client, deviceId, hardware) => {
+      // 同一设备 + 同一首歌 3 秒内重复投送：直接复用上次结果，不再向设备重复下发。
+      // 注意 key 不能带 streamUrl——每次 /play 都会签出新的地址，带地址等于永远去重不上。
+      // 重复的 player_play_music 会让音箱把刚起的拉流作废重来，实测能把它卡成「拉了不播」。
+      const dedupeKey = `${deviceId}|${songName}|${singer}`
+      const dup = this.recentPushes.get(dedupeKey)
+      if (dup) {
+        const line = `[XiaoAi] 重复投送已合并（${((Date.now() - dup.at) / 1000).toFixed(1)}s 内同曲目，跳过重复下发） → ${deviceId}`
+        console.log(line)
+        syncLog.info(line)
+        if (dup.outcome.ok) {
+          usedAudioIds.push(dup.outcome.audioId || '')
+          if (dup.outcome.audioId) audioIds[deviceId] = dup.outcome.audioId
+        }
+        return { ok: dup.outcome.ok, error: dup.outcome.error }
+      }
       const musicApiModel = needUseMusicApi(hardware, config.disabledModels)
       // 歌词模式只在「走 player_play_music 的触屏机型 + 有歌名」时开启；
       // 开启后 client 会强制 audio_type='MUSIC'，与灯环开关彻底解耦
@@ -420,6 +462,7 @@ class XiaoAiService {
       if (outcome.ok) {
         usedAudioIds.push(outcome.audioId || '')
         if (outcome.audioId) audioIds[deviceId] = outcome.audioId
+        this.recentPushes.set(dedupeKey, { at: Date.now(), outcome })
         const idPart = outcome.audioId ? `（）audioID=${outcome.audioId}` : ''
         const lyricPart = lyricsWanted ? '｜歌词模式' : ''
         const line = `[XiaoAi] 下发方式 ${outcome.via}${idPart}${lyricPart} → ${deviceId}`
