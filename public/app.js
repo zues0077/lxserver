@@ -5326,6 +5326,7 @@ class App {
             this.fillMusicAccountCheckSchedule(data.healthCheck || null);
             void this.renderMusicAccountPerms(data.allowedUsers || []);
             void this.loadQishuiSignerStatus();
+            void this.loadQishuiProxyStatus();
         } catch (e) {
             listEl.innerHTML = `<div class="music-acc-loading">加载失败：${this.escapeHtml(e.message || String(e))}</div>`;
         }
@@ -5434,6 +5435,60 @@ class App {
             this.toast && this.toast('清空失败：' + (e.message || e), 'error');
         }
         void this.loadQishuiPrefetchHint();
+    }
+
+    /** 读取取链代理状态（没配置也不报错，只是提示） */
+    async loadQishuiProxyStatus() {
+        const input = document.getElementById('qishui-proxy-url');
+        const statusEl = document.getElementById('qishui-proxy-status');
+        if (!input || !statusEl) return;
+        try {
+            const res = await this.request('/api/music/prefetch/proxy');
+            const d = (res && res.data) || {};
+            if (document.activeElement !== input) input.value = d.url || '';
+            if (!d.configured) {
+                statusEl.textContent = '未配置（受限曲只能试听）';
+                statusEl.style.color = '';
+            } else if (d.online) {
+                statusEl.textContent = '在线' + (d.source === 'env' ? '（环境变量）' : '');
+                statusEl.style.color = '#10b981';
+            } else {
+                statusEl.textContent = '不可达：' + (d.message || '连接失败');
+                statusEl.style.color = '#f59e0b';
+            }
+        } catch (e) {
+            statusEl.textContent = '状态未知';
+            statusEl.style.color = '';
+        }
+    }
+
+    /** 保存并立即探测取链代理 */
+    async saveQishuiProxy() {
+        const input = document.getElementById('qishui-proxy-url');
+        const statusEl = document.getElementById('qishui-proxy-status');
+        const url = (input && input.value || '').trim();
+        if (statusEl) { statusEl.textContent = '测试中…'; statusEl.style.color = ''; }
+        try {
+            const res = await this.request('/api/music/prefetch/proxy', {
+                method: 'POST',
+                body: JSON.stringify({ url }),
+            });
+            const d = (res && res.data) || {};
+            if (!url) {
+                if (statusEl) statusEl.textContent = '已清空（不再使用取链代理）';
+                this.toast && this.toast('已清空取链代理地址');
+                return;
+            }
+            if (d.online) {
+                if (statusEl) { statusEl.textContent = '在线，已生效'; statusEl.style.color = '#10b981'; }
+                this.toast && this.toast('取链代理连接成功，汽水受限曲可播整曲');
+            } else {
+                if (statusEl) { statusEl.textContent = '不可达：' + (d.message || ''); statusEl.style.color = '#f59e0b'; }
+                this.toast && this.toast('取链代理不可达：' + (d.message || ''), 'error');
+            }
+        } catch (e) {
+            if (statusEl) { statusEl.textContent = '保存失败：' + (e.message || e); statusEl.style.color = '#ef4444'; }
+        }
     }
 
     /** 保存并立即探测签名器 */

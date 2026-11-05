@@ -12526,6 +12526,53 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
+      // ===== 汽水取链代理地址（与签名器同一处配置，后台填一次即可） =====
+      if (pathname === '/api/music/prefetch/proxy' && (req.method === 'GET' || req.method === 'POST')) {
+        const auth = req.headers['x-frontend-auth']
+        if (auth !== global.lx.config['admin.password']) {
+          res.writeHead(401, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: false, message: 'Unauthorized' }))
+          return
+        }
+
+        const reply = async () => {
+          const st = await extraSources.sodaProxy.status(true)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            success: true,
+            data: {
+              url: st.url,
+              source: extraSources.sodaProxy.proxySource(),
+              configured: st.configured,
+              online: st.online,
+              message: st.message,
+            },
+          }))
+        }
+
+        if (req.method === 'GET') { void reply(); return }
+
+        void readBody(req).then(async body => {
+          try {
+            const patch = JSON.parse(body || '{}')
+            const raw = String(patch.url || '').trim()
+            if (raw && !/^https?:\/\//i.test(raw)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ success: false, error: '地址必须以 http:// 或 https:// 开头' }))
+              return
+            }
+            ;(global.lx.config as any)['qishui.proxyUrl'] = raw ? raw.replace(/\/+$/, '') : ''
+            if (typeof global.lx?.saveConfig === 'function') global.lx.saveConfig()
+            extraSources.sodaProxy.resetStatusCache()
+            await reply()
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
+          }
+        })
+        return
+      }
+
       // ===== 额外音源取流诊断（排障用：整曲/试听、走了哪条通道、签名链路缺哪一环） =====
       if (pathname === '/api/music/extra/diagnose' && (req.method === 'GET' || req.method === 'POST')) {
         const auth = req.headers['x-frontend-auth']

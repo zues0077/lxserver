@@ -715,6 +715,24 @@
                                         style="margin: 0; white-space: nowrap;">未配置</span>
                                 </div>
 
+                                <!-- 取链代理（可选）：由一台跑着官方 App 的 Android 设备代取整曲，汽水受限曲靠它 -->
+                                <div class="music-acc-toolbar" style="margin-top: 2px;">
+                                    <label class="music-acc-timeout-label"
+                                        title="一台常开 Android 设备上跑 soda-proxy，由它让官方 App 自己取链；填一次即可，留空=不启用"
+                                        style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
+                                        取链代理
+                                        <input type="text" id="qishui-proxy-url" class="input-field"
+                                            style="width: 280px; max-width: 100%;"
+                                            placeholder="http://192.168.1.x:18090（留空=不启用）">
+                                    </label>
+                                    <button type="button" class="btn-secondary" onclick="app.saveQishuiProxy()"
+                                        style="white-space: nowrap;">
+                                        保存并测试
+                                    </button>
+                                    <span id="qishui-proxy-status" class="config-hint-text"
+                                        style="margin: 0; white-space: nowrap;">未配置</span>
+                                </div>
+
                                 <!-- 待补清单 + 自动补传状态（签名器在线时会自己把受限曲补进缓存） -->
                                 <p class="config-hint-text" id="qishui-prefetch-hint" style="margin: 4px 0 0;"></p>
                                 <!-- 有待补时才显示：重试全部 = 把失败次数清零再补一轮；清空 = 直接放弃这些曲子 -->

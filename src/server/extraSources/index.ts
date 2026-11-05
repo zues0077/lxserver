@@ -238,6 +238,7 @@ export async function getMusicUrl(source: string, songInfo: any, quality: string
 
 // ---- 汽水待补 / 签名器（L2）：以命名空间形式导出，server.ts 直接用 extraSources.xxx ----
 export * as signer from './signer'
+export * as sodaProxy from './sodaProxy'
 export * as pending from './pending'
 export * as prefetch from './prefetch'
 
