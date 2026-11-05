@@ -23,7 +23,15 @@
  * 网络慢不等于脚本重。`callRequest` 里调用脚本 handler 时记一次时间戳差
  * （handler 同步执行到第一个 await 的耗时），只有这段超过阈值才算「脚本自身重活」。
  * 响应回来后的回调耗时由 `reportSlowTask` 的 callbackMs 走同一条记账入口。
+ *
+ * ## 降速状态会落盘（跨重启）
+ * 「实测卡了一次才搬进 worker」意味着每次进程重启后第一次搜索都要再卡一遍，
+ * 所以本层把慢源状态写进 data 目录，启动读回后由上层直接把已知慢源预置进 worker。
+ * 落的只是「这个源慢过」这个既有事实，不是另一套独立机制。
  */
+
+import * as fs from 'fs'
+import * as path from 'path'
 
 /** 单次同步块超过该值算一次「慢」，默认 800ms（正常源通常几十毫秒） */
 const DEFAULT_SYNC_MS = 800
@@ -58,11 +66,202 @@ export interface ThrottleState {
     worstSyncMs: number
     /** 最近一次命中时间 */
     lastAt: number
+    /** 脚本指纹：脚本更新后旧记录作废，不许把新脚本按在 worker 里 */
+    scriptHash?: string
+    /**
+     * 仅作为「重启后 worker 预置」依据保留（降速本身已过期）。
+     * 这类条目 not throttled，只用来让加载完音源就搬进独立线程，
+     * 避免重启后首轮搜索再把主线程卡十几秒。
+     */
+    preset?: boolean
 }
 
 const states = new Map<string, ThrottleState>()
 
 const keyOf = (owner: string, id: string) => `${owner || ''}_${id || ''}`
+
+// ===================== 降速状态落盘（跨重启） =====================
+//
+// 为什么必须落盘：现有的 worker 提升是「实测卡了一次才搬走」，于是每次进程重启后
+// 第一次搜索都要再卡一遍 —— 246 实测（2026-11-06 02:12）一份 3.18MB 响应里，
+// 西瓜聚合源回调 5420ms、非常刀 5251ms，串成 11934ms 的主线程停转。
+// 把这份状态写盘、启动读回来，重启后加载完音源就能直接把已知慢源预置进 worker。
+//
+// 两条恢复策略，避免「一次偶发永久戴帽子」：
+//   - 仍在 TTL 内 → 原样恢复（含降速状态）
+//   - 已过 TTL   → 不再维持降速（那会牺牲吞吐），但若是「单次就严重」的源，
+//                  仍保留为 worker 预置依据（preset: true）
+const getStorePath = (): string => {
+    const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
+    return path.join(dataPath, 'source-governor.json')
+}
+
+let stateLoaded = false
+/**
+ * 只有真正走过启动加载路径才允许写盘。
+ * 单元测试会大量调用 noteSyncBlock，不能让它往仓库目录里写文件。
+ */
+let persistEnabled = false
+let saveTimer: any = null
+let lastSaveAt = 0
+/** 落盘节流：频繁的慢记录不每次都写盘 */
+const SAVE_THROTTLE_MS = 30 * 1000
+
+/**
+ * 把落盘内容还原成内存状态（纯函数，便于单测三种分支）。
+ *
+ *   - 仍在 TTL 内 → 原样恢复（含降速状态，重启后慢源互斥立刻生效）
+ *   - 已过 TTL 且「单次就严重」→ 只保留为 worker 预置依据（preset: true，不降速）
+ *   - 已过 TTL 且没慢到严重档 → 丢弃
+ */
+export function parsePersistedStates(
+    raw: any,
+    cfg: GovernorConfig,
+    now: number,
+): Map<string, ThrottleState> {
+    const out = new Map<string, ThrottleState>()
+    for (const [key, value] of Object.entries<any>(raw || {})) {
+        if (!value || typeof value !== 'object') continue
+        const owner = String(value.owner || '')
+        const id = String(value.id || '')
+        if (!owner || !id) continue
+        const worstSyncMs = Number(value.worstSyncMs) || 0
+        const lastAt = Number(value.lastAt) || 0
+        const scriptHash = value.scriptHash ? String(value.scriptHash) : undefined
+        if (now - lastAt <= cfg.ttlMs) {
+            out.set(key, {
+                owner,
+                id,
+                name: String(value.name || id),
+                hits: Number(value.hits) || 0,
+                since: Number(value.since) || now,
+                until: Number(value.until) || 0,
+                worstSyncMs,
+                lastAt,
+                scriptHash,
+            })
+            continue
+        }
+        if (worstSyncMs >= cfg.severeSyncMs) {
+            out.set(key, {
+                owner,
+                id,
+                name: String(value.name || id),
+                hits: 0,
+                since: now,
+                until: 0,
+                worstSyncMs,
+                lastAt: now,
+                scriptHash,
+                preset: true,
+            })
+        }
+    }
+    return out
+}
+
+/**
+ * 启动时读回上次运行的慢源状态。幂等，重复调用只有第一次真正读盘。
+ * 文件损坏一律按「没有记录」处理，绝不影响音源加载。
+ */
+export function loadGovernorState(): void {
+    if (stateLoaded) return
+    stateLoaded = true
+    // 走到这里说明是真实启动路径（server 启动 / 音源全量加载），允许后续落盘
+    persistEnabled = true
+    try {
+        const file = getStorePath()
+        if (!fs.existsSync(file)) return
+        const raw = JSON.parse(fs.readFileSync(file, 'utf-8'))
+        const restoredMap = parsePersistedStates(raw, getGovernorConfig(), Date.now())
+        let throttledCount = 0
+        let presetCount = 0
+        for (const [key, st] of restoredMap) {
+            states.set(key, st)
+            if (st.preset) presetCount++
+            else if (st.until > Date.now()) throttledCount++
+        }
+        if (restoredMap.size > 0) {
+            console.log(`[音源调度] 已恢复上次运行的慢源记录：降速中 ${throttledCount} 个，仅作 worker 预置 ${presetCount} 个`)
+        }
+    } catch (e: any) {
+        console.warn(`[音源调度] 慢源记录读取失败（按无记录处理）: ${e?.message || e}`)
+    }
+}
+
+function saveGovernorState(): void {
+    if (!persistEnabled) return
+    try {
+        const cfg = getGovernorConfig()
+        const now = Date.now()
+        const out: Record<string, ThrottleState> = {}
+        for (const [key, st] of states) {
+            // 只存有意义的：正在降速，或历史上单次就严重（重启后要预置进 worker）
+            if (st.until > now || st.worstSyncMs >= cfg.severeSyncMs) out[key] = { ...st }
+        }
+        const file = getStorePath()
+        const dir = path.dirname(file)
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+        // 先写临时文件再改名，进程被杀不会留下半截 JSON
+        const tmp = `${file}.${process.pid}.tmp`
+        fs.writeFileSync(tmp, JSON.stringify(out, null, 2))
+        fs.renameSync(tmp, file)
+    } catch {
+        // 落盘只是优化项，写不进去不能影响取链
+    }
+}
+
+function scheduleSave(immediate = false): void {
+    const now = Date.now()
+    if (immediate || now - lastSaveAt >= SAVE_THROTTLE_MS) {
+        if (saveTimer) {
+            clearTimeout(saveTimer)
+            saveTimer = null
+        }
+        lastSaveAt = now
+        saveGovernorState()
+        return
+    }
+    if (saveTimer) return
+    saveTimer = setTimeout(() => {
+        saveTimer = null
+        lastSaveAt = Date.now()
+        saveGovernorState()
+    }, SAVE_THROTTLE_MS - (now - lastSaveAt))
+    if (saveTimer && typeof saveTimer.unref === 'function') saveTimer.unref()
+}
+
+/**
+ * 启动预置用：上一轮进程里「降速中」或「单次就严重」的源。
+ * 调用方（userApi）拿到后自行比对脚本指纹，再决定搬不搬 worker。
+ */
+export function listWorkerPresetCandidates(): Array<{
+    owner: string
+    id: string
+    name: string
+    scriptHash?: string
+    worstSyncMs: number
+    throttled: boolean
+}> {
+    loadGovernorState()
+    const cfg = getGovernorConfig()
+    const now = Date.now()
+    const out: Array<{ owner: string; id: string; name: string; scriptHash?: string; worstSyncMs: number; throttled: boolean }> = []
+    for (const st of states.values()) {
+        if (now - st.lastAt > cfg.ttlMs) continue
+        const throttled = st.until > now
+        if (!throttled && st.worstSyncMs < cfg.severeSyncMs) continue
+        out.push({
+            owner: st.owner,
+            id: st.id,
+            name: st.name,
+            scriptHash: st.scriptHash,
+            worstSyncMs: st.worstSyncMs,
+            throttled,
+        })
+    }
+    return out.sort((a, b) => b.worstSyncMs - a.worstSyncMs)
+}
 
 const num = (v: any, fallback: number, min: number): number => {
     const n = Number(v)
@@ -119,7 +318,7 @@ export interface NoteResult {
  * @param syncMs 脚本 handler 同步执行（到第一个 await 之前）的耗时，或响应回调的 callbackMs
  * @returns 降速状态变化
  */
-export function noteSyncBlock(owner: string, id: string, name: string, syncMs: number): NoteResult {
+export function noteSyncBlock(owner: string, id: string, name: string, syncMs: number, scriptHash?: string): NoteResult {
     const cfg = getGovernorConfig()
     const base: NoteResult = { throttled: false, justThrottled: false, hits: 0 }
     if (!cfg.enabled || !owner || !id) return base
@@ -141,6 +340,9 @@ export function noteSyncBlock(owner: string, id: string, name: string, syncMs: n
     st.lastAt = now
     st.name = name || st.name
     st.worstSyncMs = Math.max(st.worstSyncMs, Math.round(syncMs))
+    // 脚本指纹跟着记录走：脚本更新后上层预置时会比对，不一致就不认这条黑历史
+    if (scriptHash) st.scriptHash = scriptHash
+    st.preset = false
 
     // 严重档：单次就 2.5 秒以上（实测这类源 5~7 秒，正常源 <100ms）→ 首次即降速。
     // 必须单独开一档，否则巡检 180 分钟一轮、每轮只给每个源一次命中，
@@ -149,14 +351,20 @@ export function noteSyncBlock(owner: string, id: string, name: string, syncMs: n
 
     if ((severe || st.hits >= cfg.minHits) && st.until <= now) {
         st.until = now + cfg.ttlMs
+        // 降速是「跨重启要继续生效」的关键事实，立刻落盘；其余命中只走节流
+        scheduleSave(true)
         return { throttled: true, justThrottled: true, hits: st.hits }
     }
+    scheduleSave()
     return { throttled: st.until > now, justThrottled: false, hits: st.hits }
 }
 
 /** 手动解除降速（界面上「恢复正常」用） */
 export function clearThrottle(owner: string, id: string): boolean {
-    return states.delete(keyOf(owner, id))
+    const removed = states.delete(keyOf(owner, id))
+    // 手动解除必须持久：否则重启后又被旧记录搬回 worker
+    if (removed) scheduleSave(true)
+    return removed
 }
 
 /** 供接口/前端展示：当前所有被降速的源 */
@@ -179,6 +387,14 @@ export function resetGovernorForTest(): void {
     locks.clear()
     slowRunning = 0
     slowWaiters.length = 0
+    // 落盘状态也复位，避免测试把临时文件写进仓库目录
+    stateLoaded = true
+    persistEnabled = false
+    lastSaveAt = 0
+    if (saveTimer) {
+        clearTimeout(saveTimer)
+        saveTimer = null
+    }
 }
 
 // ---------------------------------------------------------------------------

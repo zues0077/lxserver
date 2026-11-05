@@ -10,7 +10,7 @@ import {
 } from './sourceGuard'
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure } from './sourceProbe'
-import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor } from './sourceGovernor'
+import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor, listWorkerPresetCandidates } from './sourceGovernor'
 import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible } from './sourceWorkerHost'
 import { syncLog } from '../utils/log4js'
 
@@ -386,7 +386,9 @@ export function reportSlowTask(meta: DqTaskMeta | undefined, cost: number, probe
  */
 function noteScriptSyncCost(owner: string, id: string, name: string, syncMs: number): void {
     if (!owner || !id || !Number.isFinite(syncMs) || syncMs < 50) return
-    const res = noteSyncBlock(owner, id, name, syncMs)
+    // 带上脚本指纹：降速状态要落盘，脚本更新后必须让旧记录失效，
+    // 否则一个新版本脚本会被旧版本的黑历史永远按在 worker 里
+    const res = noteSyncBlock(owner, id, name, syncMs, loadedScriptHashes.get(`${owner}/${id}`))
     if (!res.justThrottled) return
     const cfg = getGovernorConfig()
     const mins = Math.round(cfg.ttlMs / 60000)
@@ -725,6 +727,8 @@ async function createLxRequest(
         let requestOptions: any = {
             headers,
             follow_max: 5,
+            // 显式写出来而不是靠 needle 默认值：下面的超时守卫要按它算总时长预算
+            open_timeout: 10000,
             // 内网护栏：needle 会把这个 lookup 透传给 http.request，建连前按解析结果拦截。
             // 放在 lookup 而不是请求前查 URL，是为了同时挡住 302 跳转与 DNS rebinding。
             lookup: privateNetLookup,
@@ -789,13 +793,52 @@ async function createLxRequest(
             if (tracked) noteCallback(owner, id, name)
         }
 
+        /**
+         * 终态护栏：needle 的 open_timeout / response_timeout 到点只 `request.destroy()`，
+         * **不调 done()**；只有 read 超时那条路才 `done(new Error('read timeout'))`。
+         * destroy() 不带 error 不会触发 needle 的 'error' 监听 → 回调永不触发。
+         *
+         * 结果就是「请求早死了，账本里还挂着」：246 实测（2026-11-06 05:46）
+         * Hei Music聚合源 requests 130 / callbacks 59，在飞 71，且静默几分钟计数不动。
+         * 聚合源向几十个子接口并发，连不上/DNS 卡住/响应头迟迟不回全走这条路。
+         *
+         * 这里用三条互补的守卫把终态收口，且保证脚本回调最多触发一次：
+         *   1) needle 流上的 'timeout' 事件（非 read 类型）→ 当场失败收口；
+         *   2) 'response' 事件 → 撤掉本跳计时器，后续交给 needle 的 read_timeout（它会 done）；
+         *   3) 每跳一个总时长兜底，覆盖「连 timeout 事件都没等到」的极端情况。
+         */
+        let settled = false
+        let guardTimer: any = null
+        const clearGuard = () => {
+            if (guardTimer) {
+                clearTimeout(guardTimer)
+                guardTimer = null
+            }
+        }
+        const settle = (): boolean => {
+            if (settled) return false
+            settled = true
+            clearGuard()
+            return true
+        }
+        const failOnce = (err: any) => {
+            if (!settle()) return
+            closeInflightOnce()
+            releaseSlotOnce()
+            try {
+                callback.call(null, decontextify(err), null, null)
+            } catch { /* 沙箱实例可能已被释放，回调失败不影响主流程 */ }
+        }
+
         const launch = () => {
             // 排队期间实例可能已被卸载（禁用/重载/隔离），此时发起请求会让回调
             // 写进已释放的 VM2 沙箱——实测会直接 SIGSEGV 崩掉整个进程
-            if (cancelled || isDisposed?.()) { closeInflightOnce(); releaseSlotOnce(); return }
+            if (cancelled || isDisposed?.()) { settle(); closeInflightOnce(); releaseSlotOnce(); return }
                 const handleResponse = (err: any, resp: any, body: any) => {
                     // 响应回来的时刻是卡顿归因的关键锚点，必须抢在任何同步处理之前记下
                     closeInflightOnce()
+                    // 已经由超时护栏收口过的请求，迟到的响应直接丢弃，避免脚本收到两次回调
+                    if (!settle()) return
                     if (abortHolder.fn) pendingAborts?.delete(abortHolder.fn)
 
                     // 体积闸门：必须在 JSON.parse / decontextify 之前判，否则内存尖峰与同步阻塞
@@ -910,39 +953,74 @@ async function createLxRequest(
             let currentReq: any = null
 
             const follow = (targetUrl: string, reqMethod: string, reqData: any, hops: number): void => {
-                if (cancelled || isDisposed?.()) { releaseSlotOnce(); return }
+                if (settled) return
+                // 取消/卸载：静默收口（与脚本主动 abort 的语义一致——已 abort 的请求不再回调）
+                if (cancelled || isDisposed?.()) { settle(); closeInflightOnce(); releaseSlotOnce(); return }
                 const blocked = checkLiteralTarget(targetUrl)
                 if (!blocked.ok) {
                     logBlocked(blocked.host, blocked.host, blocked.reason)
-                    releaseSlotOnce()
-                    try {
-                        callback.call(null, Object.assign(new Error(`目标地址属于内网保留网段（${blocked.reason}），已被自定义源出站护栏拦截: ${blocked.host}`), { code: 'EBLOCKEDPRIVATE' }), null, null)
-                    } catch { /* 沙箱实例可能已被释放，回调失败不影响主流程 */ }
+                    failOnce(Object.assign(new Error(`目标地址属于内网保留网段（${blocked.reason}），已被自定义源出站护栏拦截: ${blocked.host}`), { code: 'EBLOCKEDPRIVATE' }))
                     return
                 }
 
                 // follow_max 必须是 -1 而不是 0：needle 的计数从 0 开始（`count <= follow_max`），
                 // 传 0 时第一次跳转 0<=0 仍成立，会被内部悄悄跟一跳 —— 那一跳完全绕过校验。
-                currentReq = needle.request(reqMethod as any, encodeRequestUrl(targetUrl), reqData, { ...requestOptions, follow_max: -1 }, (err: any, resp: any, body: any) => {
-                    if (!err && resp && resp.statusCode >= 300 && resp.statusCode < 400 && hops < MAX_FOLLOW) {
-                        const rawLocation = Array.isArray(resp.headers?.location) ? resp.headers.location[0] : resp.headers?.location
-                        let nextUrl = ''
-                        if (rawLocation) {
-                            try { nextUrl = new URL(String(rawLocation), targetUrl).toString() } catch { /* 非法 Location 当普通响应处理 */ }
+                let req: any = null
+                try {
+                    req = needle.request(reqMethod as any, encodeRequestUrl(targetUrl), reqData, { ...requestOptions, follow_max: -1 }, (err: any, resp: any, body: any) => {
+                        if (settled) return
+                        if (!err && resp && resp.statusCode >= 300 && resp.statusCode < 400 && hops < MAX_FOLLOW) {
+                            const rawLocation = Array.isArray(resp.headers?.location) ? resp.headers.location[0] : resp.headers?.location
+                            let nextUrl = ''
+                            if (rawLocation) {
+                                try { nextUrl = new URL(String(rawLocation), targetUrl).toString() } catch { /* 非法 Location 当普通响应处理 */ }
+                            }
+                            if (nextUrl) {
+                                // 303 与「非 GET 收到 301/302」按惯例改成 GET 且不带 body；
+                                // 307/308 要求原样重发，否则脚本拿到的语义就变了
+                                const keepMethod = resp.statusCode === 307 || resp.statusCode === 308
+                                const isBodyless = /^(get|head)$/i.test(reqMethod)
+                                const nextMethod = keepMethod ? reqMethod : (isBodyless ? reqMethod : 'get')
+                                const nextData = (keepMethod || isBodyless) ? reqData : null
+                                follow(nextUrl, nextMethod, nextData, hops + 1)
+                                return
+                            }
                         }
-                        if (nextUrl) {
-                            // 303 与「非 GET 收到 301/302」按惯例改成 GET 且不带 body；
-                            // 307/308 要求原样重发，否则脚本拿到的语义就变了
-                            const keepMethod = resp.statusCode === 307 || resp.statusCode === 308
-                            const isBodyless = /^(get|head)$/i.test(reqMethod)
-                            const nextMethod = keepMethod ? reqMethod : (isBodyless ? reqMethod : 'get')
-                            const nextData = (keepMethod || isBodyless) ? reqData : null
-                            follow(nextUrl, nextMethod, nextData, hops + 1)
-                            return
-                        }
-                    }
-                    handleResponse(err, resp, body)
-                })
+                        handleResponse(err, resp, body)
+                    })
+                } catch (e: any) {
+                    // needle 同步抛（URL/headers 非法等）：原来会一路冒泡到 acquireRequestSlot 的
+                    // then 里变成 unhandled rejection，回调与账本都不收口，请求永久计在「在飞」。
+                    failOnce(e)
+                    return
+                }
+                currentReq = req
+
+                try {
+                    // 响应头一到就撤掉本跳计时器：之后的 body 传输由 needle 的 read_timeout 兜着
+                    // （那条路会 done()，回调正常回来）
+                    req?.on?.('response', clearGuard)
+                    // needle 的 open/response 超时不回调，只能靠这个事件主动收口
+                    req?.on?.('timeout', (type: string) => {
+                        if (type === 'read') return
+                        failOnce(Object.assign(
+                            new Error(`${type} timeout（needle 此路径不会回调，已由宿主收口）`),
+                            { code: 'ETIMEDOUT' },
+                        ))
+                    })
+                } catch { /* 老版本 needle 返回非 EventEmitter 时忽略，仍有兜底计时器 */ }
+
+                // 总时长兜底：open + response 两段都不回调，靠上面的 timeout 事件通常已足够；
+                // 这里再兜一层，防止连 'timeout' 事件都等不到（例如底层 socket 直接哑掉）
+                const guardMs = (requestOptions.open_timeout || 10000) + (requestOptions.response_timeout || 30000) + 5000
+                clearGuard()
+                guardTimer = setTimeout(() => {
+                    failOnce(Object.assign(
+                        new Error(`请求超时 ${guardMs}ms 未收到响应（宿主兜底守卫）`),
+                        { code: 'ETIMEDOUT' },
+                    ))
+                }, guardMs)
+                if (guardTimer && typeof guardTimer.unref === 'function') guardTimer.unref()
 
                 const abortFn = () => {
                     const reqObj = (currentReq as any).request
@@ -975,6 +1053,7 @@ async function createLxRequest(
                 pendingAborts?.delete(abortHolder.fn)
             }
             // 主动 abort 后 needle 可能不再回调错误，靠这里把 inflight 收口
+            settle()
             closeInflightOnce()
             releaseSlotOnce()
         }
@@ -2760,6 +2839,40 @@ async function doInitUserApis(targetUser?: string) {
     }
 
     lastReloadDurationMs = Date.now() - startedAt
+
+    // 把「上一轮进程里已确认的慢源」直接预置进 worker。
+    //
+    // 现有提升机制是「实测卡了一次才搬走」，代价是每次进程重启后第一次搜索都要
+    // 再卡一遍：246 实测 02:12 一份 3.18MB 响应里，西瓜聚合源回调 5420ms、
+    // 非常刀 5251ms，串成 11934ms 的主线程停转（深拷贝仅 2ms，时间全在脚本同步逻辑）。
+    // governor 的降速状态本身已经落盘（见 sourceGovernor 的 loadGovernorState），
+    // 这里加载完音源就按它预热 worker，脚本指纹变了会自动不认旧记录。
+    if (stats.loadedCount > 0) {
+        try {
+            const candidates = listWorkerPresetCandidates()
+            let promoted = 0
+            for (const item of candidates) {
+                const instance = loadedApis.get(`${item.owner}_${item.id}`)
+                if (!instance) continue
+                const info = instance.info || {}
+                // 指纹不一致说明脚本已经更新，旧版本的慢记录不适用于新脚本
+                const currentHash = loadedScriptHashes.get(`${item.owner}/${item.id}`)
+                if (item.scriptHash && currentHash && item.scriptHash !== currentHash) continue
+                markWorkerEligible(item.owner, item.id, {
+                    owner: item.owner,
+                    id: item.id,
+                    name: info.name || item.name || item.id,
+                    script: info.script,
+                }, true)
+                promoted++
+            }
+            if (promoted > 0) {
+                console.log(`[自定义源] 按上次运行的慢源记录把 ${promoted} 个源预置到独立线程（避免重启后首轮再卡主线程）`)
+            }
+        } catch (e: any) {
+            console.warn(`[自定义源] 慢源预置失败（不影响加载）: ${e?.message || e}`)
+        }
+    }
 
     console.log(`[自定义源] 本次加载: ${stats.loadedCount} 个源`)
     console.log(`[自定义源] 当前总计: ${loadedApis.size} 个源`)

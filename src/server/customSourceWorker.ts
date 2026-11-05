@@ -133,6 +133,26 @@ async function boot(data: SourceWorkerData) {
 
         let cancelled = false
         let currentReq: any = null
+        // 终态护栏：与主线程同一套问题——needle 的 open/response 超时只 destroy 不回调，
+        // 请求会永久挂在 worker 里（占 socket + 内存），脚本回调也永远等不到。
+        let settled = false
+        let guardTimer: any = null
+        const clearGuard = () => {
+            if (guardTimer) {
+                clearTimeout(guardTimer)
+                guardTimer = null
+            }
+        }
+        const settle = (): boolean => {
+            if (settled) return false
+            settled = true
+            clearGuard()
+            return true
+        }
+        const failOnce = (err: any) => {
+            if (!settle()) return
+            try { callback.call(null, plainify(err), null, null) } catch { /* 沙箱可能已释放 */ }
+        }
         const abort = () => {
             try { const r = currentReq?.request; if (r && !r.aborted) r.abort() } catch { /* ignore */ }
         }
@@ -140,6 +160,7 @@ async function boot(data: SourceWorkerData) {
 
         const handleResponse = (err: any, resp: any, body: any) => {
             if (cancelled || disposed) return
+            if (!settle()) return
             if (err) {
                 try { callback.call(null, plainify(err), null, null) } catch { /* ignore */ }
                 return
@@ -166,28 +187,57 @@ async function boot(data: SourceWorkerData) {
 
         // 逐跳自己做 302：needle 的自动跳转目标不经 checkLiteralTarget，会绕开内网护栏
         const follow = (target: string, verb: string, payload: any, hops: number) => {
+            if (settled) return
             if (cancelled || disposed) return
             const blocked = checkLiteralTarget(target)
             if (!blocked.ok) {
                 const e: any = new Error(`目标地址属于内网保留网段（${blocked.reason}），已被自定义源出站护栏拦截: ${blocked.host}`)
                 e.code = 'EBLOCKEDPRIVATE'
-                try { callback.call(null, e, null, null) } catch { /* ignore */ }
+                failOnce(e)
                 return
             }
-            currentReq = needle.request(verb as any, encodeRequestUrl(target), payload, requestOptions, (err: any, resp: any, body: any) => {
-                if (!err && resp && resp.statusCode >= 300 && resp.statusCode < 400 && hops < 5) {
-                    const raw = Array.isArray(resp.headers?.location) ? resp.headers.location[0] : resp.headers?.location
-                    let next = ''
-                    if (raw) { try { next = new URL(String(raw), target).toString() } catch { /* 非法 Location 当普通响应 */ } }
-                    if (next) {
-                        const keep = resp.statusCode === 307 || resp.statusCode === 308
-                        const bodyless = /^(get|head)$/i.test(verb)
-                        follow(next, keep || bodyless ? verb : 'get', keep || bodyless ? payload : null, hops + 1)
-                        return
+            let req: any = null
+            try {
+                req = needle.request(verb as any, encodeRequestUrl(target), payload, requestOptions, (err: any, resp: any, body: any) => {
+                    if (settled) return
+                    if (!err && resp && resp.statusCode >= 300 && resp.statusCode < 400 && hops < 5) {
+                        const raw = Array.isArray(resp.headers?.location) ? resp.headers.location[0] : resp.headers?.location
+                        let next = ''
+                        if (raw) { try { next = new URL(String(raw), target).toString() } catch { /* 非法 Location 当普通响应 */ } }
+                        if (next) {
+                            const keep = resp.statusCode === 307 || resp.statusCode === 308
+                            const bodyless = /^(get|head)$/i.test(verb)
+                            follow(next, keep || bodyless ? verb : 'get', keep || bodyless ? payload : null, hops + 1)
+                            return
+                        }
                     }
-                }
-                handleResponse(err, resp, body)
-            })
+                    handleResponse(err, resp, body)
+                })
+            } catch (e: any) {
+                failOnce(e)
+                return
+            }
+            currentReq = req
+
+            try {
+                req?.on?.('response', clearGuard)
+                req?.on?.('timeout', (type: string) => {
+                    if (type === 'read') return
+                    const e: any = new Error(`${type} timeout（needle 此路径不会回调，已由宿主收口）`)
+                    e.code = 'ETIMEDOUT'
+                    failOnce(e)
+                })
+            } catch { /* 非 EventEmitter 时忽略，仍有兜底计时器 */ }
+
+            const guardMs = (requestOptions.open_timeout || 10000) + (requestOptions.response_timeout || 30000) + 5000
+            clearGuard()
+            guardTimer = setTimeout(() => {
+                const e: any = new Error(`请求超时 ${guardMs}ms 未收到响应（宿主兜底守卫）`)
+                e.code = 'ETIMEDOUT'
+                failOnce(e)
+            }, guardMs)
+            if (guardTimer && typeof guardTimer.unref === 'function') guardTimer.unref()
+
             if (cancelled) abort()
         }
 

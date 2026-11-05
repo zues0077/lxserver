@@ -33,6 +33,7 @@ import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation, listIsolations, ISOLATION_MAX_AUTO_RELEASE } from './sourceGuard'
 import { hasHotSearchItems } from './hotSearchFallback'
 import { getWorkerStatus } from './sourceWorkerHost'
+import { loadGovernorState } from './sourceGovernor'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
@@ -13895,6 +13896,9 @@ export const startServer = async (port: number, ip: string) => {
   // 初始化自定义源
   try {
     console.log('[服务] 正在初始化自定义源...')
+    // 先读回上次运行的慢源记录：加载完音源后会按它把已知慢源预置进独立线程，
+    // 避免重启后第一次搜索又把主线程卡十几秒（246 实测 11934ms）
+    loadGovernorState()
     // 修改：不传参数，默认加载 open + 所有用户源
     await initUserApis()
     console.log('[服务] 自定义源初始化完成')
