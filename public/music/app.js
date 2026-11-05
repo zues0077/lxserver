@@ -8046,6 +8046,12 @@ function setPlayerStatus(status, isPlaying = null, isLoading = false) {
         isPlaying = !audio.paused;
     }
 
+    // 投送小爱音箱时，本地 audio 是被 pause 的（声音走音箱），不能用它判断播放态，
+    // 否则明明音箱在放、界面却一直显示「暂停中」（手册 P-1113）。以投送状态为准。
+    if (window.XiaoAi && typeof window.XiaoAi.isCasting === 'function' && window.XiaoAi.isCasting()) {
+        isPlaying = true;
+    }
+
     const playStatus = isPlaying ? '播放中' : '暂停中';
 
 

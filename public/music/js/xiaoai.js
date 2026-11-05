@@ -1493,6 +1493,7 @@
                 updatePlayButtonSafe(true);
                 // 恢复播放后重新开始守望（暂停期间不轮询，省掉无谓的云端请求）
                 startWatch(watch.song);
+                if (typeof setPlayerStatus === 'function') setPlayerStatus('正在小爱音箱播放', true);
             } else {
                 const data = await request('/pause', {});
                 const states = Array.isArray(data && data.results) ? data.results.map(item => item.state) : [];
@@ -1501,6 +1502,7 @@
                 markRemotePaused(true);
                 updatePlayButtonSafe(false);
                 stopWatch();
+                if (typeof setPlayerStatus === 'function') setPlayerStatus('已暂停', false);
                 setWatchHint(
                     state.remoteStopped
                         ? '该机型不支持暂停，已停止播放（点播放会重新投送这首）'
@@ -1567,6 +1569,14 @@
         /** 投送模式下拖动进度条：跳到指定秒数（服务端重投一条以该秒开头的流） */
         seek,
         resetTimeline,
+        /**
+         * 是否「正在投送小爱音箱且非用户暂停」。
+         * 投送时本地 <audio> 是 paused 的（声音走音箱），主播放器不能用它判断播放态，
+         * 否则界面会一直显示「暂停中」。setPlayerStatus 据此修正 UI 播放态（手册 P-1113）。
+         */
+        isCasting: () => state.target === 'xiaoai' && !state.remotePaused,
+        /** 投送目标当前是否真的在音箱里播放（供更精细的 UI 判断） */
+        isCastingPlaying: () => state.target === 'xiaoai' && !state.remotePaused && !!watch.active,
         /** 当前投送曲目的整首时长（毫秒），拖动进度条换算秒数用 */
         durationMs,
         reload: loadConfig,
