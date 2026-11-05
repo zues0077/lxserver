@@ -152,6 +152,8 @@ interface GuardConfig {
     probeEnabled: boolean
     probeWindowMs: number
     probeMaxScripts: number
+    /** 启动静默期：进程起来后的这段时间内不做 CPU 卸载复检（毫秒，0 = 不限制） */
+    probeStartupQuietMs: number
     /** 卡顿归因：超过该值的卡顿才触发归因（毫秒） */
     stallMinMs: number
     /** 卡顿归因：慢定时器回调的时间窗（毫秒），窗外的记录不作为证据 */
@@ -198,6 +200,17 @@ const cfg = (): GuardConfig => {
             probeEnabled: envBool('SOURCE_GUARD_PROBE_ENABLED', true),
             probeWindowMs: envNum('SOURCE_GUARD_PROBE_WINDOW_MS', 3000),
             probeMaxScripts: envNum('SOURCE_GUARD_PROBE_MAX_SCRIPTS', 6),
+            /**
+             * 启动静默期默认 5 分钟。
+             *
+             * 246 上连续三次启动，每次都有一个无辜源被判「空转」：
+             * 02:10 全豆要（cpu_probe:0.4%）、06:10 全豆要（drop=35.8 / base=36.2）、
+             * 06:19 墨澜聚合音源（drop=27.5 / base=35.2）。
+             * 三次的 baseline 都是 30~36%，那是「加载 40 个源 + worker 预热」的启动负载，
+             * 不是空闲态；此时卸载**任意**源都会看到大幅回落，判据本身失效。
+             * 全豆要实测只有 10 次请求、加载 39ms，根本不是空转源。
+             */
+            probeStartupQuietMs: envNum('SOURCE_GUARD_PROBE_STARTUP_QUIET_MS', 5 * 60 * 1000),
             // 卡顿联动归因：CPU 采样会被阻塞错过 5~7s 的爆发，事件循环延迟不会。
             // 默认只告警不隔离（warn 先行），连续归因同一源 N 次且显式开启开关才隔离。
             // 归因触发阈值。默认 2000ms（实测依据：NAS 上 4000ms 的真实阻塞被
@@ -1087,6 +1100,13 @@ const candidateWeight = (ref: SourceRef): number => {
 }
 
 /**
+ * 是否处于「启动静默期」。抽成纯函数只为可单测：判据就一行时间比较，
+ * 但它是三起误封（全豆要×2、墨澜×1）的根因，值得钉死。
+ */
+export const inStartupQuietWindow = (quietMs: number, uptimeMs: number): boolean =>
+    quietMs > 0 && uptimeMs >= 0 && uptimeMs < quietMs
+
+/**
  * 逐个卸载候选脚本，观察 CPU 是否回落来确认「是谁在空转」。
  * 代价是每个候选一个 3s 窗口；未确认的会立即恢复加载，不影响其他音源。
  */
@@ -1112,6 +1132,16 @@ const runProbe = async (deps: GuardDeps, baseline: number): Promise<void> => {
     if (probeBusy) {
         console.log(`[自检护栏] 音源巡检进行中（${Math.round(probeBusy.elapsedMs / 1000)}s），跳过本轮 CPU 复检`
             + '（避免把巡检负载算到音源头上）')
+        highStreak = 0
+        return
+    }
+    /**
+     * 启动静默期：进程刚起来这几分钟 CPU 天然高（加载几十个源、worker 预热、缓存预热）。
+     * baseline 被启动负载抬高后，「卸载任意源 → CPU 回落」必然成立，判据就失效了。
+     * 246 三次启动各误判一个无辜源（全豆要两次、墨澜一次），全部发生在启动后 60 秒内。
+     */
+    if (inStartupQuietWindow(current.probeStartupQuietMs, process.uptime() * 1000)) {
+        console.log(`[自检护栏] 启动静默期内（已运行 ${Math.round(process.uptime())}s < ${Math.round(current.probeStartupQuietMs / 1000)}s），跳过本轮 CPU 复检（避免把启动负载算到音源头上）`)
         highStreak = 0
         return
     }

@@ -9,7 +9,7 @@ import {
     isolateSlowSource,
 } from './sourceGuard'
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
-import { isHardFailure, reportManualFailure } from './sourceProbe'
+import { isHardFailure, reportManualFailure, isPlatformDemoted } from './sourceProbe'
 import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor, listWorkerPresetCandidates } from './sourceGovernor'
 import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible } from './sourceWorkerHost'
 import { syncLog } from '../utils/log4js'
@@ -1569,8 +1569,14 @@ const VERIFY_TIMEOUT_MS = 3000
 // 因此绝不会让音源或平台「消失」，只影响下次取链时谁先被尝试。
 /** 沉底的观察窗口（毫秒）：多久之前的失败还算数 */
 const PLAY_SINK_WINDOW_MS = 15 * 60 * 1000
-/** 窗口内失败几次才沉底 */
-const PLAY_SINK_MIN_FAILS = 2
+/**
+ * 窗口内失败几次才沉底。
+ *
+ * 2026-11-05 定为 1：用户拍板「第一次取链失败先降权，第二次再关平台」——
+ * 播放侧的沉底与巡检的降权必须同一步调，否则会出现「巡检已经降权、播放侧还把它排第一」
+ * 的割裂。沉底的代价只是「下次先试别的源」，成功一次立刻恢复原位，误伤成本极低。
+ */
+const PLAY_SINK_MIN_FAILS = 1
 interface PlaySinkRecord { fails: number; lastFailAt: number }
 const playFailSink = new Map<string, PlaySinkRecord>()
 
@@ -1584,7 +1590,10 @@ export const partitionByPlaySink = (
 ): { fresh: any[]; sunk: any[] } => {
     const isSunk = (api: any): boolean => {
         const rec = playFailSink.get(playSinkKey(api?.info?.owner, api?.info?.id, platform))
-        return !!rec && rec.fails >= PLAY_SINK_MIN_FAILS && now - rec.lastFailAt < PLAY_SINK_WINDOW_MS
+        if (rec && rec.fails >= PLAY_SINK_MIN_FAILS && now - rec.lastFailAt < PLAY_SINK_WINDOW_MS) return true
+        // 巡检侧的降权观察：第一次探测失败就点亮，成功一次 / 过期自动撤销。
+        // 两套账本各管一段（播放侧管「本次失败」，巡检侧管「平台级证据」），任一命中都排到队尾。
+        return isPlatformDemoted(api?.info?.owner, api?.info?.id, platform, now)
     }
     return {
         fresh: candidates.filter(api => !isSunk(api)),

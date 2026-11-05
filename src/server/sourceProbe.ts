@@ -80,6 +80,17 @@ export interface PlatformProbeState {
    * 刚恢复过的平台再失败时要求双倍连续失败次数才允许再次关闭，抖动就落在计数上，不再落到开关上。
    */
   restoredAt?: number
+  /**
+   * 「降权观察」的起始时间戳（0/未设置 = 未降权）。
+   *
+   * 语义：该「音源 × 平台」在巡检里第一次取链失败 → 只是**排到换源顺序的队尾**，
+   * 不写 states.json、不关平台；连续第二次失败才允许关闭（见 conf.demoteThreshold / conf.failThreshold）。
+   *
+   * 为什么要有这一档：巡检一次失败就关平台，误判代价是「用户少一个能用的源」；
+   * 而第一次失败只降权，代价仅仅是「下次先试别的源」，两者严重不对称。
+   * 降权由成功一次或超过 DEMOTE_TTL_MS 自动失效，不会长期粘住。
+   */
+  demotedAt?: number
 }
 
 export interface SourceProbeState {
@@ -150,6 +161,8 @@ export interface ProbeRunResult {
   platformsDeferred: number
   /** 本次新关闭的平台 */
   newlyDisabled: string[]
+  /** 本次首次进入「降权观察」的「源/平台」（只影响换源顺序，不关平台） */
+  demoted: string[]
   /** 本次恢复可用的平台 */
   restored: string[]
   /** 本次移除的音源 */
@@ -186,6 +199,8 @@ export interface ProbePlatformDetail {
   lastCheckAt: number
   lastOkAt: number
   lastError: string
+  /** 是否处于「降权观察」：只排到换源队尾，不关平台 */
+  demoted: boolean
 }
 
 export interface ProbeStatusSnapshot {
@@ -193,6 +208,8 @@ export interface ProbeStatusSnapshot {
   running: boolean
   intervalMinutes: number
   failThreshold: number
+  /** 连续失败几次降权（0 = 关闭降权档） */
+  demoteThreshold: number
   /** 当前生效的探测并发路数（config.js 的 customSource.probe.concurrency） */
   concurrency: number
   autoDisablePlatform: boolean
@@ -224,6 +241,14 @@ export interface ProbeConfig {
   enabled: boolean
   intervalMinutes: number
   failThreshold: number
+  /**
+   * 连续失败几次后进入「降权观察」（只排到换源队尾，不关平台）。
+   *
+   * 默认 1：第一次取链失败就降权，第二次（failThreshold）才关平台。
+   * 填 0 关闭降权档，恢复「失败到阈值直接关」的老行为。
+   * 若填得 ≥ failThreshold，说明没有观察窗口，按关闭降权处理（见 configOf 的钳制）。
+   */
+  demoteThreshold: number
   timeoutMs: number
   concurrency: number
   verifyLink: boolean
@@ -349,10 +374,18 @@ const ratioNumber = (value: unknown, fallback: number): number => {
 export const configOf = (): ProbeConfig => {
   const c: any = (global.lx && global.lx.config) || {}
   const rawTestSongs = c['customSource.probe.testSongs']
+  const failThreshold = Math.max(1, Math.round(positiveNumber(c['customSource.probe.failThreshold'], 2)))
+  // 降权阈值必须给「第二次失败才关平台」留出观察窗口：
+  //   - 配 0 = 关闭降权档，回到「到阈值直接关」的老行为；
+  //   - 配到 ≥ failThreshold 等于没有观察窗口，同样按关闭处理，而不是钳成「和关闭同步触发」；
+  //   - 合法区间 [1, failThreshold - 1]，failThreshold=1 时必然为 0（本来就没有第二次）。
+  const rawDemote = Math.round(nonNegativeNumber(c['customSource.probe.demoteThreshold'], 1))
+  const demoteThreshold = rawDemote > 0 && rawDemote < failThreshold ? rawDemote : 0
   return {
     enabled: c['customSource.probe.enabled'] !== false,
     intervalMinutes: positiveNumber(c['customSource.probe.intervalMinutes'], 360),
-    failThreshold: Math.max(1, Math.round(positiveNumber(c['customSource.probe.failThreshold'], 2))),
+    failThreshold,
+    demoteThreshold,
     timeoutMs: positiveNumber(c['customSource.probe.timeoutMs'], 15000),
     // 并发默认 6：实测 40 音源 × 152 平台在并发 2 下要跑 356 秒，
     // 窗口越长越容易和用户播放撞车（抢出口带宽与 CPU）。单平台多为网络等待，提并发 safe。
@@ -452,6 +485,8 @@ const writeStatus = (owner: string, status: ProbeStatusFile) => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     status.updatedAt = Date.now()
     fs.writeFileSync(statusPath(owner), JSON.stringify(status, null, 2), 'utf-8')
+    // 取链排序读的就是这份文件，写完必须让缓存失效，否则降权要等 30 秒才对排序生效
+    statusReadCache.delete(owner)
   } catch (e: any) {
     syncLog.warn(`[音源巡检] 保存巡检状态失败 (${owner}):`, e?.message || e)
   }
@@ -1087,6 +1122,90 @@ export interface ManualFailureReport {
  */
 const RESTORE_DEBOUNCE_MS = 30 * 60_000
 
+/**
+ * 「降权观察」的有效期：从这里往后最多维持 6 小时（= 默认巡检间隔一轮）。
+ *
+ * 降权本身只是一条排序提示，但它是**有证据门槛**的：必须由一次真实探测失败点亮。
+ * 如果不设有效期，某个源被降权后再也没被巡检探到（预算截断、音源被卸载重载丢了状态），
+ * 它会永远排在队尾，而用户完全看不出原因。过期即恢复原位，下一轮巡检失败会重新降权。
+ */
+const DEMOTE_TTL_MS = 6 * 60 * 60 * 1000
+
+/** 某「源 × 平台」当前是否处于降权观察期（纯函数，便于单测；ps 为空视为未降权） */
+export const isDemoteActive = (ps: { demotedAt?: number } | undefined, now: number = Date.now()): boolean => {
+  const at = Number(ps?.demotedAt || 0)
+  return at > 0 && now - at < DEMOTE_TTL_MS
+}
+
+export interface FailureNoteOptions {
+  /** 连续失败到几次降权（0 = 关闭降权档） */
+  demoteThreshold: number
+  failThreshold: number
+  now?: number
+}
+
+/**
+ * 记一次平台侧探测失败，并按「先降权、后关平台」的阶梯推进。
+ *
+ * 只负责 failCount 与降权标记；「是否够格关平台」由调用方用 disableThresholdFor 判定
+ * （那里还有「刚恢复过的平台要双倍证据」的防抖），本函数绝不碰 autoDisabled / states.json。
+ *
+ * @returns demoteStarted=true 表示本次是**首次**进入降权观察（调用方据此只打一条日志）
+ */
+export const notePlatformFailure = (
+  ps: PlatformProbeState,
+  opts: FailureNoteOptions,
+): { demoted: boolean; demoteStarted: boolean } => {
+  const now = opts.now ?? Date.now()
+  // 失败计数上限 99，避免「连续失败 N 次」在停探期/关闭后只增不减变成无意义的极大值
+  ps.failCount = Math.min(99, Number(ps.failCount || 0) + 1)
+  const threshold = Math.max(0, Math.round(Number(opts.demoteThreshold) || 0))
+  // 已经关掉的平台不参与降权：它在 states.json 里已经不可选，排序层看不到它
+  if (!threshold || ps.autoDisabled || ps.failCount < threshold) {
+    return { demoted: isDemoteActive(ps, now), demoteStarted: false }
+  }
+  const demoteStarted = !isDemoteActive(ps, now)
+  if (demoteStarted) ps.demotedAt = now
+  return { demoted: true, demoteStarted }
+}
+
+/** 探测成功：立刻撤销降权（与「任意一次成功即恢复原位」的沉底语义保持一致） */
+export const clearPlatformDemote = (ps: PlatformProbeState): void => {
+  ps.demotedAt = 0
+}
+
+/** 磁盘状态的短缓存（只服务 isPlatformDemoted 这条热路径） */
+const statusReadCache = new Map<string, { at: number; status: ProbeStatusFile }>()
+const STATUS_READ_CACHE_MS = 30_000
+
+const readStatusCached = (owner: string): ProbeStatusFile | null => {
+  const hit = statusReadCache.get(owner)
+  const now = Date.now()
+  if (hit && now - hit.at < STATUS_READ_CACHE_MS) return hit.status
+  try {
+    const status = readStatus(owner)
+    statusReadCache.set(owner, { at: now, status })
+    return status
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 给取链排序层用：该「源 × 平台」当前是否处于降权观察期。
+ *
+ * 巡检进行中直接读内存状态（liveStatusByOwner）；不在巡检时读磁盘，带 30 秒缓存 ——
+ * 取链是热路径，不能每首歌都同步读一次 probe-status.json。
+ * 读不到 / 没建档一律返回 false（宁可少降权，也不凭缺失证据改变顺序）。
+ */
+export const isPlatformDemoted = (owner: string, sourceId: string, platform: string, now: number = Date.now()): boolean => {
+  if (!owner || !sourceId || !platform) return false
+  const live = liveStatusByOwner
+  const status = live ? live.get(owner) : readStatusCached(owner)
+  const ps = status?.sources?.[sourceId]?.platforms?.[platform]
+  return isDemoteActive(ps, now)
+}
+
 function disableThresholdFor(ps: { restoredAt?: number } | undefined, threshold: number): number {
   const restoredAt = Number(ps?.restoredAt || 0)
   if (!restoredAt) return threshold
@@ -1124,9 +1243,14 @@ export function reportManualFailure(ev: ManualFailureReport): { counted: boolean
   const ps = sourceState.platforms[ev.platform]
   if (!ps || ps.autoDisabled) return none
 
-  ps.failCount = Math.min(99, ps.failCount + 1)
   ps.lastCheckAt = Date.now()
   ps.lastError = ev.error
+  // 手动取链同样遵守「先降权、后关平台」：第一次硬故障只排到队尾，
+  // 与巡检共用同一套状态，避免两条路径对同一个平台给出不同结论
+  notePlatformFailure(ps, {
+    demoteThreshold: conf.demoteThreshold,
+    failThreshold: conf.failThreshold,
+  })
 
   let disabled = false
   if (ev.hasControlGroup && conf.autoDisablePlatform && ps.failCount >= disableThresholdFor(ps, conf.failThreshold)) {
@@ -1136,13 +1260,14 @@ export function reportManualFailure(ev: ManualFailureReport): { counted: boolean
     ps.disabledFailCount = ps.failCount
     ps.disabledAt = Date.now()
     ps.failCount = 0
+    clearPlatformDemote(ps)
     if (setPlatformDisabled(ev.owner, ev.sourceId, ev.platform, true)) disabled = true
     audit(ev.owner, 'disable-platform', {
       sourceId: ev.sourceId, sourceName: ev.sourceName, platform: ev.platform,
-      failCount: ps.failCount, error: ev.error, via: 'manual-play',
+      failCount: ps.disabledFailCount, error: ev.error, via: 'manual-play',
     })
     const msg = `⚠ 已关闭平台解析: ${ev.sourceName} / ${ev.platform}` +
-      `（同一首歌下其他音源可播，本源硬故障 ${ps.failCount} 次：${ev.error}）`
+      `（同一首歌下其他音源可播，本源硬故障 ${ps.disabledFailCount} 次：${ev.error}）`
     console.warn(`[手动取链] ${msg}`)
     syncLog.warn(`[手动取链] ${msg}`)
   }
@@ -1168,7 +1293,7 @@ export async function runSourceProbe(
   const empty: ProbeRunResult = {
     startedAt, durationMs: 0, sourcesChecked: 0, platformsChecked: 0,
     platformsOk: 0, platformsDown: 0, platformsSkipped: 0, platformsDeferred: 0,
-    newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [], suspectSkippedPlatforms: [],
+    newlyDisabled: [], demoted: [], restored: [], removed: [], suspectPlatforms: [], suspectSkippedPlatforms: [],
     message: '未执行',
   }
 
@@ -1206,7 +1331,7 @@ export async function runSourceProbe(
     const result: ProbeRunResult = {
       startedAt, durationMs: 0, sourcesChecked: targets.length, platformsChecked: 0,
       platformsOk: 0, platformsDown: 0, platformsSkipped: 0, platformsDeferred: 0,
-      newlyDisabled: [], restored: [], removed: [], suspectPlatforms: [], suspectSkippedPlatforms: [],
+      newlyDisabled: [], demoted: [], restored: [], removed: [], suspectPlatforms: [], suspectSkippedPlatforms: [],
       message: '',
     }
 
@@ -1403,6 +1528,8 @@ export async function runSourceProbe(
           platformState.failCount = 0
           platformState.lastOkAt = Date.now()
           platformState.lastError = ''
+          // 成功一次即撤销降权：顺序上的惩罚必须能被一次真实成功立刻抹掉
+          clearPlatformDemote(platformState)
           result.platformsOk++
 
           // 之前被自动关闭的平台恢复可用 → 立即自动重新开启（恢复一定是安全的，不必等后置校验）
@@ -1420,11 +1547,20 @@ export async function runSourceProbe(
           }
           platformState.status = 'ok'
         } else {
-          // 失败计数上限 99，避免「连续失败 N 次」在停探期/关闭后只增不减变成无意义的极大值
-          platformState.failCount = Math.min(99, platformState.failCount + 1)
+          // 先降权、后关平台：第一次失败只把该「源 × 平台」排到取链队尾（不写 states.json），
+          // 连续失败到 failThreshold 才由下面的落定阶段关闭。
+          const noted = notePlatformFailure(platformState, {
+            demoteThreshold: conf.demoteThreshold,
+            failThreshold: conf.failThreshold,
+          })
           platformState.lastError = shorten(lastError)
           // 是否「不可用」要等平台侧系统性判定后再落定，这里先按证据不足处理
           platformState.status = 'unknown'
+          if (noted.demoteStarted) {
+            result.demoted.push(`${job.target.name}/${job.platform}`)
+            console.log(`[音源巡检] ↓ 已降权观察: ${job.target.name} / ${job.platform}` +
+              `（首次失败：${platformState.lastError}；仅排到换源队尾，连续失败 ${conf.failThreshold} 次才关闭）`)
+          }
         }
       }
     }
@@ -1543,14 +1679,16 @@ export async function runSourceProbe(
           ps.disabledFailCount = ps.failCount
           ps.disabledAt = Date.now()
           ps.failCount = 0
+          // 平台已关闭，降权标记没有意义了（它在 states.json 里已不可选），一并清掉
+          clearPlatformDemote(ps)
           setPlatformDisabled(target.owner, target.id, platform, true)
           result.newlyDisabled.push(`${target.name}/${platform}`)
           audit(target.owner, 'disable-platform', {
             sourceId: target.id, sourceName: target.name,
-            platform, failCount: ps.failCount, error: ps.lastError,
+            platform, failCount: ps.disabledFailCount, error: ps.lastError,
           })
-          console.warn(`[音源巡检] ⚠ 已关闭平台解析: ${target.name} / ${platform}（连续失败 ${ps.failCount} 次，原因：${ps.lastError}）`)
-          syncLog.warn(`[音源巡检] ⚠ 已关闭平台解析: ${target.name} / ${platform}（连续失败 ${ps.failCount} 次，原因：${ps.lastError}）`)
+          console.warn(`[音源巡检] ⚠ 已关闭平台解析: ${target.name} / ${platform}（连续失败 ${ps.disabledFailCount} 次，原因：${ps.lastError}）`)
+          syncLog.warn(`[音源巡检] ⚠ 已关闭平台解析: ${target.name} / ${platform}（连续失败 ${ps.disabledFailCount} 次，原因：${ps.lastError}）`)
         }
       }
     }
@@ -1601,6 +1739,7 @@ export async function runSourceProbe(
       `巡检 ${targets.length} 个音源的 ${result.platformsChecked} 个平台：` +
       `可用 ${result.platformsOk}、不可用 ${result.platformsDown}、跳过 ${result.platformsSkipped}` +
       (result.platformsDeferred ? `（另有 ${result.platformsDeferred} 个失败因平台疑似异常暂缓，未计入不可用）` : '') +
+      (result.demoted.length ? `；降权观察 ${result.demoted.length} 个（仅排到换源队尾）` : '') +
       (result.newlyDisabled.length ? `；新关闭 ${result.newlyDisabled.length} 个平台` : '') +
       (result.restored.length ? `；恢复 ${result.restored.length} 个平台` : '') +
       (result.removed.length ? `；移除 ${result.removed.length} 个音源` : '') +
@@ -1817,6 +1956,7 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
             lastCheckAt: platformState.lastCheckAt || 0,
             lastOkAt: platformState.lastOkAt || 0,
             lastError: platformState.lastError || '',
+            demoted: isDemoteActive(platformState),
           })
         }
       }
@@ -1836,6 +1976,7 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
     running,
     intervalMinutes: conf.intervalMinutes,
     failThreshold: conf.failThreshold,
+    demoteThreshold: conf.demoteThreshold,
     concurrency: conf.concurrency,
     autoDisablePlatform: conf.autoDisablePlatform,
     autoRemoveSource: conf.autoRemoveSource,

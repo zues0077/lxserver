@@ -2751,6 +2751,10 @@ class App {
             if (form.elements['customSource.probe.failThreshold']) {
                 form.elements['customSource.probe.failThreshold'].value = config['customSource.probe.failThreshold'] || 2;
             }
+            if (form.elements['customSource.probe.demoteThreshold']) {
+                const demote = Number(config['customSource.probe.demoteThreshold']);
+                form.elements['customSource.probe.demoteThreshold'].value = Number.isFinite(demote) ? demote : 1;
+            }
             // 复检间隔：0 是合法值（关闭），不能用 || 兜底
             if (form.elements['customSource.probe.restoreIntervalMinutes']) {
                 const restoreMin = Number(config['customSource.probe.restoreIntervalMinutes']);
@@ -3636,6 +3640,11 @@ class App {
             'customSource.probe.intervalMinutes': parseInt(formData.get('customSource.probe.intervalMinutes')) || 360,
             'customSource.probe.concurrency': parseInt(formData.get('customSource.probe.concurrency')) || 6,
             'customSource.probe.failThreshold': parseInt(formData.get('customSource.probe.failThreshold')) || 2,
+            'customSource.probe.demoteThreshold': (() => {
+                // 0 是合法值（关闭降权档），不能像上面那样用 || 兜底成 1
+                const v = parseInt(formData.get('customSource.probe.demoteThreshold'));
+                return Number.isFinite(v) && v >= 0 ? v : 1;
+            })(),
             // 复检间隔：0 = 关闭该功能，非法输入回落 720
             'customSource.probe.restoreIntervalMinutes': (() => {
                 const minutes = parseInt(formData.get('customSource.probe.restoreIntervalMinutes'));
