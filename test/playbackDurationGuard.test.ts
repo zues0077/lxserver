@@ -77,3 +77,18 @@ test('刚好一半边界放行（阈值取宽，宁漏不误杀）', () => {
   const r = judgePlaybackDuration({ expectedSec: 240, actualSec: 120, name: '测试曲' })
   assert.strictEqual(r.level, 'ok', '恰好 50% 不判残片，避免误伤正常的前奏较长版本')
 })
+
+test('元数据本身 <30s 且曲名无豁免 → suspect（红昭愿 DJ版 现场样本）', () => {
+  // 30 分钟小压测现场：源声明 20s、实际 19.8s，相对比例判不出来（actual≈expected）
+  const r = judgePlaybackDuration({ expectedSec: 20, actualSec: 19.8, name: '红昭愿 (DJ版)' })
+  assert.strictEqual(r.level, 'suspect', `元数据即 20s 应判 suspect，实际 ${r.level}`)
+  assert.ok(r.reason?.includes('20'), 'reason 应带上元数据时长')
+
+  // 但 actual 够长（>=30s）说明拿到的不是占位音 → 放行
+  const ok = judgePlaybackDuration({ expectedSec: 20, actualSec: 45, name: '红昭愿 (DJ版)' })
+  assert.strictEqual(ok.level, 'ok')
+
+  // 曲名有豁免标记的真短音频仍然交白卷
+  const exempt = judgePlaybackDuration({ expectedSec: 20, actualSec: 19.8, name: '起床铃声' })
+  assert.strictEqual(exempt.level, 'unknown')
+})
