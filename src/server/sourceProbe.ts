@@ -35,7 +35,7 @@ import { markSourceBusy } from './sourceGuard'
 import { isThrottled } from './sourceGovernor'
 import { beginProbeQuiet, endProbeQuiet } from './probeQuiet'
 import { beginHostActivity, endHostActivity } from './sourceActivity'
-import { moveScriptToTrash } from './sourceTrash'
+import { moveScriptToTrash, listTrash } from './sourceTrash'
 import type { ScheduledTask, TaskExecutionResult } from './task/types'
 
 export const PROBE_TASK_ID = 'custom_source_health_probe'
@@ -1326,6 +1326,66 @@ export const removeProbeStatus = (owner: string, sourceId: string): boolean => {
   return true
 }
 
+/**
+ * 巡检启动时的账本自愈（2026-11-06 新增，246 全量账本扫描发现两类脏数据）：
+ *
+ * C1 反向幽灵：源文件还在（活跃源）但账本残留 removedAt —— 快照靠
+ *     `if (removedAt) continue` 跳过，于是一个**活源**的巡检明细对 /health 不可见。
+ *     现场：`幻音音源.js`，账本残留 11-02 的自动移除记录，文件后来回到源目录
+ *     但当时还没有 clearProbeRemoval，标记永远没人清。→ 走 clearProbeRemoval 清掉。
+ * C2 真孤儿：账本有条目，但源文件没了也不在回收站 —— 快照永久挂幽灵行
+ *     （现场：`Appx64 Clear Music.js`、probe-verify 空间的 `巡检验证源.js`）。
+ *     → 走 removeProbeStatus 整条剪除。
+ *
+ * 注意：`id.disabled` 结尾的文件（停用产物，如 `豆包定制[聚合音源].js.disabled`）
+ * 视为「存在」——停用是设计内状态，条目保留，不剪。
+ * 只在全量巡检时调用（restoreOnly / only 批量的 targets 是过滤后的子集，不能当活跃全集）。
+ */
+export const selfHealProbeLedger = (
+  owner: string,
+  activeIds: Set<string>,
+  trashedIds: Set<string>,
+): { healed: string[]; pruned: string[] } => {
+  const healed: string[] = []
+  const pruned: string[] = []
+  const status = readStatus(owner)
+  if (!status || !Object.keys(status.sources || {}).length) return { healed, pruned }
+  const dir = ownerDir(owner)
+  for (const id of Object.keys(status.sources)) {
+    if (activeIds.has(id)) {
+      if (status.sources[id]?.removedAt !== undefined && clearProbeRemoval(owner, id)) {
+        healed.push(id)
+        syncLog.warn(`[音源巡检] 自愈：${id} 源文件仍在但账本残留 removedAt，已清除（快照恢复可见）`)
+      }
+      continue
+    }
+    if (trashedIds.has(id)) continue
+    const fileAlive = [path.join(dir, id), path.join(dir, `${id}.disabled`)].some(p => fs.existsSync(p))
+    if (fileAlive) continue
+    if (removeProbeStatus(owner, id)) {
+      pruned.push(id)
+      syncLog.warn(`[音源巡检] 自愈：${id} 源文件已消失且不在回收站，账本孤儿条目已剪除`)
+    }
+  }
+  return { healed, pruned }
+}
+
+/** 枚举所有有巡检账本的空间（_open 目录映射回 owner 'open'） */
+export const ledgerOwners = (): string[] => {
+  const root = sourceRoot()
+  let dirs: string[] = []
+  try {
+    dirs = fs.readdirSync(root, { withFileTypes: true })
+      .filter((d: any) => d.isDirectory())
+      .map((d: any) => d.name)
+  } catch {
+    return []
+  }
+  return dirs
+    .filter(name => fs.existsSync(path.join(root, name, STATUS_FILE)))
+    .map(name => (name === '_open' ? 'open' : name))
+}
+
 /** 磁盘状态的短缓存（只服务 isPlatformDemoted 这条热路径） */
 const statusReadCache = new Map<string, { at: number; status: ProbeStatusFile }>()
 const STATUS_READ_CACHE_MS = 30_000
@@ -1478,6 +1538,28 @@ export async function runSourceProbe(
     if (options.only && options.only.length) {
       const wanted = new Set(options.only.map(o => `${o.owner}_${o.id}`))
       targets = targets.filter(t => wanted.has(`${t.owner}_${t.id}`))
+    }
+
+    // 账本自愈（C1 反向幽灵 / C2 真孤儿，见 selfHealProbeLedger 注释）。
+    // 只在全量巡检跑：restoreOnly / only 批量的 targets 是过滤后子集，不能当活跃全集。
+    // 必须在 statusFor(owner) 首次调用之前执行，否则自愈会被轮末 writeStatus 用旧状态覆盖。
+    const selfHealNotes: string[] = []
+    if (!options.restoreOnly && !(options.only && options.only.length)) {
+      const ownerScope = options.owner
+        ? [options.owner]
+        : [...new Set([...ledgerOwners(), ...targets.map(t => t.owner)])]
+      for (const owner of ownerScope) {
+        const activeIds = new Set(targets.filter(t => t.owner === owner).map(t => t.id))
+        let trashedIds: Set<string>
+        try {
+          trashedIds = new Set(listTrash(owner).map(i => i.id))
+        } catch {
+          trashedIds = new Set()
+        }
+        const r = selfHealProbeLedger(owner, activeIds, trashedIds)
+        if (r.healed.length) selfHealNotes.push(`${owner} 恢复可见 ${r.healed.length} 个：${r.healed.join('、')}`)
+        if (r.pruned.length) selfHealNotes.push(`${owner} 剪除孤儿 ${r.pruned.length} 个：${r.pruned.join('、')}`)
+      }
     }
 
     const result: ProbeRunResult = {
@@ -1903,7 +1985,8 @@ export async function runSourceProbe(
       (result.suspectSkippedPlatforms.length
         ? `；${result.suspectSkippedPlatforms.length} 个平台上轮疑似异常本轮停探（每平台保留 ${SUSPECT_SAMPLE_SIZE} 个哨兵）` : '') +
       (restoreSkippedThrottled ? `；跳过 ${restoreSkippedThrottled} 个降速中的慢源` : '') +
-      restoreCutNote
+      restoreCutNote +
+      (selfHealNotes.length ? `；账本自愈 ${selfHealNotes.join('；')}` : '')
 
     if (options.restoreOnly) lastRestoreRun = result
     else lastRun = result

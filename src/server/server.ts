@@ -641,6 +641,7 @@ const resolvePlayableAudio = async (
     quality: string
     contentType: string
     durationMs: number
+    platform: string
     reason: string
   }> = []
   let rescueProbes = 0
@@ -649,16 +650,22 @@ const resolvePlayableAudio = async (
   const rescueExhausted = () =>
     rescueProbes >= RESCUE_MAX_EXTRA_PROBES || (rescueDeadline > 0 && Date.now() >= rescueDeadline)
   const collectSuspect = (
-    item: { url: string; sourceName: string; quality: string; contentType: string; durationMs: number },
+    item: { url: string; sourceName: string; quality: string; contentType: string; durationMs: number; platform: string },
     reason: string,
   ) => {
     // 同一地址可能被多个源重复返回，去重避免无谓地吃预算
     if (suspects.some(s => s.url === item.url)) return
+    // B1：同平台的另一个子源返回了几乎同一时长的音频——多 API 源共用同一份坏文件，
+    // 再探也不会变。记入嫌疑池但**不占抢救预算**，预算要留给真正可能出完整版的跨平台候选。
+    // 现场（2026-11-06 红昭愿 (DJ版)）：kw 3 个子源返回同一份 29s，3 次预算烧光后
+    // 换源阶段进门就 rescueExhausted，tx 候选 0 次探测直接保底投最长。
+    const twin = suspects.some(s =>
+      s.platform === item.platform && Math.abs(s.durationMs - item.durationMs) <= 1000)
     if (!rescueDeadline) rescueDeadline = Date.now() + RESCUE_BUDGET_MS
-    rescueProbes++
+    if (!twin) rescueProbes++
     suspects.push({ ...item, reason })
     console.warn(
-      `[自动换源] 时长可疑，继续找完整版：${item.sourceName} ${item.durationMs ? `${Math.round(item.durationMs / 1000)}s` : ''}（${reason}）`,
+      `[自动换源] 时长可疑，继续找完整版：${item.sourceName} ${item.durationMs ? `${Math.round(item.durationMs / 1000)}s` : ''}（${reason}）${twin ? '〔同平台重复占位音，不占抢救预算〕' : ''}`,
     )
   }
   // 两段独立预算（见上面常量注释）：原源阶段超支不会吃掉换源阶段的时间片
@@ -722,6 +729,7 @@ const resolvePlayableAudio = async (
             quality: String(extra?.type || quality),
             contentType: extraProbe.contentType || '',
             durationMs: extraProbe.durationMs || 0,
+            platform: source,
           }, extraVerdict.reason || '时长异常')
           failures.push(`${extraLabel}: ${extraVerdict.reason || '时长异常'}（已继续换源）`)
           return null
@@ -734,6 +742,7 @@ const resolvePlayableAudio = async (
     }
 
     const exclude: string[] = []
+    let prevSuspectMs = -1
     for (let round = 0; round < 5; round++) {
       if (Date.now() >= deadline || probes >= RESOLVE_MAX_PROBES) return null
       let result: any
@@ -776,8 +785,16 @@ const resolvePlayableAudio = async (
           quality: String(result?.type || quality),
           contentType: probe.contentType || '',
           durationMs: probe.durationMs || 0,
+          platform: source,
         }, verdict.reason || '时长异常')
         failures.push(`${label}: ${verdict.reason || '时长异常'}（已继续换源）`)
+        // B2：同平台连续两轮几乎同时长——该平台其余子源几乎肯定还是同一份文件，
+        // 别再烧探测次数/等待时间，直接收手让位给跨平台候选
+        if (prevSuspectMs >= 0 && Math.abs(probe.durationMs - prevSuspectMs) <= 1000) {
+          failures.push(`${source}: 同平台连续返回同时长音频，跳过其余子源`)
+          return null
+        }
+        prevSuspectMs = probe.durationMs
         if (rescueExhausted()) return null
       } else {
         failures.push(`${label}: 地址不可播（${probe.detail}）`)
@@ -2386,76 +2403,16 @@ const hasVersionMismatch = (candidateName: unknown, targetName: unknown): boolea
 const SOURCE_MATCH_CACHE_TTL = 60_000
 const sourceMatchCache = new Map<string, { expiresAt: number, promise: Promise<any[]> }>()
 
-const normalizeSongMatchText = (value: unknown) => String(value || '')
-  .toLowerCase()
-  .replace(/[（(\[].*?[）)\]]/g, '')
-  .replace(/[\s\p{P}\p{S}]/gu, '')
-
-const normalizeSongNameText = (value: unknown) => String(value || '')
-  .toLowerCase()
-  .replace(/[\s\p{P}\p{S}]/gu, '')
-
-const splitSingerNames = (value: unknown) => String(value || '')
-  .toLowerCase()
-  .split(/[、，,&；;|/+]/)
-  .map(normalizeSongMatchText)
-  .filter(Boolean)
-
-const isSingerMatch = (candidateSinger: unknown, targetSinger: unknown) => {
-  const candidateText = normalizeSongMatchText(candidateSinger)
-  const targetText = normalizeSongMatchText(targetSinger)
-  if (!targetText) return true
-  if (!candidateText) return false
-  if (candidateText.includes(targetText) || targetText.includes(candidateText)) return true
-
-  const candidateParts = splitSingerNames(candidateSinger)
-  const targetParts = splitSingerNames(targetSinger)
-  return candidateParts.some(candidatePart => targetParts.some(targetPart => (
-    candidatePart.includes(targetPart) || targetPart.includes(candidatePart)
-  )))
-}
-
-const getSongDurationSeconds = (value: unknown) => {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value > 10000 ? Math.round(value / 1000) : Math.round(value)
-  }
-
-  const text = String(value || '').trim()
-  if (!text) return 0
-  if (/^\d+(?:\.\d+)?$/.test(text)) {
-    const parsed = Number(text)
-    return parsed > 10000 ? Math.round(parsed / 1000) : Math.round(parsed)
-  }
-
-  const parts = text.split(':').map(Number)
-  if (parts.some(part => !Number.isFinite(part))) return 0
-  if (parts.length === 2) return Math.round(parts[0] * 60 + parts[1])
-  if (parts.length === 3) return Math.round(parts[0] * 3600 + parts[1] * 60 + parts[2])
-  return 0
-}
-
-const getSongMatchScore = (candidate: any, target: any) => {
-  const candidateName = normalizeSongNameText(candidate?.name)
-  const targetName = normalizeSongNameText(target?.name)
-  if (!candidateName || !targetName) return -1
-  if (!candidateName.includes(targetName) && !targetName.includes(candidateName)) return -1
-  if (!isSingerMatch(candidate?.singer, target?.singer)) return -1
-
-  const candidateDuration = getSongDurationSeconds(candidate?.interval)
-  const targetDuration = getSongDurationSeconds(target?.interval)
-  let durationScore = 0
-  if (candidateDuration > 0 && targetDuration > 0) {
-    const durationDiff = Math.abs(candidateDuration - targetDuration)
-    if (durationDiff > 8) return -1
-    durationScore = 8 - durationDiff
-  }
-
-  const nameScore = candidateName === targetName ? 20 : 10
-  const candidateAlbum = normalizeSongMatchText(candidate?.albumName)
-  const targetAlbum = normalizeSongMatchText(target?.albumName)
-  const albumScore = candidateAlbum && targetAlbum && candidateAlbum === targetAlbum ? 3 : 0
-  return nameScore + durationScore + albumScore
-}
+// 歌曲匹配打分与规范化：已抽到 utils/songMatch.ts（2026-11-06，含救援模式，可单测）
+// 现场案例见该文件头注：坏元数据（<30s）会把所有完整版挡在换源候选之外
+import {
+  normalizeSongMatchText,
+  normalizeSongNameText,
+  splitSingerNames,
+  isSingerMatch,
+  getSongDurationSeconds,
+  getSongMatchScore,
+} from '../utils/songMatch'
 
 const findServerSourceMatches = async (songInfo: any, username: string) => {
   if (!songInfo?.name || !songInfo?.singer) return []

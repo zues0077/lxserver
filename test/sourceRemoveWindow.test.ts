@@ -275,3 +275,46 @@ test('removeProbeStatus：空间或源为空时返回 false 不抛错不落盘',
     // rmv-none 空间根本没建出来：读失败返回空账本，绝不能把空账本写回真路径
     assert.equal(fs.existsSync(statusFile('rmv-none')), false)
 })
+
+// ---------- selfHealProbeLedger（巡检启动时账本自愈：C1 反向幽灵 / C2 真孤儿） ----------
+
+import { selfHealProbeLedger } from '../src/server/sourceProbe'
+
+test('C1 反向幽灵：源文件在（active）但账本带 removedAt → 清标记恢复快照可见', () => {
+    // 现场：幻音音源.js 文件在源目录，账本残留 11-02 的 removedAt，活源被快照跳过
+    seedStatus('heal-a', 'live.js', {})
+    const r = selfHealProbeLedger('heal-a', new Set(['live.js']), new Set())
+    assert.deepEqual(r.healed, ['live.js'])
+    const s = readBack('heal-a').sources['live.js']
+    assert.equal(s.removedAt, undefined, 'removedAt 应被清掉')
+    assert.equal(s.platforms.wy.failCount, 5, '巡检历史不能误伤')
+})
+
+test('C2 真孤儿：文件消失且不在回收站 → 剪除条目；.disabled 视为存在不剪', () => {
+    // 现场：Appx64 Clear Music.js 文件彻底消失；豆包定制[聚合音源].js.disabled 是停用产物
+    seedStatus('heal-b', 'gone.js', {})
+    const file = statusFile('heal-b')
+    const before = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    before.sources['stopped.js'] = { name: 'stopped', removedAt: undefined, platforms: {} }
+    before.sources['trashed.js'] = { name: 'trashed', removedAt: undefined, platforms: {} }
+    fs.writeFileSync(file, JSON.stringify(before, null, 2), 'utf-8')
+    // stopped.js 以 .disabled 形式存在；gone.js 什么都不剩
+    fs.mkdirSync(path.join(tmp, 'users', 'source', 'heal-b'), { recursive: true })
+    fs.writeFileSync(path.join(tmp, 'users', 'source', 'heal-b', 'stopped.js.disabled'), '// disabled', 'utf-8')
+
+    const r = selfHealProbeLedger('heal-b', new Set(), new Set(['trashed.js']))
+    assert.deepEqual(r.pruned, ['gone.js'], `只该剪除真孤儿 gone.js，实际 ${JSON.stringify(r.pruned)}`)
+    const after = readBack('heal-b').sources
+    assert.equal(after['gone.js'], undefined)
+    assert.notEqual(after['stopped.js'], undefined, '.disabled（停用）条目不能剪')
+    assert.notEqual(after['trashed.js'], undefined, '回收站里的条目不能剪')
+})
+
+test('自愈：活跃源没 removedAt / 账本为空 → 原样返回，不写盘', () => {
+    seedStatus('heal-c', 'ok.js', { removedAt: undefined, removedReason: undefined, allDownSince: undefined })
+    const before = fs.readFileSync(statusFile('heal-c'), 'utf-8')
+    const r = selfHealProbeLedger('heal-c', new Set(['ok.js']), new Set())
+    assert.deepEqual(r.healed, [])
+    assert.deepEqual(r.pruned, [])
+    assert.equal(fs.readFileSync(statusFile('heal-c'), 'utf-8'), before, '没病不能乱动刀')
+})
