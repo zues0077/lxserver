@@ -671,6 +671,25 @@ const readPlatformFlags = (statesDirName: string, sourceId: string): PlatformFla
  * 因此这里必须「读-改-写」，不能整体覆盖，否则会抹掉用户的其他设置。
  */
 const setPlatformDisabled = (owner: string, sourceId: string, platform: string, disabled: boolean): boolean => {
+  // 额外音源（汽水/B站）：与社区脚本同待遇——自动关闭/重开写同一语义的平台开关，
+  // 只是落盘位置是 extra-sources-state.json（内置源没有 states.json 生命周期）。
+  if (owner === 'extra') {
+    try {
+      const extraSources = require('./extraSources')
+      const st = extraSources.getExtraSourceState(sourceId)
+      const list: string[] = Array.isArray(st.disabledSources) ? [...st.disabledSources] : []
+      const has = list.includes(platform)
+      if (disabled && !has) {
+        extraSources.setExtraSourceDisabledSources(sourceId, [...list, platform])
+        return true
+      }
+      if (!disabled && has) {
+        extraSources.setExtraSourceDisabledSources(sourceId, list.filter(p => p !== platform))
+        return true
+      }
+      return false
+    } catch { return false }
+  }
   let changed = false
   for (const space of stateSpacesFor(owner)) {
     try {
@@ -1091,6 +1110,19 @@ const dropFromManifest = (owner: string, sourceId: string): boolean => {
  * 避免删除动作触发一次无谓的全量重载。
  */
 const removeSource = (owner: string, sourceId: string, sourceName: string, reason: string, deps: ProbeDeps, conf: ProbeConfig): boolean => {
+  // 额外音源（汽水/B站）：内置代码没有「脚本文件」可移除，与社区脚本同待遇的等价动作
+  // 是自动停用（enabled=false）——源停止参与搜索/取链/巡检，效果与移除脚本一致；
+  // 用户随时可在设置页手动重新启用（相当于社区脚本的回收站恢复）。
+  if (owner === 'extra') {
+    try {
+      const extraSources = require('./extraSources')
+      extraSources.setExtraSourceEnabled(sourceId, false)
+    } catch { /* ignore */ }
+    audit(owner, 'remove-source', { sourceId, sourceName, reason, mode: 'disable-builtin' })
+    console.warn(`[音源巡检] ⚠ 已自动停用内置音源: ${sourceName} (${sourceId}) —— ${reason}（可在设置页重新启用）`)
+    syncLog.warn(`[音源巡检] ⚠ 已自动停用内置音源: ${sourceName} (${sourceId}) —— ${reason}（可在设置页重新启用）`)
+    return true
+  }
   try {
     deps.unload(owner, sourceId)
   } catch { /* ignore */ }
@@ -1813,7 +1845,6 @@ export async function runSourceProbe(
     // 快速复检到这里就结束：worker 里已经把「探测成功」的平台重新打开，
     // 剩下的事（定罪、关闭、移除）都需要多轮多平台证据，单平台单曲的复检样本一律不参与。
     if (!options.restoreOnly) for (const target of targets) {
-      if (target.owner === 'extra') continue
       const sourceState = statusFor(target.owner).sources[target.id]
       for (const platform of target.platforms) {
         const ps = sourceState.platforms[platform]
@@ -1868,7 +1899,6 @@ export async function runSourceProbe(
     if (conf.autoRemoveSource && !options.restoreOnly) {
       const windowMs = Math.max(0, conf.allDownDays) * 86400_000
       for (const target of targets) {
-        if (target.owner === 'extra') continue
         const status = statusFor(target.owner)
         const sourceState = status.sources[target.id]
         const platforms = Object.entries(sourceState.platforms)
