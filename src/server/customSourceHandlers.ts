@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { extractMetadata, loadUserApi, getApiStatus, reloadSingleSource, unloadSource, applyOrderToLoadedApis } from './userApi'
-import { probeNewSource, clearProbeRemoval } from './sourceProbe'
+import { probeNewSource, clearProbeRemoval, removeProbeStatus } from './sourceProbe'
 import type { IncomingMessage, ServerResponse } from 'http'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
@@ -964,6 +964,10 @@ export async function handleDelete(req: IncomingMessage, res: ServerResponse) {
         // 重新初始化
         unloadSource(targetOwner, targetId)
 
+        // 巡检账本同步剪除：不删的话 /health 快照会一直挂着这个源的幽灵行
+        // （2026-11-06 实测 gdstudio 删回回收站后 details 仍报 5 行，且永不自愈）
+        try { removeProbeStatus(targetOwner, targetId) } catch { /* 清理失败不影响删除本身 */ }
+
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true }))
     } catch (err: any) {
@@ -1192,7 +1196,13 @@ export async function handleTrashPurge(req: IncomingMessage, res: ServerResponse
         const owner = resolveOwner(username)
         if (!guardTrashAccess(req, res, owner)) return
 
+        // 清空前先算好要删哪些源，成功后把它们的巡检账本条目一并剪除（防幽灵行）
+        const items = listTrash(owner)
+        const victims = all ? items : items.filter(i => i.file === file)
         const removed = purgeTrash(owner, all ? undefined : file)
+        for (const v of victims) {
+            try { removeProbeStatus(owner, v.id) } catch { /* 清理失败不影响清空本身 */ }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, removed }))
     } catch (err: any) {
