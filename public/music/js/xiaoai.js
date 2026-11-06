@@ -1372,9 +1372,23 @@
         if (!songKey || songKey === '|' || watch.prefetchedKey === songKey) return;
         watch.prefetchedKey = songKey;
         lockNextIndex(nextIndex);
-        request('/prefetch', { songInfo: nextSong, quality: nextSong.quality || undefined }).catch(() => {
-            /* 预解析失败不影响主流程，切歌时会再解析一次 */
-        });
+        // 解锁：只清「自己这一首」的锁，避免切歌后把新歌的锁也清掉。
+        // 以前这里是 `.catch(() => {})` 静默吞掉，而 prefetchedKey 已经锁死 ——
+        // 一次网络抖动就让这首再也得不到预热，切歌时干等一次完整下载（实测 6 秒）。
+        const releaseKey = delay => {
+            setTimeout(() => {
+                if (watch.prefetchedKey === songKey) watch.prefetchedKey = '';
+            }, delay);
+        };
+        request('/prefetch', { songInfo: nextSong, quality: nextSong.quality || undefined })
+            .then(data => {
+                // 服务端闸门跳过（已有预热在跑 / 触发过密）：稍后再试，不影响主流程
+                if (data && data.skipped) releaseKey(5000);
+            })
+            .catch(() => {
+                /* 预解析失败不影响主流程：15 秒后允许再试一次 */
+                releaseKey(15000);
+            });
     };
 
     /**
@@ -1653,6 +1667,10 @@
             caller: (meta && meta.caller) || 'manual',
         });
         if (!data.success) throw new Error(data.message || '投送失败');
+        // 所有源都只有不完整版本：歌照常播，只如实说明原因，别让用户以为播放器坏了
+        if (data.incompleteReason) {
+            setMessage(`已投送可用的最长版本：${data.incompleteReason}`);
+        }
         // 投送成功时还没有播放状态，先按无状态处理（不提示），等守望第一次采样再判断
         updateVipWarning(data);
         return data;

@@ -52,6 +52,83 @@ export const judgeAudioMismatch = (params: {
     return null
 }
 
+/**
+ * 投送前的「时长是否可信」判据：识别**占位音频 / 被截断的残片**。
+ *
+ * 与 judgeAudioMismatch 的分工：那个判「这份音频是不是另一首歌」（用于拒绝落盘），
+ * 这个判「这份音频是这首歌但明显不完整」（用于**换源重挑**，绝不拒绝播放）。
+ *
+ * 现场样本（2026-11-06 小爱压测，180 次投送）：`光年之外` 11.3s ×2、`南山南` 11.3s
+ * （都来自同一音源）、`岁月神偷` 19.8s ×2、`你的答案 (Live）` 60.7s，而同曲在别处
+ * 分别是 277s / 316s / 244s / 277s。关键指纹：**11311ms 在三首不同的歌上完全相同**、
+ * 19752ms 在两首上相同 —— 这不是截断，是音源返回了固定长度的占位音频。
+ *
+ * 设计原则（宁漏不误杀）：
+ *  - 曲名自带「片段/铃声/秒数」等标记时一律交白卷（unknown），不参与判定——
+ *    `一万次悲伤 (54秒片段)` 实际 54.7s 是**真短音频**，被换掉反而是 bug。
+ *  - 只在 actual 明显不到 expected 一半时才 suspect；阈值取宽，且必须 expected 已知。
+ *  - expected 未知时只用 30s 绝对下限兜底（正常歌曲不会短于 30 秒）。
+ *  - 返回 suspect 不代表「不播」，调用方应继续换源；换不到就投最长的那个。
+ */
+const PLAYBACK_SHORT_OK =
+    /(片段|铃声|提示音|闹钟|起床|剪辑|试听|预告|彩蛋|demo|interlude|reprise|intro|outro|伴奏|纯音乐|instrumental|白噪音|雨声|asmr|lullaby|jingle)/i
+/** 曲名里自己声明了秒数（「54秒片段」「30秒铃声」）→ 交给声明值判定，不走通用阈值 */
+const PLAYBACK_DECLARED_SEC = /(\d{1,3})\s*(?:秒|s\b|sec)/i
+/** 正常歌曲的时长下限：低于此值且拿不到预期时长时，按占位音处理 */
+export const PLAYBACK_MIN_PLAUSIBLE_SEC = 30
+
+export interface PlaybackDurationVerdict {
+    level: 'ok' | 'suspect' | 'unknown'
+    reason?: string
+}
+
+export const judgePlaybackDuration = (params: {
+    /** 请求方/音源声明的时长（秒），0 表示未知 */
+    expectedSec?: number
+    /** 实际探测到的音频时长（秒） */
+    actualSec: number
+    /** 曲名：用于「片段/铃声/自带秒数」豁免 */
+    name?: unknown
+}): PlaybackDurationVerdict => {
+    const actual = Math.max(0, Math.round(Number(params.actualSec) || 0))
+    const expected = Math.max(0, Math.round(Number(params.expectedSec) || 0))
+    const name = String(params.name ?? '')
+
+    // 探不到时长（部分容器头部解析不出）时不做任何判定
+    if (actual <= 0) return { level: 'unknown' }
+
+    // 曲名声明是片段/铃声/纯音乐：一律放行，避免把用户真想听的短音频换掉
+    if (name && PLAYBACK_SHORT_OK.test(name)) return { level: 'unknown' }
+    const declared = name.match(PLAYBACK_DECLARED_SEC)
+    if (declared) {
+        const sec = Number(declared[1])
+        // 曲名说 54 秒、实际 54.7 秒 → 就是它，不许换
+        if (sec > 0 && Math.abs(actual - sec) <= Math.max(10, sec * 0.2)) return { level: 'unknown' }
+    }
+
+    if (expected >= 90) {
+        // 正常歌曲：不到一半即视为残片/占位（11s/19s/60s 对 240~340s 全部命中）
+        if (actual < expected * 0.5) {
+            return { level: 'suspect', reason: `只有 ${formatSec(actual)}，预期 ${formatSec(expected)}` }
+        }
+        return { level: 'ok' }
+    }
+
+    if (expected > 0) {
+        // 短音频（<=90s）：只按相对比例判，避免拿长曲阈值误杀儿歌
+        if (actual < expected * 0.5) {
+            return { level: 'suspect', reason: `只有 ${formatSec(actual)}，预期 ${formatSec(expected)}` }
+        }
+        return { level: 'ok' }
+    }
+
+    // 预期时长未知：只能用绝对下限兜底
+    if (actual < PLAYBACK_MIN_PLAUSIBLE_SEC) {
+        return { level: 'suspect', reason: `仅 ${actual}s，低于正常歌曲时长` }
+    }
+    return { level: 'unknown' }
+}
+
 /** 「mm:ss」/「hh:mm:ss」/ 纯秒数 → 秒；解析不出返回 0 */
 export const parseIntervalSec = (value: unknown): number => {
     if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? Math.round(value) : 0

@@ -22,6 +22,10 @@ import { buildStreamHeaders, needsBilibiliReferer, forbidsReferer } from './util
 import { probePlayableUrl } from './utils/playableProbe'
 import { isEncryptedRemoteStream } from './utils/streamEncryption'
 import { invalidateDislikeCache } from '@/server/utils/dislikeCache'
+// 投送前的「时长是否可信」判据：识别占位音频/残片并触发换源（不拒绝播放）
+import { judgePlaybackDuration, parseIntervalSec } from '@/utils/audioGuard'
+// 音源偶尔把 \uXXXX 的反斜杠弄丢，曲名变成 (u5b8cu6574u7248)，需要还原
+import { decodeSongText } from '@/utils/textDecode'
 import { createMsg2call } from 'message2call'
 import { ElFinderConnector, getSystemRoot } from './elfinderConnector'
 import formidable from 'formidable'
@@ -386,6 +390,33 @@ let lastXiaoAiStreamFailedAt = 0
  */
 let lastXiaoAiGuardAction = ''
 /**
+ * 守门判 `failed` 后主动 stop 的限流时间戳。
+ *
+ * 三级补救（换地址重推 → 占位重发 → URL 直链）全失败时，设备常停在
+ * `paused / position=0` 的**假播放态**：界面显示"播放中"、实际一片安静，
+ * 用户再点投送也不会起播，必须手动重启音箱。
+ * 主动 stop 一次能让设备回到干净状态，下一次投送就能正常拉流（相当于帮用户做了重启之外的那一步）。
+ * 10 秒限流避免连续投送时反复开关设备。
+ */
+let lastGuardStopAt = 0
+/**
+ * 预热串行闸门（F7，用户 2026-11-06 拍板：默认开、带闸门）。
+ *
+ * 预取链路（`/prefetch` → `resolveXiaoAiTrack`）会真的把下一首**整首下载 + 转码**落盘，
+ * 实测一次 8.2 秒。好处极大（切歌时 6015ms → 568ms），但在 N100 这种 4 核机上
+ * 同时跑多个 ffmpeg 会抢核，反而让**正在播放的那首歌**卡顿。
+ *
+ * 所以这里只做两道克制的限制，宁可这次不预热也不影响当前播放：
+ *  1. 同一时间只允许一个预取任务（prefetchBusy）
+ *  2. 距上一次预热不足 3 秒则跳过（节流，避免前端反复触发把队列堵满）
+ *
+ * 注意：**不能用「是否正在推流」当闸门**。正常播放时服务端一直在推字节，
+ * 按那个判据预热会永远被跳过，等于功能失效（这点踩过，记在方案文档 F7 里）。
+ */
+let prefetchBusy = false
+let lastPrefetchAt = 0
+const PREFETCH_MIN_INTERVAL_MS = 3000
+/**
  * 拉流守门（runPullGuard）正在进行中的截止时刻（ms）。
  * 守门期间（曲库 VIP 版不可播 → 自动降级 placeholder → URL 直链重发）设备短暂无进度/暂停是
  * 正常协商期，给前端一个明确信号，否则 watchdog 会误判 finished-without-progress 跳歌（手册 P-1110 续）。
@@ -516,6 +547,11 @@ interface ResolvedPlayableAudio {
   /** 探测到的真实音频时长（毫秒），0 表示算不出 */
   durationMs: number
   failures: string[]
+  /**
+   * 置位表示「所有源都只有不完整版本，这是保底投送的那个」。
+   * 上层据此在界面上如实提示（只提示、不阻断），并让自动续播照常工作。
+   */
+  incompleteReason?: string
 }
 
 /**
@@ -558,6 +594,16 @@ const RESOLVE_SWITCH_BUDGET_MS = (() => {
 const RESOLVE_MAX_PROBES = 12
 
 /**
+ * 残片抢救预算（D1，用户 2026-11-06 拍板：3 源 / 8 秒）。
+ *
+ * 探测到「能出音频但时长明显不对」（占位音频/被截断）时，不立刻接受、也不报错，
+ * 而是继续问下一个源，最多再花 3 次探测 / 8 秒。找到合格版本就立刻用；
+ * 预算用尽仍只有残片时，由 L2 保底投「最长的那一个」，保证永远能听到声音。
+ */
+const RESCUE_MAX_EXTRA_PROBES = 3
+const RESCUE_BUDGET_MS = 8000
+
+/**
  * 解析出「确认真的能出音频」的播放地址。
  *
  * 音源脚本只要拼出一个字符串就算成功，它不会验证对方是否还活着
@@ -569,9 +615,52 @@ const resolvePlayableAudio = async (
   songInfo: any,
   requestedQuality: string,
   username: string,
+  options: {
+    /**
+     * 跳过「原源」阶段，直接走换源。
+     *
+     * 用在首轮失败后的重试：首轮的 10 秒原源预算往往就是烧在同一批慢源上
+     * （实测 mg 两轮都是「解析超时」，20 秒全喂给同一批源，第 28 秒才报失败）。
+     * 重试时换一条路（别平台的候选）才有意义，原样再问一遍等于白等。
+     */
+    skipDirect?: boolean
+  } = {},
 ): Promise<ResolvedPlayableAudio> => {
   const failures: string[] = []
   const tried = new Set<string>()
+
+  /**
+   * L2 保底池：能出音频但时长不对的候选。
+   *
+   * 这里不是为了「拒绝播放」，而是为了「万一换不到完整版，至少投最长的那一个」——
+   * 用户明确要求任何情况下都要有声音，而不是此路不通就不做。
+   */
+  const suspects: Array<{
+    url: string
+    sourceName: string
+    quality: string
+    contentType: string
+    durationMs: number
+    reason: string
+  }> = []
+  let rescueProbes = 0
+  let rescueDeadline = 0
+  /** 抢救预算（3 次额外探测 / 8 秒）是否已用尽 */
+  const rescueExhausted = () =>
+    rescueProbes >= RESCUE_MAX_EXTRA_PROBES || (rescueDeadline > 0 && Date.now() >= rescueDeadline)
+  const collectSuspect = (
+    item: { url: string; sourceName: string; quality: string; contentType: string; durationMs: number },
+    reason: string,
+  ) => {
+    // 同一地址可能被多个源重复返回，去重避免无谓地吃预算
+    if (suspects.some(s => s.url === item.url)) return
+    if (!rescueDeadline) rescueDeadline = Date.now() + RESCUE_BUDGET_MS
+    rescueProbes++
+    suspects.push({ ...item, reason })
+    console.warn(
+      `[自动换源] 时长可疑，继续找完整版：${item.sourceName} ${item.durationMs ? `${Math.round(item.durationMs / 1000)}s` : ''}（${reason}）`,
+    )
+  }
   // 两段独立预算（见上面常量注释）：原源阶段超支不会吃掉换源阶段的时间片
   let deadline = Date.now() + RESOLVE_DIRECT_BUDGET_MS
   let probes = 0
@@ -612,13 +701,30 @@ const resolvePlayableAudio = async (
         probes++
         const extraProbe = await probeAudioCached(extraUrl)
         if (extraProbe.ok) {
-          return {
+          // 与主链路同一套时长判据：额外音源（B站/汽水）也会给占位音频
+          const extraVerdict = judgePlaybackDuration({
+            expectedSec: parseIntervalSec(candidate?.interval ?? songInfo?.interval),
+            actualSec: (extraProbe.durationMs || 0) / 1000,
+            name: candidate?.name || songInfo?.name,
+          })
+          if (extraVerdict.level !== 'suspect') {
+            return {
+              url: extraUrl,
+              sourceName: extraLabel,
+              quality: String(extra?.type || quality),
+              contentType: extraProbe.contentType || '',
+              durationMs: extraProbe.durationMs || 0,
+            }
+          }
+          collectSuspect({
             url: extraUrl,
             sourceName: extraLabel,
             quality: String(extra?.type || quality),
             contentType: extraProbe.contentType || '',
             durationMs: extraProbe.durationMs || 0,
-          }
+          }, extraVerdict.reason || '时长异常')
+          failures.push(`${extraLabel}: ${extraVerdict.reason || '时长异常'}（已继续换源）`)
+          return null
         }
         failures.push(`${extraLabel}: 地址不可播（${extraProbe.detail}）`)
       } catch (error: any) {
@@ -648,15 +754,34 @@ const resolvePlayableAudio = async (
       probes++
       const probe = await probeAudioCached(url)
       if (probe.ok) {
-        return {
+        // L1：能出音频还不够，得是完整的那一首。占位音频/残片不立刻接受，
+        // 也不报错 —— 记下来继续换源，让「换到对的版本」这件事自然发生。
+        const verdict = judgePlaybackDuration({
+          expectedSec: parseIntervalSec(candidate?.interval ?? songInfo?.interval),
+          actualSec: (probe.durationMs || 0) / 1000,
+          name: candidate?.name || songInfo?.name,
+        })
+        if (verdict.level !== 'suspect') {
+          return {
+            url,
+            sourceName: label,
+            quality: String(result?.type || quality),
+            contentType: probe.contentType || '',
+            durationMs: probe.durationMs || 0,
+          }
+        }
+        collectSuspect({
           url,
           sourceName: label,
           quality: String(result?.type || quality),
           contentType: probe.contentType || '',
           durationMs: probe.durationMs || 0,
-        }
+        }, verdict.reason || '时长异常')
+        failures.push(`${label}: ${verdict.reason || '时长异常'}（已继续换源）`)
+        if (rescueExhausted()) return null
+      } else {
+        failures.push(`${label}: 地址不可播（${probe.detail}）`)
       }
-      failures.push(`${label}: 地址不可播（${probe.detail}）`)
 
       // 把这个坏源排除掉再来一轮；拿不到标识或已经没有更多源就收手
       const marker = String(result?.sourceId || result?.sourceName || '').trim()
@@ -688,10 +813,16 @@ const resolvePlayableAudio = async (
   // 换源阶段拿到了 B站 BV 号也没时间取链（本轮实机复现的正是这个）。
   let direct: any = null
   try {
-    for (const quality of qualities) {
-      const left = Math.max(800, deadline - Date.now())
-      direct = await withHardBudget(attempt(songInfo, quality), left, '原源取链')
-      if (direct) break
+    if (options.skipDirect) {
+      // 重试轮直接进换源：首轮原源那 10 秒已经证明这条路走不通，再问一遍是白等
+      // （实测 mg 两轮都「解析超时」，用户干等 28 秒）
+      console.log(`[自动换源] 重试跳过原源，直接换源：${songInfo.name}`)
+    } else {
+      for (const quality of qualities) {
+        const left = Math.max(800, deadline - Date.now())
+        direct = await withHardBudget(attempt(songInfo, quality), left, '原源取链')
+        if (direct) break
+      }
     }
   } finally {
     clearTimeout(graceTimer)
@@ -712,7 +843,10 @@ const resolvePlayableAudio = async (
     console.log(`[自动换源] 原源不可用，换源候选 ${matches.length} 条：${songInfo.name} → ${matches.slice(0, 3).map(m => m.source).join(',')}`)
   }
   for (const quality of qualities) {
-    for (const match of matches.slice(0, 3)) {
+    if (suspects.length && rescueExhausted()) break
+    for (const match of matches.slice(0, 6)) {
+      // 残片抢救预算用尽：再问下去也只是多等，直接走 L2 保底
+      if (suspects.length && rescueExhausted()) break
       // 同样逐次套硬闸：保证「换源」这一段严格不超过 RESOLVE_SWITCH_BUDGET_MS，
       // 而不是被第一个候选的内部串行重试吃光。
       const left = Math.max(800, deadline - Date.now())
@@ -722,6 +856,26 @@ const resolvePlayableAudio = async (
         console.log(`[自动换源] 换源成功：${songInfo.name} → ${hit.sourceName} (${hit.quality})`)
         return { ...hit, failures }
       }
+    }
+  }
+
+  // L2 保底：所有源都只有残片时，投「最长的那一个」，绝不返回「没歌可放」。
+  // 用户 2026-11-06 定调：产品要想办法让歌播出来，而不是此路不通就不做。
+  // 宁可让用户听到 60 秒的版本并给出提示，也不要弹一个「无法播放」。
+  if (suspects.length) {
+    const best = suspects.reduce((a, b) => (b.durationMs > a.durationMs ? b : a), suspects[0])
+    console.warn(
+      `[自动换源] 所有候选都不是完整版，保底投最长的一个：${best.sourceName} ` +
+        `${best.durationMs ? `${Math.round(best.durationMs / 1000)}s` : ''}（试过 ${suspects.length} 个残片）`,
+    )
+    return {
+      url: best.url,
+      sourceName: best.sourceName,
+      quality: best.quality,
+      contentType: best.contentType,
+      durationMs: best.durationMs,
+      failures: [...failures, `仅找到不完整版本（${best.reason}），已投最长的一个`],
+      incompleteReason: best.reason,
     }
   }
 
@@ -780,6 +934,11 @@ interface XiaoAiTrackTarget {
   title?: string
   /** 写入 mp3 的 ID3 歌手 */
   artist?: string
+  /**
+   * 置位表示「所有源都只有不完整版本，这是保底投送的那个」。
+   * 只用于在界面上如实告诉用户「只找到 60 秒版本」，不阻断播放、不影响自动续播。
+   */
+  incompleteReason?: string
 }
 
 /** 扩展名 → Content-Type（本地缓存文件按真实格式命名过，可以直接推） */
@@ -1049,14 +1208,30 @@ const resolveXiaoAiTrackRaw = async (
   if (!options.skipCache) try {
     const cached = fileCache.checkCache({ ...songInfo, quality }, verifiedUsername)
     if (cached?.exists && cached.path) {
-      console.log(`[XiaoAi] 命中本地缓存，直接投送：${filename}`)
-      return {
-        path: cached.path,
-        filename,
-        cached: true,
-        contentType: AUDIO_MIME_BY_EXT[path.extname(cached.path).toLowerCase()],
-        via: '本地缓存',
-        durationMs: probeLocalFileDuration(cached.path),
+      const cachedDuration = probeLocalFileDuration(cached.path)
+      // L3：缓存命中也得校验 —— 脏文件（占位音频/被截断）一旦落盘就会**永久**命中，
+      // 前面所有换源逻辑都白做。这里只「跳过不删」：文件可能是用户自己想留的短版本，
+      // 换源后会拿到更好的；万一换不到，L2 保底仍会投它。
+      const cachedVerdict = judgePlaybackDuration({
+        expectedSec: parseIntervalSec(songInfo.interval),
+        actualSec: cachedDuration / 1000,
+        name: songInfo.name,
+      })
+      if (cachedVerdict.level === 'suspect') {
+        console.warn(
+          `[XiaoAi] 本地缓存是不完整版本，跳过并换源：${filename}（${cachedVerdict.reason}）`,
+        )
+        syncLog.warn(`[XiaoAi] 本地缓存不完整（${cachedVerdict.reason}），已跳过换源：${filename}`)
+      } else {
+        console.log(`[XiaoAi] 命中本地缓存，直接投送：${filename}`)
+        return {
+          path: cached.path,
+          filename,
+          cached: true,
+          contentType: AUDIO_MIME_BY_EXT[path.extname(cached.path).toLowerCase()],
+          via: '本地缓存',
+          durationMs: cachedDuration,
+        }
       }
     }
   } catch {
@@ -1171,7 +1346,8 @@ const resolveXiaoAiTrackRaw = async (
   if (!resolved.url) {
     await new Promise(r => setTimeout(r, 500))
     const retried = await withResolveBudget(
-      resolvePlayableAudio(songInfo, quality, verifiedUsername),
+      // 重试只走换源不走原源：两轮都问同一批慢源是 mg「28 秒才失败」的真实原因
+      resolvePlayableAudio(songInfo, quality, verifiedUsername, { skipDirect: true }),
       10000,
       { ...emptyResolved, failures: ['重试解析超时'] },
       '重试换源',
@@ -1190,6 +1366,11 @@ const resolveXiaoAiTrackRaw = async (
     throw new Error(`没有可用音源（已自动换源）：${detail}`)
   }
   console.log(`[XiaoAi] 音源可用：${filename} ← ${resolved.sourceName} (${resolved.quality})`)
+  if (resolved.incompleteReason) {
+    // L5：所有源都只有不完整版本时照常投送，但如实记录下来 —— 用户听到 60 秒就没了
+    // 不是 bug 而是音源现实，界面上要能说出原因，不能让人以为播放器坏了。
+    syncLog.warn(`[XiaoAi] 只找到不完整版本，按最长的一个投送：${filename}（${resolved.incompleteReason}）`)
+  }
 
   // 6. 先缓存再投送：整首落盘后推本地文件，彻底避开音箱拉流超时与中途断流
   //    默认关闭（cacheBeforePlay=false），即音箱直接按远端地址拉流；需要时可在页面打开。
@@ -1209,6 +1390,7 @@ const resolveXiaoAiTrackRaw = async (
         contentType: AUDIO_MIME_BY_EXT[path.extname(cached.path).toLowerCase()],
         via: `先缓存后投送（${resolved.sourceName}）`,
         durationMs: probeLocalFileDuration(cached.path) || resolved.durationMs,
+        incompleteReason: resolved.incompleteReason,
       }
     }
     try {
@@ -1230,6 +1412,7 @@ const resolveXiaoAiTrackRaw = async (
         contentType: AUDIO_MIME_BY_EXT[path.extname(afterDownload.path).toLowerCase()],
         via: `先缓存后投送（${resolved.sourceName}）`,
         durationMs: probeLocalFileDuration(afterDownload.path) || resolved.durationMs,
+        incompleteReason: resolved.incompleteReason,
       }
     }
     console.warn(`[XiaoAi] 预缓存未命中，回落到远端中转：${filename}`)
@@ -1243,6 +1426,7 @@ const resolveXiaoAiTrackRaw = async (
     contentType: resolved.contentType,
     via: `音源 ${resolved.sourceName}`,
     durationMs: resolved.durationMs,
+    incompleteReason: resolved.incompleteReason,
   }
 }
 
@@ -1765,6 +1949,12 @@ const normalizeSongInfo = (songInfo: any) => {
   if (!songInfo.singer && meta.singer) songInfo.singer = meta.singer
   if (!songInfo.source && meta.source) songInfo.source = meta.source
   if (!songInfo.interval && meta.interval) songInfo.interval = meta.interval
+
+  // 2.5 还原被吞掉反斜杠的 unicode 转义（音源 bug，实测 kw 会给出「一万次悲伤 (u5b8cu6574u7248)」）。
+  //     不修会连带 ID3 标签写入失败、歌词搜不到、守门比对一直告警。
+  if (decodeSongText(songInfo)) {
+    syncLog.warn(`[曲名修复] 还原 unicode 转义残留 → ${songInfo.name}${songInfo.singer ? ` - ${songInfo.singer}` : ''}`)
+  }
 
   // 3. 处理通用 ID 转换 (id -> songmid)
   if (!songInfo.songmid) {
@@ -9044,6 +9234,23 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     .then(action => {
                       if (action !== 'none' && lastXiaoAiPushAt === pushAt) lastXiaoAiGuardAction = action
                       xiaoAiGuardBusyUntil = 0
+                      // 三级补救全失败：设备大概率停在「假播放态」（报 paused、pos=0、没有声音），
+                      // 主动停一次把它放回干净状态，用户重新点播放就能起播，不用去拔电源。
+                      if (action === 'failed' && lastXiaoAiPushAt === pushAt && Date.now() - lastGuardStopAt >= 10000) {
+                        lastGuardStopAt = Date.now()
+                        void xiaoAiService
+                          .stop([guardDeviceId])
+                          .then(() =>
+                            syncLog.warn(
+                              `[XiaoAi] 守门彻底失败，已主动停止设备（回到可重推状态）：${songName}${
+                                singer ? ` - ${singer}` : ''
+                              }`,
+                            ),
+                          )
+                          .catch((error: any) =>
+                            syncLog.warn(`[XiaoAi] 守门失败后停止设备也失败：${error?.message || error}`),
+                          )
+                      }
                     })
                     .catch(error => {
                       syncLog.warn(`[XiaoAi] 拉流守门异常：${error?.message || error}`)
@@ -9066,6 +9273,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 via: target.via,
                 // 真实音频时长：前端自动续播用它算「还剩几秒」，避免用不可靠的 interval 元数据
                 audioDurationMs: target.durationMs || 0,
+                // 非空表示「所有源都只有不完整版本，已投最长的一个」——前端只提示，不阻断
+                incompleteReason: target.incompleteReason || '',
                 device: result.results,
                 message: result.success ? '' : '所有设备投送失败，请检查设备在线状态与登录态',
               })
@@ -9085,6 +9294,16 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               return
             }
             try {
+              // 闸门：已有预热在跑 / 刚预热过（节流）→ 本次跳过。
+              // 跳过不影响正确性：切歌时会照常现解析，只是回到没预热的耗时。
+              const tooSoon = Date.now() - lastPrefetchAt < PREFETCH_MIN_INTERVAL_MS
+              if (prefetchBusy || tooSoon) {
+                console.log(`[XiaoAi] 预热跳过（${prefetchBusy ? '已有预热任务在跑' : '触发过密'}）`)
+                sendJson({ success: true, ready: false, skipped: true, reason: prefetchBusy ? 'busy' : 'throttled' })
+                return
+              }
+              prefetchBusy = true
+              lastPrefetchAt = Date.now()
               const songInfo = normalizeSongInfo(payload.songInfo || payload.song || {}) || {}
               const quality = String(payload.quality || songInfo.quality || '320k')
               const target = await resolveXiaoAiTrack(req, songInfo, quality, verifiedUsername)
@@ -9097,6 +9316,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               })
             } catch (error: any) {
               sendJson({ success: false, message: error?.message || '预解析失败' })
+            } finally {
+              prefetchBusy = false
             }
           })
           return

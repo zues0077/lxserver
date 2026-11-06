@@ -4,6 +4,8 @@ import { MinaClient, PLAY_STATUS_PAUSED, type MinaDevice, type PlayOutcome } fro
 import { DEFAULT_MUSIC_AUDIO_ID, needUseMusicApi } from './constants'
 import { isFfmpegAvailable } from './transcode'
 import { syncLog } from '../../utils/log4js'
+// 曲名比对：区分「全角/半角写法差异」与「真错版（DJ vs Live）」，避免告警刷屏淹没真问题
+import { compareSongTitles } from '../../utils/songTitleCompare'
 import { httpRequest } from './http'
 import {
   loadConfig,
@@ -574,7 +576,18 @@ class XiaoAiService {
     // 和真实歌名比较必然不一致，属预期，不能当作「播错歌」
     if (placeholderAudioId) return
     if (expectedTitle && title && !title.includes(expectedTitle) && !expectedTitle.includes(title)) {
-      console.warn(`[XiaoAi] 音箱当前曲目（${title}）与投送的（${expectedTitle}）不一致`)
+      // 归一化后再判定：全角/半角括号、多余空格这类写法差异不算「播错歌」，
+      // 否则 20 条告警里 17 条是噪音，真错版（DJ 版 vs Live 版）反而被淹没。
+      const cmp = compareSongTitles(title, expectedTitle)
+      if (cmp.level === 'different') {
+        console.warn(
+          `[XiaoAi] 音箱当前曲目（${title}）与投送的（${expectedTitle}）不一致：${cmp.reason || '原因未知'}`,
+        )
+      } else {
+        console.log(
+          `[XiaoAi] 曲目写法差异（不告警）：${title} ↔ ${expectedTitle}（${cmp.reason || '归一化后一致'}）`,
+        )
+      }
     }
   }
 
