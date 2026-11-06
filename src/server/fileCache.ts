@@ -1909,7 +1909,7 @@ export const auditCacheItem = async (
     base.actualSec = actualSec
     base.bitrate = bitrate
 
-    const local = judgeAudioMismatch({ expectedSec: base.expectedSec, actualSec, bitrate, sizeBytes: size })
+    const local = judgeAudioMismatch({ expectedSec: base.expectedSec, actualSec, bitrate, sizeBytes: size, name: item.name })
         || judgeMetadataMismatch(item.name, item.singer, inspection?.title, inspection?.artist)
     if (local) return { ...base, verdict: 'dirty', reason: local }
 
@@ -2850,6 +2850,7 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                     actualSec: actualDurationSec,
                     bitrate: inspection.bitrate,
                     sizeBytes: tempSize,
+                    name: songInfo.name,
                 }) || judgeMetadataMismatch(songInfo.name, songInfo.singer, inspection.title, inspection.artist)
                 if (!mismatch) {
                     // 两条本地判据都放行时，还有两种「它们根本判不了」的情形：
