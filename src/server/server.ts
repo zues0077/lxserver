@@ -11086,6 +11086,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 0 是合法值（判定当轮即移除），不能用 || 兜底
             'customSource.probe.allDownDays': Number.isFinite(Number(global.lx.config['customSource.probe.allDownDays']))
               ? Number(global.lx.config['customSource.probe.allDownDays']) : 3,
+            // 0 是合法值（关闭降权档），不能用 || 兜底
+            'customSource.probe.demoteThreshold': (() => {
+              const v = Number(global.lx.config['customSource.probe.demoteThreshold'])
+              return Number.isFinite(v) && v >= 0 ? v : 1
+            })(),
             'customSource.probe.concurrency': Math.min(8, Math.max(1, Number(global.lx.config['customSource.probe.concurrency']) || 6)),
             'customSource.probe.autoDisablePlatform': global.lx.config['customSource.probe.autoDisablePlatform'] !== false,
             'customSource.probe.autoRemoveSource': global.lx.config['customSource.probe.autoRemoveSource'] !== false,
