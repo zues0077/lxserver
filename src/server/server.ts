@@ -1214,7 +1214,7 @@ const resolveXiaoAiTrackRaw = async (
   quality: string,
   verifiedUsername: string,
   directStreamUrl = '',
-  options: { skipCache?: boolean } = {},
+  options: { skipCache?: boolean; badCacheRetried?: boolean } = {},
 ): Promise<XiaoAiTrackTarget> => {
   const songName = String(songInfo.name || songInfo.title || 'track')
   const singer = String(songInfo.singer || '')
@@ -1238,7 +1238,7 @@ const resolveXiaoAiTrackRaw = async (
         console.warn(
           `[XiaoAi] 本地缓存是不完整版本，跳过并换源：${filename}（${cachedVerdict.reason}）`,
         )
-        syncLog.warn(`[XiaoAi] 本地缓存不完整（${cachedVerdict.reason}），已跳过换源：${filename}`)
+        syncLog.warn(`[XiaoAi] 本地缓存不完整（${cachedVerdict.reason}），已跳过该缓存，继续换源：${filename}`)
       } else {
         console.log(`[XiaoAi] 命中本地缓存，直接投送：${filename}`)
         return {
@@ -1328,17 +1328,27 @@ const resolveXiaoAiTrackRaw = async (
   if (existingDownload) {
     const arrived = await waitForCachedFile(songInfo, quality, verifiedUsername, 12000)
     if (arrived?.path) {
-      console.log(`[XiaoAi] 等到本地缓存落盘，直接投送：${filename}`)
-      return {
-        path: arrived.path,
-        filename,
-        cached: true,
-        contentType: AUDIO_MIME_BY_EXT[path.extname(arrived.path).toLowerCase()],
-        via: '本地缓存（等待下载完成）',
-        durationMs: probeLocalFileDuration(arrived.path),
+      // 落盘文件也要复判：这个文件可能就是前端下载的占位残片（L3 同款风险），
+      // 是残片就别接，继续走现解析（那边有完整的换源链）
+      const arrivedVerdict = judgePlaybackDuration({
+        expectedSec: parseIntervalSec(songInfo.interval),
+        actualSec: probeLocalFileDuration(arrived.path) / 1000,
+        name: songInfo.name,
+      })
+      if (arrivedVerdict.level !== 'suspect') {
+        console.log(`[XiaoAi] 等到本地缓存落盘，直接投送：${filename}`)
+        return {
+          path: arrived.path,
+          filename,
+          cached: true,
+          contentType: AUDIO_MIME_BY_EXT[path.extname(arrived.path).toLowerCase()],
+          via: '本地缓存（等待下载完成）',
+          durationMs: probeLocalFileDuration(arrived.path),
+        }
       }
+      console.warn(`[XiaoAi] 等到的本地缓存不完整（${arrivedVerdict.reason}），不采用，继续换源：${filename}`)
     }
-    console.warn(`[XiaoAi] 缓存仍在下载中，先按换源投送：${filename}`)
+    console.warn(`[XiaoAi] 缓存仍在下载中或不可用，先按换源投送：${filename}`)
   }
 
   // 5. 现解析：原源 → 换源 → 音质降级，每个候选都做音频探测
@@ -1400,7 +1410,7 @@ const resolveXiaoAiTrackRaw = async (
     if (cached) {
       console.log(`[XiaoAi] 先缓存后投送：${filename}`)
       setCachedTrackUrl(cacheKey, resolved.url, resolved.durationMs)
-      return {
+      const cachedTarget: XiaoAiTrackTarget = {
         path: cached.path,
         filename,
         cached: true,
@@ -1409,6 +1419,28 @@ const resolveXiaoAiTrackRaw = async (
         durationMs: probeLocalFileDuration(cached.path) || resolved.durationMs,
         incompleteReason: resolved.incompleteReason,
       }
+      // 落盘复判（D1'）：探测是流头估算，会员通道/流式地址可能估出偏大值让残片漏网
+      //（2026-11-06 实机：wy 320k 估算通过，落盘真实 28.9s）。坏文件再给一次换源机会；
+      // 第二次还坏就如实提示，不再循环。
+      const cacheVerdict = judgePlaybackDuration({
+        expectedSec: parseIntervalSec(songInfo.interval),
+        actualSec: (cachedTarget.durationMs || 0) / 1000,
+        name: songInfo.name,
+      })
+      if (cacheVerdict.level === 'suspect' && !options.badCacheRetried) {
+        syncLog.warn(`[XiaoAi] 换源落盘文件仍不完整（${cacheVerdict.reason}），清缓存重新解析一次：${filename}`)
+        try { fs.unlinkSync(cached.path) } catch { /* 文件没了更好 */ }
+        return resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, directStreamUrl, {
+          ...options,
+          skipCache: true,
+          badCacheRetried: true,
+        })
+      }
+      if (cacheVerdict.level === 'suspect') {
+        cachedTarget.incompleteReason = cacheVerdict.reason || resolved.incompleteReason
+        syncLog.warn(`[XiaoAi] 重新解析后落盘文件仍不完整（${cacheVerdict.reason}），如实提示后投送：${filename}`)
+      }
+      return cachedTarget
     }
     try {
       await Promise.race([
@@ -1422,7 +1454,7 @@ const resolveXiaoAiTrackRaw = async (
     if (afterDownload) {
       console.log(`[XiaoAi] 先缓存后投送：${filename}`)
       setCachedTrackUrl(cacheKey, resolved.url, resolved.durationMs)
-      return {
+      const afterTarget: XiaoAiTrackTarget = {
         path: afterDownload.path,
         filename,
         cached: true,
@@ -1431,6 +1463,25 @@ const resolveXiaoAiTrackRaw = async (
         durationMs: probeLocalFileDuration(afterDownload.path) || resolved.durationMs,
         incompleteReason: resolved.incompleteReason,
       }
+      const afterVerdict = judgePlaybackDuration({
+        expectedSec: parseIntervalSec(songInfo.interval),
+        actualSec: (afterTarget.durationMs || 0) / 1000,
+        name: songInfo.name,
+      })
+      if (afterVerdict.level === 'suspect' && !options.badCacheRetried) {
+        syncLog.warn(`[XiaoAi] 换源落盘文件仍不完整（${afterVerdict.reason}），清缓存重新解析一次：${filename}`)
+        try { fs.unlinkSync(afterDownload.path) } catch { /* 文件没了更好 */ }
+        return resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, directStreamUrl, {
+          ...options,
+          skipCache: true,
+          badCacheRetried: true,
+        })
+      }
+      if (afterVerdict.level === 'suspect') {
+        afterTarget.incompleteReason = afterVerdict.reason || resolved.incompleteReason
+        syncLog.warn(`[XiaoAi] 重新解析后落盘文件仍不完整（${afterVerdict.reason}），如实提示后投送：${filename}`)
+      }
+      return afterTarget
     }
     console.warn(`[XiaoAi] 预缓存未命中，回落到远端中转：${filename}`)
   }
