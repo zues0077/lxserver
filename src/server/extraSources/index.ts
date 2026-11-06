@@ -7,6 +7,12 @@
  *   - musicAccount/resolvers/* 只做一层薄封装，把 Cookie 传进来复用这里的实现，
  *     避免同一套接口逻辑写两遍（写两遍必然出现「账号通道能播、匿名通道播不了」这种分裂）。
  *
+ * 在取链编排中的角色（2026-11-06 定稿）：
+ *   本模块的 getMusicUrl 就是汽水/B站的「服务端通道」（等价于五大平台的 musicAccount
+ *   账号通道）：脚本声明了 qs/bili 平台时优先走脚本（与五大平台同一条 callUserApiGetMusicUrl
+ *   路径）；脚本不可用/失败时由本模块兜底。优先级跟随「首选自己的账号」开关；
+ *   名单（使用权限）只控制带不带 Cookie（音质），不封通道 —— 匿名流本就是公开音源。
+ *
  * 之所以不放进 musicSdk：那个目录会被上游 lx-music 整体覆盖（见 musicSDK1.md）。
  */
 
@@ -14,17 +20,24 @@ import * as bilibili from './bilibili'
 import * as soda from './soda'
 import * as store from '../musicAccount/store'
 import { isUserAllowed } from '../musicAccount/permission'
-import { isExtraSourceActive } from './state'
-
-// 把 state.ts 的启用态读写透出，供 customSourceHandlers / userApi / sourceProbe 直接复用
-export {
-  getExtraSourceState,
-  setExtraSourceEnabled,
-  setExtraSourceDisabledSources,
-  isExtraSourceActive,
-} from './state'
+import { isEnabled as accountEnabled } from '../musicAccount'
 
 export type ExtraSourceId = 'bili' | 'soda'
+
+/**
+ * 脚本生态里的平台 key 别名归一。
+ * 社区脚本声明汽水/B站平台时 key 写法不一（qs / qishui / soda…），服务端统一 id 是
+ * soda / bili —— 巡检目标、探测曲搜索、脚本候选匹配都按脚本声明的原始 key 走，
+ * 只有落回本模块时才归一，避免任何一层写死单一写法。
+ */
+const SOURCE_ALIASES: Record<string, ExtraSourceId> = {
+  soda: 'soda', qs: 'soda', qishui: 'soda', qsmusic: 'soda',
+  bili: 'bili', bilibili: 'bili', bilivideo: 'bili',
+}
+
+export function normalizeExtraSourceId(source: string): ExtraSourceId | null {
+  return SOURCE_ALIASES[String(source || '').trim().toLowerCase()] || null
+}
 
 const SEARCHERS: Record<string, (keyword: string, page: number, pageSize: number) => Promise<{ list: any[]; total: number; allPage: number }>> = {
   bili: bilibili.searchSongs,
@@ -51,7 +64,6 @@ export async function getComments(
   limit = 20,
   hot = false,
 ): Promise<any | null> {
-  if (!isExtraSourceActive(String(source || ''))) return null
   const fn = COMMENTS[String(source || '')]
   if (!fn) return null
   return fn(songInfo, page, limit, hot)
@@ -62,18 +74,18 @@ const DISPLAY_NAME: Record<string, string> = {
   soda: '汽水音乐',
 }
 
-/** 该 source 是否由本模块接管 */
+/** 该 source 是否由本模块接管（接受脚本生态的别名写法：qs / qishui / bilibili…） */
 export function isExtraSource(source: string): boolean {
-  return Object.prototype.hasOwnProperty.call(SEARCHERS, String(source || ''))
+  return normalizeExtraSourceId(source) !== null
 }
 
 export function displayName(source: string): string {
-  return DISPLAY_NAME[source] || source
+  return DISPLAY_NAME[normalizeExtraSourceId(source) || source] || source
 }
 
 export async function searchSongs(source: string, keyword: string, page = 1, pageSize = 20) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
-  const searcher = SEARCHERS[source]
+  const id = normalizeExtraSourceId(source)
+  const searcher = id ? SEARCHERS[id] : undefined
   if (!searcher) throw new Error(`额外音源不支持：${source}`)
   return searcher(keyword, page, pageSize)
 }
@@ -88,21 +100,18 @@ function unsupported(source: string, what: string): never {
 }
 
 export async function searchSingers(source: string, keyword: string, page = 1, pageSize = 20) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.searchSingers(keyword, page, pageSize)
   if (source === 'bili') return bilibili.searchUsers(keyword, page, pageSize)
   return unsupported(source, '歌手搜索')
 }
 
 export async function searchAlbums(source: string, keyword: string, page = 1, pageSize = 20) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.searchAlbums(keyword, page, pageSize)
   if (source === 'bili') return bilibili.searchAlbums(keyword, page, pageSize)
   return unsupported(source, '专辑搜索')
 }
 
 export async function getArtistDetail(source: string, artistId: string) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.getArtistDetail(artistId)
   if (source === 'bili') return bilibili.getUserCard(artistId)
   return unsupported(source, '歌手详情')
@@ -113,14 +122,12 @@ export async function getArtistDetail(source: string, artistId: string) {
  * 必须靠「UP 主名」当关键词去搜视频，再按 mid 过滤。
  */
 export async function getArtistSongs(source: string, artistId: string, page = 1, pageSize = 50, name = '') {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.getArtistSongs(artistId, page, pageSize)
   if (source === 'bili') return bilibili.getUserVideos(artistId, name, page, pageSize)
   return unsupported(source, '歌手歌曲列表')
 }
 
 export async function getArtistAlbums(source: string, artistId: string, page = 1, pageSize = 30, name = '') {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.getArtistAlbums(artistId, page, pageSize)
   // B站 UP 主没有「专辑」，但有「合集(season)/系列(series)」，当专辑返回
   if (source === 'bili') return bilibili.getArtistAlbums(artistId, page, name)
@@ -128,7 +135,6 @@ export async function getArtistAlbums(source: string, artistId: string, page = 1
 }
 
 export async function getAlbumSongs(source: string, albumId: string) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.getAlbumSongs(albumId)
   if (source === 'bili') return bilibili.getAlbumSongs(albumId)
   return unsupported(source, '专辑歌曲列表')
@@ -144,42 +150,36 @@ export function hasSongList(source: string): boolean {
 }
 
 export async function getSongListTags(source: string) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.getPlaylistTags()
   if (source === 'bili') return bilibili.getSongListTags()
   throw new Error(`${displayName(source)} 暂不支持歌单分类`)
 }
 
 export async function getSongListList(source: string, tagId: string, page = 1) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.getPlaylistList(tagId, page)
   if (source === 'bili') return bilibili.getSongListList(tagId, page)
   throw new Error(`${displayName(source)} 暂不支持歌单列表`)
 }
 
 export async function getSongListDetail(source: string, id: string) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.getPlaylistDetail(id)
   if (source === 'bili') return bilibili.getSongListDetail(id)
   throw new Error(`${displayName(source)} 暂不支持歌单详情`)
 }
 
 export async function searchSongList(source: string, text: string, page = 1) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.searchPlaylists(text, page)
   if (source === 'bili') return bilibili.searchPlaylists(text, page)
   throw new Error(`${displayName(source)} 暂不支持歌单搜索`)
 }
 
 export async function getLeaderboardBoards(source: string) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.getBoards()
   if (source === 'bili') return bilibili.getLeaderboardBoards()
   throw new Error(`${displayName(source)} 暂不支持排行榜`)
 }
 
 export async function getLeaderboardList(source: string, bangid: string) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.getBoardSongs(bangid)
   if (source === 'bili') return bilibili.getLeaderboardList(bangid)
   throw new Error(`${displayName(source)} 暂不支持排行榜歌曲`)
@@ -239,21 +239,22 @@ export async function getMusicUrl(source: string, songInfo: any, quality: string
   /** 汽水加密曲随取链下发的 AES 解密密钥（32 位十六进制）；非加密曲为空 */
   key?: string
 }> {
-  const resolver = RESOLVERS[source]
-  if (!resolver) throw new Error(`额外音源不支持：${source}`)
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
+  const id = normalizeExtraSourceId(source)
+  if (!id) throw new Error(`额外音源不支持：${source}`)
+  const resolver = RESOLVERS[id]
 
   // 使用权限：名单外的用户不带账号 Cookie（B站/汽水匿名流本身就是公开音源，
   // 不该把权限做成「整块封掉」，只收回「用管理员的会员 Cookie 换更高音质」这部分）。
-  const cookie = isUserAllowed(username) ? (store.getCookie(source) || '') : ''
+  // 「启用账号取链」总开关关闭时同样退回匿名 —— 开关只管 Cookie，不封公开通道。
+  const cookie = (isUserAllowed(username) && accountEnabled()) ? (store.getCookie(id) || '') : ''
   // username 只用于「取链失败时记待补」，让补传能落回播放者自己的缓存目录
   const result = await resolver(songInfo, quality, cookie, username)
-  if (!result?.url) throw new Error(`${displayName(source)} 未返回可用链接`)
+  if (!result?.url) throw new Error(`${displayName(id)} 未返回可用链接`)
 
   return {
     url: result.url,
     type: result.quality || quality,
-    sourceName: `${displayName(source)}${cookie ? '（账号）' : '（免登录）'}`,
+    sourceName: `${displayName(id)}${cookie ? '（账号）' : '（免登录）'}`,
     accountUsed: !!cookie,
     via: (result as any).via,
     key: (result as any).key,
@@ -274,7 +275,6 @@ export * as prefetch from './prefetch'
  * B站视频没有 LRC，返回 null 让上层照旧跳过。
  */
 export async function getLyric(source: string, songInfo: any): Promise<{ lyric: string; lxlyric: string } | null> {
-  if (!isExtraSourceActive(String(source || ''))) return null
   if (String(source || '') !== 'soda') return null
   let id: any = songInfo?.songmid ?? songInfo?.id ?? songInfo?.meta?.trackId ?? ''
   if (id && typeof id === 'object') id = id.songmid ?? id.id ?? ''
@@ -293,47 +293,6 @@ export function sodaEntitlementVerdict() {
 
 /** 取流诊断：一次说清「拿到的是整曲还是试听、走的哪条通道、还缺什么」 */
 export async function diagnoseStream(source: string, songInfo: any, quality: string) {
-  if (!isExtraSourceActive(source)) throw new Error(`额外音源已停用：${source}`)
   if (source === 'soda') return soda.diagnoseStream(songInfo, quality, store.getCookie('soda') || '')
   throw new Error(`${displayName(source)} 暂不支持取流诊断`)
-}
-
-/** 供 /health 或后台展示用的一行摘要 */
-export function describe(): Array<{ id: string; name: string; playback: boolean }> {
-  return [
-    { id: 'bili', name: 'Bilibili', playback: true },
-    { id: 'soda', name: '汽水音乐', playback: true },
-  ]
-}
-
-const EXTRA_SOURCE_IDS: ExtraSourceId[] = ['bili', 'soda']
-
-/**
- * 供 getProbeTargets() 追加额外音源的巡检目标。
- * 与社区脚本源对等：每个额外音源是一条独立 target，callRequest 把 musicUrl 转发到本模块的
- * getMusicUrl，并返回纯 URL 字符串（与社区脚本的 musicUrl 返回形态一致，probePlatform 用
- * normalizeProbeUrl 校验）。不特殊化 —— 新增/移除平台只改这份枚举，不写死任一。
- */
-export function getProbeTargets(): Array<{
-  owner: string
-  id: string
-  name: string
-  platforms: string[]
-  qualities: Record<string, string[]>
-  callRequest: (action: string, source: string, info: any) => Promise<any>
-}> {
-  return EXTRA_SOURCE_IDS.map((id) => ({
-    owner: 'extra',
-    id,
-    name: displayName(id),
-    platforms: [id],
-    qualities: {},
-    callRequest: async (action: string, source: string, info: any) => {
-      if (action === 'musicUrl') {
-        const r = await getMusicUrl(source, info?.musicInfo, info?.quality || '320k', info?.username)
-        return r?.url
-      }
-      throw new Error(`额外音源不支持的操作：${action}`)
-    },
-  }))
 }

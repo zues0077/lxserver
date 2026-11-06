@@ -66,6 +66,41 @@ import * as tunnel from 'tunnel'
 import { getProxyAgent } from '../modules/utils/proxy.js'
 import { tryResolveByAccount, isEnabled, isPriority, isSupportedSource, getPlatform } from './musicAccount'
 import { isUserAllowed } from './musicAccount/permission'
+
+// ---- 汽水/B站的脚本平台 key 别名 ----
+// 社区脚本声明这两个平台时 key 写法不一（qs / qishui / soda…、bili / bilibili…），
+// 服务端统一 id 是 soda / bili。候选脚本匹配、平台开关判定、取链调用都按脚本声明的
+// 原始 key 走（scriptPlatformKeys），只有落回服务端通道（extraSources）时才归一。
+const EXTRA_SOURCE_ALIASES: Record<string, string[]> = {
+    soda: ['soda', 'qs', 'qishui', 'qsmusic'],
+    bili: ['bili', 'bilibili', 'bilivideo'],
+}
+/** 服务端统一 id -> 脚本可能声明的平台 key 列表（非额外音源返回自身） */
+export function scriptPlatformKeys(source: string): string[] {
+    return EXTRA_SOURCE_ALIASES[String(source || '').trim().toLowerCase()] || [source]
+}
+/** 是否汽水/B站（服务端通道由 extraSources 提供） */
+export function isExtraSourceId(source: string): boolean {
+    return !!EXTRA_SOURCE_ALIASES[String(source || '').trim().toLowerCase()]
+}
+
+/**
+ * 汽水/B站的「服务端通道」（extraSources）：
+ * 与五大平台的 musicAccount 账号通道同角色 —— 名单内带管理员 Cookie（高音质/签名器），
+ * 名单外或未配 Cookie 时匿名。匿名流本就是公开音源，名单只控制 Cookie 不封通道。
+ * 返回 null 表示通道没出链，交给后续脚本循环 / 报错分支。
+ */
+async function resolveViaExtraChannel(
+    source: string, songInfo: any, quality: string, clientUsername?: string,
+): Promise<{ url: string; type: string; sourceName: string; via?: string; key?: string } | null> {
+    try {
+        const extraSources = require('./extraSources')
+        const extra = await extraSources.getMusicUrl(source, songInfo, quality, clientUsername)
+        return extra?.url ? extra : null
+    } catch {
+        return null
+    }
+}
 import { checkLiteralTarget, createGuardedLookup, logBlocked } from './requestGuard'
 const inflate = promisify(zlib.inflate)
 const deflate = promisify(zlib.deflate)
@@ -647,13 +682,8 @@ export function getProbeTargets(): Array<{
             callRequest: api.callRequest,
         })
     }
-    // 额外音源（汽水/B站）：与社区脚本源对等纳入巡检，不特殊化。
-    // 它们不在 loadedApis 里（不走 musicSdk），靠本段追加独立 target。
-    try {
-        const extraSources = require('./extraSources')
-        const extraTargets = extraSources.getProbeTargets?.() || []
-        for (const t of extraTargets) targets.push(t)
-    } catch { /* 额外音源模块缺失时不阻断主流程 */ }
+    // 额外音源巡检目标已撤销：汽水/B站不再作为独立 target 参与巡检，
+    // 脚本声明的 qs/bili 平台随 loadedApis 的常规目标自动纳入（与五大平台同待遇）。
     return targets
 }
 
@@ -1798,7 +1828,7 @@ export async function callUserApiGetMusicUrl(
     enableAutoSwitchApiSource?: boolean,
     excludeApiSources?: string[],
     deadlineAt?: number
-): Promise<{ url: string, type: string, sourceName?: string, sourceId?: string, attempts?: any[], hasMoreSources?: boolean }> {
+): Promise<{ url: string, type: string, sourceName?: string, sourceId?: string, attempts?: any[], hasMoreSources?: boolean, via?: string, key?: string, extraChannel?: boolean }> {
     /**
      * 取到链接后的「可播性复核」要按剩余预算收缩。
      * 复核满额是 HEAD 3s + Range GET 3s = 6s，而调用方（/api/music/url）整体只有 25s 硬预算：
@@ -1816,6 +1846,18 @@ export async function callUserApiGetMusicUrl(
     }
     // 使用权限：后台「平台账号 → 使用权限」名单外的用户不消费账号 Cookie（名单为空=所有人可用）
     const accountAllowed = isUserAllowed(clientUsername)
+    // 换源重试时前端会把已试过的源记进排除清单（`extra:soda` / 源名）——
+    // 服务端通道同样要遵守，否则「取链成功但拉流 403」的死链会在换源循环里反复命中。
+    const extraChannelAllowed = (): boolean => {
+        if (!Array.isArray(excludeApiSources) || excludeApiSources.length === 0) return true
+        let label = ''
+        try { label = String(require('./extraSources').displayName(source) || '').toLowerCase() } catch { }
+        return !excludeApiSources.some((n: any) => {
+            const s = String(n || '').trim().toLowerCase()
+            if (!s) return false
+            return s === `extra:${source}` || (!!label && (s === label || s.startsWith(label)))
+        })
+    }
     // 标准化 songInfo 格式：将 meta 中的字段提升到顶层
     const normalizedSongInfo = { ...songInfo }
     if (songInfo.meta) {
@@ -1932,6 +1974,27 @@ export async function callUserApiGetMusicUrl(
         }
     }
 
+    // ========== 汽水/B站服务端通道（「首选自己的账号」开 = 服务端通道优先） ==========
+    // 与五大平台的账号优先钩子同位：isPriority 开时先走服务端通道（名单内带 Cookie，
+    // 名单外匿名），取不到再落脚本循环。key/via 透传给上层（汽水 CENC 解密 / 登录态复核）。
+    if (isExtraSourceId(source) && isEnabled() && isPriority() && extraChannelAllowed()) {
+        const extra = await resolveViaExtraChannel(source, normalizedSongInfo, quality, clientUsername)
+        if (extra) {
+            const attempt = { name: extra.sourceName, status: 'success', message: `服务端通道（${extra.via || '直连'}）` }
+            if (onProgress) await onProgress(attempt)
+            return {
+                url: extra.url,
+                type: extra.type,
+                sourceName: extra.sourceName,
+                sourceId: `extra:${source}`,
+                attempts: [attempt],
+                hasMoreSources: isSourceSupported(source, clientUsername),
+                via: extra.via,
+                key: extra.key,
+            } as any
+        }
+    }
+
     let supportedCount = 0;
     let lastError: Error | null = null;
 
@@ -1975,9 +2038,11 @@ export async function callUserApiGetMusicUrl(
         return userStates[id] || userStates[decodeURIComponent(id)] || userStates[encodeURIComponent(id)] || {}
     }
 
-    // 按 loadedApis 收集所有可用候选源（权限过滤，不强制任何顺序）
+    // 按载入的 APIs 收集所有可用候选源（权限过滤，不强制任何顺序）
+    // 汽水/B站：脚本声明的 key 可能是 qs/qishui/bilibili 等别名，按别名集合匹配。
+    const sKeys = scriptPlatformKeys(source)
     for (const [apiId, api] of loadedApis) {
-        if (!api.info.sources || !api.info.sources[source]) continue
+        if (!api.info.sources || !sKeys.some(k => api.info.sources[k])) continue
 
         const state = getSourceState(api.info.id)
 
@@ -1992,8 +2057,8 @@ export async function callUserApiGetMusicUrl(
             if (!isEnabled) continue
             if (userApiIds.has(api.info.id)) continue  // 被同名私有版本覆盖，跳过
 
-            // 检查平台是否被禁用
-            if (Array.isArray(state.disabledSources) && state.disabledSources.includes(source)) {
+            // 检查平台是否被禁用（按脚本声明的 key 判定）
+            if (Array.isArray(state.disabledSources) && sKeys.some(k => state.disabledSources.includes(k))) {
                 continue
             }
 
@@ -2001,8 +2066,8 @@ export async function callUserApiGetMusicUrl(
         } else if (clientUsername && api.info.owner === clientUsername) {
             if (!api.info.enabled) continue
 
-            // 检查平台是否被禁用
-            if (Array.isArray(state.disabledSources) && state.disabledSources.includes(source)) {
+            // 检查平台是否被禁用（按脚本声明的 key 判定）
+            if (Array.isArray(state.disabledSources) && sKeys.some(k => state.disabledSources.includes(k))) {
                 continue
             }
 
@@ -2100,6 +2165,26 @@ export async function callUserApiGetMusicUrl(
             }
         }
 
+        // 汽水/B站：无任何脚本声明 qs/bili 时，服务端通道是唯一出路（匿名也可用，
+        // 不受账号总开关限制 —— 公共匿名通道保持既有可用性）。
+        if (isExtraSourceId(source)) {
+            const extra = await resolveViaExtraChannel(source, normalizedSongInfo, quality, clientUsername)
+            if (extra) {
+                const attempt = { name: extra.sourceName, status: 'success', message: `无可用自定义源，服务端通道兜底（${extra.via || '直连'}）` }
+                if (onProgress) await onProgress(attempt)
+                return {
+                    url: extra.url,
+                    type: extra.type,
+                    sourceName: extra.sourceName,
+                    sourceId: `extra:${source}`,
+                    attempts: [attempt],
+                    hasMoreSources: false,
+                    via: extra.via,
+                    key: extra.key,
+                } as any
+            }
+        }
+
         const hasExcluded = Array.isArray(excludeApiSources) && excludeApiSources.length > 0
         const accountTried = isEnabled() && isSupportedSource(source)
         let errMsg: string
@@ -2146,6 +2231,9 @@ export async function callUserApiGetMusicUrl(
     // 本轮取链里失败的音源（用于轮末把硬故障证据交给巡检）
     const roundFailures: Array<{ api: any; message: string }> = []
 
+    // 本轮实际调脚本时传「脚本声明的 key」（qs/bilibili 等），别在脚本内部做归一
+    const scriptKeyFor = (api: any): string => sKeys.find(k => api.info?.sources?.[k]) || source
+
     if (supportedCount === 1) {
         const api = candidates[0]
         const maxRetries = 3
@@ -2157,7 +2245,7 @@ export async function callUserApiGetMusicUrl(
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (第 ${i + 1}/${maxRetries} 次, 所属: ${api.info.owner})`)
 
                 const rawUrl = await withTimeout(
-                    api.callRequest('musicUrl', source, {
+                    api.callRequest('musicUrl', scriptKeyFor(api), {
                         musicInfo: normalizedSongInfo,
                         quality: quality,
                         type: quality
@@ -2204,7 +2292,7 @@ export async function callUserApiGetMusicUrl(
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (所属: ${api.info.owner})`)
 
                 const rawUrl = await withTimeout(
-                    api.callRequest('musicUrl', source, {
+                    api.callRequest('musicUrl', scriptKeyFor(api), {
                         musicInfo: normalizedSongInfo,
                         quality: quality,
                         type: quality
@@ -2267,6 +2355,27 @@ export async function callUserApiGetMusicUrl(
                 attempts: [...attempts, attempt],
                 hasMoreSources: false,
             }
+        }
+    }
+
+    // ========== 汽水/B站服务端兜底通道 ==========
+    // 脚本循环全败后落服务端通道（extraSources）：名单内带 Cookie、名单外匿名。
+    // 匿名流是公开音源，不受账号总开关限制 —— 保持「无脚本也能播汽水/B站」的既有可用性。
+    if (isExtraSourceId(source) && extraChannelAllowed()) {
+        const extra = await resolveViaExtraChannel(source, normalizedSongInfo, quality, clientUsername)
+        if (extra) {
+            const attempt = { name: extra.sourceName, status: 'success', message: `脚本源全部失败，服务端通道兜底（${extra.via || '直连'}）` }
+            if (onProgress) await onProgress(attempt)
+            return {
+                url: extra.url,
+                type: extra.type,
+                sourceName: extra.sourceName,
+                sourceId: `extra:${source}`,
+                attempts: [...attempts, attempt],
+                hasMoreSources: false,
+                via: extra.via,
+                key: extra.key,
+            } as any
         }
     }
 
@@ -2905,19 +3014,9 @@ export function getLoadedApis() {
 // 检查某个源是否被支持
 // clientUsername: 调用者的用户名。如果未提供，则只能检查 open 源
 export function isSourceSupported(source: string, clientUsername?: string): boolean {
-    // 额外音源（汽水/B站）：独立于社区脚本的启用态，与 5 平台对等参与「换源」判定
-    if (source === 'soda' || source === 'bili') {
-        try {
-            const extraSources = require('./extraSources')
-            const st = extraSources.getExtraSourceState(source)
-            if (st.enabled === false) return false
-            if (Array.isArray(st.disabledSources) && st.disabledSources.includes(source)) return false
-            return true
-        } catch {
-            // 模块读不到时保守放行，避免把本可播的内置音源误判成「无可用源」
-            return true
-        }
-    }
+    // 汽水/B站：服务端通道（extraSources）匿名即可用，恒视为支持；
+    // 脚本通道是否可用由取链编排自己探（脚本声明的 qs/bilibili 等别名按 scriptPlatformKeys 匹配）。
+    if (isExtraSourceId(source)) return true
 
     const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
     let userStates: Record<string, any> = {}

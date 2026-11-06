@@ -671,25 +671,8 @@ const readPlatformFlags = (statesDirName: string, sourceId: string): PlatformFla
  * 因此这里必须「读-改-写」，不能整体覆盖，否则会抹掉用户的其他设置。
  */
 const setPlatformDisabled = (owner: string, sourceId: string, platform: string, disabled: boolean): boolean => {
-  // 额外音源（汽水/B站）：与社区脚本同待遇——自动关闭/重开写同一语义的平台开关，
-  // 只是落盘位置是 extra-sources-state.json（内置源没有 states.json 生命周期）。
-  if (owner === 'extra') {
-    try {
-      const extraSources = require('./extraSources')
-      const st = extraSources.getExtraSourceState(sourceId)
-      const list: string[] = Array.isArray(st.disabledSources) ? [...st.disabledSources] : []
-      const has = list.includes(platform)
-      if (disabled && !has) {
-        extraSources.setExtraSourceDisabledSources(sourceId, [...list, platform])
-        return true
-      }
-      if (!disabled && has) {
-        extraSources.setExtraSourceDisabledSources(sourceId, list.filter(p => p !== platform))
-        return true
-      }
-      return false
-    } catch { return false }
-  }
+  // 汽水/B站（2026-11-06 定稿）：不再有「extra 独立源」，巡检对象是脚本声明的 qs/bili
+  // 平台，自动关闭/重开与五大平台一样写脚本的 states.json，无需特殊分支。
   let changed = false
   for (const space of stateSpacesFor(owner)) {
     try {
@@ -1110,19 +1093,6 @@ const dropFromManifest = (owner: string, sourceId: string): boolean => {
  * 避免删除动作触发一次无谓的全量重载。
  */
 const removeSource = (owner: string, sourceId: string, sourceName: string, reason: string, deps: ProbeDeps, conf: ProbeConfig): boolean => {
-  // 额外音源（汽水/B站）：内置代码没有「脚本文件」可移除，与社区脚本同待遇的等价动作
-  // 是自动停用（enabled=false）——源停止参与搜索/取链/巡检，效果与移除脚本一致；
-  // 用户随时可在设置页手动重新启用（相当于社区脚本的回收站恢复）。
-  if (owner === 'extra') {
-    try {
-      const extraSources = require('./extraSources')
-      extraSources.setExtraSourceEnabled(sourceId, false)
-    } catch { /* ignore */ }
-    audit(owner, 'remove-source', { sourceId, sourceName, reason, mode: 'disable-builtin' })
-    console.warn(`[音源巡检] ⚠ 已自动停用内置音源: ${sourceName} (${sourceId}) —— ${reason}（可在设置页重新启用）`)
-    syncLog.warn(`[音源巡检] ⚠ 已自动停用内置音源: ${sourceName} (${sourceId}) —— ${reason}（可在设置页重新启用）`)
-    return true
-  }
   try {
     deps.unload(owner, sourceId)
   } catch { /* ignore */ }
@@ -1573,17 +1543,8 @@ export async function runSourceProbe(
         if (platformState.autoDisabled && !flags.disabled.has(platform)) {
           if (setPlatformDisabled(target.owner, target.id, platform, true)) flags.disabled.add(platform)
         }
-        // 额外音源（汽水/B站）：手动平台开关/停用存在 extra-sources-state.json，
-        // 与社区脚本的 states.json 不同源；这里一并纳入「手动关闭」判定，使巡检跳过它。
+        // 手动平台开关/停用判定（与五大平台同源，均读脚本 states.json）
         let manuallyDisabled = flags.disabled.has(platform)
-        if (!manuallyDisabled && target.owner === 'extra') {
-          try {
-            const extraSources = require('./extraSources')
-            const st = extraSources.getExtraSourceState(target.id)
-            if (st.enabled === false) manuallyDisabled = true
-            else if (Array.isArray(st.disabledSources) && st.disabledSources.includes(platform)) manuallyDisabled = true
-          } catch { /* ignore */ }
-        }
         manuallyDisabled = manuallyDisabled && !platformState.autoDisabled
         if (manuallyDisabled) {
           platformState.status = 'skipped'
@@ -2131,7 +2092,7 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
   const autoDisabledPlatforms: ProbeStatusSnapshot['autoDisabledPlatforms'] = []
   const details: ProbePlatformDetail[] = []
   // 空间既可能来自「当前已加载的源」，也可能只有历史记录（源全被移除后），两边都覆盖
-  const owners = new Set<string>(['open', 'extra', ...registeredUsers()])
+  const owners = new Set<string>(['open', ...registeredUsers()])
   for (const target of depsRef ? depsRef.listTargets() : []) owners.add(target.owner)
   for (const owner of owners) {
     const status = readStatus(owner)

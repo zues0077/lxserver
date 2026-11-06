@@ -9837,127 +9837,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
             }
 
-            // 额外音源（Bilibili / 汽水）不依赖 musicSdk、也不依赖自定义源：
-            // 搜索由 extraSources 提供，取流同样自带（B站匿名可用，配了 Cookie 才有大会员音质）。
-            // 命中本地缓存时跳过（否则会把缓存结果覆盖成一次全新的远端取链）。
-            let extraSourceError: string | null = null
-
-            // 换源重试时前端会带 excludeApiSources（已经试过的源名）。额外音源（B站账号 / 汽水）
-            // 也记在这份清单里 —— 以前这里无条件先走额外音源，于是 B站「取链成功但拉流 403」时，
-            // 前端每次重试都拿回同一条死链，界面就在「解析成功 / 解析失败」之间无限循环。
-            const excludedSourceNames = Array.isArray(excludeApiSources) ? excludeApiSources.map((n: any) => String(n || '')) : []
-            const extraLabel = extraSources.displayName(source).toLowerCase()
-            const extraSourceTried = excludedSourceNames.some((name: string) => {
-              const n = name.trim().toLowerCase()
-              if (!n) return false
-              return n === `extra:${source}` || n === extraLabel || n.startsWith(extraLabel)
-            })
-
-            if (!result && extraSources.isExtraSource(source) && extraSourceTried) {
-              extraSourceError = `${extraSources.displayName(source)} 本轮已尝试过，改走换源`
-              console.warn(`[额外音源] ${extraSources.displayName(source)} 已在排除清单里，跳过并换源: ${songInfo.name}`)
-            }
-
-            if (!result && extraSources.isExtraSource(source) && !extraSourceTried) {
-              try {
-                const extra = await withHardBudget(
-                  extraSources.getMusicUrl(source, songInfo, quality || '128k', verifiedUsername),
-                  budgetMs,
-                  `${extraSources.displayName(source)} 取链`,
-                )
-                if (!extra) {
-                  throw new Error(`${extraSources.displayName(source)} 取链超时（${Math.round(budgetMs / 1000)} 秒）`)
-                }
-
-                // 汽水：判断这次到底有没有用上账号签名器。
-                // 走 extraSources 分支就不会进 tryResolveByAccount，复核必须在这里补上，
-                // 否则「账号过期但歌还能匿名播」永远不会被当场标红（要等 72 小时巡检）。
-                if (source === 'soda') musicAccount.noteSodaAnonymousLink(extra.via)
-
-                // 汽水加密流：随取链响应下发的 CENC 加密 MP4，其 AES 密钥（spade_a）已在
-                // getAudioUrl 里捕获并登记（extra.key）。这里不再「判死 DRM」，而是走
-                // 「下载 → 本地解密落缓存 → 返回明文缓存地址」，让首播即可播。
-                // 无密钥（非加密曲 / 没拿到 spade_a）才维持原直链透传逻辑。
-                const sodaKey = source === 'soda' ? (extra as any).key : ''
-                if (source === 'soda' && sodaKey) {
-                  let cached = fileCache.checkCache({ ...songInfo, quality: quality || '' }, verifiedUsername)
-                  if (!(cached && cached.exists && !cached.isCollision && cached.url)) {
-                    // 下载并本地解密（downloadAndCache 内部已支持 decryptKey）
-                    await fileCache.downloadAndCache(
-                      songInfo, extra.url, quality || '128k', verifiedUsername, undefined,
-                      false, false, false,
-                      { requestedSource: source, downloadSource: source, sourceName: extra.sourceName, decryptKey: sodaKey },
-                    )
-                    cached = fileCache.checkCache({ ...songInfo, quality: quality || '' }, verifiedUsername)
-                  }
-                  if (!cached || !cached.exists || !cached.url) {
-                    throw new Error('汽水加密曲下载/解密失败，无法生成可播放地址')
-                  }
-                  console.log(`[汽水解密] 返回已解密缓存地址: ${songInfo.name} (${cached.quality || quality})`)
-                  result = {
-                    url: cached.url,
-                    type: 'local',
-                    sourceName: `${extra.sourceName}（已解密）`,
-                    sourceId: 'extra:soda',
-                    quality: cached.quality || quality || extra.type,
-                    folder: cached.folder,
-                    attempts: [{ name: extra.sourceName, status: 'success' }],
-                  }
-                  void pushProgress({ name: extra.sourceName, status: 'success' })
-                } else {
-                  // B站 / 汽水非加密曲：直链透传（仍保留加密流兜底拦截）
-                  if (await isEncryptedRemoteStream(extra.url)) {
-                    throw new Error(
-                      `${extraSources.displayName(source)} 该曲返回的是加密流（DRM），浏览器无法播放，请改用它源或其他平台播放`
-                    )
-                  }
-                  result = {
-                    url: extra.url,
-                    type: extra.type,
-                    sourceName: extra.sourceName,
-                    sourceId: `extra:${source}`,
-                    attempts: [{ name: extra.sourceName, status: 'success' }],
-                  }
-                  void pushProgress({ name: extra.sourceName, status: 'success' })
-                }
-              } catch (e: any) {
-                // 不再直接抛错：汽水大量曲目「已下架 / 仅客户端可播」，直接失败等于让歌彻底没声。
-                // 先记下原因落到下面的换源，换成功就把这条从待补清单摘掉（清单只留全网都没有的）。
-                const extraMsg = e?.message || String(e)
-                console.warn(`[额外音源] ${source} 取链失败，改走换源: ${extraMsg}`)
-                extraSourceError = extraMsg
-              }
-            }
-
-            // 额外音源失败后的换源：与常规平台的失败处理保持一致（先让它响）
-            if (!result && extraSourceError) {
-              try {
-                const switched = await switchToOtherSource(songInfo, quality || '128k', verifiedUsername)
-                if (switched?.url) {
-                  removePendingAfterSwitch(songInfo)
-                  result = {
-                    url: switched.url,
-                    type: switched.quality,
-                    sourceName: switched.sourceName,
-                    sourceId: `extra-switch:${switched.songInfo?.source || ''}`,
-                    attempts: [{ name: switched.sourceName, status: 'success' }],
-                    // 汽水「仅 60 秒试听」这类降级会静默换到别的平台，必须让用户知情，
-                    // 否则只是缓冲完发现音源变了，根本不知道发生了什么。
-                    switched: {
-                      from: sourceDisplayName(source),
-                      to: switched.sourceName,
-                      reason: switchReasonForUser(extraSourceError),
-                    },
-                  }
-                  void pushProgress({ name: switched.sourceName, status: 'success' })
-                  console.log(`[换源] ${extraSources.displayName(source)} 失败后已换到 ${switched.sourceName}：${songInfo.name}`)
-                }
-              } catch (switchErr: any) {
-                console.warn(`[换源] ${source} 失败后换源也未命中: ${switchErr?.message || switchErr}`)
-              }
-              // 换源也没成，才把失败写进短缓存（避免把「其实能换到」的曲子也一起缓存掉）
-              if (!result) rememberMusicUrlFailure(failKey, extraSourceError)
-            }
+            // 汽水/B站（2026-11-06 定稿）：与五大平台完全同构 —— 不再在本层直连 extraSources，
+            // 统一落 callUserApiGetMusicUrl：脚本声明 qs/bili 平台 → 与五大平台同一条脚本通道；
+            // extraSources（服务端通道，= musicAccount 语义里的账号通道）按「首选自己的账号」
+            // 决定优先/兜底，名单只控制 Cookie。CENC 解密落缓存在下方统一后处理（result.key）。
 
             // 账号通道独立于自定义源存在：即使一个自定义源都没装，
             // 只要管理员配了自己的平台 Cookie，也应该能播。所以这里放宽进入条件。
@@ -9981,7 +9864,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
             let customSourceError: string | null = null
             let attempts: any[] = []
-            if (!result && !extraSourceError && (isSourceSupported(source, verifiedUsername) || accountUsable)) {
+            if (!result && (isSourceSupported(source, verifiedUsername) || accountUsable)) {
               try {
                 console.log(`[歌曲播放] 使用自定义源解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
 
@@ -10004,6 +9887,44 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 }
                 result = userApiResult
                 attempts = userApiResult.attempts || []
+
+                // 汽水/B站统一后处理（脚本通道 + 服务端通道都落这里）：
+                // ① 登录态复核：服务端通道的 via 透出（匿名明文通道 → 复核账号是否过期）
+                if (source === 'soda') musicAccount.noteSodaAnonymousLink((result as any).via)
+                // ② 汽水 CENC 加密流：服务端通道随链下发 AES 密钥（result.key，spade_a）——
+                //    走「下载 → 本地解密落缓存 → 返回明文缓存地址」，让首播即可播。
+                const sodaKey = source === 'soda' ? (result as any).key : ''
+                if (source === 'soda' && sodaKey) {
+                  let cached = fileCache.checkCache({ ...songInfo, quality: quality || '' }, verifiedUsername)
+                  if (!(cached && cached.exists && !cached.isCollision && cached.url)) {
+                    await fileCache.downloadAndCache(
+                      songInfo, result.url, quality || '128k', verifiedUsername, undefined,
+                      false, false, false,
+                      { requestedSource: source, downloadSource: source, sourceName: result.sourceName, decryptKey: sodaKey },
+                    )
+                    cached = fileCache.checkCache({ ...songInfo, quality: quality || '' }, verifiedUsername)
+                  }
+                  if (!cached || !cached.exists || !cached.url) {
+                    throw new Error('汽水加密曲下载/解密失败，无法生成可播放地址')
+                  }
+                  console.log(`[汽水解密] 返回已解密缓存地址: ${songInfo.name} (${cached.quality || quality})`)
+                  result = {
+                    ...result,
+                    url: cached.url,
+                    type: 'local',
+                    sourceName: `${result.sourceName}（已解密）`,
+                    quality: cached.quality || quality || result.type,
+                    folder: cached.folder,
+                  } as any
+                } else if (source === 'soda' || source === 'bili') {
+                  // 无密钥（脚本通道直链 / 非加密曲）：仍做加密流兜底拦截 —— 脚本拿不到
+                  // CENC 密钥，加密流浏览器播不了，必须显式失败让位给换源。
+                  if (await isEncryptedRemoteStream(result.url)) {
+                    throw new Error(
+                      `${source === 'soda' ? '汽水' : 'B站'} 该曲返回的是加密流（DRM），浏览器无法播放，请改用它源或其他平台播放`
+                    )
+                  }
+                }
               } catch (userApiError: any) {
                 // 兜底：userApi 层已把 undefined / 非 Error 抛出品归一化，这里再防一次，
                 // 避免任何意外抛出品把「取链失败」放大成无提示的 500
@@ -10013,7 +9934,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 attempts = (userApiError && userApiError.attempts) || []
                 // 不抛出错误，继续尝试内置源
               }
-              } else if (!result && !extraSourceError) {
+              } else if (!result) {
                 // isSourceSupported = false: 无任何自定义源支持此平台，立即通知前端
                 const why = accountBlockedByPermission
                 ? `${sourceName} 只能通过平台账号取链，但当前用户「${verifiedUsername}」不在使用权限名单内`
@@ -10023,14 +9944,45 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               void pushProgress({ name: '系统', status: 'fail', message: why })
             }
 
-            // 自定义源失败则直接报错（内置 SDK 无独立解析能力，回退无意义）
+            // 自定义源失败：汽水/B站先换源（保持既有行为 —— 全通道失败也让歌有声明），
+            // 其余平台直接报错（内置 SDK 无独立解析能力，回退无意义）。
+            if (!result && (source === 'soda' || source === 'bili')) {
+              const switchReason = customSourceError || '汽水/B站所有取链通道均失败'
+              try {
+                const switched = await switchToOtherSource(songInfo, quality || '128k', verifiedUsername)
+                if (switched?.url) {
+                  removePendingAfterSwitch(songInfo)
+                  result = {
+                    url: switched.url,
+                    type: switched.quality,
+                    sourceName: switched.sourceName,
+                    sourceId: `extra-switch:${switched.songInfo?.source || ''}`,
+                    attempts: [{ name: switched.sourceName, status: 'success' }],
+                    // 汽水「仅 60 秒试听」这类降级会静默换到别的平台，必须让用户知情，
+                    // 否则只是缓冲完发现音源变了，根本不知道发生了什么。
+                    switched: {
+                      from: sourceDisplayName(source),
+                      to: switched.sourceName,
+                      reason: switchReasonForUser(switchReason),
+                    },
+                  }
+                  void pushProgress({ name: switched.sourceName, status: 'success' })
+                  console.log(`[换源] ${source} 失败后已换到 ${switched.sourceName}：${songInfo.name}`)
+                }
+              } catch (switchErr: any) {
+                console.warn(`[换源] ${source} 失败后换源也未命中: ${switchErr?.message || switchErr}`)
+              }
+              // 换源也没成，才把失败写进短缓存（避免把「其实能换到」的曲子也一起缓存掉）
+              if (!result) rememberMusicUrlFailure(failKey, switchReason)
+            }
+
             if (!result) {
               const fallbackMsg = accountUsable
                 ? `自定义源与你配置的账号都未能取到链接（账号见 /health 日志里的 [平台账号] 记录）`
                 : accountBlockedByPermission
                   ? `${sourceName} 只能通过平台账号取链，但当前用户「${verifiedUsername}」不在使用权限名单内；请联系管理员在「平台账号 → 使用权限」里加入该用户`
                   : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
-              const rawMsg = customSourceError || extraSourceError || fallbackMsg
+              const rawMsg = customSourceError || fallbackMsg
               // 缺 ID 的请求必须点名原因：日志里那一排「缺少 songId」不是音源坏了，
               // 而是这首歌没带平台 ID，用户照提示去换音源只会白折腾。
               const errMsg = songIdMissing

@@ -1054,24 +1054,28 @@ if (typeof configBackupTimer.unref === 'function') configBackupTimer.unref()
     // 测试曲目来源之二：内置 SDK 搜索兜底（缓存里没有该平台的歌时使用）
     searchTestSong: async (platform: string) => {
       try {
-        // 额外音源（汽水/B站）自发现探针曲：它们不在 musicSdk 里，走 extraSources 分发
-        if (platform === 'soda' || platform === 'bili') {
+        // 额外音源（汽水/B站）自发现探针曲：它们不在 musicSdk 里，走 extraSources 分发。
+        // 平台 key 按脚本生态写法（qs/qishui/bilibili…）传入，extraSources 内部归一。
+        {
           const extraSources = require('@/server/extraSources')
-          const res = await extraSources.searchSongs(platform, '周杰伦', 1, 10)
-          const list = Array.isArray(res?.list) ? res.list : []
-          const picks = list
-            .filter((it: any) => it && (it.id || it.songmid))
-            .slice(0, 3)
-            .map((it: any) => ({
-              source: platform,
-              songmid: String(it.id ?? it.songmid),
-              name: it.name,
-              singer: Array.isArray(it.singer) ? it.singer.map((s: any) => s.name ?? s).join('/') : (it.singer || ''),
-              hash: it.hash,
-              albumId: it.albumId,
-              interval: it.interval,
-            }))
-          return picks.length ? picks : null
+          const extraId = extraSources.normalizeExtraSourceId ? extraSources.normalizeExtraSourceId(platform) : null
+          if (extraId) {
+            const res = await extraSources.searchSongs(extraId, '周杰伦', 1, 10)
+            const list = Array.isArray(res?.list) ? res.list : []
+            const picks = list
+              .filter((it: any) => it && (it.id || it.songmid))
+              .slice(0, 3)
+              .map((it: any) => ({
+                source: platform,
+                songmid: String(it.id ?? it.songmid),
+                name: it.name,
+                singer: Array.isArray(it.singer) ? it.singer.map((s: any) => s.name ?? s).join('/') : (it.singer || ''),
+                hash: it.hash,
+                albumId: it.albumId,
+                interval: it.interval,
+              }))
+            return picks.length ? picks : null
+          }
         }
         const api = musicSdk?.[platform]
         const search = api?.musicSearch?.search

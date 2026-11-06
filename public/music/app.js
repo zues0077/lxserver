@@ -15297,27 +15297,20 @@ function resolveSourceOwner(sourceId) {
 }
 
 // 自定义源在 lxserver 里只负责「取链」：搜索、歌词、封面都由服务端内置实现提供。
-// 所以脚本声明的平台里，只有内置 musicSdk 覆盖的五个平台真会把取链请求交给它；
-// 其余 key（bilibili/qishui/qs/kuaishou/youtube/xmly…）永远不会被调用——
-// bili/soda 由内置 extraSources 接管，别的平台服务端根本没有入口。
-// 这里统一算一份标注，免得用户把「脚本声明」当成「能用」。
-const CUSTOM_SOURCE_NATIVE_PLATFORMS = new Set(['wy', 'tx', 'kw', 'kg', 'mg']);
-const CUSTOM_SOURCE_BUILTIN_LABELS = {
-    bili: 'B站', bilibili: 'B站', bilivideo: 'B站',
-    soda: '汽水', qs: '汽水', qishui: '汽水', qsmusic: '汽水'
-};
+// 服务端会真正调用取链的平台：五大平台（wy/tx/kw/kg/mg）+ 汽水/B站
+// （脚本声明的 qs/qishui/soda…、bili/bilibili… 都算，服务端按别名归一后走脚本通道，
+// 脚本不可用时由服务端通道兜底）——这些平台在脚本里渲染成与五大平台完全一致的开关。
+// 其余 key（kuaishou/youtube/xmly…）服务端没有入口，永远不会被调用，
+// 统一标成「未接入」，免得用户把「脚本声明」当成「能用」。
+const CUSTOM_SOURCE_NATIVE_PLATFORMS = new Set([
+    'wy', 'tx', 'kw', 'kg', 'mg',
+    'soda', 'qs', 'qishui', 'qsmusic',
+    'bili', 'bilibili', 'bilivideo',
+]);
 
 function describeCustomSourcePlatform(key) {
     const lower = String(key || '').trim().toLowerCase();
     if (CUSTOM_SOURCE_NATIVE_PLATFORMS.has(lower)) return { native: true, tag: '', note: '' };
-    const builtin = CUSTOM_SOURCE_BUILTIN_LABELS[lower];
-    if (builtin) {
-        return {
-            native: false,
-            tag: '内置',
-            note: `${builtin}由本服务内置实现搜索与取链，脚本里这个平台的实现不会被调用`,
-        };
-    }
     return {
         native: false,
         tag: '未接入',
@@ -15569,7 +15562,14 @@ async function renderCustomSources() {
                     'kw': { name: '酷我', color: 't-badge-yellow' },
                     'tx': { name: 'QQ', color: 't-badge-green' },
                     'wy': { name: '网易', color: 't-badge-red' },
-                    'mg': { name: '咪咕', color: 't-badge-pink' }
+                    'mg': { name: '咪咕', color: 't-badge-pink' },
+                    'soda': { name: '汽水', color: 't-badge-cyan' },
+                    'qs': { name: '汽水', color: 't-badge-cyan' },
+                    'qishui': { name: '汽水', color: 't-badge-cyan' },
+                    'qsmusic': { name: '汽水', color: 't-badge-cyan' },
+                    'bili': { name: 'B站', color: 't-badge-pink' },
+                    'bilibili': { name: 'B站', color: 't-badge-pink' },
+                    'bilivideo': { name: 'B站', color: 't-badge-pink' }
                 };
 
                 supportedBadges = `<div class="flex flex-wrap gap-1 md:gap-1.5 mt-1.5 md:mt-2">
@@ -16848,7 +16848,14 @@ function openEditSourceModal(sourceId) {
         'tx': { name: 'QQ音乐', icon: 'fab fa-qq', color: 'text-emerald-500 bg-emerald-50 dark:bg-emerald-900/30' },
         'wy': { name: '网易云音乐', icon: 'fas fa-cloud', color: 'text-red-500 bg-red-50 dark:bg-red-900/30' },
         'mg': { name: '咪咕音乐', icon: 'fas fa-headphones-alt', color: 'text-pink-500 bg-pink-50 dark:bg-pink-900/30' },
-        'local': { name: '本地音乐', icon: 'fas fa-hdd', color: 'text-purple-500 bg-purple-50 dark:bg-purple-900/30' }
+        'local': { name: '本地音乐', icon: 'fas fa-hdd', color: 'text-purple-500 bg-purple-50 dark:bg-purple-900/30' },
+        'soda': { name: '汽水音乐', icon: 'fas fa-tint', color: 'text-cyan-500 bg-cyan-50 dark:bg-cyan-900/30' },
+        'qs': { name: '汽水音乐', icon: 'fas fa-tint', color: 'text-cyan-500 bg-cyan-50 dark:bg-cyan-900/30' },
+        'qishui': { name: '汽水音乐', icon: 'fas fa-tint', color: 'text-cyan-500 bg-cyan-50 dark:bg-cyan-900/30' },
+        'qsmusic': { name: '汽水音乐', icon: 'fas fa-tint', color: 'text-cyan-500 bg-cyan-50 dark:bg-cyan-900/30' },
+        'bili': { name: 'Bilibili', icon: 'fas fa-tv', color: 'text-pink-500 bg-pink-50 dark:bg-pink-900/30' },
+        'bilibili': { name: 'Bilibili', icon: 'fas fa-tv', color: 'text-pink-500 bg-pink-50 dark:bg-pink-900/30' },
+        'bilivideo': { name: 'Bilibili', icon: 'fas fa-tv', color: 'text-pink-500 bg-pink-50 dark:bg-pink-900/30' }
     };
 
     const supportedSources = Array.isArray(source.supportedSources) ? source.supportedSources : [];
