@@ -98,6 +98,7 @@ import {
 } from './xiaoai'
 import { runPullGuard } from './xiaoai/pullGuard'
 import { isStaleSeekPosition } from './xiaoai/seekGuard'
+import { resolveSeekKnownMs } from './xiaoai/seekDuration'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
 /** 当前生效的 dislike 匹配选项，下发给前端保证前后端判定一致 */
@@ -440,12 +441,18 @@ let lastXiaoAiTrack: {
   /** 整首时长（毫秒），seek 时用它算剩余时长 */
   durationMs: number
   /**
-   * 这一首的**整首**时长（毫秒），投送时锁定，之后任何 seek/探测都不许改写。
+   * 这一首的**整首**时长（毫秒），投送时锁定；投送时不知道（远端中转拿不到时长，
+   * 锁定值 = 0）时允许 seek 从可信来源（本地文件探测/完整流首次上报）**学得后一次性
+   * 锁定**，只放大不缩小——此后任何被切片流带短的设备上报都不许再改写它。
    *
    * 为什么单独存一份：`durationMs` 会被「时长探测失败时补探」等路径写回，
    * 一旦被写成一个残值，后续「拖回开头」算出来的剩余时长就会离谱
    * （实测：225s 的歌在回到开头时被算成剩余 36s）。剩余时长直接决定
    * 平滑下发的码率——码率被放大数倍就会把音箱缓冲灌爆，表现为「拉流但不播放」。
+   *
+   * 死亡螺旋（2026-11-07 01:28 实测富士山下 261s）：投送时 totalDurationMs=0，
+   * 首次 seek 只能拿设备上报兜底，而 seek 后音箱播的是切片流、上报跟着变短
+   * （261→33→4→0s），每次拖动都按更短的「总时长」切出更碎的尾巴直到无声。
    */
   totalDurationMs: number
 } | null = null
@@ -9422,36 +9429,32 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 return
               }
 
-              // 时长三档兜底：投送时探测到的 → 现场再探一次（探测偶发失败时会补回来）
-              // → 设备上报的曲目时长。三者都没有就不夹取，按用户拖的位置直接跳，
-              // 也好过退化成「从头重播」。
+              // 时长三档兜底 + 粘性锁定：逻辑收口在 resolveSeekKnownMs（单测按住）。
               // 整首时长以投送时锁定的 totalDurationMs 为准，不要用 track.durationMs：
               // 后者会被各种兜底路径写回残值（实测 225s 的歌「回到开头」时算出剩余 36s），
               // 而剩余时长直接决定平滑下发码率——码率放大数倍会把音箱缓冲灌爆，
               // 表现就是「拉流但不播放、连点屏幕播放键也起不来」（2026-11-05）。
-              let knownMs = Number(track.totalDurationMs) > 0
-                ? Number(track.totalDurationMs)
-                : Number(track.durationMs) > 0
-                  ? Number(track.durationMs)
-                  : 0
-              // 确实不知道整首时长时才现场补探一次；**不写回 track**（写回会污染后续 seek）
-              if (knownMs <= 0 && track.target.path) knownMs = probeLocalFileDuration(track.target.path)
-              if (knownMs <= 0) knownMs = lastXiaoAiDeviceDurationMs
-              // 上界校正：连续拖动时实测见过 knownMs 掉成「切片剩余」（259s 的歌报 34s），
-              // 一旦掉下去，之后每次「回到开头」的剩余时长都是错的，码率估算也跟着错。
-              // 只在「明显偏小」时用设备上报的整首时长拉回：设备报的可能是整首、
-              // 也可能是当前切片（短流），所以要求设备值超过 60 秒且大于已知值的 1.5 倍，
-              // 正常情况两者接近，这条永远不会误触。
-              if (
-                lastXiaoAiDeviceDurationMs > 60000
-                && knownMs > 0
-                && lastXiaoAiDeviceDurationMs > knownMs * 1.5
-              ) {
-                console.warn(
-                  `[XiaoAi] 跳转时长校正：knownMs=${Math.round(knownMs / 1000)}s 明显偏小，`
-                  + `按设备上报整首 ${Math.round(lastXiaoAiDeviceDurationMs / 1000)}s 修正`,
+              const resolved = resolveSeekKnownMs({
+                lockedTotalMs: Number(track.totalDurationMs) || 0,
+                trackDurationMs: Number(track.durationMs) || 0,
+                // target.path 恒为投送时的整曲文件（切片只写进 nextTarget，不回写
+                // track.target），所以探测值是整曲时长；远端中转无本地文件时为 0。
+                probedMs: track.target.path ? probeLocalFileDuration(track.target.path) : 0,
+                deviceDurationMs: lastXiaoAiDeviceDurationMs,
+                // 设备上报只有「音箱还播着完整流」时才是整曲时长
+                deviceOnFullStream: lastXiaoAiSeekSec === 0
+                  && getStreamRounds(lastXiaoAiStreamSid).replay !== true,
+              })
+              const knownMs = resolved.knownMs
+              // 粘性回写：整曲时长一旦从可信来源学到（投送探测/本地文件探测/完整流首次
+              // 上报），就锁进 totalDurationMs——只放大不缩小。锁住之后，就算音箱随后
+              // 播的是切片流、上报时长越拖越短，seek 也不再退回去信它，死亡螺旋从根上断掉。
+              if (resolved.lockedTotalMs !== Number(track.totalDurationMs || 0)) {
+                console.log(
+                  `[XiaoAi] 跳转学到整曲时长 ${Math.round(resolved.lockedTotalMs / 1000)}s，锁定 totalDurationMs`
+                  + `（原值 ${Math.round(Number(track.totalDurationMs || 0) / 1000)}s）`,
                 )
-                knownMs = lastXiaoAiDeviceDurationMs
+                track.totalDurationMs = resolved.lockedTotalMs
               }
               const totalSec = knownMs > 0 ? knownMs / 1000 : 0
               // 贴到结尾会切出 0.5 秒碎片，夹到 duration-3（songloft 同款守卫）
@@ -9612,7 +9615,17 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (pathname === '/api/music/xiaoai/status' && req.method === 'GET') {
           const deviceId = String(urlObj.searchParams.get('deviceId') || '')
           void xiaoAiService
-            .getStatus(deviceId, Number(lastXiaoAiTrack?.durationMs) || lastXiaoAiDeviceDurationMs)
+            .getStatus(
+              deviceId,
+              // 时长标尺优先用锁定的整曲时长：durationMs 会被兜底路径写残，
+              // 而设备上报在 seek 后是切片流时长（2026-11-07 实测同曲内 227s→133s）。
+              // 标尺错了 progressRatio 就错，前端 watchdog 的「临近结尾自动切歌」
+              // 永远等不到墙钟满——尾段放完只能重拉 → 按住 4s → 410 拒绝 →
+              // 音箱 TTS「播放遇到问题」（同日 01:33 实测三连）。
+              Number(lastXiaoAiTrack?.totalDurationMs) > 0
+                ? Number(lastXiaoAiTrack?.totalDurationMs)
+                : Number(lastXiaoAiTrack?.durationMs) || lastXiaoAiDeviceDurationMs,
+            )
             .then(result => {
               // streamFull：本次投送这一路流被完整拉了几遍。
               // 音箱播完会自己重拉同一个 URL，所以 >=2 就等于「已经放完一遍」，
@@ -9622,7 +9635,16 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const reportedDuration = Number(
                 (result as any)?.raw?.play_song_detail?.duration || (result as any)?.durationMs || 0,
               )
-              if (reportedDuration > 0) lastXiaoAiDeviceDurationMs = reportedDuration
+              // 只在完整流上吸收设备上报时长：seek 后音箱播切片流、上报跟着变短
+              // （2026-11-07 实测同曲内 227s→133s），照单全收会污染 seek 兜底源；
+              // 切歌时 lastXiaoAiSeekSec 会归零、流是新 sid（replay=false），正常吸收不受影响。
+              if (
+                reportedDuration > 0
+                && (lastXiaoAiSeekSec === 0 && rounds.replay !== true
+                  || lastXiaoAiDeviceDurationMs > 0 && reportedDuration > lastXiaoAiDeviceDurationMs * 1.5)
+              ) {
+                lastXiaoAiDeviceDurationMs = reportedDuration
+              }
               sendJson({
                 success: true,
                 ...result,
