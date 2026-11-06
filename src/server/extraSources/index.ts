@@ -16,6 +16,14 @@ import * as store from '../musicAccount/store'
 import { isUserAllowed } from '../musicAccount/permission'
 import { isExtraSourceActive } from './state'
 
+// 把 state.ts 的启用态读写透出，供 customSourceHandlers / userApi / sourceProbe 直接复用
+export {
+  getExtraSourceState,
+  setExtraSourceEnabled,
+  setExtraSourceDisabledSources,
+  isExtraSourceActive,
+} from './state'
+
 export type ExtraSourceId = 'bili' | 'soda'
 
 const SEARCHERS: Record<string, (keyword: string, page: number, pageSize: number) => Promise<{ list: any[]; total: number; allPage: number }>> = {
