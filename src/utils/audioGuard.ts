@@ -45,9 +45,7 @@ export const judgeAudioMismatch = (params: {
         // 之后每次重播都要重新解析 + 整首下载再丢弃）。上限只在元数据可信时生效：
         // expected>=30s，或曲名带片段/铃声豁免词（真铃声串成长混音仍要拦），
         // 或曲名自带与元数据吻合的秒数声明（「30秒铃声」请求 28s）。
-        const metadataTrusted = expected >= PLAYBACK_MIN_PLAUSIBLE_SEC
-            || PLAYBACK_SHORT_OK.test(name)
-            || declaredSecMatches(name, expected)
+        const metadataTrusted = originMetadataTrusted(name, expected)
         if (metadataTrusted && actual > expected * 2 + 60) return `明显长于预期 (${actual}s / 预期 ${expected}s)`
         return null
     }
@@ -227,6 +225,19 @@ export interface OriginVerdict {
  *              而音频时长正好等于它模糊匹配到的头部候选（±3s）且与请求时长已有明显偏差
  *  - unknown ：搜不到、信息不足、或只有「同名不同歌手」的候选（翻唱/译名差异太常见）
  */
+/**
+ * 请求方声明的时长是否可信：
+ *  - expected >= 30s（正常歌曲登记范围）
+ *  - 或曲名带片段/铃声豁免词（真铃声的短元数据是自描述的）
+ *  - 或曲名自带与元数据吻合的秒数声明（「30秒铃声」声明 30s、元数据 28s）
+ *
+ * r66 定调：音源返回的 <30s 元数据本身疑似占位残片，不可作为判罪依据。
+ */
+const originMetadataTrusted = (requestName: unknown, expectedSec: number): boolean =>
+    expectedSec >= PLAYBACK_MIN_PLAUSIBLE_SEC
+    || PLAYBACK_SHORT_OK.test(String(requestName ?? ''))
+    || declaredSecMatches(String(requestName ?? ''), expectedSec)
+
 export const judgeOriginMismatch = (params: {
     requestName: unknown
     requestSinger?: unknown
@@ -262,6 +273,16 @@ export const judgeOriginMismatch = (params: {
         const closest = registered.reduce((best, sec) => (
             Math.abs(sec - actual) < Math.abs(best - actual) ? sec : best
         ), registered[0])
+        // 请求方元数据本身是占位残片（<30s 且无豁免，r66 定调）时，「同名同歌手版本登记时长
+        // 全对不上」不足以定罪：曲库里往往只有原版/其他版本的登记时长，换源/救援拿到的
+        // 同曲另一版本（实测 红昭愿 DJ阿布 2:53 vs 曲库登记 4:15/3:23）会被误判
+        // 「不是同一版本」，好文件依旧进不了缓存（2026-11-06 实机 r69 复测确认，
+        // 与 judgeAudioMismatch「明显长于预期」是同一类反向误杀）。降级 unknown 放行。
+        // 约束：实际音频至少得是正常歌曲长度（>=30s），残片/占位音仍走 suspect。
+        // 「无效 ID 返回别曲」的主防护不受影响——那种场景请求元数据正常（>=30s）。
+        if (!originMetadataTrusted(params.requestName, expected) && actual >= PLAYBACK_MIN_PLAUSIBLE_SEC) {
+            return { verdict: 'unknown' }
+        }
         return {
             verdict: 'suspect',
             reason: `源侧登记的时长是 ${formatSec(closest)}，音频实际 ${formatSec(actual)}，不是同一版本`,

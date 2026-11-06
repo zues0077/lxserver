@@ -61,3 +61,54 @@ test('正常长曲分支（expected>60）回归：不受本次改动影响', () 
 test('不传 name（旧调用兼容）：<30s 元数据同样跳过长上限', () => {
   assert.strictEqual(judgeAudioMismatch({ expectedSec: 28, actualSec: 173 }), null)
 })
+
+// ---- judgeOriginMismatch 源侧核验：同类反向误杀的延伸修复（r69 实机复测发现） ----
+// 现场：请求「红昭愿 (DJ版) 音阙诗听 00:28」（占位残片元数据），换源拿到 DJ阿布 173s；
+// kw 曲库同名同歌手登记只有 4:15 等原版时长 → 旧逻辑判「不是同一版本」拒缓存。
+import { judgeOriginMismatch } from '../src/utils/audioGuard'
+
+const CANDS = [
+  { name: '红昭愿 (DJ版)', singer: '音阙诗听', interval: '04:15' },
+  { name: '红昭愿 (DJ版)', singer: 'DJ半夏', interval: '03:23' },
+]
+
+test('源侧核验：占位元数据 28s + 曲库全对不上 173s → 降级 unknown 放行（修复点）', () => {
+  const r = judgeOriginMismatch({
+    requestName: '红昭愿 (DJ版)', requestSinger: '音阙诗听',
+    expectedSec: 28, actualSec: 173, candidates: CANDS,
+  })
+  assert.strictEqual(r.verdict, 'unknown', `应降级 unknown，实际 ${JSON.stringify(r)}`)
+})
+
+test('源侧核验：真铃声豁免词 → 阶段 A 严格判定保持，仍判 suspect', () => {
+  const r = judgeOriginMismatch({
+    requestName: '起床铃声', requestSinger: '音阙诗听',
+    expectedSec: 28, actualSec: 173,
+    candidates: [{ name: '起床铃声', singer: '音阙诗听', interval: '00:30' }],
+  })
+  assert.strictEqual(r.verdict, 'suspect', `真铃声串长音频应保持 suspect，实际 ${JSON.stringify(r)}`)
+})
+
+test('源侧核验：元数据可信（>=30s）→ 旧判定不变，全对不上仍 suspect', () => {
+  const r = judgeOriginMismatch({
+    requestName: '红昭愿 (DJ版)', requestSinger: '音阙诗听',
+    expectedSec: 203, actualSec: 173, candidates: CANDS,
+  })
+  assert.strictEqual(r.verdict, 'suspect', `可信元数据下全对不上应保持 suspect，实际 ${JSON.stringify(r)}`)
+})
+
+test('源侧核验：占位元数据但实际音频过短（<30s）→ 不放行，保持 suspect', () => {
+  const r = judgeOriginMismatch({
+    requestName: '红昭愿 (DJ版)', requestSinger: '音阙诗听',
+    expectedSec: 28, actualSec: 12, candidates: CANDS,
+  })
+  assert.strictEqual(r.verdict, 'suspect', `12s 残片不应借豁免溜进缓存，实际 ${JSON.stringify(r)}`)
+})
+
+test('源侧核验：任一登记版本时长吻合 → ok（原有正向回归）', () => {
+  const r = judgeOriginMismatch({
+    requestName: '红昭愿 (DJ版)', requestSinger: 'DJ半夏',
+    expectedSec: 203, actualSec: 203, candidates: CANDS,
+  })
+  assert.strictEqual(r.verdict, 'ok', `吻合版本应 ok，实际 ${JSON.stringify(r)}`)
+})
