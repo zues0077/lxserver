@@ -641,6 +641,7 @@ const resolvePlayableAudio = async (
     quality: string
     contentType: string
     durationMs: number
+    platform: string
     reason: string
   }> = []
   let rescueProbes = 0
@@ -649,16 +650,22 @@ const resolvePlayableAudio = async (
   const rescueExhausted = () =>
     rescueProbes >= RESCUE_MAX_EXTRA_PROBES || (rescueDeadline > 0 && Date.now() >= rescueDeadline)
   const collectSuspect = (
-    item: { url: string; sourceName: string; quality: string; contentType: string; durationMs: number },
+    item: { url: string; sourceName: string; quality: string; contentType: string; durationMs: number; platform: string },
     reason: string,
   ) => {
     // 同一地址可能被多个源重复返回，去重避免无谓地吃预算
     if (suspects.some(s => s.url === item.url)) return
+    // B1：同平台的另一个子源返回了几乎同一时长的音频——多 API 源共用同一份坏文件，
+    // 再探也不会变。记入嫌疑池但**不占抢救预算**，预算要留给真正可能出完整版的跨平台候选。
+    // 现场（2026-11-06 红昭愿 (DJ版)）：kw 3 个子源返回同一份 29s，3 次预算烧光后
+    // 换源阶段进门就 rescueExhausted，tx 候选 0 次探测直接保底投最长。
+    const twin = suspects.some(s =>
+      s.platform === item.platform && Math.abs(s.durationMs - item.durationMs) <= 1000)
     if (!rescueDeadline) rescueDeadline = Date.now() + RESCUE_BUDGET_MS
-    rescueProbes++
+    if (!twin) rescueProbes++
     suspects.push({ ...item, reason })
     console.warn(
-      `[自动换源] 时长可疑，继续找完整版：${item.sourceName} ${item.durationMs ? `${Math.round(item.durationMs / 1000)}s` : ''}（${reason}）`,
+      `[自动换源] 时长可疑，继续找完整版：${item.sourceName} ${item.durationMs ? `${Math.round(item.durationMs / 1000)}s` : ''}（${reason}）${twin ? '〔同平台重复占位音，不占抢救预算〕' : ''}`,
     )
   }
   // 两段独立预算（见上面常量注释）：原源阶段超支不会吃掉换源阶段的时间片
@@ -722,6 +729,7 @@ const resolvePlayableAudio = async (
             quality: String(extra?.type || quality),
             contentType: extraProbe.contentType || '',
             durationMs: extraProbe.durationMs || 0,
+            platform: source,
           }, extraVerdict.reason || '时长异常')
           failures.push(`${extraLabel}: ${extraVerdict.reason || '时长异常'}（已继续换源）`)
           return null
@@ -734,6 +742,7 @@ const resolvePlayableAudio = async (
     }
 
     const exclude: string[] = []
+    let prevSuspectMs = -1
     for (let round = 0; round < 5; round++) {
       if (Date.now() >= deadline || probes >= RESOLVE_MAX_PROBES) return null
       let result: any
@@ -776,8 +785,16 @@ const resolvePlayableAudio = async (
           quality: String(result?.type || quality),
           contentType: probe.contentType || '',
           durationMs: probe.durationMs || 0,
+          platform: source,
         }, verdict.reason || '时长异常')
         failures.push(`${label}: ${verdict.reason || '时长异常'}（已继续换源）`)
+        // B2：同平台连续两轮几乎同时长——该平台其余子源几乎肯定还是同一份文件，
+        // 别再烧探测次数/等待时间，直接收手让位给跨平台候选
+        if (prevSuspectMs >= 0 && Math.abs(probe.durationMs - prevSuspectMs) <= 1000) {
+          failures.push(`${source}: 同平台连续返回同时长音频，跳过其余子源`)
+          return null
+        }
+        prevSuspectMs = probe.durationMs
         if (rescueExhausted()) return null
       } else {
         failures.push(`${label}: 地址不可播（${probe.detail}）`)
@@ -1197,7 +1214,7 @@ const resolveXiaoAiTrackRaw = async (
   quality: string,
   verifiedUsername: string,
   directStreamUrl = '',
-  options: { skipCache?: boolean } = {},
+  options: { skipCache?: boolean; badCacheRetried?: boolean } = {},
 ): Promise<XiaoAiTrackTarget> => {
   const songName = String(songInfo.name || songInfo.title || 'track')
   const singer = String(songInfo.singer || '')
@@ -1221,7 +1238,7 @@ const resolveXiaoAiTrackRaw = async (
         console.warn(
           `[XiaoAi] 本地缓存是不完整版本，跳过并换源：${filename}（${cachedVerdict.reason}）`,
         )
-        syncLog.warn(`[XiaoAi] 本地缓存不完整（${cachedVerdict.reason}），已跳过换源：${filename}`)
+        syncLog.warn(`[XiaoAi] 本地缓存不完整（${cachedVerdict.reason}），已跳过该缓存，继续换源：${filename}`)
       } else {
         console.log(`[XiaoAi] 命中本地缓存，直接投送：${filename}`)
         return {
@@ -1311,17 +1328,27 @@ const resolveXiaoAiTrackRaw = async (
   if (existingDownload) {
     const arrived = await waitForCachedFile(songInfo, quality, verifiedUsername, 12000)
     if (arrived?.path) {
-      console.log(`[XiaoAi] 等到本地缓存落盘，直接投送：${filename}`)
-      return {
-        path: arrived.path,
-        filename,
-        cached: true,
-        contentType: AUDIO_MIME_BY_EXT[path.extname(arrived.path).toLowerCase()],
-        via: '本地缓存（等待下载完成）',
-        durationMs: probeLocalFileDuration(arrived.path),
+      // 落盘文件也要复判：这个文件可能就是前端下载的占位残片（L3 同款风险），
+      // 是残片就别接，继续走现解析（那边有完整的换源链）
+      const arrivedVerdict = judgePlaybackDuration({
+        expectedSec: parseIntervalSec(songInfo.interval),
+        actualSec: probeLocalFileDuration(arrived.path) / 1000,
+        name: songInfo.name,
+      })
+      if (arrivedVerdict.level !== 'suspect') {
+        console.log(`[XiaoAi] 等到本地缓存落盘，直接投送：${filename}`)
+        return {
+          path: arrived.path,
+          filename,
+          cached: true,
+          contentType: AUDIO_MIME_BY_EXT[path.extname(arrived.path).toLowerCase()],
+          via: '本地缓存（等待下载完成）',
+          durationMs: probeLocalFileDuration(arrived.path),
+        }
       }
+      console.warn(`[XiaoAi] 等到的本地缓存不完整（${arrivedVerdict.reason}），不采用，继续换源：${filename}`)
     }
-    console.warn(`[XiaoAi] 缓存仍在下载中，先按换源投送：${filename}`)
+    console.warn(`[XiaoAi] 缓存仍在下载中或不可用，先按换源投送：${filename}`)
   }
 
   // 5. 现解析：原源 → 换源 → 音质降级，每个候选都做音频探测
@@ -1383,7 +1410,7 @@ const resolveXiaoAiTrackRaw = async (
     if (cached) {
       console.log(`[XiaoAi] 先缓存后投送：${filename}`)
       setCachedTrackUrl(cacheKey, resolved.url, resolved.durationMs)
-      return {
+      const cachedTarget: XiaoAiTrackTarget = {
         path: cached.path,
         filename,
         cached: true,
@@ -1392,6 +1419,28 @@ const resolveXiaoAiTrackRaw = async (
         durationMs: probeLocalFileDuration(cached.path) || resolved.durationMs,
         incompleteReason: resolved.incompleteReason,
       }
+      // 落盘复判（D1'）：探测是流头估算，会员通道/流式地址可能估出偏大值让残片漏网
+      //（2026-11-06 实机：wy 320k 估算通过，落盘真实 28.9s）。坏文件再给一次换源机会；
+      // 第二次还坏就如实提示，不再循环。
+      const cacheVerdict = judgePlaybackDuration({
+        expectedSec: parseIntervalSec(songInfo.interval),
+        actualSec: (cachedTarget.durationMs || 0) / 1000,
+        name: songInfo.name,
+      })
+      if (cacheVerdict.level === 'suspect' && !options.badCacheRetried) {
+        syncLog.warn(`[XiaoAi] 换源落盘文件仍不完整（${cacheVerdict.reason}），清缓存重新解析一次：${filename}`)
+        try { fs.unlinkSync(cached.path) } catch { /* 文件没了更好 */ }
+        return resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, directStreamUrl, {
+          ...options,
+          skipCache: true,
+          badCacheRetried: true,
+        })
+      }
+      if (cacheVerdict.level === 'suspect') {
+        cachedTarget.incompleteReason = cacheVerdict.reason || resolved.incompleteReason
+        syncLog.warn(`[XiaoAi] 重新解析后落盘文件仍不完整（${cacheVerdict.reason}），如实提示后投送：${filename}`)
+      }
+      return cachedTarget
     }
     try {
       await Promise.race([
@@ -1405,7 +1454,7 @@ const resolveXiaoAiTrackRaw = async (
     if (afterDownload) {
       console.log(`[XiaoAi] 先缓存后投送：${filename}`)
       setCachedTrackUrl(cacheKey, resolved.url, resolved.durationMs)
-      return {
+      const afterTarget: XiaoAiTrackTarget = {
         path: afterDownload.path,
         filename,
         cached: true,
@@ -1414,6 +1463,25 @@ const resolveXiaoAiTrackRaw = async (
         durationMs: probeLocalFileDuration(afterDownload.path) || resolved.durationMs,
         incompleteReason: resolved.incompleteReason,
       }
+      const afterVerdict = judgePlaybackDuration({
+        expectedSec: parseIntervalSec(songInfo.interval),
+        actualSec: (afterTarget.durationMs || 0) / 1000,
+        name: songInfo.name,
+      })
+      if (afterVerdict.level === 'suspect' && !options.badCacheRetried) {
+        syncLog.warn(`[XiaoAi] 换源落盘文件仍不完整（${afterVerdict.reason}），清缓存重新解析一次：${filename}`)
+        try { fs.unlinkSync(afterDownload.path) } catch { /* 文件没了更好 */ }
+        return resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, directStreamUrl, {
+          ...options,
+          skipCache: true,
+          badCacheRetried: true,
+        })
+      }
+      if (afterVerdict.level === 'suspect') {
+        afterTarget.incompleteReason = afterVerdict.reason || resolved.incompleteReason
+        syncLog.warn(`[XiaoAi] 重新解析后落盘文件仍不完整（${afterVerdict.reason}），如实提示后投送：${filename}`)
+      }
+      return afterTarget
     }
     console.warn(`[XiaoAi] 预缓存未命中，回落到远端中转：${filename}`)
   }
@@ -2386,76 +2454,16 @@ const hasVersionMismatch = (candidateName: unknown, targetName: unknown): boolea
 const SOURCE_MATCH_CACHE_TTL = 60_000
 const sourceMatchCache = new Map<string, { expiresAt: number, promise: Promise<any[]> }>()
 
-const normalizeSongMatchText = (value: unknown) => String(value || '')
-  .toLowerCase()
-  .replace(/[（(\[].*?[）)\]]/g, '')
-  .replace(/[\s\p{P}\p{S}]/gu, '')
-
-const normalizeSongNameText = (value: unknown) => String(value || '')
-  .toLowerCase()
-  .replace(/[\s\p{P}\p{S}]/gu, '')
-
-const splitSingerNames = (value: unknown) => String(value || '')
-  .toLowerCase()
-  .split(/[、，,&；;|/+]/)
-  .map(normalizeSongMatchText)
-  .filter(Boolean)
-
-const isSingerMatch = (candidateSinger: unknown, targetSinger: unknown) => {
-  const candidateText = normalizeSongMatchText(candidateSinger)
-  const targetText = normalizeSongMatchText(targetSinger)
-  if (!targetText) return true
-  if (!candidateText) return false
-  if (candidateText.includes(targetText) || targetText.includes(candidateText)) return true
-
-  const candidateParts = splitSingerNames(candidateSinger)
-  const targetParts = splitSingerNames(targetSinger)
-  return candidateParts.some(candidatePart => targetParts.some(targetPart => (
-    candidatePart.includes(targetPart) || targetPart.includes(candidatePart)
-  )))
-}
-
-const getSongDurationSeconds = (value: unknown) => {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value > 10000 ? Math.round(value / 1000) : Math.round(value)
-  }
-
-  const text = String(value || '').trim()
-  if (!text) return 0
-  if (/^\d+(?:\.\d+)?$/.test(text)) {
-    const parsed = Number(text)
-    return parsed > 10000 ? Math.round(parsed / 1000) : Math.round(parsed)
-  }
-
-  const parts = text.split(':').map(Number)
-  if (parts.some(part => !Number.isFinite(part))) return 0
-  if (parts.length === 2) return Math.round(parts[0] * 60 + parts[1])
-  if (parts.length === 3) return Math.round(parts[0] * 3600 + parts[1] * 60 + parts[2])
-  return 0
-}
-
-const getSongMatchScore = (candidate: any, target: any) => {
-  const candidateName = normalizeSongNameText(candidate?.name)
-  const targetName = normalizeSongNameText(target?.name)
-  if (!candidateName || !targetName) return -1
-  if (!candidateName.includes(targetName) && !targetName.includes(candidateName)) return -1
-  if (!isSingerMatch(candidate?.singer, target?.singer)) return -1
-
-  const candidateDuration = getSongDurationSeconds(candidate?.interval)
-  const targetDuration = getSongDurationSeconds(target?.interval)
-  let durationScore = 0
-  if (candidateDuration > 0 && targetDuration > 0) {
-    const durationDiff = Math.abs(candidateDuration - targetDuration)
-    if (durationDiff > 8) return -1
-    durationScore = 8 - durationDiff
-  }
-
-  const nameScore = candidateName === targetName ? 20 : 10
-  const candidateAlbum = normalizeSongMatchText(candidate?.albumName)
-  const targetAlbum = normalizeSongMatchText(target?.albumName)
-  const albumScore = candidateAlbum && targetAlbum && candidateAlbum === targetAlbum ? 3 : 0
-  return nameScore + durationScore + albumScore
-}
+// 歌曲匹配打分与规范化：已抽到 utils/songMatch.ts（2026-11-06，含救援模式，可单测）
+// 现场案例见该文件头注：坏元数据（<30s）会把所有完整版挡在换源候选之外
+import {
+  normalizeSongMatchText,
+  normalizeSongNameText,
+  splitSingerNames,
+  isSingerMatch,
+  getSongDurationSeconds,
+  getSongMatchScore,
+} from '../utils/songMatch'
 
 const findServerSourceMatches = async (songInfo: any, username: string) => {
   if (!songInfo?.name || !songInfo?.singer) return []
