@@ -1302,6 +1302,30 @@ export const clearProbeRemoval = (owner: string, sourceId: string): boolean => {
   return changed
 }
 
+/**
+ * 删除音源（手动删进回收站 / 彻底删除 / 回收站清空）时，把它的巡检账本条目一并删掉。
+ *
+ * 不删的后果（2026-11-06 246 实测）：getSourceProbeStatus 的快照里会一直挂着
+ * 这个已经不存在的源的行 —— `gdstudio音乐源.js` 删回回收站后 details 仍报 5 行，
+ * 且永远不会自愈：巡检不再巡它（源已不在列表），账本也没人剪除，面板展示幽灵。
+ *
+ * 与 clearProbeRemoval 并列：恢复=清「已移除」标记留历史，删除=整条删掉。
+ * 注意「probe 自动移除」不走这里：那条路写的是 removedAt 标记，快照靠
+ * `if (removedAt) continue` 跳过，同样不产生幽灵行，且保留了失效历史。
+ *
+ * 读失败时不落盘：readStatus 异常会返回空账本，直接 writeStatus 会把真账本覆盖成空。
+ * 所以只在该源条目确实存在时才写。
+ */
+export const removeProbeStatus = (owner: string, sourceId: string): boolean => {
+  if (!owner || !sourceId) return false
+  const live = liveStatusByOwner
+  const status = live ? live.get(owner) : readStatus(owner)
+  if (!status || !status.sources[sourceId]) return false
+  delete status.sources[sourceId]
+  writeStatus(owner, status)
+  return true
+}
+
 /** 磁盘状态的短缓存（只服务 isPlatformDemoted 这条热路径） */
 const statusReadCache = new Map<string, { at: number; status: ProbeStatusFile }>()
 const STATUS_READ_CACHE_MS = 30_000

@@ -243,3 +243,35 @@ test('clearProbeRemoval：源或空间不存在时返回 false 不抛错', () =>
     assert.equal(clearProbeRemoval('clr-none', 'ghost.js'), false)
     assert.equal(clearProbeRemoval('', ''), false)
 })
+
+// ---------- removeProbeStatus（删除音源后剪除巡检账本条目，防 /health 幽灵行） ----------
+
+import { removeProbeStatus } from '../src/server/sourceProbe'
+
+test('removeProbeStatus：删掉该源条目，其他源不受牵连', () => {
+    seedStatus('rmv-a', 'srcA.js', {})
+    // 同一空间再种一个无辜源
+    const file = statusFile('rmv-a')
+    const before = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    before.sources['innocent.js'] = { name: 'innocent', platforms: {} }
+    fs.writeFileSync(file, JSON.stringify(before, null, 2), 'utf-8')
+
+    assert.equal(removeProbeStatus('rmv-a', 'srcA.js'), true)
+    const after = readBack('rmv-a').sources
+    assert.equal(after['srcA.js'], undefined)          // 幽灵行消失
+    assert.notEqual(after['innocent.js'], undefined)   // 无辜源还在
+})
+
+test('removeProbeStatus：条目不存在时返回 false 且不动文件', () => {
+    seedStatus('rmv-b', 'srcB.js', {})
+    const before = fs.readFileSync(statusFile('rmv-b'), 'utf-8')
+    assert.equal(removeProbeStatus('rmv-b', 'not-there.js'), false)
+    assert.equal(fs.readFileSync(statusFile('rmv-b'), 'utf-8'), before)
+})
+
+test('removeProbeStatus：空间或源为空时返回 false 不抛错不落盘', () => {
+    assert.equal(removeProbeStatus('rmv-none', 'ghost.js'), false)
+    assert.equal(removeProbeStatus('', ''), false)
+    // rmv-none 空间根本没建出来：读失败返回空账本，绝不能把空账本写回真路径
+    assert.equal(fs.existsSync(statusFile('rmv-none')), false)
+})
