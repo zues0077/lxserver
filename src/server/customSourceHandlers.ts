@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { extractMetadata, loadUserApi, getApiStatus, reloadSingleSource, unloadSource, applyOrderToLoadedApis } from './userApi'
-import { probeNewSource } from './sourceProbe'
+import { probeNewSource, clearProbeRemoval } from './sourceProbe'
 import type { IncomingMessage, ServerResponse } from 'http'
 import needle from 'needle'
 import { getProxyAgent } from '../modules/utils/proxy.js'
@@ -252,6 +252,8 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
 
         // [音源巡检] 新上传的音源：立即逐个平台探测可用性（异步，不阻塞响应）
         probeNewSource(targetOwner, id)
+        // 同名重传会撞上旧账本里残留的「已移除」标记（removedAt），不清理的话面板不显示这个源
+        try { clearProbeRemoval(targetOwner, id) } catch { /* 清理失败不影响上传本身 */ }
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))
@@ -416,6 +418,8 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
 
         // [音源巡检] 新导入的音源：立即逐个平台探测可用性（异步，不阻塞响应）
         probeNewSource(targetOwner, id)
+        // 同名重导会撞上旧账本里残留的「已移除」标记（removedAt），不清理的话面板不显示这个源
+        try { clearProbeRemoval(targetOwner, id) } catch { /* 清理失败不影响导入本身 */ }
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, filename: displayName, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))
@@ -1169,6 +1173,9 @@ export async function handleTrashRestore(req: IncomingMessage, res: ServerRespon
         }
         // 恢复的音源默认关闭：先让用户在列表里确认平台与状态，再手动启用，避免一恢复就参与取链
         probeNewSource(owner, realId)
+        // 清掉巡检账本里的「已移除」标记与失效计时：不清理的话面板上看不到这个源、
+        // 也永远不会再次参与「全平台失效自动移除」的判定
+        try { clearProbeRemoval(owner, realId) } catch { /* 清理失败不影响恢复本身 */ }
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, id: realId, name: entry.name, enabled: !!entry.enabled }))

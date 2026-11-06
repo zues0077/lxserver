@@ -11083,13 +11083,16 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'customSource.probe.enabled': global.lx.config['customSource.probe.enabled'] !== false,
             'customSource.probe.intervalMinutes': Number(global.lx.config['customSource.probe.intervalMinutes']) || 360,
             'customSource.probe.failThreshold': Number(global.lx.config['customSource.probe.failThreshold']) || 2,
+            // 0 是合法值（判定当轮即移除），不能用 || 兜底
+            'customSource.probe.allDownDays': Number.isFinite(Number(global.lx.config['customSource.probe.allDownDays']))
+              ? Number(global.lx.config['customSource.probe.allDownDays']) : 3,
             'customSource.probe.concurrency': Math.min(8, Math.max(1, Number(global.lx.config['customSource.probe.concurrency']) || 6)),
             'customSource.probe.autoDisablePlatform': global.lx.config['customSource.probe.autoDisablePlatform'] !== false,
             'customSource.probe.autoRemoveSource': global.lx.config['customSource.probe.autoRemoveSource'] !== false,
             'customSource.probe.removeMode': global.lx.config['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash',
             // 回收站保留天数：0 是合法值（永不清理），不能用 || 兜底
             'customSource.trash.retentionDays': Number.isFinite(Number(global.lx.config['customSource.trash.retentionDays']))
-              ? Number(global.lx.config['customSource.trash.retentionDays']) : 30,
+              ? Number(global.lx.config['customSource.trash.retentionDays']) : 3,
             // 快速复检 / 节流 / 单轮预算：0 是合法值（关闭），不能用 || 兜底
             'customSource.probe.restoreIntervalMinutes': Number.isFinite(Number(global.lx.config['customSource.probe.restoreIntervalMinutes']))
               ? Number(global.lx.config['customSource.probe.restoreIntervalMinutes']) : 180,
@@ -11163,6 +11166,17 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
               if (newConfig['customSource.probe.failThreshold'] !== undefined) {
                 global.lx.config['customSource.probe.failThreshold'] = Math.max(1, parseInt(newConfig['customSource.probe.failThreshold']) || 2)
+              }
+              // 降权阈值：0 是合法值（关闭降权档），不能用 || 兜底成 1
+              if (newConfig['customSource.probe.demoteThreshold'] !== undefined) {
+                const demote = parseInt(newConfig['customSource.probe.demoteThreshold'])
+                global.lx.config['customSource.probe.demoteThreshold'] = Number.isFinite(demote) && demote >= 0 ? demote : 1
+              }
+              // 全平台失效满几天移除：0 = 判定当轮即移除；上限 90 天
+              if (newConfig['customSource.probe.allDownDays'] !== undefined) {
+                const allDown = parseInt(newConfig['customSource.probe.allDownDays'])
+                global.lx.config['customSource.probe.allDownDays'] = Number.isFinite(allDown)
+                  ? Math.min(90, Math.max(0, allDown)) : 3
               }
               if (newConfig['customSource.probe.concurrency'] !== undefined) {
                 global.lx.config['customSource.probe.concurrency'] = Math.min(8, Math.max(1, parseInt(newConfig['customSource.probe.concurrency']) || 6))

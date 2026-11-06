@@ -2755,6 +2755,11 @@ class App {
                 const demote = Number(config['customSource.probe.demoteThreshold']);
                 form.elements['customSource.probe.demoteThreshold'].value = Number.isFinite(demote) ? demote : 1;
             }
+            // 全平台失效满几天移除：0 是合法值（判定当轮即移除），不能用 || 兜底
+            if (form.elements['customSource.probe.allDownDays']) {
+                const allDownDays = Number(config['customSource.probe.allDownDays']);
+                form.elements['customSource.probe.allDownDays'].value = Number.isFinite(allDownDays) ? allDownDays : 3;
+            }
             // 复检间隔：0 是合法值（关闭），不能用 || 兜底
             if (form.elements['customSource.probe.restoreIntervalMinutes']) {
                 const restoreMin = Number(config['customSource.probe.restoreIntervalMinutes']);
@@ -2771,9 +2776,9 @@ class App {
                 form.elements['customSource.probe.removeMode'].value = config['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash';
             }
             if (form.elements['customSource.trash.retentionDays']) {
-                // 0 是合法值（永不清理），不能用 || 兜底成 30
+                // 0 是合法值（永不清理），不能用 || 兜底成默认值
                 form.elements['customSource.trash.retentionDays'].value =
-                    String(config['customSource.trash.retentionDays'] ?? 30);
+                    String(config['customSource.trash.retentionDays'] ?? 3);
             }
 
             // URL路径配置
@@ -3644,6 +3649,11 @@ class App {
                 // 0 是合法值（关闭降权档），不能像上面那样用 || 兜底成 1
                 const v = parseInt(formData.get('customSource.probe.demoteThreshold'));
                 return Number.isFinite(v) && v >= 0 ? v : 1;
+            })(),
+            // 全平台失效满几天移除：0 是合法值（当轮即移除），上限 90 天
+            'customSource.probe.allDownDays': (() => {
+                const v = parseInt(formData.get('customSource.probe.allDownDays'));
+                return Number.isFinite(v) ? Math.min(90, Math.max(0, v)) : 3;
             })(),
             // 复检间隔：0 = 关闭该功能，非法输入回落 720
             'customSource.probe.restoreIntervalMinutes': (() => {

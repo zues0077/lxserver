@@ -64,6 +64,7 @@ const REQUIRED_FIELDS = [
   'customSource.probe.enabled', 'customSource.probe.intervalMinutes',
   'customSource.probe.concurrency', 'customSource.probe.failThreshold',
   'customSource.probe.demoteThreshold',
+  'customSource.probe.allDownDays',
   'customSource.probe.restoreIntervalMinutes',
   'customSource.probe.autoDisablePlatform', 'customSource.probe.autoRemoveSource',
   'customSource.probe.removeMode',
@@ -246,9 +247,10 @@ test('配置项搜索：工具栏吸顶、筛选只加 class 不动结构', () =
 test('回收站保留天数：配置字段、默认值、清理入口三处对齐', () => {
   assert.equal(countField(formBlock, 'customSource.trash.retentionDays'), 1)
   const defaultTs = fs.readFileSync(path.join(ROOT, 'src/defaultConfig.ts'), 'utf8')
-  assert.match(defaultTs, /'customSource\.trash\.retentionDays': 30/)
+  // 默认 3 天（用户 2026-11-06 定调：全平台失效 3 天进回收站，回收站再留 3 天）
+  assert.match(defaultTs, /'customSource\.trash\.retentionDays': 3/)
   const indexTs = fs.readFileSync(path.join(ROOT, 'src/index.ts'), 'utf8')
   assert.match(indexTs, /startTrashJanitor\(/, '启动时应挂上回收站清理定时器')
-  // 0 是合法值（永不清理），读配置时不能被 || 兜底成 30
-  assert.doesNotMatch(indexTs, /customSource\.trash\.retentionDays'\] \|\| 30/, '0 不能被 || 吞掉')
+  // 0 是合法值（永不清理），读配置时不能被 || 兜底成默认值
+  assert.doesNotMatch(indexTs, /customSource\.trash\.retentionDays'\] \|\| \d+/, '0 不能被 || 吞掉')
 })

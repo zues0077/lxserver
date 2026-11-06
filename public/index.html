@@ -2303,6 +2303,14 @@
                                             <small class="config-hint">调高可减少误判，但失效平台会更晚被关闭</small>
                                         </div>
                                         <div class="config-field">
+                                            <label class="config-label">全平台失效满几天后移除音源</label>
+                                            <input type="number" name="customSource.probe.allDownDays"
+                                                class="form-input config-input" value="3" min="0" max="90" />
+                                            <small class="config-hint">
+                                                默认 3 天。仅当该音源<strong>所有</strong>平台都失效（任一平台恢复即重新计时）才移除，单个平台失效只关那个平台；填 0 表示判定当轮就移除
+                                            </small>
+                                        </div>
+                                        <div class="config-field">
                                             <label class="config-label">已关闭平台复检间隔（分钟）</label>
                                             <input type="number" name="customSource.probe.restoreIntervalMinutes"
                                                 class="form-input config-input" value="180" min="0" max="10080" />
@@ -2350,8 +2358,8 @@
                                         <div class="config-field">
                                             <label class="config-label">自动清理超过（天）</label>
                                             <input type="number" name="customSource.trash.retentionDays"
-                                                class="form-input config-input" value="30" min="0" max="3650" />
-                                            <small class="config-hint">默认 30 天，填 0 表示永不自动清理。到期条目会被彻底删除（不可恢复）</small>
+                                                class="form-input config-input" value="3" min="0" max="3650" />
+                                            <small class="config-hint">默认 3 天，填 0 表示永不自动清理。到期条目会被彻底删除（不可恢复）</small>
                                         </div>
                                     </div>
                                 </div>

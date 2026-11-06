@@ -98,6 +98,13 @@ export interface SourceProbeState {
   platforms: Record<string, PlatformProbeState>
   removedAt?: number
   removedReason?: string
+  /**
+   * 「全平台首次判定失效」的起始时间戳（0/未设置 = 当前没有处于全平台失效）。
+   *
+   * 只用于「持续失效满 N 天才移除」的时间窗判定：任一平台恢复可用即清零，
+   * 因此它记的是**连续**失效时长，不是累计。落盘在 probe-status.json 里，重启不丢计时。
+   */
+  allDownSince?: number
 }
 
 export interface ProbeStatusFile {
@@ -215,6 +222,8 @@ export interface ProbeStatusSnapshot {
   autoDisablePlatform: boolean
   autoRemoveSource: boolean
   removeMode: 'trash' | 'delete'
+  /** 全平台失效持续多少天后移除音源（0 = 判定当轮即移除） */
+  allDownDays: number
   lastRunAt: number | null
   lastRun: ProbeRunResult | null
   /** 「已关闭平台快速复检」的间隔（分钟）；0 表示关闭 */
@@ -255,6 +264,15 @@ export interface ProbeConfig {
   autoDisablePlatform: boolean
   autoRemoveSource: boolean
   removeMode: 'trash' | 'delete'
+  /**
+   * 全平台失效持续多少天后才移除整个音源。
+   *
+   * 用户 2026-11-06 定调：全平台失效满 3 天即可移除（进回收站，回收站再留 3 天）。
+   * 为什么要「持续」而不是「本轮判定即移除」：单轮判定受测试曲目、平台瞬时故障影响，
+   * 实测一次失败的条目下一轮恢复的比例约 20%（failCount=1 的样本 3/3 恢复），
+   * 立即移除等于用最轻的证据做最重的处置。用时间窗把「偶发」和「真的死了」分开。
+   */
+  allDownDays: number
   probeOnNewSource: boolean
   testSongs: Record<string, Partial<ProbeTestSong>>
   /** 平台失败率超过该比例即视为「平台侧系统性异常」，本轮暂缓自动处置 */
@@ -324,6 +342,12 @@ const HARD_FAILURE_PATTERN = new RegExp([
   'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'certificate',
   'Unknown cipher', 'unsupported cipher', 'digital envelope',
   'HTTP\\s*5\\d\\d', '\\b5\\d\\d\\b\\s*(?:错误|Error)',
+  // 4xx 里只有「资源不存在 / 已永久移除」算音源自己的硬故障。
+  // 实测聚合源报「链接返回 404/GET 404（music.haitangw.cc）」= 它写死的后端路径已失效，
+  // 与「测试曲目不可播」无关；老正则只认 5xx，这批源因此被当成软失败永久豁免
+  // （failCount 堆到 99 也不关、也不删，2026-11-06 实测 kg 上 9 个）。
+  // 403/401 刻意不收：那是平台风控、地区限制或版权限制，源本身可能没坏。
+  '\\b404\\b', '\\b410\\b\\s*(?:Gone|错误|已删除)',
   '已废弃', '已停用', '已下线', '已关闭', '请升级',
   // 「取链成功但返回的是网页」——由 verifyUrlPlayable 的 content-type 判定产生。
   // 这类不是「这首歌没版权」（那种应该返回空/报错），而是音源脚本自身坏了，
@@ -335,6 +359,82 @@ const HARD_FAILURE_PATTERN = new RegExp([
 export const isHardFailure = (message: unknown): boolean => {
   if (typeof message !== 'string' || !message) return false
   return HARD_FAILURE_PATTERN.test(message)
+}
+
+/** 「该音源是否全平台失效」的判定结果 */
+export interface AllDownVerdict {
+  /** 该源支持的每个有结论的平台都失败，且没有任何平台成功 */
+  allDown: boolean
+  /** 至少有一个平台给出了失败证据（down，或 unknown 且 failCount>0） */
+  hasEvidence: boolean
+  /**
+   * 所有平台里「最近一次成功」的时间戳（0 = 从未成功过）。
+   *
+   * 用途：`allDownSince` 是本次上线后才有的字段，存量坏源没有计时起点。
+   * 用 lastOkAt 推断「它其实已经多久没成功过了」，避免它们明明死了几个月
+   * 还要从部署那一刻重新等满 3 天。
+   */
+  lastOkAt: number
+}
+
+/**
+ * 判定「该音源是否全平台失效」。
+ *
+ * 刻意不要求 status === 'down'：被平台侧异常豁免的平台 status 是 'unknown'，
+ * 老写法要求「每个平台都 down」，导致「所有平台都探不通」的源永远凑不齐移除条件
+ * （2026-11-06 实测：长青SVIP 4 个平台 down + mg/kg 被豁免 → 永远不删）。
+ *
+ * skipped 不算证据也不算反证：它意味着这轮没探到（停探期/预算截断），
+ * 既不能用来定罪，也不该成为「因为一个没探的平台就永不清理」的绊脚石。
+ */
+export const evalAllDown = (
+  platforms: string[],
+  getState: (platform: string) => PlatformProbeState | undefined,
+): AllDownVerdict => {
+  let allDown = true
+  let hasEvidence = false
+  let lastOkAt = 0
+  for (const platform of platforms) {
+    const ps = getState(platform)
+    if (!ps) { allDown = false; break }
+    lastOkAt = Math.max(lastOkAt, Number(ps.lastOkAt) || 0)
+    if (ps.status === 'ok') { allDown = false; break }
+    if (ps.status === 'skipped') continue
+    if (ps.status === 'down' || ps.failCount > 0) { hasEvidence = true; continue }
+    allDown = false
+    break
+  }
+  return { allDown, hasEvidence: allDown && hasEvidence, lastOkAt }
+}
+
+/**
+ * 全平台失效的「持续」判定。
+ *
+ * 时间窗记的是**连续**失效：任一平台恢复或整轮没探到（无证据）都会把计时清零。
+ * @param prevSince 上次记录的计时起点（0 = 未在计时）
+ * @param windowMs 需要持续的毫秒数；0 表示判定当轮即移除
+ * @returns since 新的计时起点；remove 是否该移除；started 本次是否刚开始计时
+ */
+export const decideAllDownRemoval = (
+  prevSince: number,
+  verdict: AllDownVerdict,
+  now: number,
+  windowMs: number,
+): { since: number; remove: boolean; started: boolean } => {
+  if (!verdict.allDown || !verdict.hasEvidence) return { since: 0, remove: false, started: false }
+  if (windowMs <= 0) return { since: now, remove: true, started: true }
+  const base = Number(prevSince) || 0
+  if (base > 0) return { since: base, remove: now - base >= windowMs, started: false }
+
+  // 没有计时起点 = 首次判定（含存量坏源）。用 lastOkAt 推断已经失效多久：
+  // 最后一次成功早于「窗口起点」说明它确实已经连续失效满窗口，直接移除，
+  // 不必因为本字段是这次才加的、从部署那一刻重新等 3 天。
+  const lastOkAt = Number(verdict.lastOkAt) || 0
+  if (lastOkAt > 0 && now - lastOkAt >= windowMs) {
+    return { since: lastOkAt, remove: true, started: false }
+  }
+  // 从未成功过（lastOkAt=0，多半是新导入还没跑通的源）：无法证明持续了多久，从此刻起计时
+  return { since: now, remove: false, started: true }
 }
 /** 单个平台每轮最多尝试几首测试曲目（第一首失败后换歌重试，降低单曲失灵的误判） */
 const MAX_SONG_ATTEMPTS = 3
@@ -394,6 +494,9 @@ export const configOf = (): ProbeConfig => {
     autoDisablePlatform: c['customSource.probe.autoDisablePlatform'] !== false,
     autoRemoveSource: c['customSource.probe.autoRemoveSource'] !== false,
     removeMode: c['customSource.probe.removeMode'] === 'delete' ? 'delete' : 'trash',
+    // 全平台失效持续多少天移除：默认 3 天（用户 2026-11-06 定调）。
+    // 0 = 关闭时间窗（判定当轮即移除，等同老行为）；上限 90 天，避免配置写错把清理拖成永久。
+    allDownDays: Math.min(90, nonNegativeNumber(c['customSource.probe.allDownDays'], 3)),
     probeOnNewSource: c['customSource.probe.probeOnNewSource'] !== false,
     testSongs: rawTestSongs && typeof rawTestSongs === 'object' && !Array.isArray(rawTestSongs) ? rawTestSongs : {},
     systemicFailureRatio: ratioNumber(c['customSource.probe.systemicFailureRatio'], DEFAULT_SYSTEMIC_RATIO),
@@ -1174,6 +1277,31 @@ export const clearPlatformDemote = (ps: PlatformProbeState): void => {
   ps.demotedAt = 0
 }
 
+/**
+ * 从回收站恢复音源后清掉它的「已移除」标记与失效计时。
+ *
+ * 不清的后果：probe-status.json 里该源的 removedAt 还在 ——
+ * getSourceProbeStatus 会跳过 removedAt 条目（面板上看不到这个源），
+ * 自动移除判定也会 continue（用户救回的源永远不再被考察）。
+ *
+ * 巡检进行中改的是同一份内存对象（liveStatusByOwner 里的引用），
+ * 轮末整体 writeStatus 不会把我们这次清理覆盖掉；不在巡检就直接落盘。
+ */
+export const clearProbeRemoval = (owner: string, sourceId: string): boolean => {
+  if (!owner || !sourceId) return false
+  const live = liveStatusByOwner
+  const status = live ? live.get(owner) : readStatus(owner)
+  if (!status) return false
+  const sourceState = status.sources[sourceId]
+  if (!sourceState) return false
+  let changed = false
+  if (sourceState.removedAt !== undefined) { delete sourceState.removedAt; changed = true }
+  if (sourceState.removedReason !== undefined) { delete sourceState.removedReason; changed = true }
+  if (sourceState.allDownSince !== undefined) { delete sourceState.allDownSince; changed = true }
+  if (changed) writeStatus(owner, status)
+  return changed
+}
+
 /** 磁盘状态的短缓存（只服务 isPlatformDemoted 这条热路径） */
 const statusReadCache = new Map<string, { at: number; status: ProbeStatusFile }>()
 const STATUS_READ_CACHE_MS = 30_000
@@ -1702,6 +1830,7 @@ export async function runSourceProbe(
 
     // 全平台不可用 → 移除音源
     if (conf.autoRemoveSource && !options.restoreOnly) {
+      const windowMs = Math.max(0, conf.allDownDays) * 86400_000
       for (const target of targets) {
         const status = statusFor(target.owner)
         const sourceState = status.sources[target.id]
@@ -1709,25 +1838,28 @@ export async function runSourceProbe(
         if (!platforms.length || sourceState.removedAt) continue
         if (!target.platforms.length) continue
 
-        // 必须「每个平台都有明确的失败结论」，任何 skipped 都视为证据不足，不删
-        let allDown = true
-        let hasEvidence = false
-        for (const platform of target.platforms) {
-          const ps = sourceState.platforms[platform]
-          if (!ps) { allDown = false; break }
-          if (ps.status === 'down') { hasEvidence = true; continue }
-          if (ps.status === 'skipped') { allDown = false; break }
-          allDown = false
-          break
+        // 「全平台失效」判定与「持续多久」判定都抽成纯函数（见 evalAllDown / decideAllDownRemoval）：
+        // 这两个条件以前写死在一起，导致「所有平台都探不通」的源因为一个平台 status !== 'down'
+        // 就永远凑不齐移除条件（2026-11-06 实测死锁）。
+        const verdict = evalAllDown(target.platforms, p => sourceState.platforms[p])
+        const now = Date.now()
+        const decision = decideAllDownRemoval(sourceState.allDownSince || 0, verdict, now, windowMs)
+        if (decision.since !== (sourceState.allDownSince || 0)) {
+          sourceState.allDownSince = decision.since || undefined
+        }
+        if (!decision.remove) {
+          if (decision.started) {
+            console.warn(`[音源巡检] ⏳ 音源全平台失效，开始计时: ${target.name}` +
+              `（${conf.allDownDays} 天后移除；期间任一平台恢复即取消）`)
+          }
+          continue
         }
 
-        if (allDown && hasEvidence) {
-          const reason = `全部平台（${target.platforms.join(', ')}）连续失败达阈值`
-          if (removeSource(target.owner, target.id, target.name, reason, deps, conf)) {
-            sourceState.removedAt = Date.now()
-            sourceState.removedReason = reason
-            result.removed.push(`${target.name} (${target.id})`)
-          }
+        const reason = `全部平台（${target.platforms.join(', ')}）持续失效超过 ${conf.allDownDays} 天`
+        if (removeSource(target.owner, target.id, target.name, reason, deps, conf)) {
+          sourceState.removedAt = Date.now()
+          sourceState.removedReason = reason
+          result.removed.push(`${target.name} (${target.id})`)
         }
       }
     }
@@ -1981,6 +2113,7 @@ export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot
     autoDisablePlatform: conf.autoDisablePlatform,
     autoRemoveSource: conf.autoRemoveSource,
     removeMode: conf.removeMode,
+    allDownDays: conf.allDownDays,
     lastRunAt,
     lastRun,
     restoreIntervalMinutes: conf.restoreIntervalMinutes,

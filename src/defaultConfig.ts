@@ -156,6 +156,8 @@ const config: LX.Config = {
   'customSource.probe.enabled': true, // 巡检总开关
   'customSource.probe.intervalMinutes': 360, // 复检间隔（分钟，默认 6 小时；平台多时别调太小，避免持续探测第三方）
   'customSource.probe.failThreshold': 2, // 连续失败多少次判定不可用
+  'customSource.probe.demoteThreshold': 1, // 连续失败几次后降权观察（只排队尾）；0 = 关闭降权档
+  'customSource.probe.allDownDays': 3, // 全平台失效满几天移除音源；单个平台失效只关平台，0 = 当轮即移除
   'customSource.probe.timeoutMs': 15000, // 单平台单次探测超时（毫秒）
   // 必须与 sourceProbe.ts 里 positiveNumber(..., 6) 的兜底值保持一致：
   // config.js 一旦显式落值就会覆盖运行时默认，两边不同步会让「默认 6」形同虚设。
@@ -166,7 +168,7 @@ const config: LX.Config = {
   'customSource.probe.removeMode': 'trash', // 移除方式：trash 移入回收站 / delete 直接删除
   // 回收站保留天数：只增不减会把 NAS 盘慢慢吃满，而多数人不会回头翻。
   // 0 = 永不自动清理（想长期留档时用）。到期条目被彻底删除，不可恢复。
-  'customSource.trash.retentionDays': 30,
+  'customSource.trash.retentionDays': 3,
   'customSource.probe.probeOnNewSource': true, // 新增音源是否立即巡检
   // 已关闭平台「快速复检」：只探被自动关闭的平台、每平台 1 首，成功即恢复，不做定罪。
   // 全量巡检一轮后，被误关或平台临时故障的源原本要等这么久才能复活；

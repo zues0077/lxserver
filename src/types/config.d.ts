@@ -622,6 +622,16 @@ declare namespace LX {
      */
     'customSource.probe.failThreshold'?: number
     /**
+     * 连续失败几次后进入「降权观察」(默认 1)：只把该平台排到换源队尾，不关平台。
+     * 填 0 关闭降权档（退化为「失败到阈值直接关」）。
+     */
+    'customSource.probe.demoteThreshold'?: number
+    /**
+     * 全平台失效持续多少天后移除整个音源 (默认 3)。0 = 判定当轮即移除。
+     * 单个平台失效只关那个平台，不会移除音源。
+     */
+    'customSource.probe.allDownDays'?: number
+    /**
      * 单个平台单次探测超时(毫秒, 默认 15000)。
      */
     'customSource.probe.timeoutMs'?: number
