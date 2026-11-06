@@ -67,7 +67,8 @@ export const judgeAudioMismatch = (params: {
  *  - 曲名自带「片段/铃声/秒数」等标记时一律交白卷（unknown），不参与判定——
  *    `一万次悲伤 (54秒片段)` 实际 54.7s 是**真短音频**，被换掉反而是 bug。
  *  - 只在 actual 明显不到 expected 一半时才 suspect；阈值取宽，且必须 expected 已知。
- *  - expected 未知时只用 30s 绝对下限兜底（正常歌曲不会短于 30 秒）。
+ *  - expected 未知时只用 30s 绝对下限兜底（正常歌曲不会短于 30 秒）；
+ *    expected 本身 <30s 且曲名无豁免同理（源声明即 20s 的「红昭愿 (DJ版)」）。
  *  - 返回 suspect 不代表「不播」，调用方应继续换源；换不到就投最长的那个。
  */
 const PLAYBACK_SHORT_OK =
@@ -115,6 +116,12 @@ export const judgePlaybackDuration = (params: {
     }
 
     if (expected > 0) {
+        // 元数据本身就不到 30s（现场样本：`红昭愿 (DJ版)` 源声明即 20s，实际 19.8s）——
+        // 相对比例永远判不出来（actual≈expected），但正常歌曲不会短于 30 秒，
+        // 曲名又没有片段/铃声豁免 → 按占位残片处理触发换源；全源都这样则投最长+提示，不拒绝播放
+        if (expected < PLAYBACK_MIN_PLAUSIBLE_SEC && actual < PLAYBACK_MIN_PLAUSIBLE_SEC) {
+            return { level: 'suspect', reason: `源元数据即 ${formatSec(expected)}，疑似占位残片` }
+        }
         // 短音频（<=90s）：只按相对比例判，避免拿长曲阈值误杀儿歌
         if (actual < expected * 0.5) {
             return { level: 'suspect', reason: `只有 ${formatSec(actual)}，预期 ${formatSec(expected)}` }
