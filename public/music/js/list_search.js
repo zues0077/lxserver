@@ -145,6 +145,8 @@ window.ListSearch = {
     },
 
     handleKeydown: function (e) {
+        // 输入法组合期间的回车只用于确认候选词，不能当成「跳到下一个匹配」
+        if (!e || e.isComposing || e.keyCode === 229) return;
         if (e.key === 'Enter') {
             e.preventDefault();
             this.navigate(1);

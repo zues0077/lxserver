@@ -341,6 +341,8 @@ window.LocalMusicManager = {
     },
 
     handleRichKeydown(event, el) {
+        // 输入法组合期间的回车用于上屏候选词，不能拦
+        if (!event || event.isComposing || event.keyCode === 229) return;
         if (event.key === 'Enter') {
             event.preventDefault();
             return;

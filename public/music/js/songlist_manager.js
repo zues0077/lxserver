@@ -1213,7 +1213,7 @@ function toggleSongListViewMode() { window.SongListManager.toggleViewMode(); }
 
 function closeSongListDetail() { window.SongListManager.closeDetail(); }
 function playAllInSongList() { window.SongListManager.playAll(); }
-function handleSongListSearchKeyPress(e) { if (e.key === 'Enter') window.SongListManager.search(); }
+function handleSongListSearchKeyPress(e) { if (!e || e.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') window.SongListManager.search(); }
 function openExternalListModal() { window.SongListManager.openExternalListModal(); }
 function closeExternalListModal() { window.SongListManager.closeExternalListModal(); }
 function handleOpenExternalList() { window.SongListManager.handleOpenExternalList(); }

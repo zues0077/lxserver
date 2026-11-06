@@ -2379,6 +2379,8 @@ window.clearQueue = clearQueue;
 
 // Search Logic
 function handleSearchKeyPress(e) {
+    // 中文输入法组合期间的回车是「确认候选词」，不是「提交搜索」
+    if (!e || e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter') {
         if (typeof hideSearchSuggestions === 'function') hideSearchSuggestions();
         doSearch();
