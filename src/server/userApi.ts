@@ -647,6 +647,13 @@ export function getProbeTargets(): Array<{
             callRequest: api.callRequest,
         })
     }
+    // 额外音源（汽水/B站）：与社区脚本源对等纳入巡检，不特殊化。
+    // 它们不在 loadedApis 里（不走 musicSdk），靠本段追加独立 target。
+    try {
+        const extraSources = require('./extraSources')
+        const extraTargets = extraSources.getProbeTargets?.() || []
+        for (const t of extraTargets) targets.push(t)
+    } catch { /* 额外音源模块缺失时不阻断主流程 */ }
     return targets
 }
 
@@ -2898,6 +2905,20 @@ export function getLoadedApis() {
 // 检查某个源是否被支持
 // clientUsername: 调用者的用户名。如果未提供，则只能检查 open 源
 export function isSourceSupported(source: string, clientUsername?: string): boolean {
+    // 额外音源（汽水/B站）：独立于社区脚本的启用态，与 5 平台对等参与「换源」判定
+    if (source === 'soda' || source === 'bili') {
+        try {
+            const extraSources = require('./extraSources')
+            const st = extraSources.getExtraSourceState(source)
+            if (st.enabled === false) return false
+            if (Array.isArray(st.disabledSources) && st.disabledSources.includes(source)) return false
+            return true
+        } catch {
+            // 模块读不到时保守放行，避免把本可播的内置音源误判成「无可用源」
+            return true
+        }
+    }
+
     const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
     let userStates: Record<string, any> = {}
     if (clientUsername && clientUsername !== 'default') {

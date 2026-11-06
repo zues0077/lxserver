@@ -557,6 +557,52 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
         return source
     })
 
+    // 额外音源（汽水/B站）：内置公开源，与社区脚本源对等出现在设置列表。
+    // 它们没有 sources.json / 重载生命周期，启用态与平台开关走 extra-sources-state.json，
+    // 健康状态复用同一套 probe-status.json（owner='extra'）。
+    try {
+        const extraSources = require('./extraSources')
+        const probeStatus = (() => {
+            try { return require('./sourceProbe').getProbeStatusForOwner('extra') } catch { return null }
+        })()
+        for (const ex of extraSources.describe()) {
+            const id = ex.id
+            const st = extraSources.getExtraSourceState(id)
+            const disabled = Array.isArray(st.disabledSources) ? st.disabledSources : []
+            const active = extraSources.isExtraSourceActive(id)
+            let status = 'ok'
+            let error = ''
+            const psEntry = probeStatus?.sources?.[id]
+            if (!active) {
+                status = 'disabled'
+                error = '已停用'
+            } else if (psEntry) {
+                const platforms = Object.entries(psEntry.platforms || {})
+                if (platforms.length) {
+                    const anyUp = platforms.some(([, p]: any) => p.status === 'ok')
+                    const anyDown = platforms.some(([, p]: any) => p.status === 'down')
+                    if (anyDown && !anyUp) { status = 'down'; error = '全部平台探测失败' }
+                    else if (anyDown) { status = 'warning'; error = '部分平台探测失败' }
+                }
+            }
+            enrichedSources.push({
+                id,
+                name: ex.name,
+                owner: 'extra',
+                isPublic: true,
+                enabled: active,
+                playback: ex.playback,
+                disabledSources: disabled,
+                supportedSources: [id],
+                extraSource: true,
+                status,
+                error,
+            })
+        }
+    } catch (e) {
+        console.error('[额外音源] 列表注入失败:', e)
+    }
+
     // ===== 自定义合并后的排序逻辑 =====
     let targetOwner = (username && username !== 'default') ? username : 'open'
     let orderPath = path.join(getSourceDir(targetOwner), 'order.json')
@@ -611,6 +657,22 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
         const body = await readBody(req)
         const { id, sourceId, enabled, username, allowUnsafeVM } = JSON.parse(body)
         const targetId = id || sourceId
+
+        // 额外音源（汽水/B站）：启用/停用走独立状态文件，不走社区脚本的 sources.json
+        if (targetId === 'soda' || targetId === 'bili') {
+            const auth = req.headers['x-frontend-auth']
+            if (auth !== global.lx.config['admin.password']) {
+                res.writeHead(403, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ success: false, error: '权限不足：切换内置音源需要管理员身份。' }))
+                return
+            }
+            const extraSources = require('./extraSources')
+            const enabledNow = enabled !== undefined ? !!enabled : !extraSources.isExtraSourceActive(targetId)
+            extraSources.setExtraSourceEnabled(targetId, enabledNow)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, enabled: enabledNow }))
+            return
+        }
 
         let targetOwner = (username && username !== 'default') ? username : 'open'
 
@@ -882,6 +944,13 @@ export async function handleDelete(req: IncomingMessage, res: ServerResponse) {
         const { id, sourceId, username, mode } = JSON.parse(body)
         const targetId = id || sourceId
 
+        // 额外音源（汽水/B站）是内置音源，不可删除
+        if (targetId === 'soda' || targetId === 'bili') {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: false, error: '内置音源不可删除。' }))
+            return
+        }
+
         // 查找逻辑同 Toggle
         let targetOwner = (username && username !== 'default') ? username : 'open'
 
@@ -1044,6 +1113,22 @@ export async function handleUpdatePlatforms(req: IncomingMessage, res: ServerRes
         const body = await readBody(req)
         const { id, sourceId, username, disabledSources } = JSON.parse(body)
         const targetId = id || sourceId
+
+        // 额外音源（汽水/B站）：平台开关走独立状态文件
+        if (targetId === 'soda' || targetId === 'bili') {
+            const auth = req.headers['x-frontend-auth']
+            if (auth !== global.lx.config['admin.password']) {
+                res.writeHead(403, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ success: false, error: '权限不足：修改内置音源平台配置需要管理员身份。' }))
+                return
+            }
+            const extraSources = require('./extraSources')
+            const disabled = Array.isArray(disabledSources) ? disabledSources : []
+            extraSources.setExtraSourceDisabledSources(targetId, disabled)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: true, id: targetId, disabledSources: disabled }))
+            return
+        }
 
         if (!targetId) {
             throw new Error('缺少音源ID')

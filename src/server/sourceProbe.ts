@@ -1517,7 +1517,18 @@ export async function runSourceProbe(
         if (platformState.autoDisabled && !flags.disabled.has(platform)) {
           if (setPlatformDisabled(target.owner, target.id, platform, true)) flags.disabled.add(platform)
         }
-        const manuallyDisabled = flags.disabled.has(platform) && !platformState.autoDisabled
+        // 额外音源（汽水/B站）：手动平台开关/停用存在 extra-sources-state.json，
+        // 与社区脚本的 states.json 不同源；这里一并纳入「手动关闭」判定，使巡检跳过它。
+        let manuallyDisabled = flags.disabled.has(platform)
+        if (!manuallyDisabled && target.owner === 'extra') {
+          try {
+            const extraSources = require('./extraSources')
+            const st = extraSources.getExtraSourceState(target.id)
+            if (st.enabled === false) manuallyDisabled = true
+            else if (Array.isArray(st.disabledSources) && st.disabledSources.includes(platform)) manuallyDisabled = true
+          } catch { /* ignore */ }
+        }
+        manuallyDisabled = manuallyDisabled && !platformState.autoDisabled
         if (manuallyDisabled) {
           platformState.status = 'skipped'
           result.platformsSkipped++
@@ -1778,6 +1789,7 @@ export async function runSourceProbe(
     // 快速复检到这里就结束：worker 里已经把「探测成功」的平台重新打开，
     // 剩下的事（定罪、关闭、移除）都需要多轮多平台证据，单平台单曲的复检样本一律不参与。
     if (!options.restoreOnly) for (const target of targets) {
+      if (target.owner === 'extra') continue
       const sourceState = statusFor(target.owner).sources[target.id]
       for (const platform of target.platforms) {
         const ps = sourceState.platforms[platform]
@@ -1832,6 +1844,7 @@ export async function runSourceProbe(
     if (conf.autoRemoveSource && !options.restoreOnly) {
       const windowMs = Math.max(0, conf.allDownDays) * 86400_000
       for (const target of targets) {
+        if (target.owner === 'extra') continue
         const status = statusFor(target.owner)
         const sourceState = status.sources[target.id]
         const platforms = Object.entries(sourceState.platforms)
@@ -2049,12 +2062,22 @@ export function createSourceProbeRestoreTask(): ScheduledTask {
   return task
 }
 
+/** 读取某个 owner 的巡检状态文件（不存在/解析失败返回 null）。供设置列表注入额外音源健康状态。 */
+export function getProbeStatusForOwner(owner: string): any | null {
+  try {
+    const s = readStatus(owner)
+    return s && typeof s === 'object' ? s : null
+  } catch {
+    return null
+  }
+}
+
 export function getSourceProbeStatus(includeDetail = false): ProbeStatusSnapshot {
   const conf = configOf()
   const autoDisabledPlatforms: ProbeStatusSnapshot['autoDisabledPlatforms'] = []
   const details: ProbePlatformDetail[] = []
   // 空间既可能来自「当前已加载的源」，也可能只有历史记录（源全被移除后），两边都覆盖
-  const owners = new Set<string>(['open', ...registeredUsers()])
+  const owners = new Set<string>(['open', 'extra', ...registeredUsers()])
   for (const target of depsRef ? depsRef.listTargets() : []) owners.add(target.owner)
   for (const owner of owners) {
     const status = readStatus(owner)
