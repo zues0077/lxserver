@@ -2006,7 +2006,7 @@ export async function callUserApiGetMusicUrl(
     // 读取当前用户的公开源状态覆盖（启用/禁用）以及私有源 ID 集合
     let userStates: Record<string, any> = {}
     const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
-    if (clientUsername && clientUsername !== 'default') {
+    if (clientUsername && clientUsername !== 'default' && clientUsername !== 'open') {
         const userPath = path.join(dataPath, 'users', 'source', clientUsername)
         const statesPath = path.join(userPath, 'states.json')
         const metaPath = path.join(userPath, 'sources.json')
@@ -2049,7 +2049,7 @@ export async function callUserApiGetMusicUrl(
         if (api.info.owner === 'open') {
             // 计算公开源对当前用户的有效启用状态
             let isEnabled = api.info.enabled
-            if (clientUsername && clientUsername !== 'default') {
+            if (clientUsername && clientUsername !== 'default' && clientUsername !== 'open') {
                 if (typeof state.enabled === 'boolean') {
                     isEnabled = state.enabled
                 }
@@ -2084,7 +2084,7 @@ export async function callUserApiGetMusicUrl(
         let orderData: string[] = []
 
         // 优先读用户自己的排序（admin/order.json），再回退到公开源排序（_open/order.json）
-        const orderCandidates = clientUsername && clientUsername !== 'default'
+        const orderCandidates = clientUsername && clientUsername !== 'default' && clientUsername !== 'open'
             ? [
                 path.join(dataPath, 'users', 'source', clientUsername, 'order.json'),
                 path.join(dataPath, 'users', 'source', '_open', 'order.json')
@@ -3020,7 +3020,7 @@ export function isSourceSupported(source: string, clientUsername?: string): bool
 
     const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
     let userStates: Record<string, any> = {}
-    if (clientUsername && clientUsername !== 'default') {
+    if (clientUsername && clientUsername !== 'default' && clientUsername !== 'open') {
         const statesPath = path.join(dataPath, 'users', 'source', clientUsername, 'states.json')
         if (fs.existsSync(statesPath)) {
             try { userStates = JSON.parse(fs.readFileSync(statesPath, 'utf-8')) } catch (e) { }
@@ -3043,7 +3043,7 @@ export function isSourceSupported(source: string, clientUsername?: string): bool
 
         const state = getSourceState(api.info.id)
         let isEnabled = api.info.enabled
-        if (api.info.owner === 'open' && clientUsername && clientUsername !== 'default') {
+        if (api.info.owner === 'open' && clientUsername && clientUsername !== 'default' && clientUsername !== 'open') {
             if (typeof state.enabled === 'boolean') {
                 isEnabled = state.enabled
             }
