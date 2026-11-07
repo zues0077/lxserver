@@ -21,6 +21,8 @@ import { normalizeText } from '@/server/utils/songVersion'
 import { buildStreamHeaders, needsBilibiliReferer, forbidsReferer } from './utils/streamHeaders'
 import { probePlayableUrl } from './utils/playableProbe'
 import { isEncryptedRemoteStream } from './utils/streamEncryption'
+import { probeRemoteStream, parseIntervalSeconds } from './remoteStreamGate'
+import { noteSodaPreviewVerdict } from './extraSources/soda'
 import { invalidateDislikeCache } from '@/server/utils/dislikeCache'
 // 投送前的「时长是否可信」判据：识别占位音频/残片并触发换源（不拒绝播放）
 import { judgePlaybackDuration, parseIntervalSec } from '@/utils/audioGuard'
@@ -10026,6 +10028,19 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     throw new Error(
                       `${source === 'soda' ? '汽水' : 'B站'} 该曲返回的是加密流（DRM），浏览器无法播放，请改用它源或其他平台播放`
                     )
+                  }
+                  // [R75-1] 汽水直链「可播性门禁」：乱序流 + 试听片段拦截。
+                  // 2026-11-07 任素汐 140 次取链审计：49% 漏网直链是「容器元数据明文、
+                  // 音频数据乱序」的流（无 enca CENC 特征，上面的探测抓不到，与 UA 无关），
+                  // 17% 是 60/45 秒试听片段（明文可解码）。判据与实现见 remoteStreamGate.ts。
+                  if (source === 'soda' && /^https?:\/\//i.test(String(result.url || ''))) {
+                    const expectedSec = parseIntervalSeconds(songInfo.interval || (songInfo as any)?.meta?.interval)
+                    const gate = await probeRemoteStream(String(result.url), expectedSec)
+                    if (!gate.ok) {
+                      if (gate.kind === 'preview') noteSodaPreviewVerdict(songInfo, gate.reason || '')
+                      console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
+                      throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
+                    }
                   }
                 }
               } catch (userApiError: any) {

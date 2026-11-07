@@ -368,6 +368,17 @@ function rememberPreviewVerdict(trackId: string, message: string): void {
 }
 
 /**
+ * [R75-3] 供取链出口门禁（server.ts）记录「试听片段」判定（R75-1 时长校验命中的曲子）。
+ * 记入后 5 分钟内同曲取链直接按同一句话判失败，把时间让给换源——
+ * 否则同一首试听曲要反复跑完「取链 → ffprobe → 换源」整条链才能落到换源结果。
+ */
+export function noteSodaPreviewVerdict(songInfo: any, message: string): void {
+  const trackId = sodaTrackIdOf(songInfo)
+  if (!isSodaId(trackId)) return
+  rememberPreviewVerdict(trackId, message)
+}
+
+/**
  * 汽水账号体检结论（只读，供 `/api/music/accounts` 之类接口展示）。
  * 返回 null 表示最近没有出现过「只有试听」的判定。
  */
