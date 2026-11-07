@@ -99,6 +99,7 @@ import {
 import { runPullGuard } from './xiaoai/pullGuard'
 import { isStaleSeekPosition } from './xiaoai/seekGuard'
 import { resolveSeekKnownMs } from './xiaoai/seekDuration'
+import { fixBrokenUnicodeEscapes, fixTrackListNames } from './songNameFix'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
 /** 当前生效的 dislike 匹配选项，下发给前端保证前后端判定一致 */
@@ -8324,6 +8325,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         const wantArrayFormat = ['array', 'list'].includes((urlObj.searchParams.get('format') || '').toLowerCase())
           || urlObj.searchParams.get('legacy') === '1'
         const sendSearchResult = (payload: any) => {
+          // 上游音源偶发返回「丢反斜杠的 unicode 转义残留」歌名（u5b8cu6574u7248 = 完整版），
+          // 音箱会直接显示脏名字，还会让缓存名守卫 409 误判。出口处统一修复。
+          if (payload && Array.isArray(payload.list)) fixTrackListNames(payload.list)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           const body = wantArrayFormat && payload && Array.isArray(payload.list) ? payload.list : payload
           res.end(JSON.stringify(body))
@@ -8425,6 +8429,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 }
               } catch { /* 回填失败就保持无封面，不阻塞搜索 */ }
             }
+            // kglite 歌曲分支不走 sendSearchResult（它要按 hash 回填封面后直发），
+            // 同样要在出口修复转义残留歌名
+            fixTrackListNames(list)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({
               list,
@@ -9408,7 +9415,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               const expectName = typeof payload.expectSongName === 'string' ? payload.expectSongName.trim() : ''
               if (expectName) {
                 const trackName = String(track.songInfo.name || track.songInfo.title || '').trim()
-                if (trackName && trackName !== expectName) {
+                // 两侧都先修转义残留再比对：历史缓存可能是脏名（u5b8cu6574u7248），
+                // 而搜索出口已经修过的话新请求是净名，修复后二者相等即可免于重新投送
+                const normalizedTrackName = fixBrokenUnicodeEscapes(trackName)
+                const normalizedExpectName = fixBrokenUnicodeEscapes(expectName)
+                if (normalizedTrackName && normalizedTrackName !== normalizedExpectName) {
                   sendJson(
                     {
                       success: false,

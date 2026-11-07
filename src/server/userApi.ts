@@ -1657,6 +1657,38 @@ export const notePlayFailure = (api: any, platform: string): void => {
 export const clearPlayFailure = (api: any, platform: string): void => {
     if (!api?.info) return
     playFailSink.delete(playSinkKey(api.info.owner, api.info.id, platform))
+    cooldownSink.delete(playSinkKey(api.info.owner, api.info.id, platform))
+}
+
+// ==================== 回源超时的「短冷却」账本 ====================
+// 与沉底的区别：沉底只降权（冷却期内仍会被尝试，每首新歌白吃一次 5~10s 超时预算），
+// 冷却在第一轮直接跳过该源。只认超时类失败（取链超时/回源超时）——那是「这个源的
+// 后端现在很慢」的信号，与歌曲无关；软失败（无版权/已下架）不该触发。
+// 可用性保障：冷却不剥夺机会——全部常规源失败后第二轮再试冷却中的源，只是顺序变了。
+const PLAY_COOLDOWN_WINDOW_MS = 90 * 1000
+const cooldownSink = new Map<string, number>()
+const COOLDOWN_MSG_RE = /超时/
+
+/** 取链失败后按错误信息记账：超时类失败才进冷却账本 */
+export const notePlayCooldown = (api: any, platform: string, failMessage: string): void => {
+    if (!api?.info || !COOLDOWN_MSG_RE.test(String(failMessage || ''))) return
+    cooldownSink.set(playSinkKey(api.info.owner, api.info.id, platform), Date.now() + PLAY_COOLDOWN_WINDOW_MS)
+}
+
+/** 按「是否处于回源超时冷却期」把候选分成两轮：第一轮试 hot，全败后第二轮试 cooled */
+export const partitionByCooldown = (
+    candidates: any[],
+    platform: string,
+    now: number = Date.now(),
+): { hot: any[]; cooled: any[] } => {
+    if (!playSinkEnabled() || candidates.length < 2) return { hot: candidates, cooled: [] }
+    const hot: any[] = []
+    const cooled: any[] = []
+    for (const api of candidates) {
+        const until = cooldownSink.get(playSinkKey(api?.info?.owner, api?.info?.id, platform)) || 0
+        ;(until > now ? cooled : hot).push(api)
+    }
+    return { hot, cooled }
 }
 
 /**
@@ -2282,14 +2314,24 @@ export async function callUserApiGetMusicUrl(
             }
         }
     } else {
-        // 多个源，轮流尝试
-        for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
-            const api = candidates[candidateIndex]
+        // 多个源，轮流尝试。分两轮：第一轮跳过处于「回源超时冷却」的源，
+        // 全部常规源失败后第二轮再试它们（冷却只改顺序、不剥夺机会，可用性不变）
+        const { hot, cooled } = partitionByCooldown(candidates, source)
+        if (cooled.length) {
+            console.log(`[自定义源] ${cooled.length} 个音源处于回源超时冷却期（90s 内先跳过，全败后兜底再试）：` +
+                cooled.map((a: any) => a.info?.name).join('、'))
+        }
+        const passSeq: Array<{ api: any; inCooldownPass: boolean }> = [
+            ...hot.map((api: any) => ({ api, inCooldownPass: false })),
+            ...cooled.map((api: any) => ({ api, inCooldownPass: true })),
+        ]
+        for (let candidateIndex = 0; candidateIndex < passSeq.length; candidateIndex++) {
+            const { api, inCooldownPass } = passSeq[candidateIndex]
             // 预算见底就别再挨个源打了：调用方早就返回 500，这里继续请求只是白烧上游配额
             if (budgetExhausted()) break
-            const perTimeout = budgetForSource(candidates.length - candidateIndex)
+            const perTimeout = budgetForSource(passSeq.length - candidateIndex)
             try {
-                console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (所属: ${api.info.owner})`)
+                console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (所属: ${api.info.owner}${inCooldownPass ? ', 冷却兜底轮' : ''})`)
 
                 const rawUrl = await withTimeout(
                     api.callRequest('musicUrl', scriptKeyFor(api), {
@@ -2319,14 +2361,16 @@ export async function callUserApiGetMusicUrl(
                     sourceName: api.info.name,
                     sourceId: api.info.id,
                     attempts,
-                    hasMoreSources: candidateIndex < candidates.length - 1
+                    hasMoreSources: candidateIndex < passSeq.length - 1
                 }
             } catch (error: any) {
-                console.error(`[自定义源] ${api.info.name} 失败:`, `音源日志：${describeError(error)}`)
+                const failMsg = describeError(error)
+                console.error(`[自定义源] ${api.info.name} 失败:`, `音源日志：${failMsg}`)
                 lastError = error
                 notePlayFailure(api, source)
-                roundFailures.push({ api, message: describeError(error) })
-                const att = { name: api.info.name, status: 'fail', message: `音源日志：${describeError(error)}` }
+                notePlayCooldown(api, source, failMsg)
+                roundFailures.push({ api, message: failMsg })
+                const att = { name: api.info.name, status: 'fail', message: `音源日志：${failMsg}` }
                 attempts.push(att)
                 if (onProgress) await onProgress(att)
                 continue
