@@ -34,7 +34,7 @@ import formidable from 'formidable'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
-import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, describeError } from './userApi'
+import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, getContractSummary, describeError } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation, listIsolations, ISOLATION_MAX_AUTO_RELEASE } from './sourceGuard'
 import { hasHotSearchItems } from './hotSearchFallback'
@@ -3152,6 +3152,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         // 全进程登记到的长定时器（>=5min，含注册栈）：周期性卡顿的头号嫌疑
         activeLongTimers: getActiveLongTimers(),
         sourceGuard: getSourceGuardStatus(),
+        // 协议契约自检：脚本声明的 actions/qualitys 是否与宿主能力一致。
+        // 以前这类违规只会在取链阶段以「无链接」暴露，读这里能直接看到是谁、哪一种。
+        sourceContract: getContractSummary(),
         sourceProbe: getSourceProbeStatus(probeDetail),
         // 慢源独立线程：哪些源进 worker、哪些已熔断、开关状态（r43 实机排障用）
         sourceWorker: getWorkerStatus(),

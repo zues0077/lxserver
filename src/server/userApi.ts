@@ -12,6 +12,8 @@ import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure, isPlatformDemoted } from './sourceProbe'
 import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor, listWorkerPresetCandidates } from './sourceGovernor'
 import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible } from './sourceWorkerHost'
+import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue } from './sourceContract'
+import type { ContractReport } from './sourceContract'
 import { syncLog } from '../utils/log4js'
 
 /**
@@ -644,6 +646,67 @@ export function getApiStatus(owner: string, id: string): ApiStatusInfo | undefin
 }
 
 /**
+ * 取某个已加载音源的协议契约自检报告。
+ *
+ * 未加载（禁用/加载失败）时返回 undefined —— 契约只有在脚本真的 inited 之后
+ * 才存在，列表接口据此区分「没加载」和「加载了且合规」。返回值是只读快照，
+ * 调用方不应把它写回实例。
+ */
+export function getSourceContract(owner: string, id: string): ContractReport | undefined {
+    const api = loadedApis.get(`${owner}_${id}`)
+    return api?.info?.contract || undefined
+}
+
+/**
+ * 全局契约自检汇总，供 `/health` 使用。
+ *
+ * 只有一条统计口径有意义：**有多少个已加载源声明违规**。合规数没意义（大多数源
+ * 本来就合规），`byIssue` 才是排查用的——它回答「当前这批源里最普遍的协议问题是哪种」，
+ * 比如一片 `unsupported_actions` 就说明有人批量装了一批同一来源的改造脚本。
+ */
+export function getContractSummary(): {
+    checked: number
+    compliant: number
+    violating: number
+    byIssue: Record<string, number>
+} {
+    const reports: ContractReport[] = []
+    for (const api of loadedApis.values()) {
+        const report: ContractReport | undefined = api?.info?.contract
+        if (report) reports.push(report)
+    }
+    return summarizeContractReports(reports)
+}
+
+/**
+ * 汇总逻辑抽成纯函数，便于单测（loadedApis 是模块内私有状态，外部注入不了）。
+ * 统计口径：`violating` 按**源**计数（一个源多个平台违规只算一个源），
+ * `byIssue` 按**问题码**计数（同一个错误码出现几次）。
+ */
+export function summarizeContractReports(reports: ContractReport[]): {
+    checked: number
+    compliant: number
+    violating: number
+    byIssue: Record<string, number>
+} {
+    let compliant = 0
+    const byIssue: Record<string, number> = {}
+    for (const report of reports) {
+        if (report.compliant) compliant += 1
+        for (const issue of report.issues) {
+            if (issue.severity !== 'error') continue
+            byIssue[issue.code] = (byIssue[issue.code] || 0) + 1
+        }
+    }
+    return {
+        checked: reports.length,
+        compliant,
+        violating: reports.length - compliant,
+        byIssue,
+    }
+}
+
+/**
  * 供「平台可用性巡检」（sourceProbe.ts）使用：返回已加载音源实例及其沙箱调用入口。
  * 只暴露巡检所需的最小面（owner/id/name/支持平台/callRequest），
  * 外部无法借此改动实例内部状态，也避免把 loadedApis 整个泄漏出去。
@@ -1106,6 +1169,8 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
     // 创建事件处理映射
     const eventHandlers = new Map<string, Function>()
     let registeredSources: any = {}
+    /** 脚本声明的能力契约自检结果；inited 之前为 null */
+    let contractReport: ContractReport | null = null
 
     // ===== 实例级资源登记（用于卸载时彻底释放，避免定时器/请求泄漏）=====
     // 音源脚本运行在沙箱中，但 setTimeout/setInterval 用的是宿主真实实现。
@@ -1282,6 +1347,19 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
             if (eventName === 'inited') {
                 if (dData && dData.sources) {
                     registeredSources = dData.sources
+                    // 契约自检：把「声明违规」在加载时就变成一条指向平台与字段的日志。
+                    // 以前这类问题要等用户点歌失败、翻沙箱日志才看得见（豆包音源的
+                    // 多声明 actions + 返回对象就是这样被当成「源坏了」的）。
+                    // 只记日志不拒绝加载——能不能播由取链阶段决定。
+                    try {
+                        contractReport = inspectSourceContract(registeredSources)
+                        const brief = summarizeContract(contractReport)
+                        if (brief) {
+                            const level = contractReport.compliant ? 'warn' : 'error'
+                            console[level](`[自定义源-${fullApiInfo.name}] 协议契约不合规（${brief}）；` +
+                                `不影响加载，取链时按可用性决定是否成功`)
+                        }
+                    } catch { /* 自检本身绝不能影响加载 */ }
                     if (global.lx.config['debug.enabled']) {
                         console.log(`[自定义源-${fullApiInfo.name}] 已注册音源:`, Object.keys(registeredSources).join(', '))
                     }
@@ -1444,7 +1522,7 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
 
         // 保存加载 of the API
         const apiInstance = {
-            info: { ...fullApiInfo, sources: registeredSources },
+            info: { ...fullApiInfo, sources: registeredSources, contract: contractReport },
             handlers: eventHandlers,
             timers: sandboxTimers,
             pendingAborts,
@@ -1571,11 +1649,42 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
     }
 }
 
-const validateReturnedMusicUrl = (rawUrl: any, sourceName?: string): string => {
-    if (!rawUrl || typeof rawUrl !== 'string') {
-        throw new Error('音源未返回有效的链接字符串')
+/**
+ * 「返回对象」的降级解包日志节流。
+ *
+ * 协议要求 `musicUrl` 返回字符串；返回对象是只在源自家 App 生效的私有扩展。
+ * 这里放行（能播比合规重要），但必须留痕，否则永远没人去修脚本。
+ * 同一源同一字段 10 分钟内只记一次——换源队列会对同一首歌反复尝试，不节流会刷屏。
+ */
+const unwrapLogAt = new Map<string, number>()
+const UNWRAP_LOG_INTERVAL_MS = 10 * 60 * 1000
+const noteUnwrapOnce = (key: string, line: string): void => {
+    const now = Date.now()
+    const last = unwrapLogAt.get(key) || 0
+    if (now - last < UNWRAP_LOG_INTERVAL_MS) return
+    unwrapLogAt.set(key, now)
+    if (unwrapLogAt.size > 500) {
+        for (const [k, t] of unwrapLogAt) if (now - t >= UNWRAP_LOG_INTERVAL_MS) unwrapLogAt.delete(k)
     }
-    const trimmed = rawUrl.trim()
+    console.warn(line)
+}
+
+export const validateReturnedMusicUrl = (rawUrl: any, sourceName?: string): string => {
+    const unwrapped = unwrapMusicUrlValue(rawUrl)
+    if (!unwrapped) {
+        if (!rawUrl || typeof rawUrl !== 'string') {
+            const shape = rawUrl && typeof rawUrl === 'object'
+                ? `（返回了对象，字段: ${Object.keys(rawUrl).slice(0, 6).join(',') || '空'}）`
+                : ''
+            throw new Error(`音源未返回有效的链接字符串${shape}`)
+        }
+        throw new Error(`音源返回了非播放链接内容: ${String(rawUrl).trim().slice(0, 40)}`)
+    }
+    if (unwrapped.fromObject) {
+        noteUnwrapOnce(`${sourceName || ''}|${unwrapped.path}`,
+            `[自定义源] ${sourceName || '未知'} 的 musicUrl 返回了对象（协议要求字符串），已按 .${unwrapped.path} 解包降级，建议作者修正`)
+    }
+    const trimmed = unwrapped.url
     const lower = trimmed.toLowerCase()
     if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
         throw new Error(`音源返回了非播放链接内容: ${trimmed.slice(0, 40)}`)
