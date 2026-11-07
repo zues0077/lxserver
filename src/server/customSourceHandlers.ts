@@ -10,7 +10,7 @@ import { verifyUser } from './userAuth'
 import { getFlagFor, getIsolationFor, describeIsolationReason, describeGuardReasons, ISOLATION_AUTO_RELEASE_MS } from './sourceGuard'
 import { getThrottle } from './sourceGovernor'
 import { moveScriptToTrash, listTrash, takeFromTrash, purgeTrash, removeTrashCopies } from './sourceTrash'
-import { prioritizeContractIssues } from './sourceContract'
+import { prioritizeContractIssues, summarizeContractByCode } from './sourceContract'
 
 // 读取请求体
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -551,6 +551,8 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
                 source.contract = {
                     compliant: contract.compliant,
                     counts: contract.counts,
+                    // 全量按码计数：issues 被截断到 6 条，前端按源聚合时要用这份真值
+                    byCode: summarizeContractByCode(contract.issues),
                     // 列表里只给前 6 条，够看清是什么问题；完整报告用 error 日志看。
                     // 排序必须先做：warn 多的源会把 error 挤掉，面板就只剩「可忽略的提示」。
                     issues: prioritizeContractIssues(contract.issues, 6),

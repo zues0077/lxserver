@@ -185,6 +185,24 @@ export const inspectSourceContract = (sources: unknown): ContractReport => {
     }
 }
 
+/**
+ * 按问题码做全量计数（丢弃 info）。
+ *
+ * 列表接口只回传前几条 issues（够看清是什么问题），前端要「按源聚合」时
+ * 不能拿截断后的数组去数——否则 9 项会被数成 6 项。所以另给一份真值。
+ */
+export const summarizeContractByCode = (
+    issues: ContractIssue[],
+): { error: Record<string, number>; warn: Record<string, number> } => {
+    const out: { error: Record<string, number>; warn: Record<string, number> } = { error: {}, warn: {} }
+    for (const i of issues) {
+        if (i.severity === 'info') continue
+        const bucket = out[i.severity]
+        bucket[i.code] = (bucket[i.code] || 0) + 1
+    }
+    return out
+}
+
 const SEVERITY_RANK: Record<ContractSeverity, number> = { error: 0, warn: 1, info: 2 }
 
 /**

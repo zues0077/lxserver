@@ -15358,12 +15358,17 @@ function describeContractIssue(issue) {
 }
 
 /**
- * 协议契约角标。
+ * 协议契约角标——**只给 error 级**。
  *
  * 跟 guard（静态可疑特征）不是一件事：guard 看的是脚本像不像恶意代码，
  * 这里判的是「脚本 inited 时声明的能力，宿主能不能满足」——典型的反例是
  * 多声明了 musicUrl 以外的 actions，部分客户端会因此把整个源判为不合规并禁用，
  * 而症状要等到用户点歌才以「无链接」暴露。
+ *
+ * warn 级（绝大多数是声明了 192k/hires/atmos 这类非标准音质档）不进卡片：
+ * 39 个源里 23 个都带 warn，一屏二十多个「契约 N 提示」看着像满屏故障，
+ * 实际一个都影响不到。它们统一收进列表顶部的汇总条（buildContractSummary），
+ * 卡片只保留需要人动手的 error 和「全合规」的淡标记。
  *
  * 只提示不禁用：能不能播仍由取链决定，处置权留给用户。
  */
@@ -15372,30 +15377,122 @@ function buildContractTag(source) {
     if (!c) return '';
     const issues = Array.isArray(c.issues) ? c.issues : [];
     const errs = issues.filter(i => i.severity === 'error');
-    const warns = issues.filter(i => i.severity === 'warn');
     // 真实条数取自 counts：接口只回传前 6 条 issues，拿它长度当总数会把 9 项说成 6 项
     const totalErr = typeof c.counts?.error === 'number' ? c.counts.error : errs.length;
-    const totalWarn = typeof c.counts?.warn === 'number' ? c.counts.warn : warns.length;
+    const totalWarn = typeof c.counts?.warn === 'number' ? c.counts.warn : 0;
 
-    // 完全干净：给一个极淡的对勾，证明自检确实跑过（否则用户会以为功能没生效）
-    if (totalErr === 0 && totalWarn === 0) {
-        return `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-medium whitespace-nowrap border border-transparent bg-emerald-50/70 text-emerald-600/70 dark:bg-emerald-500/10 dark:text-emerald-400/70"
-                title="协议契约自检通过：脚本 inited 时声明的 actions / qualitys 都符合宿主协议"><i class="fas fa-file-signature mr-0.5"></i>契约 OK</span>`;
+    // 纯 warn / 全合规都不占卡片位置——汇总条已经说过了
+    if (totalErr === 0) return '';
+
+    const tip = `协议契约自检发现 ${totalErr} 项不符合宿主协议`
+        + (totalWarn ? `，另有 ${totalWarn} 项提示` : '')
+        + '：' + issues.filter(i => i.severity === 'error').slice(0, 4).map(describeContractIssue).join('；')
+        + '（只提示，不影响加载）';
+    return `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold whitespace-nowrap border bg-orange-50 text-orange-600 border-orange-200 dark:bg-orange-500/20 dark:text-orange-400 dark:border-orange-500/30"
+        title="${escapeHtmlText(tip)}"><i class="fas fa-file-signature mr-0.5"></i>契约 ${totalErr} 项</span>`;
+}
+
+/**
+ * 问题码 → 汇总条里的短标签。
+ *
+ * 不能直接复用 CONTRACT_ISSUE_TEXT：那是给单条 issue 写的完整说明
+ * （「qualitys 为空，该平台不会被取链」），三五个并排就成了一句话接一句话。
+ * 汇总条只要名词，把动词留给后面统一的「客户端会忽略…」。
+ */
+const CONTRACT_CODE_SHORT = {
+    sources_invalid: '没有 sources',
+    sources_empty: 'sources 是空的',
+    source_not_object: '平台声明不是对象',
+    name_missing: '缺 name',
+    type_not_music: 'type 非 music',
+    actions_missing: '缺 actions 声明',
+    actions_not_array: 'actions 不是数组',
+    unsupported_actions: '多余 actions',
+    music_url_not_declared: '缺 musicUrl',
+    qualitys_missing: '缺音质档声明',
+    qualitys_not_array: '音质档不是数组',
+    qualitys_invalid_item: '音质档含空项',
+    qualitys_empty: '音质档为空',
+    unknown_quality: '非标准音质档'
+};
+
+/** 问题码 → 短标签（汇总条里用，不带平台前缀） */
+function contractCodeLabel(code) {
+    return CONTRACT_CODE_SHORT[code] || CONTRACT_ISSUE_TEXT[code] || code;
+}
+
+/**
+ * 契约自检汇总条：把「23 个源各有几条提示」压成列表顶部的一行。
+ *
+ * 为什么不逐个源角标：warn 的成因高度同质——实测 39 个源 65 条 warn 里
+ * 63 条都是同一个 unknown_quality（音源作者照抄了 QQ/网易的原生音质档）。
+ * 分散到 23 张卡片上是 23 条一样的噪音；聚合成一行才说得清「这是个普遍现象，
+ * 不是某个源坏了」。
+ *
+ * 数字一律取 counts / byCode（后端全量统计），不数 issues 数组——那是截断到 6 条的样本。
+ */
+function buildContractSummary(list) {
+    if (!Array.isArray(list) || !list.length) return '';
+    let checked = 0, warnSources = 0, warnTotal = 0, errSources = 0, errTotal = 0;
+    const byCode = { error: {}, warn: {} };
+    const warnNames = [], errNames = [];
+    for (const s of list) {
+        const c = s && s.contract;
+        if (!c) continue;
+        checked++;
+        const ce = typeof c.counts?.error === 'number' ? c.counts.error : 0;
+        const cw = typeof c.counts?.warn === 'number' ? c.counts.warn : 0;
+        if (cw > 0) { warnSources++; warnTotal += cw; warnNames.push(s.name || s.id || '?'); }
+        if (ce > 0) { errSources++; errTotal += ce; errNames.push(s.name || s.id || '?'); }
+        if (c.byCode) {
+            for (const sev of ['error', 'warn']) {
+                const m = c.byCode[sev] || {};
+                for (const k of Object.keys(m)) byCode[sev][k] = (byCode[sev][k] || 0) + (m[k] || 0);
+            }
+        }
+    }
+    if (!checked) return '';
+
+    if (errTotal === 0 && warnTotal === 0) {
+        return `<div id="contract-summary" class="mb-3 px-3 py-2 rounded-lg t-bg-panel border t-border-main text-[11px] t-text-muted leading-relaxed">
+            <i class="fas fa-file-signature text-emerald-500 mr-1"></i>契约自检：${checked} 个源声明的 actions / qualitys 都符合宿主协议
+        </div>`;
     }
 
-    const isErr = totalErr > 0;
-    const tip = (isErr
-        ? `协议契约自检发现 ${totalErr} 项不符合宿主协议`
-        : `协议契约自检发现 ${totalWarn} 项提示`)
-        + (isErr && totalWarn ? `，另有 ${totalWarn} 项提示` : '')
-        + '：' + issues.slice(0, 4).map(describeContractIssue).join('；')
-        + '（只提示，不影响加载）';
-    // 有 error 才用「N 项」这种需要人处理的措辞；纯 warn（多为音源声明了非标准音质档）
-    // 用「N 提示」，否则 37 个源里 30 多个都挂着同一句「契约 N 项」，等于噪音。
-    return `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold whitespace-nowrap border ${isErr
-        ? 'bg-orange-50 text-orange-600 border-orange-200 dark:bg-orange-500/20 dark:text-orange-400 dark:border-orange-500/30'
-        : 'bg-slate-50 text-slate-500 border-slate-200 dark:bg-neutral-800 dark:text-neutral-400 dark:border-neutral-700'}"
-        title="${escapeHtmlText(tip)}"><i class="fas fa-file-signature mr-0.5"></i>${isErr ? `契约 ${totalErr} 项` : `契约 ${totalWarn} 提示`}</span>`;
+    const topCodes = (bucket, total) => {
+        const rows = Object.entries(bucket).sort((a, b) => b[1] - a[1]);
+        if (!rows.length) return '';
+        const shown = rows.slice(0, 3).map(([k, v]) => `${contractCodeLabel(k)} ${v}`).join(' · ');
+        const rest = rows.length > 3 ? ` · 其余 ${rows.length - 3} 类共 ${total - rows.slice(0, 3).reduce((a, r) => a + r[1], 0)} 条` : '';
+        return shown + rest;
+    };
+
+    const head = [`${checked} 个源已检查`];
+    if (warnSources) head.push(`${warnSources} 个源有提示`);
+    if (errSources) head.push(`${errSources} 个源有错误`);
+
+    const lines = [];
+    if (warnTotal) {
+        // 老版本后端没有 byCode 时只报总数，不要留个空冒号
+        const detail = topCodes(byCode.warn, warnTotal);
+        lines.push(`<div class="mt-0.5 opacity-80"><i class="fas fa-circle-info mr-1"></i>提示 ${warnTotal} 条${detail ? '：' + escapeHtmlText(detail) : ''} —— 客户端会忽略这些声明，不影响取链</div>`);
+    }
+    if (errTotal) {
+        const detail = topCodes(byCode.error, errTotal);
+        lines.push(`<div class="mt-0.5 text-orange-600 dark:text-orange-400"><i class="fas fa-triangle-exclamation mr-1"></i>错误 ${errTotal} 条${detail ? '：' + escapeHtmlText(detail) : ''} —— 对应源下方有橙色角标</div>`);
+    }
+
+    // 悬停看具体是哪些源：汇总条只给数量，要动手时还得知道去哪儿找
+    const tip = [
+        warnNames.length ? `有提示的源：${warnNames.slice(0, 12).join('、')}${warnNames.length > 12 ? ` 等 ${warnNames.length} 个` : ''}` : '',
+        errNames.length ? `有错误的源：${errNames.slice(0, 12).join('、')}${errNames.length > 12 ? ` 等 ${errNames.length} 个` : ''}` : '',
+    ].filter(Boolean).join('\n');
+
+    return `<div id="contract-summary" class="mb-3 px-3 py-2 rounded-lg t-bg-panel border ${errTotal ? 'border-orange-200 dark:border-orange-500/30' : 't-border-main'} text-[11px] t-text-muted leading-relaxed"
+        title="${escapeHtmlText(tip)}">
+        <i class="fas fa-file-signature ${errTotal ? 'text-orange-500' : 't-text-muted opacity-60'} mr-1"></i>契约自检：${head.join(' · ')}
+        ${lines.join('')}
+    </div>`;
 }
 
 /**
@@ -15610,6 +15707,8 @@ async function renderCustomSources() {
         // 先清掉上一次的汇总（每次渲染都重算，避免显示过期数字）
         const staleSummary = container.querySelector('#source-health-summary');
         if (staleSummary) staleSummary.remove();
+        const staleContract = container.querySelector('#contract-summary');
+        if (staleContract) staleContract.remove();
 
         // 如果开启了公开限制且未通过验证，则显示锁定提示
         if (shouldShowHidden) {
@@ -15643,6 +15742,11 @@ async function renderCustomSources() {
         container.innerHTML = '';
         // 列表最上方先摆「各平台当前可用源数」，取链失败时用户一眼能判断是不是源全挂了
         if (healthSummary) container.insertAdjacentHTML('beforeend', healthSummary);
+
+        // 契约提示按源聚合到顶部：warn 级不进卡片——39 个源里 23 个都带 warn，
+        // 逐个挂「契约 N 提示」看着像满屏故障，实际一条都不影响取链。
+        const contractSummary = buildContractSummary(list);
+        if (contractSummary) container.insertAdjacentHTML('beforeend', contractSummary);
 
         list.forEach((source, index) => {
             const div = document.createElement('div');

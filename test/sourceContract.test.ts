@@ -6,6 +6,7 @@ import {
   inspectSourceContract,
   prioritizeContractIssues,
   summarizeContract,
+  summarizeContractByCode,
   unwrapMusicUrlValue,
 } from '../src/server/sourceContract'
 
@@ -213,4 +214,39 @@ test('prioritizeContractIssues：同级别按平台名稳定排序', () => {
     { platform: 'kg', code: 'unsupported_actions', severity: 'error' as const, detail: '' },
   ]
   assert.deepStrictEqual(prioritizeContractIssues(issues, 6).map(i => i.platform), ['kg', 'wy'])
+})
+
+// ---------------- 按码计数（列表按源聚合的数据源） ----------------
+// 列表接口的 issues 被截断到 6 条，前端要统计「哪些问题最多」必须有不受截断影响的真值。
+
+test('summarizeContractByCode：error / warn 分开计数，info 丢弃', () => {
+  const issues = [
+    { platform: 'tx', code: 'unknown_quality', severity: 'warn' as const, detail: '' },
+    { platform: 'wy', code: 'unknown_quality', severity: 'warn' as const, detail: '' },
+    { platform: 'kg', code: 'unsupported_actions', severity: 'error' as const, detail: '' },
+    { platform: 'local', code: 'local_platform_skipped', severity: 'info' as const, detail: '' },
+  ]
+  assert.deepStrictEqual(summarizeContractByCode(issues), {
+    error: { unsupported_actions: 1 },
+    warn: { unknown_quality: 2 },
+  })
+})
+
+test('summarizeContractByCode：空报告返回空桶，且每次是新对象（不串味）', () => {
+  const a = summarizeContractByCode([])
+  const b = summarizeContractByCode([])
+  assert.deepStrictEqual(a, { error: {}, warn: {} })
+  assert.notStrictEqual(a, b)
+  assert.notStrictEqual(a.warn, b.warn)
+})
+
+test('summarizeContractByCode：与 inspectSourceContract 的 counts 对得上', () => {
+  const r = inspectSourceContract({
+    tx: { name: 'QQ', type: 'music', actions: ['musicUrl', 'lyric'], qualitys: ['320k', '192k'] },
+    wy: { name: '网易', type: 'music', actions: ['musicUrl'], qualitys: ['320k'] },
+  })
+  const byCode = summarizeContractByCode(r.issues)
+  const sum = (m: Record<string, number>) => Object.values(m).reduce((a, b) => a + b, 0)
+  assert.strictEqual(sum(byCode.error), r.counts.error)
+  assert.strictEqual(sum(byCode.warn), r.counts.warn)
 })
