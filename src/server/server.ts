@@ -9926,7 +9926,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
             // 失败短缓存：同一首歌 TTL 内重复请求直接复用上次的失败结论，
             // 不再把 30 多个自定义源重问一遍（这是「音源整体失效时请求风暴」的主要成本）。
-            if (!result && MUSIC_URL_FAIL_TTL_MS) {
+            // noCache（智能换源重试）要跳过：用户明确要求重新解析，别拿上次的失败结论打发。
+            if (!result && !noCache && MUSIC_URL_FAIL_TTL_MS) {
               const remembered = readMusicUrlFailure(failKey)
               if (remembered) {
                 const waitSec = Math.max(1, Math.round(remembered.retryAfterMs / 1000))

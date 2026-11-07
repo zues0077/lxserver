@@ -2675,7 +2675,11 @@ async function doSearch(page = 1, append = false) {
                 const container = document.getElementById('search-results');
                 const scroller = findScrollParent(container);
                 const keepTop = scroller ? scroller.scrollTop : 0;
-                renderResults(sorted);
+                // 按类型分发渲染：聚合歌手/专辑返回的是歌手/专辑实体，按歌曲行渲染会变成
+                // 「歌名全叫任素汐、歌手/专辑列全是 -」的怪列表（实机截图 2026-11-07）。
+                if (type === 'singer') renderSingerResults(sorted);
+                else if (type === 'album') renderAlbumResults(sorted);
+                else renderResults(sorted);
                 if (scroller && keepTop > 0) scroller.scrollTop = keepTop;
                 return sorted;
             };
@@ -6694,7 +6698,10 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, op
         return { url: localUrl, sourceType: 'server_cache', quality: song.quality || quality, folder: localFolder };
     }
 
-    const shouldBypassServerCache = isRetry === 'local_retry' || isRetry === 'download';
+    // 重试（智能换源/播放器重试/下载）一律绕开服务端文件缓存预查：
+    // 缓存里的文件可能就是播放失败的原因（实测坏 m4a 缓存让换源死循环——每次重试
+    // 都命中同一个坏文件）。只有首次点播才允许缓存优先。
+    const shouldBypassServerCache = Boolean(isRetry) || options.bypassCache === true;
 
     const allowServerCache = settings.preferServerCache !== false && !shouldBypassServerCache;
     if (allowServerCache) {
@@ -6784,7 +6791,10 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, op
             songInfo: song,
             quality,
             enableAutoSwitchApiSource: settings.enableAutoSwitchApiSource !== false,
-            excludeApiSources: Array.isArray(excludeApiSources) ? excludeApiSources : []
+            excludeApiSources: Array.isArray(excludeApiSources) ? excludeApiSources : [],
+            // 绕缓存时同步告知服务端跳过文件缓存命中层（服务端 noCache 已支持），
+            // 否则前端绕了、服务端又秒回同一个坏缓存，换源等于白换
+            noCache: shouldBypassServerCache ? true : undefined
         });
         let res = await fetch(`${API_BASE}/url`, {
             method: 'POST',

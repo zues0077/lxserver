@@ -12,6 +12,7 @@ import { buildLyrics, parseLyrics } from '../utils/lrcTool'
 import { formatPlayTime } from '../utils/common'
 import { judgeAudioMismatch, judgeMetadataMismatch } from '@/utils/audioGuard'
 import { verifyTrackOrigin, canVerifyOrigin } from './sourceVerify'
+import { probeAudioDecodable } from './decodeProbe'
 import { getCacheBrowseLocation } from './cacheBrowseLocation'
 import { buildStreamHeaders } from './utils/streamHeaders'
 import { syncLog } from '@/utils/log4js'
@@ -2877,6 +2878,21 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                     safeUnlink(fileStream, tempPath)
                     fail(new Error(`${mismatch}，已拒绝写入缓存`))
                     return
+                }
+
+                // r74 解码抽检：元数据/时长/标签全正常但 AAC 流损坏的坏文件（实测 99.85% 帧解码失败）
+ // 靠上面的判据拦不住，这里用 ffmpeg 真实解码前 8 秒。坏文件当场删除、按下载失败处理，
+ // 取链继续换源——坏数据永远进不了缓存，之后也不会被「命中本地缓存」死循环复用。
+                if (inspection.audioContainer !== 'encrypted') {
+                    const probe = probeAudioDecodable(tempPath)
+                    if (!probe.ok) {
+                        const line = `[文件缓存] 解码抽检失败（坏文件已拦截）: ${songInfo.name} — ${probe.reason}`
+                        console.warn(line)
+                        syncLog.warn(line)
+                        safeUnlink(fileStream, tempPath)
+                        fail(new Error(`源文件音频流损坏（${probe.reason}），已拦截不入缓存`))
+                        return
+                    }
                 }
 
                 const finalBaseName = getFileName(songInfo, actualQuality, isOnlyDownload, username)
