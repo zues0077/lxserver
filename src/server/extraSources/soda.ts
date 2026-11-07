@@ -471,6 +471,38 @@ function resolveAppProfile(dev: {
  * x-helios / x-medusa，我们只负责把请求发出去并解析。任何一步不满足就返回 null，
  * 由调用方记进待补清单 —— 绝不让签名器故障变成「播放报错还看不出原因」。
  */
+/**
+ * [R76] 签名通道选流（纯函数，供单测）：在预算内按码率选档的基础上，**优先选「带解密密钥的档」**。
+ *
+ * 背景（2026-11-07 任素汐 140 次取链审计 + 坏流 box 解析实验证实）：版权曲直链是 CENC
+ * 加密流（stsd=enca），密钥随火山 GetPlayInfo 的 `PlayInfoList[].PlayAuth` **逐码率下发**、
+ * 且常只有部分档带钥（第一项常为空，libresoda issue #7「哪把钥匙配哪个文件」）；原逻辑
+ * 只按码率盲选 → 选中无钥档 → 返回无钥加密直链，明明别档有钥匙却只能被门禁拦截换源。
+ * 策略：宁降一档可播，不选无钥加密流。
+ *
+ * @param ranked 已按 rank 降序（同 rank 按码率降序）的候选档
+ * @param wantRank 请求音质允许的最高 rank
+ * @param keyOf 判断某档是否带钥（按 URL/码率回查登记表）
+ * @param hasTrackLevelKey 是否存在「档位无关」的钥匙兑底（track_v2 顶层 / 全局登记表）
+ * @returns 选中的档 + 是否发生了降档（降档只发生在「预算内全无钥、预算外有钥」时）
+ */
+export function chooseSignedStream<T extends { meta: { rank: number } }>(
+  ranked: T[],
+  wantRank: number,
+  keyOf: (item: T) => boolean,
+  hasTrackLevelKey: boolean,
+): { item: T; downgraded: boolean } {
+  const budgeted = ranked.filter(x => x.meta.rank <= wantRank)
+  const pool = budgeted.length ? budgeted : [ranked[ranked.length - 1]]
+  const keyed = pool.filter(keyOf)
+  if (keyed.length) return { item: keyed[0], downgraded: false }
+  // 有档位无关的钥匙兑底时维持原选（钥匙回读逻辑会给它配上）
+  if (hasTrackLevelKey) return { item: pool[0], downgraded: false }
+  const keyedAny = ranked.filter(keyOf)
+  if (keyedAny.length) return { item: keyedAny[0], downgraded: true }
+  return { item: pool[0], downgraded: false }
+}
+
 async function trySignedStream(trackId: string, cookie: string, quality = '320k'): Promise<{
   url: string
   quality: string
@@ -555,7 +587,17 @@ async function trySignedStream(trackId: string, cookie: string, quality = '320k'
     .filter(x => x.meta)
     .sort((a, b) => (b.meta!.rank - a.meta!.rank) || (bitrate(b.v) - bitrate(a.v)))
   if (!ranked.length) return null
-  const chosen = ranked.find(x => x.meta!.rank <= wantRank) || ranked[ranked.length - 1]
+  // [R76] 带钥档优先：选中的档无钥而其他档有钥时降档换可播（详见 chooseSignedStream 注释）
+  const hasTrackLevelKey = Boolean(hexKey || getSodaKey(trackId))
+  const keyOf = (x: { v: SodaVideoItem; meta: { label: string; rank: number } }) =>
+    Boolean(sodaKeyForStream(String(x.v.main_url || x.v.backup_url), x.v.video_meta?.bitrate))
+  const picked = chooseSignedStream(ranked, wantRank, keyOf, hasTrackLevelKey)
+  const chosen = picked.item
+  if (picked.downgraded) {
+    console.log(
+      `[汽水签名] 请求音质档无解密密钥，降级到带钥档 ${chosen.v.video_meta?.quality}（R76：宁降档可播，不选无钥加密流）`,
+    )
+  }
 
   // [汽水解密] 关键回读：track_v2 本身不带密钥，但 GetPlayInfo（火山 VOD）那条通道带，
   // 且是**逐码率项**各带一把（PlayInfoList[].PlayAuth），所以要按 URL/码率回查本次选中的那条，
