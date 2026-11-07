@@ -76,8 +76,14 @@ export async function handleValidate(req: IncomingMessage, res: ServerResponse) 
             const contractIssues = contract
                 ? prioritizeContractIssues(contract.issues, 10)
                 : []
+            // 提示语用 detail（人话）而不是 code：`wy.unsupported_actions` 只有看代码的人懂，
+            // 上传音源的是普通用户，他需要知道「哪个平台、声明错在哪」。
             const contractHint = contract && !contract.compliant
-                ? `脚本声明不符合宿主协议：${contractIssues.slice(0, 3).map((i: any) => `${i.platform}.${i.code}`).join('、')}`
+                ? `脚本声明不符合宿主协议：${contractIssues
+                    .filter((i: any) => i.severity === 'error')
+                    .slice(0, 2)
+                    .map((i: any) => `${i.platform}：${String(i.detail || i.code).slice(0, 40)}`)
+                    .join('；')}`
                     + `（仍可加载，但部分平台可能取链失败）`
                 : ''
 
