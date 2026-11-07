@@ -40,6 +40,8 @@ import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clea
 import { hasHotSearchItems } from './hotSearchFallback'
 import { getWorkerStatus } from './sourceWorkerHost'
 import { loadGovernorState } from './sourceGovernor'
+import { qualityLedgerSnapshot } from './sourceQualityLedger'
+import { rateLimitSnapshot } from './sourceRateLimit'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
@@ -3155,6 +3157,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         // 协议契约自检：脚本声明的 actions/qualitys 是否与宿主能力一致。
         // 以前这类违规只会在取链阶段以「无链接」暴露，读这里能直接看到是谁、哪一种。
         sourceContract: getContractSummary(),
+        // 播放侧的两本短线账本：按档位短路（1h 自动放行探路）与限流退避（30s）。
+        // 只列仍在生效的条目——这两本账都在内存、会自己过期，列全量没有意义。
+        playbackLedger: {
+          quality: qualityLedgerSnapshot(),
+          rateLimit: rateLimitSnapshot(),
+        },
         sourceProbe: getSourceProbeStatus(probeDetail),
         // 慢源独立线程：哪些源进 worker、哪些已熔断、开关状态（r43 实机排障用）
         sourceWorker: getWorkerStatus(),
