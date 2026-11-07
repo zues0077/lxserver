@@ -2002,7 +2002,11 @@ export async function callUserApiGetMusicUrl(
                 // 只有确实还有自定义源可试时才告诉上层「可换源」，
                 // 否则会让播放器显示一个点了也没用的换源按钮
                 hasMoreSources: isSourceSupported(source, clientUsername),
-            }
+                // [R76 修复] key/via 必须透传：汽水签名通道随链下发的 CENC 解密密钥
+                // 曾在这里被丢弃，导致上层解密分支永远不触发、带钥加密流被当 DRM 拦掉
+                via: acct.via,
+                key: acct.key,
+            } as any
         }
     }
 
@@ -2193,7 +2197,10 @@ export async function callUserApiGetMusicUrl(
                     sourceId: `account:${source}`,
                     attempts: [attempt],
                     hasMoreSources: false,
-                }
+                    // [R76 修复] 同上：透传汽水 CENC 解密密钥与通道名
+                    via: acct.via,
+                    key: acct.key,
+                } as any
             }
         }
 
@@ -2398,7 +2405,10 @@ export async function callUserApiGetMusicUrl(
                 sourceId: `account:${source}`,
                 attempts: [...attempts, attempt],
                 hasMoreSources: false,
-            }
+                // [R76 修复] 同上：透传汽水 CENC 解密密钥与通道名
+                via: acct.via,
+                key: acct.key,
+            } as any
         }
     }
 
