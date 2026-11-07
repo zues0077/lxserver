@@ -157,7 +157,14 @@ export const applyQualityLedger = (
     return { candidates: usable, blocked, rescuedAll: false }
 }
 
-/** 取链成功时清掉该源该平台的全部档位记录（源重载/换脚本后旧证据不该再算数） */export const clearQualityLedger = (owner: string, id: string, platform?: string): number => {
+/**
+ * 取链成功时清掉该源该平台的档位记录。
+ *
+ * ⚠️ 只在「脚本换新 / 源被重载」时调用（旧证据针对旧实现，必须作废）。
+ * **不要**在单次取链成功时调用：成功的是那一档，平台下别的档的失败证据仍然有效，
+ * 一起清掉会让坏档永远攒不够样本、永远短路不了。
+ */
+export const clearQualityLedger = (owner: string, id: string, platform?: string): number => {
     const prefix = `${owner || ''}:${id || ''}:${platform || ''}`
     let removed = 0
     for (const key of [...ledger.keys()]) {

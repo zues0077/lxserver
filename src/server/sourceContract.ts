@@ -185,8 +185,25 @@ export const inspectSourceContract = (sources: unknown): ContractReport => {
     }
 }
 
-/** 把报告压成一行给日志用；无问题时返回空串，调用方据此决定是否打日志 */
-export const summarizeContract = (report: ContractReport): string => {
+const SEVERITY_RANK: Record<ContractSeverity, number> = { error: 0, warn: 1, info: 2 }
+
+/**
+ * 按严重程度排序后截断——**必须先排序再截断**。
+ *
+ * 面板和上传回执都只展示前几条。若按脚本声明顺序原样切，一个平台上的多条
+ * warn（缺 name、非标准音质档）就能把同一源里真正该看的 error 挤出列表，
+ * 用户看到「契约 5 项」却全是可忽略的提示，等于没提示。
+ */
+export const prioritizeContractIssues = (issues: ContractIssue[], limit = 6): ContractIssue[] =>
+    [...issues]
+        .filter(i => i.severity !== 'info')
+        .sort((a, b) => {
+            const bySeverity = SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]
+            return bySeverity !== 0 ? bySeverity : String(a.platform).localeCompare(String(b.platform))
+        })
+        .slice(0, limit)
+
+/** 把报告压成一行给日志用；无问题时返回空串，调用方据此决定是否打日志 */export const summarizeContract = (report: ContractReport): string => {
     if (!report.issues.length) return ''
     const parts = report.issues
         .filter(i => i.severity !== 'info')

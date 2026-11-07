@@ -4,6 +4,7 @@ import {
   ALLOWED_REMOTE_ACTIONS,
   LX_STANDARD_QUALITIES,
   inspectSourceContract,
+  prioritizeContractIssues,
   summarizeContract,
   unwrapMusicUrlValue,
 } from '../src/server/sourceContract'
@@ -174,4 +175,42 @@ test('认不出就返回 null（不瞎猜业务对象）', () => {
 test('只用 http/https，大小写不敏感', () => {
   assert.strictEqual(unwrapMusicUrlValue({ url: 'HTTPS://A/B.MP3' })!.url, 'HTTPS://A/B.MP3')
   assert.deepStrictEqual(unwrapMusicUrlValue('HTTP://a/b'), { url: 'HTTP://a/b', path: '', fromObject: false })
+})
+
+// ---------------- 展示截断：必须先按严重程度排序 ----------------
+// 面板只给前几条，若按声明顺序切，一个平台的多条 warn 会把 error 挤掉 ——
+// 用户看到「契约 5 项」却全是可忽略的提示，等于没提示。
+
+test('prioritizeContractIssues：error 永远排在 warn 前面，info 被丢弃', () => {
+  const issues = [
+    { platform: 'kg', code: 'name_missing', severity: 'warn' as const, detail: 'w1' },
+    { platform: 'kg', code: 'unknown_quality', severity: 'warn' as const, detail: 'w2' },
+    { platform: 'tx', code: 'local_platform_skipped', severity: 'info' as const, detail: 'i1' },
+    { platform: 'wy', code: 'unsupported_actions', severity: 'error' as const, detail: 'e1' },
+    { platform: 'mg', code: 'music_url_not_declared', severity: 'error' as const, detail: 'e2' },
+  ]
+  const got = prioritizeContractIssues(issues, 3)
+  // 两个 error 先出（同级按平台名 mg < wy），后面的 warn 才轮到
+  assert.deepStrictEqual(got.map(i => i.code), ['music_url_not_declared', 'unsupported_actions', 'name_missing'])
+  // info 不参与展示（local 平台的说明性条目）
+  assert.ok(got.every(i => i.severity !== 'info'))
+})
+
+test('prioritizeContractIssues：截断到 limit，且不改动入参数组', () => {
+  const issues = Array.from({ length: 9 }, (_, i) => ({
+    platform: 'p' + i, code: 'unsupported_actions', severity: 'error' as const, detail: 'd',
+  }))
+  const before = JSON.stringify(issues)
+  assert.strictEqual(prioritizeContractIssues(issues, 6).length, 6)
+  assert.strictEqual(JSON.stringify(issues), before)
+  assert.strictEqual(prioritizeContractIssues(issues).length, 6)
+  assert.strictEqual(prioritizeContractIssues([], 6).length, 0)
+})
+
+test('prioritizeContractIssues：同级别按平台名稳定排序', () => {
+  const issues = [
+    { platform: 'wy', code: 'unsupported_actions', severity: 'error' as const, detail: '' },
+    { platform: 'kg', code: 'unsupported_actions', severity: 'error' as const, detail: '' },
+  ]
+  assert.deepStrictEqual(prioritizeContractIssues(issues, 6).map(i => i.platform), ['kg', 'wy'])
 })

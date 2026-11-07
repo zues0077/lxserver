@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import {
   RATE_LIMIT_BACKOFF_MS,
   clearRateLimit,
+  clearRateLimitForSource,
   isRateLimitFailure,
   isRateLimited,
   noteRateLimit,
@@ -92,4 +93,26 @@ test('快照只列仍在退避期的条目', () => {
 test('重复限流不会无限增长（同键覆盖）', () => {
   for (let i = 0; i < 5; i++) noteRateLimit('open', 'a', 'kw', T0 + i)
   assert.strictEqual(rateLimitSnapshot(T0 + 10).length, 1)
+})
+
+// ---------------- 源重载时整体清退避 ----------------
+// 脚本换新后，针对旧实现记的限流不该继续压着新实现（否则「已经修好了」还要白等 30 秒）。
+
+test('clearRateLimitForSource 只清该源，不动别的源与别的平台', () => {
+  resetRateLimit()
+  const now = Date.now()
+  noteRateLimit('open', 'doubao', 'tx', now)
+  noteRateLimit('open', 'doubao', 'wy', now)
+  noteRateLimit('open', 'other', 'tx', now)
+  noteRateLimit('admin', 'doubao', 'tx', now)
+  assert.strictEqual(isRateLimited('open', 'doubao', 'tx', now), true)
+
+  const removed = clearRateLimitForSource('open', 'doubao')
+  assert.strictEqual(removed, 2)
+  assert.strictEqual(isRateLimited('open', 'doubao', 'tx', now), false)
+  assert.strictEqual(isRateLimited('open', 'doubao', 'wy', now), false)
+  // 同名 id 属于不同 owner：不能一起清
+  assert.strictEqual(isRateLimited('admin', 'doubao', 'tx', now), true)
+  assert.strictEqual(isRateLimited('open', 'other', 'tx', now), true)
+  resetRateLimit()
 })

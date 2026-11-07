@@ -68,6 +68,24 @@ export const clearRateLimit = (owner: string, id: string, platform: string): voi
     backoff.delete(keyOf(owner, id, platform))
 }
 
+/**
+ * 清掉某源在**所有平台**的退避记录。
+ *
+ * 用于脚本重载/换新：退避是针对旧实现撞的限流记的，新脚本没撞过，
+ * 继续压着它只会让「已经修好了」的源白等 30 秒。
+ */
+export const clearRateLimitForSource = (owner: string, id: string): number => {
+    const prefix = `${owner || ''}:${id || ''}:`
+    let removed = 0
+    for (const k of [...backoff.keys()]) {
+        if (k.startsWith(prefix)) {
+            backoff.delete(k)
+            removed += 1
+        }
+    }
+    return removed
+}
+
 /** 诊断快照 */
 export const rateLimitSnapshot = (now: number = Date.now()): Array<{ key: string; until: string }> => {
     const out: Array<{ key: string; until: string }> = []

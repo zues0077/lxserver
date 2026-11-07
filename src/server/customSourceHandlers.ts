@@ -10,6 +10,7 @@ import { verifyUser } from './userAuth'
 import { getFlagFor, getIsolationFor, describeIsolationReason, describeGuardReasons, ISOLATION_AUTO_RELEASE_MS } from './sourceGuard'
 import { getThrottle } from './sourceGovernor'
 import { moveScriptToTrash, listTrash, takeFromTrash, purgeTrash, removeTrashCopies } from './sourceTrash'
+import { prioritizeContractIssues } from './sourceContract'
 
 // 读取请求体
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -71,8 +72,9 @@ export async function handleValidate(req: IncomingMessage, res: ServerResponse) 
             // 刻意不把 valid 置 false：多声明动作的源往往仍能取链（返回对象还能解包降级），
             // 这里只做提示，阻断权留给取链结果。
             const contract = api?.info?.contract
+            // 先按严重程度排序再截断：否则同一平台的多条 warn 会把 error 挤出提示
             const contractIssues = contract
-                ? contract.issues.filter((i: any) => i.severity !== 'info')
+                ? prioritizeContractIssues(contract.issues, 10)
                 : []
             const contractHint = contract && !contract.compliant
                 ? `脚本声明不符合宿主协议：${contractIssues.slice(0, 3).map((i: any) => `${i.platform}.${i.code}`).join('、')}`
@@ -543,8 +545,9 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
                 source.contract = {
                     compliant: contract.compliant,
                     counts: contract.counts,
-                    // 列表里只给前 6 条，够看清是什么问题；完整报告用 error 日志看
-                    issues: contract.issues.filter(i => i.severity !== 'info').slice(0, 6),
+                    // 列表里只给前 6 条，够看清是什么问题；完整报告用 error 日志看。
+                    // 排序必须先做：warn 多的源会把 error 挤掉，面板就只剩「可忽略的提示」。
+                    issues: prioritizeContractIssues(contract.issues, 6),
                 }
             }
         } catch (e) { }

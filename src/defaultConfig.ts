@@ -223,6 +223,10 @@ const config: LX.Config = {
   // 单首歌的单次失败里「无版权/已下架」这类软失败占比很高，凭一次失败禁用会误伤一批，
   // 所以只改尝试顺序，把定罪留给有测试曲目与阈值保护的巡检。
   'customSource.playSink.enabled': true,
+  // 按「源 × 平台 × 音质档」短路：某源在某一档连续失败且零成功，就在该档直接跳过一小时
+  // （到期自动放行一次探路，成功即恢复）。与上面沉底的区别：沉底只改顺序仍会试，
+  // 这里是本次不发，省掉整段超时预算（flac 档最明显：一个壳源能耗掉十几秒）。
+  'customSource.qualityLedger.enabled': true,
 }
 
 export default config

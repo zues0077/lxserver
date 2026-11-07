@@ -15,7 +15,7 @@ import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerElig
 import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue } from './sourceContract'
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
-import { clearRateLimit, isRateLimitFailure, isRateLimited, noteRateLimit } from './sourceRateLimit'
+import { clearRateLimit, clearRateLimitForSource, isRateLimitFailure, isRateLimited, noteRateLimit } from './sourceRateLimit'
 import { syncLog } from '../utils/log4js'
 
 /**
@@ -1788,15 +1788,19 @@ export const notePlayFailure = (api: any, platform: string, failMessage?: string
     playFailSink.set(key, rec)
 }
 
-/** 取链成功——立刻撤销沉底/冷却/限流退避，并清掉该源该平台的档位账本 */
+/** 取链成功——立刻撤销沉底/冷却/限流退避 */
 export const clearPlayFailure = (api: any, platform: string): void => {
     if (!api?.info) return
     playFailSink.delete(playSinkKey(api.info.owner, api.info.id, platform))
     cooldownSink.delete(playSinkKey(api.info.owner, api.info.id, platform))
     try {
         clearRateLimit(api.info.owner, api.info.id, platform)
-        // 成功说明源此刻是好的：档位账本里关于它的旧证据不该再压着别的档
-        clearQualityLedger(api.info.owner, api.info.id, platform)
+        // 刻意不清「源 × 平台 × 档」账本：成功的是**本次请求那一档**，
+        // 平台下别的档（典型是长期坏的 flac）证据不该被这次 128k 成功一笔勾销。
+        // 早先在这里清整平台，结果 flac 永远攒不够样本、永远短路不了 ——
+        // 恰好把这个账本要解决的问题（坏档每次白吃十几秒超时）还给了自己。
+        // 该档自身的恢复由 noteQualityResult(ok=true) 负责；
+        // 脚本换新导致旧证据失效时，在 reloadSingleSource 里整体清（见那里）。
     } catch { /* 记账失败绝不能影响播放 */ }
 }
 
@@ -2439,9 +2443,23 @@ export async function callUserApiGetMusicUrl(
     /**
      * 记一次「源 × 平台 × 档」的结果。
      * 只影响下次要不要跳过这一档，绝不参与启停决策；任何异常都吞掉，不能影响取链。
+     *
+     * 两条准入限制（都是实测踩出来的）：
+     *  1. **限流不进账本**：429 是平台临时状态，源没坏。混进来 3 次就能把一个好档
+     *     短路一小时，与 sourceRateLimit.ts 的设计直接冲突。
+     *  2. **同一轮内同一源只记一次失败**：单源场景会重试 3 次，三次全是同一首歌、
+     *     同一时刻的连续失败，属于同一个事件。按次计数会让 minSamples=3 退化成
+     *     「一次播放请求就短路一小时」，一首本来就没版权的歌能把整个档封掉。
      */
-    const noteQuality = (api: any, ok: boolean): void => {
+    const qualityFailNoted = new Set<string>()
+    const noteQuality = (api: any, ok: boolean, failMessage?: string): void => {
         if (!quality) return
+        if (!ok && failMessage && isRateLimitFailure(failMessage)) return
+        const key = `${api?.info?.owner || ''}:${api?.info?.id || ''}`
+        if (!ok) {
+            if (qualityFailNoted.has(key)) return
+            qualityFailNoted.add(key)
+        }
         try {
             noteQualityResult(
                 {
@@ -2493,7 +2511,7 @@ export async function callUserApiGetMusicUrl(
                 console.error(`[自定义源] ${api.info.name} 失败 (第 ${i + 1}/${maxRetries} 次):`, `音源日志：${describeError(error)}`)
                 lastError = error
                 notePlayFailure(api, source, describeError(error))
-                noteQuality(api, false)
+                noteQuality(api, false, describeError(error))
                 roundFailures.push({ api, message: describeError(error) })
                 const att = { name: api.info.name, status: 'fail', message: `第 ${i + 1} 次尝试失败,音源日志：${describeError(error)}` }
                 attempts.push(att)
@@ -2560,7 +2578,7 @@ export async function callUserApiGetMusicUrl(
                 console.error(`[自定义源] ${api.info.name} 失败:`, `音源日志：${failMsg}`)
                 lastError = error
                 notePlayFailure(api, source, failMsg)
-                noteQuality(api, false)
+                noteQuality(api, false, failMsg)
                 notePlayCooldown(api, source, failMsg)
                 roundFailures.push({ api, message: failMsg })
                 const att = { name: api.info.name, status: 'fail', message: `音源日志：${failMsg}` }
@@ -2873,6 +2891,14 @@ export async function reloadSingleSource(owner: string, sourceId: string): Promi
     // 先卸载旧实例：既避免加载失败时残留旧脚本，也保证定时器被释放
     unloadLoadedApi(apiKey)
     apiStatus.delete(apiKey)
+
+    // 脚本换新 = 旧证据作废：档位短路和限流退避都是针对**旧实现**的判断。
+    // 不清的话，作者修好脚本后我们还会按老账把人挡在门外（还得等一小时才放行探路）。
+    // 这是这几本账唯一该整体清空的时机 —— 不是每次取链成功都清。
+    try {
+        clearQualityLedger(owner, sourceId)
+        clearRateLimitForSource(owner, sourceId)
+    } catch { /* 清理失败不影响重载 */ }
 
     if (!fs.existsSync(metaPath)) return { success: true }
 
