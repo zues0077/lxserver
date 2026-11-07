@@ -15373,24 +15373,29 @@ function buildContractTag(source) {
     const issues = Array.isArray(c.issues) ? c.issues : [];
     const errs = issues.filter(i => i.severity === 'error');
     const warns = issues.filter(i => i.severity === 'warn');
+    // 真实条数取自 counts：接口只回传前 6 条 issues，拿它长度当总数会把 9 项说成 6 项
+    const totalErr = typeof c.counts?.error === 'number' ? c.counts.error : errs.length;
+    const totalWarn = typeof c.counts?.warn === 'number' ? c.counts.warn : warns.length;
 
     // 完全干净：给一个极淡的对勾，证明自检确实跑过（否则用户会以为功能没生效）
-    if (!errs.length && !warns.length) {
+    if (totalErr === 0 && totalWarn === 0) {
         return `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-medium whitespace-nowrap border border-transparent bg-emerald-50/70 text-emerald-600/70 dark:bg-emerald-500/10 dark:text-emerald-400/70"
                 title="协议契约自检通过：脚本 inited 时声明的 actions / qualitys 都符合宿主协议"><i class="fas fa-file-signature mr-0.5"></i>契约 OK</span>`;
     }
 
-    const isErr = errs.length > 0;
+    const isErr = totalErr > 0;
     const tip = (isErr
-        ? `协议契约自检发现 ${errs.length} 项不符合宿主协议`
-        : `协议契约自检发现 ${warns.length} 项提示`)
-        + (isErr && warns.length ? `，另有 ${warns.length} 项提示` : '')
+        ? `协议契约自检发现 ${totalErr} 项不符合宿主协议`
+        : `协议契约自检发现 ${totalWarn} 项提示`)
+        + (isErr && totalWarn ? `，另有 ${totalWarn} 项提示` : '')
         + '：' + issues.slice(0, 4).map(describeContractIssue).join('；')
         + '（只提示，不影响加载）';
+    // 有 error 才用「N 项」这种需要人处理的措辞；纯 warn（多为音源声明了非标准音质档）
+    // 用「N 提示」，否则 37 个源里 30 多个都挂着同一句「契约 N 项」，等于噪音。
     return `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold whitespace-nowrap border ${isErr
         ? 'bg-orange-50 text-orange-600 border-orange-200 dark:bg-orange-500/20 dark:text-orange-400 dark:border-orange-500/30'
         : 'bg-slate-50 text-slate-500 border-slate-200 dark:bg-neutral-800 dark:text-neutral-400 dark:border-neutral-700'}"
-        title="${escapeHtmlText(tip)}"><i class="fas fa-file-signature mr-0.5"></i>契约 ${issues.length} 项</span>`;
+        title="${escapeHtmlText(tip)}"><i class="fas fa-file-signature mr-0.5"></i>${isErr ? `契约 ${totalErr} 项` : `契约 ${totalWarn} 提示`}</span>`;
 }
 
 /**
@@ -15403,8 +15408,9 @@ function buildContractNote(source) {
     if (!c || c.compliant) return '';
     const errs = (Array.isArray(c.issues) ? c.issues : []).filter(i => i.severity === 'error');
     if (!errs.length) return '';
+    const totalErr = typeof c.counts?.error === 'number' ? c.counts.error : errs.length;
     const head = errs.slice(0, 3).map(describeContractIssue);
-    const more = errs.length > 3 ? ` 等 ${errs.length} 项` : '';
+    const more = totalErr > head.length ? ` 等 ${totalErr} 项` : '';
     return `<div class="mt-1 flex items-center">
         <span class="text-[9px] md:text-[10px] text-orange-600 dark:text-orange-400 truncate max-w-[240px] md:max-w-none"
               title="${escapeHtmlText(errs.map(i => i.detail).join('；'))}"><i class="fas fa-file-signature mr-1"></i>声明不符宿主协议：${escapeHtmlText(head.join('；'))}${more}</span>
