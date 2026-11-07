@@ -1,6 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import { extractMetadata, loadUserApi, getApiStatus, reloadSingleSource, unloadSource, applyOrderToLoadedApis } from './userApi'
+import { extractMetadata, loadUserApi, getApiStatus, getSourceContract, reloadSingleSource, unloadSource, applyOrderToLoadedApis } from './userApi'
 import { probeNewSource, clearProbeRemoval, removeProbeStatus } from './sourceProbe'
 import type { IncomingMessage, ServerResponse } from 'http'
 import needle from 'needle'
@@ -67,12 +67,28 @@ export async function handleValidate(req: IncomingMessage, res: ServerResponse) 
                 throw new Error('脚本没有注册任何音源。请确保脚本正确调用了 lx.send("inited", { sources: {...} })')
             }
 
+            // 上传阶段就把「声明违规」告诉用户，而不是等他点歌失败再回头查。
+            // 刻意不把 valid 置 false：多声明动作的源往往仍能取链（返回对象还能解包降级），
+            // 这里只做提示，阻断权留给取链结果。
+            const contract = api?.info?.contract
+            const contractIssues = contract
+                ? contract.issues.filter((i: any) => i.severity !== 'info')
+                : []
+            const contractHint = contract && !contract.compliant
+                ? `脚本声明不符合宿主协议：${contractIssues.slice(0, 3).map((i: any) => `${i.platform}.${i.code}`).join('、')}`
+                    + `（仍可加载，但部分平台可能取链失败）`
+                : ''
+
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({
                 valid: true,
                 metadata,
                 sources: Object.keys(sources),
-                sourcesCount
+                sourcesCount,
+                contract: contract
+                    ? { compliant: contract.compliant, counts: contract.counts, issues: contractIssues.slice(0, 10) }
+                    : undefined,
+                contractHint: contractHint || undefined,
             }))
         } else {
             res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -516,6 +532,21 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
             const flag = getFlagFor(source.owner, source.id)
             // 顺带把特征码翻成人话：列表角标与弹窗都用它，避免直接显示 infinite_loop 这种码
             if (flag) source.guard = { ...flag, reasonText: describeGuardReasons(flag.reasons) }
+        } catch (e) { }
+
+        // 协议契约自检：脚本 inited 时算出来的声明合规性。
+        // 与上面的 guard（静态可疑特征）不同，这里判的是「声明能不能被宿主满足」——
+        // 典型是多声明了 musicUrl 以外的动作。只提示、不禁用：能不能播由取链决定。
+        try {
+            const contract = getSourceContract(source.owner, source.id)
+            if (contract) {
+                source.contract = {
+                    compliant: contract.compliant,
+                    counts: contract.counts,
+                    // 列表里只给前 6 条，够看清是什么问题；完整报告用 error 日志看
+                    issues: contract.issues.filter(i => i.severity !== 'info').slice(0, 6),
+                }
+            }
         } catch (e) { }
 
         // 已隔离的音源必须能被看见：它被卸载后状态看起来只是「没生效」，
