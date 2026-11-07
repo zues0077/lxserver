@@ -15328,6 +15328,89 @@ function describeCustomSourcePlatform(key) {
     };
 }
 
+/**
+ * 契约自检问题码 → 人话。
+ * 后端 sourceContract.ts 每条 issue 都带机器码（unsupported_actions 之类），
+ * 直接把码贴到面板等于没说；这里只做展示映射，判断逻辑全在后端。
+ */
+const CONTRACT_ISSUE_TEXT = {
+    sources_invalid: 'inited 里没有 sources 对象，等于没注册音源',
+    sources_empty: 'sources 是空对象，没有任何平台',
+    source_not_object: '平台声明不是对象',
+    name_missing: '缺 name，只能显示平台 id',
+    local_platform_skipped: 'local 平台语义不同，跳过校验',
+    type_not_music: 'type 应为 music',
+    actions_missing: '未声明 actions，按只提供 musicUrl 处理',
+    actions_not_array: 'actions 不是数组',
+    unsupported_actions: '声明了宿主不支持的 actions',
+    music_url_not_declared: 'actions 里没有 musicUrl',
+    qualitys_missing: '未声明 qualitys',
+    qualitys_not_array: 'qualitys 不是数组',
+    qualitys_invalid_item: 'qualitys 里有非字符串项',
+    qualitys_empty: 'qualitys 为空，该平台不会被取链',
+    unknown_quality: '声明了非标准音质档'
+};
+
+function describeContractIssue(issue) {
+    if (!issue) return '';
+    const text = CONTRACT_ISSUE_TEXT[issue.code] || issue.code;
+    return (issue.platform ? issue.platform + '：' : '') + text;
+}
+
+/**
+ * 协议契约角标。
+ *
+ * 跟 guard（静态可疑特征）不是一件事：guard 看的是脚本像不像恶意代码，
+ * 这里判的是「脚本 inited 时声明的能力，宿主能不能满足」——典型的反例是
+ * 多声明了 musicUrl 以外的 actions，部分客户端会因此把整个源判为不合规并禁用，
+ * 而症状要等到用户点歌才以「无链接」暴露。
+ *
+ * 只提示不禁用：能不能播仍由取链决定，处置权留给用户。
+ */
+function buildContractTag(source) {
+    const c = source && source.contract;
+    if (!c) return '';
+    const issues = Array.isArray(c.issues) ? c.issues : [];
+    const errs = issues.filter(i => i.severity === 'error');
+    const warns = issues.filter(i => i.severity === 'warn');
+
+    // 完全干净：给一个极淡的对勾，证明自检确实跑过（否则用户会以为功能没生效）
+    if (!errs.length && !warns.length) {
+        return `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-medium whitespace-nowrap border border-transparent bg-emerald-50/70 text-emerald-600/70 dark:bg-emerald-500/10 dark:text-emerald-400/70"
+                title="协议契约自检通过：脚本 inited 时声明的 actions / qualitys 都符合宿主协议"><i class="fas fa-file-signature mr-0.5"></i>契约 OK</span>`;
+    }
+
+    const isErr = errs.length > 0;
+    const tip = (isErr
+        ? `协议契约自检发现 ${errs.length} 项不符合宿主协议`
+        : `协议契约自检发现 ${warns.length} 项提示`)
+        + (isErr && warns.length ? `，另有 ${warns.length} 项提示` : '')
+        + '：' + issues.slice(0, 4).map(describeContractIssue).join('；')
+        + '（只提示，不影响加载）';
+    return `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold whitespace-nowrap border ${isErr
+        ? 'bg-orange-50 text-orange-600 border-orange-200 dark:bg-orange-500/20 dark:text-orange-400 dark:border-orange-500/30'
+        : 'bg-slate-50 text-slate-500 border-slate-200 dark:bg-neutral-800 dark:text-neutral-400 dark:border-neutral-700'}"
+        title="${escapeHtmlText(tip)}"><i class="fas fa-file-signature mr-0.5"></i>契约 ${issues.length} 项</span>`;
+}
+
+/**
+ * 契约问题的说明行：角标只给「几项」，这里说清是哪几项。
+ * 只有 error 级才占一行——warn 级（缺 name、非标准音质档）属于能跑但要注意，
+ * 挂在每张卡片上会把真正要看的红色错误淹没。
+ */
+function buildContractNote(source) {
+    const c = source && source.contract;
+    if (!c || c.compliant) return '';
+    const errs = (Array.isArray(c.issues) ? c.issues : []).filter(i => i.severity === 'error');
+    if (!errs.length) return '';
+    const head = errs.slice(0, 3).map(describeContractIssue);
+    const more = errs.length > 3 ? ` 等 ${errs.length} 项` : '';
+    return `<div class="mt-1 flex items-center">
+        <span class="text-[9px] md:text-[10px] text-orange-600 dark:text-orange-400 truncate max-w-[240px] md:max-w-none"
+              title="${escapeHtmlText(errs.map(i => i.detail).join('；'))}"><i class="fas fa-file-signature mr-1"></i>声明不符宿主协议：${escapeHtmlText(head.join('；'))}${more}</span>
+    </div>`;
+}
+
 async function fetchCustomSources() {
     try {
         const username = getCurrentUsername();
@@ -15678,6 +15761,9 @@ async function renderCustomSources() {
                         title="${escapeHtmlText(tip)}"><i class="fas fa-hourglass-half mr-0.5"></i>降速</span>`;
             })() : '';
 
+            // 协议契约自检：脚本 inited 声明的能力是否被宿主满足（只提示，不禁用）
+            const contractTag = buildContractTag(source);
+
             // 权限判断：管理员有所有权限；登录用户对公开源只有查看使用（Toggle）权限，无法刷新或删除
             const isPublic = source.owner === 'open';
             const canManageSource = isAdmin || (!isPublic && isUser);
@@ -15737,6 +15823,9 @@ async function renderCustomSources() {
                 </div>`;
             })() : '';
 
+            // 契约问题说明行：角标只说几项，这里说清是哪几项（仅 error 级）
+            const contractNote = buildContractNote(source);
+
             // 平台级关闭的汇总：徽标只是划线，数量多了不容易一眼看出关了几个
             const platformOffText = (() => {
                 const PLATFORM_NAMES = { kg: '酷狗', kw: '酷我', tx: 'QQ', wy: '网易', mg: '咪咕' };
@@ -15777,6 +15866,7 @@ async function renderCustomSources() {
                         ${vmTag}
                         ${guardTag}
                         ${throttleTag}
+                        ${contractTag}
                     </div>
                     ${errorMsg}
                     <div class="flex flex-wrap items-center text-[10px] t-text-muted gap-x-2.5 md:gap-x-3 gap-y-1 mt-1 md:mt-1.5">
@@ -15790,6 +15880,7 @@ async function renderCustomSources() {
                     ${platformOffText ? `<div class="mt-1 flex items-center">${platformOffText}</div>` : ''}
                     ${isolatedNote}
                     ${throttleNote}
+                    ${contractNote}
                 </div>
                 
                 <div class="flex flex-col items-end gap-1.5 md:gap-2 shrink-0">
