@@ -40,6 +40,8 @@ import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clea
 import { hasHotSearchItems } from './hotSearchFallback'
 import { getWorkerStatus } from './sourceWorkerHost'
 import { loadGovernorState } from './sourceGovernor'
+import { qualityLedgerSnapshot } from './sourceQualityLedger'
+import { rateLimitSnapshot } from './sourceRateLimit'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
@@ -3152,6 +3154,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         // 全进程登记到的长定时器（>=5min，含注册栈）：周期性卡顿的头号嫌疑
         activeLongTimers: getActiveLongTimers(),
         sourceGuard: getSourceGuardStatus(),
+        // 播放侧的两本短线账本：按档位短路（1h 自动放行探路）与限流退避（30s）。
+        // 只列仍在生效的条目——这两本账都在内存、会自己过期，列全量没有意义。
+        playbackLedger: {
+          quality: qualityLedgerSnapshot(),
+          rateLimit: rateLimitSnapshot(),
+        },
         sourceProbe: getSourceProbeStatus(probeDetail),
         // 慢源独立线程：哪些源进 worker、哪些已熔断、开关状态（r43 实机排障用）
         sourceWorker: getWorkerStatus(),

@@ -12,6 +12,8 @@ import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure, isPlatformDemoted } from './sourceProbe'
 import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor, listWorkerPresetCandidates } from './sourceGovernor'
 import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible } from './sourceWorkerHost'
+import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
+import { clearRateLimit, isRateLimitFailure, isRateLimited, noteRateLimit, rateLimitSnapshot } from './sourceRateLimit'
 import { syncLog } from '../utils/log4js'
 
 /**
@@ -1619,7 +1621,12 @@ const playFailSink = new Map<string, PlaySinkRecord>()
 
 const playSinkKey = (owner: string, id: string, platform: string): string => `${owner || ''}:${id || ''}:${platform || ''}`
 
-/** 按「近期是否反复失败」把候选分成两拨：先试 fresh，再试 sunk。纯函数，便于单测 */
+/**
+ * 按「近期是否反复失败」把候选分成两拨：先试 fresh，再试 sunk。
+ *
+ * 判定依赖两份模块内账本（播放沉底 + 限流退避）与巡检侧的降权状态，
+ * 因此 `now` 可注入以便单测固定在某一时刻。
+ */
 export const partitionByPlaySink = (
     candidates: any[],
     platform: string,
@@ -1628,6 +1635,9 @@ export const partitionByPlaySink = (
     const isSunk = (api: any): boolean => {
         const rec = playFailSink.get(playSinkKey(api?.info?.owner, api?.info?.id, platform))
         if (rec && rec.fails >= PLAY_SINK_MIN_FAILS && now - rec.lastFailAt < PLAY_SINK_WINDOW_MS) return true
+        // 平台刚回过 429：30 秒内先排到队尾，别立刻再撞一次。
+        // 这与沉底不同——限流不进失败账本，30 秒后自动恢复（见 sourceRateLimit.ts）。
+        if (isRateLimited(api?.info?.owner, api?.info?.id, platform, now)) return true
         // 巡检侧的降权观察：第一次探测失败就点亮，成功一次 / 过期自动撤销。
         // 两套账本各管一段（播放侧管「本次失败」，巡检侧管「平台级证据」），任一命中都排到队尾。
         return isPlatformDemoted(api?.info?.owner, api?.info?.id, platform, now)
@@ -1643,9 +1653,25 @@ const playSinkEnabled = (): boolean => {
     return v !== false
 }
 
-/** 记一次取链失败（原因不限）——只用于排序，不参与定罪 */
-export const notePlayFailure = (api: any, platform: string): void => {
+/** 「源 × 平台 × 音质档」短路开关。默认开；关掉后只保留原来的源级沉底 */
+const qualityLedgerEnabled = (): boolean => {
+    const v = (global.lx && global.lx.config) ? (global.lx.config as any)['customSource.qualityLedger.enabled'] : undefined
+    return v !== false
+}
+
+/**
+ * 记一次取链失败——只用于排序，不参与定罪。
+ *
+ * `failMessage` 用来分流：**限流（429）不进沉底账本**，改走 30 秒短退避。
+ * 限流是平台侧的临时状态，源本身没坏；记进失败账本会让健康源被排到队尾十几分钟，
+ * 还会污染「源 × 档」账本，把能用的档位判成必败档。
+ */
+export const notePlayFailure = (api: any, platform: string, failMessage?: string): void => {
     if (!api?.info) return
+    if (failMessage && isRateLimitFailure(failMessage)) {
+        noteRateLimit(api.info.owner, api.info.id, platform)
+        return
+    }
     const key = playSinkKey(api.info.owner, api.info.id, platform)
     const rec = playFailSink.get(key) || { fails: 0, lastFailAt: 0 }
     rec.fails += 1
@@ -1653,11 +1679,16 @@ export const notePlayFailure = (api: any, platform: string): void => {
     playFailSink.set(key, rec)
 }
 
-/** 取链成功——立刻撤销沉底，并把它清出账本 */
+/** 取链成功——立刻撤销沉底/冷却/限流退避，并清掉该源该平台的档位账本 */
 export const clearPlayFailure = (api: any, platform: string): void => {
     if (!api?.info) return
     playFailSink.delete(playSinkKey(api.info.owner, api.info.id, platform))
     cooldownSink.delete(playSinkKey(api.info.owner, api.info.id, platform))
+    try {
+        clearRateLimit(api.info.owner, api.info.id, platform)
+        // 成功说明源此刻是好的：档位账本里关于它的旧证据不该再压着别的档
+        clearQualityLedger(api.info.owner, api.info.id, platform)
+    } catch { /* 记账失败绝不能影响播放 */ }
 }
 
 // ==================== 回源超时的「短冷却」账本 ====================
@@ -1701,6 +1732,10 @@ export const partitionByCooldown = (
 const reportPlayHardFailures = (failures: Array<{ api: any; message: string }>, platform: string, hasControlGroup: boolean): void => {
     if (!failures.length) return
     for (const f of failures) {
+        // 限流不是硬故障：交给巡检只会让一个健康源被降权/关闭。
+        // isHardFailure 本来就不含 429，但文案里可能同时出现 5xx 与 429（上游包装过），
+        // 所以这里显式先排除。
+        if (isRateLimitFailure(f.message)) continue
         if (!isHardFailure(f.message)) continue
         try {
             reportManualFailure({
@@ -2171,6 +2206,25 @@ export async function callUserApiGetMusicUrl(
         })
     }
 
+    // === 按「源 × 平台 × 音质档」短路：这一档已证明必败的源先不发它 ===
+    // 与沉底的分工：沉底是「这个源在这个平台不行」→ 排到队尾但仍会试；
+    // 这里是「这个源的这一档不行」→ 本次直接不发，省掉整段超时预算，
+    // 让真正能出这一档的源早点上场（flac 档尤其明显：一个壳源能耗掉十几秒）。
+    // 铁律：全部被短路时必须整体放行——账本只允许省掉白跑，不允许造成无源可用。
+    if (qualityLedgerEnabled() && candidates.length > 0 && quality) {
+        const plan = applyQualityLedger(candidates, source, quality)
+        if (plan.blocked.length > 0) {
+            const names = plan.blocked.map((a: any) => a.info?.name).join('、')
+            if (plan.rescuedAll) {
+                console.log(`[自定义源] ${source}/${quality} 档的源全部处于短路期，本次忽略账本放行探路：${names}`)
+            } else {
+                candidates = plan.candidates
+                console.log(`[自定义源] ${plan.blocked.length} 个音源在 ${source}/${quality} 档已连续失败且零成功，` +
+                    `本次跳过（1 小时后自动放行探路）：${names}`)
+            }
+        }
+    }
+
     if (enableAutoSwitchApiSource === false && candidates.length > 1) {
         candidates = [candidates[0]]
     }
@@ -2273,6 +2327,25 @@ export async function callUserApiGetMusicUrl(
     // 本轮实际调脚本时传「脚本声明的 key」（qs/bilibili 等），别在脚本内部做归一
     const scriptKeyFor = (api: any): string => sKeys.find(k => api.info?.sources?.[k]) || source
 
+    /**
+     * 记一次「源 × 平台 × 档」的结果。
+     * 只影响下次要不要跳过这一档，绝不参与启停决策；任何异常都吞掉，不能影响取链。
+     */
+    const noteQuality = (api: any, ok: boolean): void => {
+        if (!quality) return
+        try {
+            noteQualityResult(
+                {
+                    owner: String(api?.info?.owner || ''),
+                    id: String(api?.info?.id || ''),
+                    platform: source,
+                    quality,
+                },
+                ok,
+            )
+        } catch { /* 记账失败不影响播放 */ }
+    }
+
     if (supportedCount === 1) {
         const api = candidates[0]
         const maxRetries = 3
@@ -2300,6 +2373,7 @@ export async function callUserApiGetMusicUrl(
 
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
                 clearPlayFailure(api, source)
+                noteQuality(api, true)
                 // 单源场景没有对照组（没人证明这首歌能播），只记账不处置
                 reportPlayHardFailures(roundFailures, source, false)
                 const att = { name: api.info.name, status: 'success', message: `第 ${i + 1} 次尝试成功` }
@@ -2309,7 +2383,8 @@ export async function callUserApiGetMusicUrl(
             } catch (error: any) {
                 console.error(`[自定义源] ${api.info.name} 失败 (第 ${i + 1}/${maxRetries} 次):`, `音源日志：${describeError(error)}`)
                 lastError = error
-                notePlayFailure(api, source)
+                notePlayFailure(api, source, describeError(error))
+                noteQuality(api, false)
                 roundFailures.push({ api, message: describeError(error) })
                 const att = { name: api.info.name, status: 'fail', message: `第 ${i + 1} 次尝试失败,音源日志：${describeError(error)}` }
                 attempts.push(att)
@@ -2357,6 +2432,7 @@ export async function callUserApiGetMusicUrl(
 
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
                 clearPlayFailure(api, source)
+                noteQuality(api, true)
                 // 本源成功 = 这首歌在这个平台确定可播 → 本轮硬故障失败的源有了对照组
                 reportPlayHardFailures(roundFailures, source, true)
                 const att = { name: api.info.name, status: 'success' }
@@ -2374,7 +2450,8 @@ export async function callUserApiGetMusicUrl(
                 const failMsg = describeError(error)
                 console.error(`[自定义源] ${api.info.name} 失败:`, `音源日志：${failMsg}`)
                 lastError = error
-                notePlayFailure(api, source)
+                notePlayFailure(api, source, failMsg)
+                noteQuality(api, false)
                 notePlayCooldown(api, source, failMsg)
                 roundFailures.push({ api, message: failMsg })
                 const att = { name: api.info.name, status: 'fail', message: `音源日志：${failMsg}` }
