@@ -140,21 +140,28 @@ export const filterByQualityLedger = (
 }
 
 /**
- * 把账本结论套用到候选列表上，并处理「全部被短路」的死局。
+ * 把账本结论套用到候选列表上：**可用源在前，短路中的源排到最后兜底**。
  *
- * `rescuedAll=true` 表示这一次忽略账本、全体放行：这是探路，也是防死锁的兜底。
- * 调用方应据此打一条日志（用户需要知道「这次为什么还是试了那个坏档」）。
+ * 为什么是「排到队尾」而不是「本次不发」：账本记的是「源 × 平台 × 档」，
+ * 而能不能出链还要看**这一首歌**。跨歌曲攒出来的证据只能说明「这一档大概率不行」，
+ * 不能说明「这一首一定不行」——把源直接丢掉，等于让一次误判直接变成播放失败。
+ *
+ * 排到队尾同时拿到两边的好处：
+ *   - 前面有可用源成功 → 循环提前返回，那几段超时预算照样省掉了（收益不变）；
+ *   - 可用源全败 → 兜底再试它们一次，把「误杀」从失败降级成慢一拍（不会更坏）。
+ *
+ * 调用方必须处理 `rescuedAll`（全部在短路期）：那是探路，也是防死锁兜底。
  */
 export const applyQualityLedger = (
     candidates: any[],
     platform: string,
     quality: string,
     now: number = Date.now(),
-): { candidates: any[]; blocked: any[]; rescuedAll: boolean } => {
+): { candidates: any[]; blocked: any[]; rescuedAll: boolean; reserve: number } => {
     const { usable, blocked } = filterByQualityLedger(candidates, platform, quality, now)
-    if (blocked.length === 0) return { candidates, blocked, rescuedAll: false }
-    if (usable.length === 0) return { candidates, blocked, rescuedAll: true }
-    return { candidates: usable, blocked, rescuedAll: false }
+    if (blocked.length === 0) return { candidates, blocked, rescuedAll: false, reserve: 0 }
+    if (usable.length === 0) return { candidates, blocked, rescuedAll: true, reserve: 0 }
+    return { candidates: [...usable, ...blocked], blocked, rescuedAll: false, reserve: blocked.length }
 }
 
 /**

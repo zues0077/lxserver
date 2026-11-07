@@ -161,17 +161,30 @@ test('applyQualityLedger：无人短路时原样返回，不新建数组', () =>
   const r = applyQualityLedger(list, 'kw', 'flac', T0)
   assert.strictEqual(r.candidates, list)
   assert.strictEqual(r.blocked.length, 0)
+  assert.strictEqual(r.reserve, 0)
   assert.strictEqual(r.rescuedAll, false)
 })
 
-test('applyQualityLedger：部分短路 → 只剔除被短路的', () => {
+test('applyQualityLedger：部分短路 → 可用源在前，被短路源排到队尾兜底（不丢弃）', () => {
   const a = api('open', 'a')
   const b = api('open', 'b')
   for (let i = 0; i < 3; i++) noteQualityResult({ owner: 'open', id: 'a', platform: 'kw', quality: 'flac' }, false, T0 + i)
   const r = applyQualityLedger([a, b], 'kw', 'flac', T0 + 10)
-  assert.deepStrictEqual(r.candidates.map((x: any) => x.info.id), ['b'])
+  // 关键：a 仍在列表里，只是排到 b 后面 —— 前面的源成功就白省，
+  // 全败时它还会被试一次，跨歌曲的证据不能直接判这一首死刑
+  assert.deepStrictEqual(r.candidates.map((x: any) => x.info.id), ['b', 'a'])
   assert.deepStrictEqual(r.blocked.map((x: any) => x.info.id), ['a'])
+  assert.strictEqual(r.reserve, 1)
   assert.strictEqual(r.rescuedAll, false)
+})
+
+test('applyQualityLedger：多个被短路源保持原有相对顺序排到队尾', () => {
+  const a = api('open', 'a'); const b = api('open', 'b'); const c = api('open', 'c')
+  for (let i = 0; i < 3; i++) noteQualityResult({ owner: 'open', id: 'a', platform: 'kw', quality: 'flac' }, false, T0 + i)
+  for (let i = 0; i < 3; i++) noteQualityResult({ owner: 'open', id: 'c', platform: 'kw', quality: 'flac' }, false, T0 + i)
+  const r = applyQualityLedger([a, b, c], 'kw', 'flac', T0 + 10)
+  assert.deepStrictEqual(r.candidates.map((x: any) => x.info.id), ['b', 'a', 'c'])
+  assert.strictEqual(r.reserve, 2)
 })
 
 test('applyQualityLedger：全部短路 → 全体放行探路（账本不允许造成无源可用）', () => {

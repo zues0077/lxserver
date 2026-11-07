@@ -648,6 +648,28 @@ export function getApiStatus(owner: string, id: string): ApiStatusInfo | undefin
 }
 
 /**
+ * 按 order.json 里的位置排序候选源；**没被列出的按 id 字典序兜底**。
+ *
+ * 抽成纯函数是为了让「顺序可复现」这条规则可测：以前 order.json 没覆盖到源时
+ * （新装、手工拷入、`_open` 下根本没这个文件）直接沿用 Map 插入顺序，
+ * 也就是脚本加载完成顺序 —— 那是异步竞态，同一份数据两次启动可能选到不同的源。
+ */
+export const sortCandidatesByOrder = (candidates: any[], idToIndex: Map<string, number>): any[] => {
+    const orderIndex = (api: any): number => {
+        const id = String(api?.info?.id || '')
+        return idToIndex.has(id) ? idToIndex.get(id)! : 999999
+    }
+    return [...candidates].sort((a: any, b: any) => {
+        const ia = orderIndex(a)
+        const ib = orderIndex(b)
+        if (ia !== ib) return ia - ib
+        const ka = String(a?.info?.id || '')
+        const kb = String(b?.info?.id || '')
+        return ka < kb ? -1 : ka > kb ? 1 : 0
+    })
+}
+
+/**
  * 取某个已加载音源的协议契约自检报告。
  *
  * 未加载（禁用/加载失败）时返回 undefined —— 契约只有在脚本真的 inited 之后
@@ -2260,9 +2282,15 @@ export async function callUserApiGetMusicUrl(
         }
     }
 
-    // === 实时按 order.json 对候选列表排序 ===
+    // === 实时按 order.json 对候选列表排序（未列出者按 id 兜底稳定排序）===
     // 不依赖 loadedApis 的 Map 插入顺序（部分 reload 后顺序会乱），
-    // 每次解析都直接读 order.json，无需重启服务器即可生效
+    // 每次解析都直接读 order.json，无需重启服务器即可生效。
+    //
+    // ⚠️ order.json 缺失/没覆盖到某些源时，**绝不能退化成加载完成顺序**：
+    // 那是异步竞态（脚本初始化快慢、沙箱启动先后都会影响它），同一份数据两次启动
+    // 可能把不同的源排到第一位。实测（2026-11-08 A/B，wy/起风了）两个实例数据与配置
+    // 完全相同，只因顺序不同：一个命中 110ms 的源，另一个命中 1.9s 的源，差 17 倍。
+    // 所以始终排序，order.json 里没列出的按 id 字典序兜底 —— 顺序可预期，可复现。
     if (candidates.length > 1) {
         const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
         let orderData: string[] = []
@@ -2284,14 +2312,8 @@ export async function callUserApiGetMusicUrl(
             }
         }
 
-        if (orderData.length > 0) {
-            const idToIndex = new Map(orderData.map((id, i) => [id, i]))
-            candidates.sort((a: any, b: any) => {
-                const ia = idToIndex.has(a.info.id) ? idToIndex.get(a.info.id)! : 999999
-                const ib = idToIndex.has(b.info.id) ? idToIndex.get(b.info.id)! : 999999
-                return ia - ib
-            })
-        }
+        const idToIndex = new Map(orderData.map((id, i) => [id, i]))
+        candidates = sortCandidatesByOrder(candidates, idToIndex)
     }
     // =========================================
 
@@ -2319,11 +2341,13 @@ export async function callUserApiGetMusicUrl(
         })
     }
 
-    // === 按「源 × 平台 × 音质档」短路：这一档已证明必败的源先不发它 ===
+    // === 按「源 × 平台 × 音质档」排序：这一档已证明必败的源排到队尾 ===
     // 与沉底的分工：沉底是「这个源在这个平台不行」→ 排到队尾但仍会试；
-    // 这里是「这个源的这一档不行」→ 本次直接不发，省掉整段超时预算，
+    // 这里是「这个源的这一档不行」→ 优先发给别的源，省掉整段超时预算，
     // 让真正能出这一档的源早点上场（flac 档尤其明显：一个壳源能耗掉十几秒）。
-    // 铁律：全部被短路时必须整体放行——账本只允许省掉白跑，不允许造成无源可用。
+    // 铁律：账本只允许省掉白跑，不允许造成无源可用 ——
+    // 所以被短路的源**排到队尾兜底**而不是本次不发：前面有源成功就白省了，
+    // 前面全败时它们还会被试一次，误判只让这次慢一拍，不会变成播放失败。
     if (qualityLedgerEnabled() && candidates.length > 0 && quality) {
         const plan = applyQualityLedger(candidates, source, quality)
         if (plan.blocked.length > 0) {
@@ -2333,7 +2357,7 @@ export async function callUserApiGetMusicUrl(
             } else {
                 candidates = plan.candidates
                 console.log(`[自定义源] ${plan.blocked.length} 个音源在 ${source}/${quality} 档已连续失败且零成功，` +
-                    `本次跳过（1 小时后自动放行探路）：${names}`)
+                    `本次排到队尾兜底（前面的源全败才试）：${names}`)
             }
         }
     }
