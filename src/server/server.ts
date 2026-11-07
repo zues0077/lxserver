@@ -9990,22 +9990,27 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   // 预算内没有任何源返回地址：抛出去走统一的「解析失败」分支（会写失败短缓存）
                   throw new Error(`取链超时：${Math.round(budgetMs / 1000)} 秒内没有任何源返回可用地址`)
                 }
-                result = userApiResult
+                // [R75 修复] 后处理（解密/加密拦截/可播性门禁）可能 throw；若先把结果赋给
+                // result，catch 后 result 仍残留被拦截的坏直链，外层 if (!result) 判非空 →
+                // 跳过换源、跳过报错，坏直链被当成功结果 200 返回（r73/r75 审计中 100 条
+                // 乱序/加密直链漏给前端的根因）。改为先在局部变量上完成后处理，全部通过
+                // 才赋给 result —— 拦截 throw 时 result 保持空，换源/失败分支正常接管。
+                const candidate: any = userApiResult
                 attempts = userApiResult.attempts || []
 
                 // 汽水/B站统一后处理（脚本通道 + 服务端通道都落这里）：
                 // ① 登录态复核：服务端通道的 via 透出（匿名明文通道 → 复核账号是否过期）
-                if (source === 'soda') musicAccount.noteSodaAnonymousLink((result as any).via)
+                if (source === 'soda') musicAccount.noteSodaAnonymousLink(candidate.via)
                 // ② 汽水 CENC 加密流：服务端通道随链下发 AES 密钥（result.key，spade_a）——
                 //    走「下载 → 本地解密落缓存 → 返回明文缓存地址」，让首播即可播。
-                const sodaKey = source === 'soda' ? (result as any).key : ''
+                const sodaKey = source === 'soda' ? candidate.key : ''
                 if (source === 'soda' && sodaKey) {
                   let cached = fileCache.checkCache({ ...songInfo, quality: quality || '' }, verifiedUsername)
                   if (!(cached && cached.exists && !cached.isCollision && cached.url)) {
                     await fileCache.downloadAndCache(
-                      songInfo, result.url, quality || '128k', verifiedUsername, undefined,
+                      songInfo, candidate.url, quality || '128k', verifiedUsername, undefined,
                       false, false, false,
-                      { requestedSource: source, downloadSource: source, sourceName: result.sourceName, decryptKey: sodaKey },
+                      { requestedSource: source, downloadSource: source, sourceName: candidate.sourceName, decryptKey: sodaKey },
                     )
                     cached = fileCache.checkCache({ ...songInfo, quality: quality || '' }, verifiedUsername)
                   }
@@ -10014,17 +10019,17 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   }
                   console.log(`[汽水解密] 返回已解密缓存地址: ${songInfo.name} (${cached.quality || quality})`)
                   result = {
-                    ...result,
+                    ...candidate,
                     url: cached.url,
                     type: 'local',
-                    sourceName: `${result.sourceName}（已解密）`,
-                    quality: cached.quality || quality || result.type,
+                    sourceName: `${candidate.sourceName}（已解密）`,
+                    quality: cached.quality || quality || candidate.type,
                     folder: cached.folder,
                   } as any
                 } else if (source === 'soda' || source === 'bili') {
                   // 无密钥（脚本通道直链 / 非加密曲）：仍做加密流兜底拦截 —— 脚本拿不到
                   // CENC 密钥，加密流浏览器播不了，必须显式失败让位给换源。
-                  if (await isEncryptedRemoteStream(result.url)) {
+                  if (await isEncryptedRemoteStream(candidate.url)) {
                     throw new Error(
                       `${source === 'soda' ? '汽水' : 'B站'} 该曲返回的是加密流（DRM），浏览器无法播放，请改用它源或其他平台播放`
                     )
@@ -10033,15 +10038,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   // 2026-11-07 任素汐 140 次取链审计：49% 漏网直链是「容器元数据明文、
                   // 音频数据乱序」的流（无 enca CENC 特征，上面的探测抓不到，与 UA 无关），
                   // 17% 是 60/45 秒试听片段（明文可解码）。判据与实现见 remoteStreamGate.ts。
-                  if (source === 'soda' && /^https?:\/\//i.test(String(result.url || ''))) {
+                  if (source === 'soda' && /^https?:\/\//i.test(String(candidate.url || ''))) {
                     const expectedSec = parseIntervalSeconds(songInfo.interval || (songInfo as any)?.meta?.interval)
-                    const gate = await probeRemoteStream(String(result.url), expectedSec)
+                    const gate = await probeRemoteStream(String(candidate.url), expectedSec)
                     if (!gate.ok) {
                       if (gate.kind === 'preview') noteSodaPreviewVerdict(songInfo, gate.reason || '')
                       console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
                       throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
                     }
                   }
+                  // 后处理全部通过：此刻才把候选结果转正
+                  result = candidate
+                } else {
+                  // 其余平台无后处理，直接转正
+                  result = candidate
                 }
               } catch (userApiError: any) {
                 // 兜底：userApi 层已把 undefined / 非 Error 抛出品归一化，这里再防一次，
@@ -10050,6 +10060,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 console.error(`[歌曲播放] 自定义源解析失败:`, message)
                 customSourceError = message
                 attempts = (userApiError && userApiError.attempts) || []
+                // [R75 修复] 双保险：后处理 throw 时若 result 已被中途赋值（历史遗留路径），
+                // 必须清空，否则坏直链会在这里漏给成功响应
+                result = undefined
                 // 不抛出错误，继续尝试内置源
               }
               } else if (!result) {
@@ -10069,6 +10082,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               try {
                 const switched = await switchToOtherSource(songInfo, quality || '128k', verifiedUsername)
                 if (switched?.url) {
+                  // [R75-1] 换源结果同样过「可播性门禁」：换源目标若也是汽水系（如 lx-animemusic
+                  // 脚本直连抖音 CDN），拿到的直链同样可能是乱序流/试听片段，不检就等于把
+                  // 拦截过的坏流换个通道再漏一次。
+                  const switchedUrl = String(switched.url || '')
+                  if (switchedUrl.startsWith('/') || !/^https?:\/\//i.test(switchedUrl)) {
+                    // 本地缓存地址 / 非直链：无需门禁
+                  } else {
+                    const expectedSecSwitch = parseIntervalSeconds(songInfo.interval || (songInfo as any)?.meta?.interval)
+                    const gateSwitch = await probeRemoteStream(switchedUrl, expectedSecSwitch)
+                    if (!gateSwitch.ok) {
+                      console.warn(`[换源] 换源结果未过可播性门禁（${switched.sourceName}）: ${songInfo.name} — ${gateSwitch.reason}`)
+                      throw new Error(`换源结果不可播（${gateSwitch.reason}）`)
+                    }
+                  }
                   removePendingAfterSwitch(songInfo)
                   result = {
                     url: switched.url,
