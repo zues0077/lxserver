@@ -99,6 +99,17 @@ export default {
 
       if (list == null) return this.search(str, page, limit, retryNum)
 
+      // 风控假成功拦截：酷狗对部分 IP/UA 会秒回 error_code:0 + 空 lists（实测 30min 216 次探测 83% 空返回，
+      // 其中 169 次 <100ms 秒回）。空数组不是 null，旧判定直接当正常结果返回，搜索层整段失效。
+      // 实测空/成功是秒级窗口交替（同轮混合率 69%），紧邻退避重试即可恢复。
+      // 首页空结果才重试（翻页时空页是正常回绕），退避 250/600ms 共 2 次。
+      if (list.length === 0 && Number(page) === 1 && retryNum <= 2) {
+        const backoff = retryNum === 1 ? 250 : 600
+        console.warn(`[kg搜索] 疑似风控空返回（第${retryNum}次），${backoff}ms 后重试：${str}`)
+        return new Promise(resolve => setTimeout(resolve, backoff))
+          .then(() => this.search(str, page, limit, retryNum))
+      }
+
       this.total = result.data.total
       this.page = page
       this.allPage = Math.ceil(this.total / limit)

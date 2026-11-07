@@ -99,6 +99,7 @@ import {
 import { runPullGuard } from './xiaoai/pullGuard'
 import { isStaleSeekPosition } from './xiaoai/seekGuard'
 import { resolveSeekKnownMs } from './xiaoai/seekDuration'
+import { noteBadTrack, peekBadTrack, clearBadTrack } from './xiaoai/badTrackLedger'
 import { fixBrokenUnicodeEscapes, fixTrackListNames } from './songNameFix'
 const { MusicTagger, MetaPicture } = require('music-tag-native')
 
@@ -1618,6 +1619,33 @@ const resolveXiaoAiTrack = async (
     quality = '320k'
   }
 
+  // 坏曲账本（r73 方案2）：转码+换源都失败的曲目在 15min 内复用原格式文件直投，
+  // 不再重复「下载×2+转码×4」全链路（实测每次 ~20s+）。直链场景（directStreamUrl）不查账，
+  // 那是新下载的文件与账本无关；文件被 LRU 清理时 peekBadTrack 返 null 自动重走全链路。
+  if (!directStreamUrl) {
+    const bad = peekBadTrack(songInfo, quality)
+    if (bad) {
+      const durMs = probeLocalFileDuration(bad.filePath)
+      const baseName = path.basename(bad.filePath)
+      const ext = path.extname(bad.filePath).toLowerCase()
+      const reuseContentType = ext === '.m4a' || ext === '.mp4' ? 'audio/mp4'
+        : ext === '.ogg' ? 'audio/ogg'
+        : ext === '.flac' ? 'audio/flac'
+        : ext === '.wav' ? 'audio/wav'
+        : 'audio/mpeg'
+      console.warn(`[XiaoAi] 坏曲账本命中，复用原格式文件直投：${baseName}（${Math.round(durMs / 1000)}s）`)
+      syncLog.warn(`[XiaoAi] 坏曲账本命中，复用原格式文件直投：${baseName}（${Math.round(durMs / 1000)}s）`)
+      return {
+        path: bad.filePath,
+        filename: baseName,
+        cached: true,
+        contentType: reuseContentType,
+        via: `${bad.via}｜坏源原格式复用`,
+        durationMs: durMs > 0 ? durMs : 0,
+      }
+    }
+  }
+
   const target = await resolveXiaoAiTrackRaw(req, songInfo, quality, verifiedUsername, directStreamUrl)
   let unified: XiaoAiTrackTarget
   try {
@@ -1647,6 +1675,8 @@ const resolveXiaoAiTrack = async (
   const retryUnified = await applyMp3Unification(retry, songInfo, quality, verifiedUsername)
   if (!retryUnified.transcodeError) {
     syncLog.info(`[XiaoAi] 换源后转码成功：${retryUnified.filename}（${retryUnified.via}）`)
+    // 新文件能正常转码：旧账条目已过时（可能是偶发网络截断），清掉别挡后续投送
+    clearBadTrack(songInfo, quality)
     return retryUnified
   }
   // 换源也没救回来（同一路源、同一个坏文件，例如汽水《秋酿》的 AAC 参数集损坏）。
@@ -1657,6 +1687,8 @@ const resolveXiaoAiTrack = async (
   syncLog.warn(
     `[XiaoAi] 转码与换源都失败，按原格式投送（可能无声）：${retryUnified.filename}（${String(retryUnified.transcodeError).slice(0, 120)}）`,
   )
+  // 记入坏曲账本（r73 方案2）：15min 内同曲投送直接复用本文件，不再重复全链路
+  if (retryUnified.path) noteBadTrack(songInfo, quality, retryUnified.path, retryUnified.via || '原格式')
   return { ...retryUnified, via: `${retryUnified.via}｜转码失败-原格式` }
 }
 
@@ -8642,6 +8674,35 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             result = { list: searchData.list || [], total: searchData.total || 0, allPage: searchData.allPage || 1, pageSize: limit, fetchedPages: page, source }
           } else {
             throw Object.assign(new Error(`搜索类型不合法：${type}`), { statusCode: 400 })
+          }
+
+          // kg 风控兜底（r73 方案1.5）：Web 端点（songsearch.kugou.com）被风控秒回空列表
+          // （实测 30min 216 次探测 83% 空返回，SDK 层退避重试见 kg/musicSearch.js）。
+          // 这里再加一层同平台协议兜底——概念版端点（complexsearch.kugou.com，kglite 通道）
+          // 是完全独立的端点+协议，实测 12 连打 0 空返回。结果标 source:'kglite'，取链走账号通道。
+          if (source === 'kg' && type === 'song' && (!result.list || result.list.length === 0)) {
+            try {
+              const liteCookie = musicAccount.getCookie('kglite') || ''
+              const liteData: any = requestedLimit > 0
+                ? await musicAccount.kglite.searchSongs(name, Math.max(1, page), Math.min(requestedLimit, 50), liteCookie)
+                : await musicAccount.kglite.searchKgliteAll(name, liteCookie)
+              const liteList: any[] = Array.isArray(liteData?.list) ? liteData.list : []
+              if (liteList.length > 0) {
+                console.warn(`[搜索] kg Web端点空返回（疑似风控），已用概念版端点兜底：${name}（${liteList.length} 条）`)
+                result = {
+                  list: requestedLimit > 0 ? liteList.slice(0, requestedLimit) : liteList,
+                  total: Number(liteData?.total) || liteList.length,
+                  allPage: Number(liteData?.allPage) || 1,
+                  pageSize: requestedLimit > 0 ? requestedLimit : 20,
+                  fetchedPages: 1,
+                  stopReason: 'kglite-fallback',
+                  hasMore: false,
+                  source: 'kglite',
+                }
+              }
+            } catch (liteErr: any) {
+              console.warn(`[搜索] kg 概念版兜底也失败：${liteErr?.message || liteErr}`)
+            }
           }
 
           fs.appendFileSync(path.join(process.cwd(), 'debug.txt'), `[Search] Source: ${source}, Type: ${type}, Query: ${name}, FetchedPages: ${result.fetchedPages}, Returned: ${result.list.length}, PlatformTotal: ${result.total}\n`)
