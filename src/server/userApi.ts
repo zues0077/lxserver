@@ -669,6 +669,46 @@ export const sortCandidatesByOrder = (candidates: any[], idToIndex: Map<string, 
     })
 }
 
+/** 已经尝试过落盘的 order.json 路径（含失败），避免每个请求都去写盘 */
+const orderSnapshotTried = new Set<string>()
+
+/**
+ * order.json 缺失时，把「当前生效的顺序」落盘冻结一次。
+ *
+ * 为什么不是按 id 字典序兜底：字典序是**任意**的。实测（2026-11-08，wy/晴天 320k）
+ * 按 id 排会把 `1010音源`、`Ciallo` 顶到最前，每次请求白跑 5.5s 才轮到能出链的源，
+ * 而原来的顺序只要 0.2s —— 用户什么都没改，却平白慢了 20 倍。
+ *
+ * 冻结当前顺序同时拿到三件事：
+ *   - 不打扰：用户此刻用的顺序就是它，第一次启动后原样保留，不会莫名重排；
+ *   - 可复现：落盘后重启不再漂移，排查「重启后某平台变慢」有据可查；
+ *   - 可调整：面板里拖一下就改 order.json，不再受加载竞态影响。
+ *
+ * 只写一次：写完文件就存在了，下次读到就走正常路径。写不了（只读挂载）时
+ * 记进 tried 集合，别每个请求都重试一遍。
+ */
+export const persistOrderSnapshot = (orderPath: string, ids: string[]): boolean => {
+    if (!orderPath || ids.length < 2) return false
+    if (orderSnapshotTried.has(orderPath)) return false
+    orderSnapshotTried.add(orderPath)
+    try {
+        // 已有文件就绝不覆盖：那可能是用户手改的，也可能被并发请求抢先写了
+        if (fs.existsSync(orderPath)) return false
+        fs.mkdirSync(path.dirname(orderPath), { recursive: true })
+        const tmp = orderPath + '.tmp'
+        fs.writeFileSync(tmp, JSON.stringify(ids, null, 2), 'utf-8')
+        fs.renameSync(tmp, orderPath)
+        console.log(`[自定义源] 未找到 order.json，已按当前加载顺序冻结 ${ids.length} 个源：${orderPath}`)
+        return true
+    } catch (e: any) {
+        console.log(`[自定义源] 冻结 order.json 失败（按 id 字典序兜底）：${e?.message || e}`)
+        return false
+    }
+}
+
+/** 单测用：清掉「已尝试落盘」标记 */
+export const __resetOrderSnapshotState = (): void => { orderSnapshotTried.clear() }
+
 /**
  * 取某个已加载音源的协议契约自检报告。
  *
@@ -2282,7 +2322,7 @@ export async function callUserApiGetMusicUrl(
         }
     }
 
-    // === 实时按 order.json 对候选列表排序（未列出者按 id 兜底稳定排序）===
+    // === 实时按 order.json 对候选列表排序（缺失则冻结当前顺序）===
     // 不依赖 loadedApis 的 Map 插入顺序（部分 reload 后顺序会乱），
     // 每次解析都直接读 order.json，无需重启服务器即可生效。
     //
@@ -2290,7 +2330,13 @@ export async function callUserApiGetMusicUrl(
     // 那是异步竞态（脚本初始化快慢、沙箱启动先后都会影响它），同一份数据两次启动
     // 可能把不同的源排到第一位。实测（2026-11-08 A/B，wy/起风了）两个实例数据与配置
     // 完全相同，只因顺序不同：一个命中 110ms 的源，另一个命中 1.9s 的源，差 17 倍。
-    // 所以始终排序，order.json 里没列出的按 id 字典序兜底 —— 顺序可预期，可复现。
+    //
+    // 处理顺序：
+    //   1. 有 order.json → 按它排（用户/面板说了算）；
+    //   2. 没有 → 把**当前这份顺序**写进 order.json 冻结一次（不重排、不扰民），
+    //      从此重启也稳定。不用「id 字典序」当默认：字典序是任意的，实测会把
+    //      慢源顶到最前，白白多花 5.5s；
+    //   3. 写盘失败（只读挂载）→ 才退到 id 字典序兜底，至少保证可复现。
     if (candidates.length > 1) {
         const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
         let orderData: string[] = []
@@ -2306,10 +2352,21 @@ export async function callUserApiGetMusicUrl(
         for (const orderPath of orderCandidates) {
             if (fs.existsSync(orderPath)) {
                 try {
-                    orderData = JSON.parse(fs.readFileSync(orderPath, 'utf-8'))
+                    const parsed = JSON.parse(fs.readFileSync(orderPath, 'utf-8'))
+                    orderData = Array.isArray(parsed) ? parsed : []
                     if (orderData.length > 0) break
                 } catch (e) { }
             }
+        }
+
+        if (orderData.length === 0) {
+            // 没有排序文件：先把当前顺序冻结落盘，再按这份顺序排 ——
+            // 这样「首次启动」和「之后每次启动」用的是同一份顺序。
+            const snapIds = candidates.map((a: any) => String(a?.info?.id || '')).filter(Boolean)
+            const writePath = orderCandidates.find(p => {
+                try { return fs.existsSync(path.dirname(p)) } catch (e) { return false }
+            }) || orderCandidates[orderCandidates.length - 1]
+            if (persistOrderSnapshot(writePath, snapIds)) orderData = snapIds
         }
 
         const idToIndex = new Map(orderData.map((id, i) => [id, i]))

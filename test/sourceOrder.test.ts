@@ -48,3 +48,49 @@ test('不改入参数组（调用方可能还在用原顺序做别的事）', ()
     sortCandidatesByOrder(list, new Map())
     assert.deepStrictEqual(ids(list), snapshot)
 })
+
+// ==== order.json 缺失时的「冻结当前顺序」 ====
+
+test('order.json 缺失 → 按当前顺序落盘冻结，内容与传入一致', () => {
+    const { persistOrderSnapshot, __resetOrderSnapshotState } = require('../src/server/userApi')
+    const fs = require('node:fs')
+    const os = require('node:os')
+    const path = require('node:path')
+    __resetOrderSnapshotState()
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-order-'))
+    const file = path.join(dir, 'order.json')
+    const list = ['z.js', 'a.js', 'm.js'] // 故意逆字典序：冻结的是顺序，不是字典序
+    assert.strictEqual(persistOrderSnapshot(file, list), true)
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf-8')), list)
+    assert.deepStrictEqual(ids(sortCandidatesByOrder([src('a.js'), src('m.js'), src('z.js')],
+        new Map(list.map((id: string, i: number) => [id, i])))), list)
+    fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('已经冻结过 → 不重复写，也不覆盖已有文件', () => {
+    const { persistOrderSnapshot, __resetOrderSnapshotState } = require('../src/server/userApi')
+    const fs = require('node:fs')
+    const os = require('node:os')
+    const path = require('node:path')
+    __resetOrderSnapshotState()
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-order-'))
+    const file = path.join(dir, 'order.json')
+    fs.writeFileSync(file, JSON.stringify(['keep.js', 'me.js']), 'utf-8')
+    assert.strictEqual(persistOrderSnapshot(file, ['a.js', 'b.js']), false)
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf-8')), ['keep.js', 'me.js'])
+    fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('候选少于 2 个或路径为空 → 不写文件', () => {
+    const { persistOrderSnapshot, __resetOrderSnapshotState } = require('../src/server/userApi')
+    const fs = require('node:fs')
+    const os = require('node:os')
+    const path = require('node:path')
+    __resetOrderSnapshotState()
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-order-'))
+    const file = path.join(dir, 'order.json')
+    assert.strictEqual(persistOrderSnapshot(file, ['only.js']), false)
+    assert.strictEqual(fs.existsSync(file), false)
+    assert.strictEqual(persistOrderSnapshot('', ['a.js', 'b.js']), false)
+    fs.rmSync(dir, { recursive: true, force: true })
+})
