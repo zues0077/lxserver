@@ -184,7 +184,21 @@ const priorFor = (index: PlayRankPriorIndex | undefined, owner: string, id: stri
 /**
  * 排序分：越小越靠前。
  * 无样本 / 样本不足 → 跨档先验（若比中性分更好）→ 否则 `NEUTRAL_MS`；从未成功 → `Infinity`。
+ *
+ * 2026-11-09（Y.11 修复）：失败-only 记录原来在进程生命周期内**永久 Infinity** ——
+ * `now` 参数在函数体内从未被使用，落盘的 6h TTL 只管导出、不管打分，实测 +1 年仍 Infinity。
+ * 现在加「降级时钟」：最后一次失败超过 `STALE_FAIL_MS` 就退回中性分（只是"不再罚"，
+ * 不会把它抬到有实测样本的源前面）；再失败一次刷新 lastAt，重新 Infinity。
  */
+export const STALE_FAIL_MS = 30 * 60 * 1000
+
+/**
+ * 跨平台先验打折（Y.11 修复）：`anyKey` 是「别的平台的最好成绩」，证据强度天然弱于
+ * 本平台实测 —— kw 上 1683ms 的源不该被当成"这个源整体慢"直接判死 tx（跨平台污染），
+ * 反过来 mg 上 426ms 也不该全等于 wy 的 426ms。先验只作"弱证据"，乘一个折扣。
+ */
+export const ANYKEY_DISCOUNT = 1.3
+
 export const playRankScore = (
     target: PlayRankTarget,
     now: number = Date.now(),
@@ -194,10 +208,14 @@ export const playRankScore = (
     if (!rec || rec.attempts < MIN_TRUST) {
         // 有一次失败记录但从未成功：不给先验，别拿别的键把它抬上来
         if (rec && rec.successes === 0 && rec.attempts > 0) return NEUTRAL_MS
-        const priorMs = prior?.samePlatform ?? prior?.anyKey
+        const priorMs = prior?.samePlatform
+            ?? (prior?.anyKey !== undefined ? prior.anyKey * ANYKEY_DISCOUNT : undefined)
         return priorMs !== undefined && priorMs > 0 ? Math.min(NEUTRAL_MS, priorMs) : NEUTRAL_MS
     }
-    if (rec.successes === 0) return Number.POSITIVE_INFINITY
+    if (rec.successes === 0) {
+        if (now - rec.lastAt >= STALE_FAIL_MS) return NEUTRAL_MS
+        return Number.POSITIVE_INFINITY
+    }
     const failRate = 1 - rec.successes / rec.attempts
     return rec.ewmaMs + failRate * FAIL_PENALTY_MS
 }
@@ -265,6 +283,112 @@ export const rankCandidatesByHistory = (
 }
 
 export const playRankSize = (): number => stats.size
+
+// ==================== ε-greedy 试探（Y.11-5 修复「账本锁定」）====================
+// 排序/沉底/冷却都是「证据优先」：一个源在本平台没被证明过（或历史失败），
+// 只要首选源持续成功，它就永远不会被尝试 —— 实测隔离实例里最快源（20ms）失败一次后
+// 连点 10 首正常歌 0 次被试，每首白付 280ms；生产侧 tx 上 84ms 的西瓜聚合源全程 0 次尝试。
+// 修复不改打分公式（惩罚本身可逆，缺的只是"被试一次"的机会），而是反向探索：
+// 首选源被证明稳定成功后，周期性给一个「本平台未证明 + 有跨平台成功史」的源一次
+// 低预算队首先手。成功 → 记录重置重新洗牌（见 noteProbeSuccessReset）；
+// 失败 → 照常记账，代价被 PROBE_BUDGET_MS 兜住。
+
+/** 试探只在「源多且差异大」的平台开，先观察 tx/kg，别的平台以后按数据决定 */
+export const PROBE_PLATFORMS = ['tx', 'kg']
+/** 同一「平台:档」两次试探的最小间隔：1 小时最多 6 次探索，代价可控 */
+export const PROBE_INTERVAL_MS = 10 * 60 * 1000
+/** 试探预算（ms）：挂了最多白吃 1.5s，均摊 ~150ms/首；好了省出 200ms+/首 */
+export const PROBE_BUDGET_MS = 1500
+/** 首选源至少成功这么多次才算「稳定」，才值得花一次探索 */
+export const PROBE_MIN_TOP_SUCCESSES = 10
+/** 首选源失败超过这个数就不试探（首选自己都不稳，先顾自己） */
+export const PROBE_TOP_MAX_FAILS = 2
+
+const lastProbeAt = new Map<string, number>()
+
+/** 测试用：清空试探节流状态 */
+export const resetProbeState = (): void => { lastProbeAt.clear() }
+
+/**
+ * 选出本次该试探的源（若有的话）。
+ *
+ * 资格（三条同时满足）：
+ *  1. 平台在 `PROBE_PLATFORMS` 且距上次试探 ≥ `PROBE_INTERVAL_MS`；
+ *  2. 队首（调用方排好序后的第一个）稳定成功：successes ≥ `PROBE_MIN_TOP_SUCCESSES`
+ *     且失败 ≤ `PROBE_TOP_MAX_FAILS`；
+ *  3. 候选里有「本平台未证明 + 有跨平台成功史」的源：
+ *     - 本平台无记录 / 样本不足 MIN_TRUST（从没真正跑过），或
+ *     - 失败-only 但已过降级时钟（旧失败证据过期，见 `STALE_FAIL_MS`）。
+ *     刚失败不久的（新鲜 Infinity）**不**试探——最近证据是负的。
+ *
+ * 多个候选时取跨平台证据最好的（anyKey 最小）。返回后由调用方把它插到队首，
+ * 并用 `PROBE_BUDGET_MS` 收紧预算；返回 undefined 表示本轮不试探。
+ */
+export const planProbeCandidate = (
+    candidates: any[],
+    platform: string,
+    quality: string,
+    now: number = Date.now(),
+    priors?: PlayRankPriorIndex,
+): { api: any; priorMs: number } | undefined => {
+    if (!quality || candidates.length < 3 || !PROBE_PLATFORMS.includes(platform)) return undefined
+    const probeKey = `${platform}:${quality}`
+    if (now - (lastProbeAt.get(probeKey) || 0) < PROBE_INTERVAL_MS) return undefined
+    const top = candidates[0]
+    const topRec = stats.get(playRankKey({
+        owner: String(top?.info?.owner || ''),
+        id: String(top?.info?.id || ''),
+        platform,
+        quality,
+    }))
+    if (!topRec
+        || topRec.successes < PROBE_MIN_TOP_SUCCESSES
+        || topRec.attempts - topRec.successes > PROBE_TOP_MAX_FAILS) return undefined
+    const index = priors || buildPlayRankPriors()
+    let best: { api: any; priorMs: number } | undefined
+    for (let i = 1; i < candidates.length; i++) {
+        const api = candidates[i]
+        const owner = String(api?.info?.owner || '')
+        const id = String(api?.info?.id || '')
+        const entry = index.byKey.get(`${owner}:${id}`)
+        // 没有任何跨平台成功史 = 没有值得探索的证据
+        if (!entry || !Number.isFinite(entry.anyKey)) continue
+        const rec = stats.get(playRankKey({ owner, id, platform, quality }))
+        const unproven = !rec || rec.attempts < MIN_TRUST
+        const staleFailOnly = !!rec && rec.successes === 0 && now - rec.lastAt >= STALE_FAIL_MS
+        if (!unproven && !staleFailOnly) continue
+        const pf = priorFor(index, owner, id, platform)
+        const priorMs = pf?.samePlatform ?? entry.anyKey * ANYKEY_DISCOUNT
+        if (!best || priorMs < best.priorMs) best = { api, priorMs }
+    }
+    if (!best) return undefined
+    lastProbeAt.set(probeKey, now)
+    return best
+}
+
+/**
+ * 试探成功 = 旧惩罚判错了（源其实健康）：把该键记录重置为这一次成功，从零重新竞争。
+ * 若只照常记账（attempts=2/successes=1），50% 失败率 × FAIL_PENALTY_MS 会把它压回
+ * 队尾，试探就永远白做 —— 生产 tx 实算要 17 次试探才能翻身，不可接受。
+ * 试探失败不走这里，照常 notePlayResult 记失败。
+ */
+export const noteProbeSuccessReset = (
+    target: PlayRankTarget,
+    costMs: number,
+    now: number = Date.now(),
+): void => {
+    if (!target || !target.quality) return
+    const raw = Math.max(0, Number(costMs) || 0)
+    // attempts 给到 MIN_TRUST：1 次样本会落进「样本不足 → 中性分」分支，
+    // 等于没重置（1200 分照样排不进前列）；2 次 = 直接进实测分数分支
+    stats.set(playRankKey(target), {
+        attempts: MIN_TRUST,
+        successes: MIN_TRUST,
+        ewmaMs: Math.min(raw, 60000),
+        lastAt: now,
+    })
+    try { markLedgerDirty() } catch { /* 落盘标记失败不影响排序 */ }
+}
 
 /** 与 playRankScore 同口径，但直接吃记录（快照里已经拿到记录，不必再查一次表） */
 const scoreOf = (rec: PlayRankRecord): number => {

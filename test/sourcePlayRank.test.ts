@@ -12,10 +12,16 @@ import {
     NEUTRAL_MS,
     MIN_TRUST,
     FAIL_PENALTY_MS,
+    STALE_FAIL_MS,
+    ANYKEY_DISCOUNT,
+    PROBE_INTERVAL_MS,
     notePlayResult,
     playRankScore,
     rankCandidatesByHistory,
     resetPlayRank,
+    resetProbeState,
+    planProbeCandidate,
+    noteProbeSuccessReset,
     playRankSize,
     playRankSnapshot,
     adaptiveTimeoutMs,
@@ -271,4 +277,114 @@ test('失败惩罚不误伤全成功的快源：300ms 全成功仍远优于中�
     notePlayResult(T('clean'), true, 300)
     assert.strictEqual(playRankScore(T('clean')), 300)
     assert.ok(playRankScore(T('clean')) < NEUTRAL_MS)
+})
+
+// ---- Y.11 修复包（2026-11-09）：账本锁定三处 ----
+
+test('失败-only 降级时钟：30 分钟无新失败退回中性分，不再永久 Infinity', () => {
+    resetPlayRank()
+    const t0 = Date.now()
+    notePlayResult(T('stale'), false, 0, t0)
+    notePlayResult(T('stale'), false, 0, t0)
+    assert.strictEqual(playRankScore(T('stale'), t0), Number.POSITIVE_INFINITY)
+    assert.strictEqual(playRankScore(T('stale'), t0 + STALE_FAIL_MS - 1), Number.POSITIVE_INFINITY)
+    assert.strictEqual(playRankScore(T('stale'), t0 + STALE_FAIL_MS), NEUTRAL_MS,
+        '过了降级时钟 = 只是"不再罚"，不是把它抬到有实测样本的源前面')
+})
+
+test('降级后再失败一次：重新 Infinity 并刷新时钟', () => {
+    resetPlayRank()
+    const t0 = Date.now()
+    notePlayResult(T('x'), false, 0, t0)
+    notePlayResult(T('x'), false, 0, t0)
+    assert.strictEqual(playRankScore(T('x'), t0 + STALE_FAIL_MS + 1000), NEUTRAL_MS)
+    notePlayResult(T('x'), false, 0, t0 + STALE_FAIL_MS + 2000)
+    assert.strictEqual(playRankScore(T('x'), t0 + STALE_FAIL_MS + 3000), Number.POSITIVE_INFINITY)
+})
+
+test('降级时钟让失败-only 源重新参与排序（新鲜垫底、过期回中性位）', () => {
+    resetPlayRank()
+    const t0 = Date.now()
+    for (let i = 0; i < 2; i++) notePlayResult(T('slowbutok'), true, 1500, t0)
+    notePlayResult(T('wasbad'), false, 0, t0)
+    notePlayResult(T('wasbad'), false, 0, t0)
+    let ranked = rankCandidatesByHistory([api('wasbad'), api('slowbutok')], 'wy', '320k', t0)
+    assert.deepStrictEqual(ids(ranked), ['slowbutok', 'wasbad'], '新鲜失败仍垫底')
+    ranked = rankCandidatesByHistory([api('wasbad'), api('slowbutok')], 'wy', '320k', t0 + STALE_FAIL_MS)
+    assert.deepStrictEqual(ids(ranked), ['wasbad', 'slowbutok'],
+        '过期失败回中性 1200，优于 1500 的实测源（差距过门槛）')
+})
+
+test('跨平台先验打折：anyKey 证据 ×1.3（弱证据），同平台先验不打折', () => {
+    resetPlayRank()
+    // mg 1000 → 打折先验 1300 > 中性 1200 → 取中性：不该被别的平台成绩明显提前
+    for (let i = 0; i < 4; i++) notePlayResult(T('d1', 'mg'), true, 1000)
+    for (let i = 0; i < 2; i++) notePlayResult(T('ref1', 'wy'), true, 1500)
+    // 1200 vs 1500：差 300 但不足 25%（375）→ 换位门槛拦住，保持原顺序
+    assert.deepStrictEqual(ids(rankCandidatesByHistory([api('ref1'), api('d1')], 'wy', '320k')), ['ref1', 'd1'])
+    resetPlayRank()
+    // mg 500 → 打折先验 650：与 1500 差 850、56%，两个门槛都过 → 换到前面
+    for (let i = 0; i < 4; i++) notePlayResult(T('d2', 'mg'), true, 500)
+    for (let i = 0; i < 2; i++) notePlayResult(T('ref2', 'wy'), true, 1500)
+    assert.deepStrictEqual(ids(rankCandidatesByHistory([api('ref2'), api('d2')], 'wy', '320k')), ['d2', 'ref2'])
+})
+
+test('ε-greedy 试探：首选稳定成功 + 候选本平台未证明 + 有跨平台成功史 → 给先手', () => {
+    resetPlayRank()
+    resetProbeState()
+    const t0 = Date.now()
+    for (let i = 0; i < 11; i++) notePlayResult(T('top', 'tx'), true, 200)
+    notePlayResult(T('top', 'tx'), false) // 12 次里 1 次失败，仍算稳定
+    notePlayResult(T('a', 'kw'), true, 100)   // a：tx 无记录，kw 有成功史
+    notePlayResult(T('a', 'kw'), true, 100)
+    notePlayResult(T('b', 'kw'), true, 100)   // b：tx 刚失败 2 次（新鲜 Infinity）
+    notePlayResult(T('b', 'tx'), false, 0, t0)
+    notePlayResult(T('b', 'tx'), false, 0, t0)
+    const probe = planProbeCandidate([api('top'), api('a'), api('b')], 'tx', '320k', t0)
+    assert.ok(probe, '应当选出试探源')
+    assert.strictEqual(probe!.api.info.id, 'a', '新鲜失败不试探，选未证明的 a')
+    assert.strictEqual(probe!.priorMs, 100 * ANYKEY_DISCOUNT)
+    assert.strictEqual(planProbeCandidate([api('top'), api('a'), api('b')], 'tx', '320k', t0 + 1000),
+        undefined, '同一键 10 分钟内节流')
+    assert.ok(planProbeCandidate([api('top'), api('a'), api('b')], 'tx', '320k', t0 + PROBE_INTERVAL_MS),
+        '过间隔后可再试探')
+})
+
+test('ε-greedy 试探：首选不稳 / 无跨平台证据 / 平台未开 → 不试探', () => {
+    const t0 = Date.now()
+    // 首选只成功 3 次：不稳，不花探索预算
+    resetPlayRank(); resetProbeState()
+    for (let i = 0; i < 3; i++) notePlayResult(T('top2', 'tx'), true, 200)
+    notePlayResult(T('c', 'kw'), true, 100)
+    assert.strictEqual(planProbeCandidate([api('top2'), api('c'), api('d')], 'tx', '320k', t0), undefined)
+    // 首选稳但候选没有任何跨平台成功史：没有值得探索的证据
+    resetPlayRank(); resetProbeState()
+    for (let i = 0; i < 11; i++) notePlayResult(T('top3', 'tx'), true, 200)
+    assert.strictEqual(planProbeCandidate([api('top3'), api('n1'), api('n2')], 'tx', '320k', t0), undefined)
+    // 平台未开（wy 不在清单）
+    resetPlayRank(); resetProbeState()
+    for (let i = 0; i < 11; i++) notePlayResult(T('top4', 'wy'), true, 200)
+    notePlayResult(T('f', 'mg'), true, 100)
+    assert.strictEqual(planProbeCandidate([api('top4'), api('f'), api('g')], 'wy', '320k', t0), undefined)
+    // 失败-only 过降级时钟后可被试探
+    resetPlayRank(); resetProbeState()
+    for (let i = 0; i < 11; i++) notePlayResult(T('top5', 'kg'), true, 200)
+    notePlayResult(T('h', 'kw'), true, 100)
+    notePlayResult(T('h', 'kg'), false, 0, t0)
+    notePlayResult(T('h', 'kg'), false, 0, t0)
+    assert.strictEqual(planProbeCandidate([api('top5'), api('h'), api('n3')], 'kg', '320k', t0),
+        undefined, '新鲜失败不试探')
+    assert.ok(planProbeCandidate([api('top5'), api('h'), api('n3')], 'kg', '320k', t0 + STALE_FAIL_MS + 1),
+        '过期失败可试探')
+})
+
+test('试探成功重置：清掉失败史，从这次成功重新竞争', () => {
+    resetPlayRank()
+    notePlayResult(T('r', 'tx'), false)
+    notePlayResult(T('r', 'tx'), false)
+    notePlayResult(T('r', 'tx'), false)
+    assert.strictEqual(playRankScore(T('r', 'tx')), Number.POSITIVE_INFINITY)
+    noteProbeSuccessReset(T('r', 'tx'), 95)
+    assert.strictEqual(playRankScore(T('r', 'tx')), 95,
+        '重置后按本次实测成绩参与排序（否则 50% 失败惩罚把它压回队尾，试探白做）')
 })

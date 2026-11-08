@@ -15,7 +15,7 @@ import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerElig
 import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue, normalizeQualityList } from './sourceContract'
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
-import { notePlayResult, rankCandidatesByHistory, adaptiveTimeoutMs, buildPlayRankPriors } from './sourcePlayRank'
+import { notePlayResult, rankCandidatesByHistory, adaptiveTimeoutMs, buildPlayRankPriors, planProbeCandidate, noteProbeSuccessReset, PROBE_BUDGET_MS } from './sourcePlayRank'
 import { markLedgerDirty } from './sourceLedgerDirty'
 import { clearRateLimit, clearRateLimitForSource, isRateLimitFailure, isRateLimited, noteRateLimit } from './sourceRateLimit'
 import { syncLog } from '../utils/log4js'
@@ -2625,6 +2625,26 @@ export async function callUserApiGetMusicUrl(
         candidates = [candidates[0]]
     }
 
+    // === ε-greedy 试探（2026-11-09 Y.11 修复「账本锁定」）===
+    // 排序/沉底/冷却全是「证据优先」：首选源持续成功时，一个本平台没被证明过（或旧失败）
+    // 的源永远不会被尝试——实测最快源失败一次后 10 首 0 次被试（280ms/首），生产 tx 上
+    // 84ms 的西瓜聚合源全程 0 次尝试。这里做反向探索：首选被证明稳定后，周期性给
+    // 「本平台未证明 + 有跨平台成功史」的源一次队首先手，预算收紧到 PROBE_BUDGET_MS。
+    // 成功 → 记录重置重新洗牌（noteProbeSuccessReset）；失败 → 照常记账，代价有界。
+    // 只在 playRank 开关开启时生效（它是排序策略的一部分，不是独立机制）。
+    let probeApi: any
+    if (candidates.length >= 3 && playRankEnabled()) {
+        const probe = planProbeCandidate(candidates, source, quality)
+        if (probe?.api) {
+            probeApi = probe.api
+            const rest = candidates.filter((a: any) => a !== probeApi)
+            candidates = [probeApi, ...rest]
+            console.log(`[自定义源] ε-greedy 试探：首选 ${rest[0]?.info?.name} 稳定成功，` +
+                `给 ${probeApi.info?.name} 一次队首先手（预算 ${PROBE_BUDGET_MS}ms；` +
+                `成功清记录重排，失败照常记账）`)
+        }
+    }
+
     supportedCount = candidates.length
 
     if (supportedCount === 0) {
@@ -2874,7 +2894,10 @@ export async function callUserApiGetMusicUrl(
             const { api, inCooldownPass } = passSeq[candidateIndex]
             // 预算见底就别再挨个源打了：调用方早就返回 500，这里继续请求只是白烧上游配额
             if (budgetExhausted()) break
-            const perTimeout = budgetForSource(api, passSeq.length - candidateIndex)
+            // 试探源预算收紧：挂了最多白吃 PROBE_BUDGET_MS，不会拖垮整体 deadline
+            const perTimeout = api === probeApi
+                ? Math.max(1000, Math.min(PROBE_BUDGET_MS, budgetForSource(api, passSeq.length - candidateIndex)))
+                : budgetForSource(api, passSeq.length - candidateIndex)
             try {
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (所属: ${api.info.owner}${inCooldownPass ? ', 冷却兜底轮' : ''})`)
                 const attemptStartedAt = Date.now()
@@ -2897,7 +2920,22 @@ export async function callUserApiGetMusicUrl(
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
                 clearPlayFailure(api, source)
                 noteQuality(api, true)
-                notePlayPerf(api, true, Date.now() - attemptStartedAt)
+                if (api === probeApi) {
+                    // 试探成功 = 旧惩罚判错了：清记录重置，让它从这次成功重新参与竞争
+                    // （照常记账的话 50% 失败率惩罚会把它压回队尾，试探白做）
+                    noteProbeSuccessReset(
+                        {
+                            owner: String(api?.info?.owner || ''),
+                            id: String(api?.info?.id || ''),
+                            platform: source,
+                            quality,
+                        },
+                        Date.now() - attemptStartedAt,
+                    )
+                    console.log(`[自定义源] ε-greedy 试探成功：${api.info.name} 记录已重置，下次请求按新成绩参与排序`)
+                } else {
+                    notePlayPerf(api, true, Date.now() - attemptStartedAt)
+                }
                 // 本源成功 = 这首歌在这个平台确定可播 → 本轮硬故障失败的源有了对照组
                 reportPlayHardFailures(roundFailures, source, true)
                 const att = { name: api.info.name, status: 'success' }
