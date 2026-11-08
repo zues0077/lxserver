@@ -73,6 +73,38 @@ const asStringArray = (v: unknown): string[] =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length > 0) : []
 
 /**
+ * 归一化 `qualitys`：LX 协议允许两种写法，插件里两种都在用 ——
+ *
+ *   ['128k', '320k']                      裸字符串
+ *   [{ type: '128k', label: '标准品质' }]  带展示名的对象（官方文档里的写法）
+ *
+ * 以前这里只认字符串，对象式声明会被整条过滤掉、`qualities` 变成空数组，
+ * 于是判出 `qualitys_empty` **error**。实测反例：39 个源里的「弥音」声明的是
+ * 对象式 128k，脚本本身能正常出链（巡检 status=success），却被判不合规 ——
+ * 这种误判的代价不是多一条日志：面板会把一个能用的源标红，甚至有人据此停用/删源。
+ *
+ * 所以两种形态都接受，只有「既不是非空字符串、也没有非空 type」才算坏项。
+ */
+export const normalizeQualityList = (v: unknown): { list: string[]; invalid: number } => {
+    if (!Array.isArray(v)) return { list: [], invalid: 0 }
+    const list: string[] = []
+    let invalid = 0
+    for (const item of v) {
+        if (typeof item === 'string') {
+            if (item) list.push(item)
+            else invalid++
+            continue
+        }
+        if (isPlainObject(item) && typeof item.type === 'string' && item.type) {
+            list.push(item.type)
+            continue
+        }
+        invalid++
+    }
+    return { list, invalid }
+}
+
+/**
  * 逐平台核对 `sources` 声明是否符合宿主协议。
  *
  * 纯函数，不读写任何全局状态，便于单测；调用方拿到的 `issues` 里每条都带
@@ -110,7 +142,8 @@ export const inspectSourceContract = (sources: unknown): ContractReport => {
         }
 
         const actions = asStringArray(meta.actions)
-        const qualities = asStringArray(meta.qualitys)
+        const qualityInfo = normalizeQualityList(meta.qualitys)
+        const qualities = qualityInfo.list
         let platformOk = true
 
         if (typeof meta.name !== 'string' || !meta.name.trim()) {
@@ -155,9 +188,9 @@ export const inspectSourceContract = (sources: unknown): ContractReport => {
         } else if (!Array.isArray(meta.qualitys)) {
             add(platform, 'qualitys_not_array', 'warn', 'qualitys 不是数组')
         } else {
-            const invalidItems = meta.qualitys.filter((q: unknown) => typeof q !== 'string' || !q)
-            if (invalidItems.length > 0) {
-                add(platform, 'qualitys_invalid_item', 'warn', 'qualitys 里有非字符串或空项')
+            if (qualityInfo.invalid > 0) {
+                add(platform, 'qualitys_invalid_item', 'warn',
+                    `qualitys 里有 ${qualityInfo.invalid} 项既不是非空字符串、也没有 type 字段`)
             }
             if (qualities.length === 0) {
                 add(platform, 'qualitys_empty', 'error',

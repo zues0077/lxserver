@@ -12,7 +12,7 @@ import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure, isPlatformDemoted } from './sourceProbe'
 import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor, listWorkerPresetCandidates } from './sourceGovernor'
 import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible } from './sourceWorkerHost'
-import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue } from './sourceContract'
+import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue, normalizeQualityList } from './sourceContract'
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
 import { notePlayResult, rankCandidatesByHistory } from './sourcePlayRank'
@@ -798,8 +798,11 @@ export function getProbeTargets(): Array<{
         const sources: Record<string, any> = info.sources || {}
         const qualities: Record<string, string[]> = {}
         for (const [platform, meta] of Object.entries(sources)) {
-            const list = (meta as any)?.qualitys
-            if (Array.isArray(list)) qualities[platform] = list.filter((q: any) => typeof q === 'string' && q)
+            // 与契约校验同口径：既接受 ['128k']，也接受 [{ type: '128k', label: '标准' }]。
+            // 官方文档的写法是后者，以前这里只认字符串，对象式声明会被整条丢掉，
+            // 巡检就只能在 qualitys 为空时退回 128k（对「仅128k」的源恰好蒙对，对别的档就错了）。
+            const normalized = normalizeQualityList((meta as any)?.qualitys)
+            if (normalized.list.length) qualities[platform] = normalized.list
         }
         targets.push({
             owner: String(info.owner || 'open'),

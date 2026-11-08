@@ -556,6 +556,10 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
                     // 列表里只给前 6 条，够看清是什么问题；完整报告用 error 日志看。
                     // 排序必须先做：warn 多的源会把 error 挤掉，面板就只剩「可忽略的提示」。
                     issues: prioritizeContractIssues(contract.issues, 6),
+                    // 逐平台结论：面板要「把出问题的平台单独标灰」只能看这个。
+                    // 之前只回整体 compliant，用户看得到「这个源不合规」却看不到是哪个平台，
+                    // 只能翻 issues 文本猜。ok=false 仅为提示，不联动任何停用/删除。
+                    platforms: contract.platforms,
                 }
             }
         } catch (e) { }

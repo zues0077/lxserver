@@ -261,3 +261,40 @@ test('summarizeContractByCode：与 inspectSourceContract 的 counts 对得上',
   assert.strictEqual(sum(byCode.error), r.counts.error)
   assert.strictEqual(sum(byCode.warn), r.counts.warn)
 })
+
+// ---- qualitys 的对象式声明：官方协议允许 [{ type, label }]，不能按「空数组」误判 ----
+// 实测反例「弥音」（39 个源里的 1 个）：声明的是 [{ type:'128k', label:'标准品质' }]，
+// 脚本能正常出链、巡检 status=success，却被判 qualitys_empty error。
+test('qualitys 用对象式 [{type,label}]：合规，档位取 type，不报空数组', () => {
+  const r = inspectSourceContract({
+    tx: { name: 'QQ', type: 'music', actions: ['musicUrl'], qualitys: [{ type: '128k', label: '标准品质' }] },
+  })
+  assert.strictEqual(r.compliant, true)
+  assert.deepStrictEqual(codes(r), [])
+  assert.deepStrictEqual(r.platforms.tx.qualities, ['128k'])
+  assert.strictEqual(r.platforms.tx.ok, true)
+})
+
+test('qualitys 两种写法混用也能归一：字符串与对象各取一档', () => {
+  const r = inspectSourceContract({
+    kw: { name: '酷我', type: 'music', actions: ['musicUrl'], qualitys: ['320k', { type: 'flac', label: '无损' }] },
+  })
+  assert.deepStrictEqual(r.platforms.kw.qualities, ['320k', 'flac'])
+  assert.ok(!codes(r).includes('kw:qualitys_invalid_item'))
+})
+
+test('qualitys 里既不是字符串也没有 type 的项才算坏项（warn，不升级 error）', () => {
+  const r = inspectSourceContract({
+    kw: { name: '酷我', type: 'music', actions: ['musicUrl'], qualitys: ['', { label: '无 type' }, '128k'] },
+  })
+  assert.strictEqual(r.platforms.kw.ok, true)
+  assert.ok(codes(r).includes('kw:qualitys_invalid_item'))
+  assert.ok(!codes(r).includes('kw:qualitys_empty'))
+  assert.deepStrictEqual(r.platforms.kw.qualities, ['128k'])
+})
+
+test('真正的空数组仍然是 error（与对象式声明区分开）', () => {
+  const r = inspectSourceContract({ kw: { name: '酷我', type: 'music', actions: ['musicUrl'], qualitys: [] } })
+  assert.strictEqual(r.platforms.kw.ok, false)
+  assert.ok(codes(r).includes('kw:qualitys_empty'))
+})

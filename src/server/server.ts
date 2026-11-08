@@ -11443,6 +11443,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'customSource.probe.throttleMs': Number.isFinite(Number(global.lx.config['customSource.probe.throttleMs']))
               ? Number(global.lx.config['customSource.probe.throttleMs']) : 250,
             'customSource.probe.maxDurationMs': Number(global.lx.config['customSource.probe.maxDurationMs']) || 480000,
+            // 取链期的三个运行期账本开关。以前只写在 defaultConfig 里，接口既不回也不收，
+            // 等于「代码里有开关、面板和 API 都够不着」，只能改 config.js 再重启。
+            // 三个都是「只改尝试顺序、不动启停」的软策略，给出口才能让用户按体感自己关。
+            'customSource.playRank.enabled': global.lx.config['customSource.playRank.enabled'] !== false,
+            'customSource.playSink.enabled': global.lx.config['customSource.playSink.enabled'] !== false,
+            'customSource.qualityLedger.enabled': global.lx.config['customSource.qualityLedger.enabled'] !== false,
             'configBackup.enable': global.lx.config['configBackup.enable'] ?? true,
             'configBackup.retentionDays': global.lx.config['configBackup.retentionDays'] ?? 7,
             'configBackup.dir': global.lx.config['configBackup.dir'] ?? '',
@@ -11559,6 +11565,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (newConfig['customSource.probe.maxDurationMs'] !== undefined) {
                 global.lx.config['customSource.probe.maxDurationMs'] =
                   Math.max(60000, parseInt(newConfig['customSource.probe.maxDurationMs']) || 480000)
+              }
+              // 取链期的三个运行期软策略：只改尝试顺序，不动任何启停，关掉即退回 order.json 固定顺序
+              for (const key of ['customSource.playRank.enabled', 'customSource.playSink.enabled', 'customSource.qualityLedger.enabled'] as const) {
+                if (newConfig[key] !== undefined) global.lx.config[key] = !!newConfig[key]
               }
 
               // 巡检开关与间隔改动后立即重排任务。
