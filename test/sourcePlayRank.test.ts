@@ -214,3 +214,41 @@ test('自适应单源超时按「源 × 平台 × 档」隔离：别的档位的
     assert.strictEqual(adaptiveTimeoutMs(T('dual', 'wy', '128k')), ADAPTIVE_TIMEOUT_MIN_MS)
     assert.strictEqual(adaptiveTimeoutMs(T('dual', 'wy', '320k')), ADAPTIVE_TIMEOUT_MAX_MS)
 })
+
+// ---- 跨档先验（2026-11-08）：本档没样本时，用同源别的键的成绩提前 ----
+// 背景：重启后账本清零，裤佬 wy 先攒到 9 次样本（EWMA 1798ms）排第一，
+// 墨澜 wy 只被试了 1 次（160ms）→ 样本不足给中性 1200ms → 160ms 的源排在 1798ms 之后，
+// 同一首歌 17952 要 728~2661ms、17950 只要 136~239ms。而墨澜在 mg 上早有 4 次样本（426ms）。
+test('跨档先验：本档样本不足时，用同源别的平台的成绩把它提前', () => {
+    resetPlayRank()
+    // 裤佬：wy 本档 9 次成功 1798ms
+    for (let i = 0; i < MIN_TRUST; i++) notePlayResult(T('kulao'), true, 1798)
+    // 墨澜：mg 4 次 426ms（别的平台），wy 只有 1 次 160ms（不够 MIN_TRUST）
+    for (let i = 0; i < 4; i++) notePlayResult(T('molan', 'mg'), true, 426)
+    notePlayResult(T('molan', 'wy'), true, 160)
+    const ranked = rankCandidatesByHistory([api('kulao'), api('molan')], 'wy', '320k')
+    assert.deepStrictEqual(ids(ranked), ['molan', 'kulao'],
+        '160ms(1 次) + 同源 426ms 先验 = 426，应当胜过 1798ms')
+})
+
+test('跨档先验只提前、不惩罚：同源别档很慢时，本档仍按中性分算', () => {
+    resetPlayRank()
+    for (let i = 0; i < 4; i++) notePlayResult(T('slowelsewhere', 'mg'), true, 4000)
+    // 本档无样本：先验 4000 > 中性 1200 → 取 1200，不因为别的平台慢就沉底
+    assert.strictEqual(playRankScore(T('slowelsewhere')), NEUTRAL_MS)
+})
+
+test('跨档先验在本档攒到 2 次样本后自动失效', () => {
+    resetPlayRank()
+    for (let i = 0; i < 4; i++) notePlayResult(T('dual', 'mg'), true, 100)
+    notePlayResult(T('dual', 'wy'), true, 2500)
+    notePlayResult(T('dual', 'wy'), true, 2500)
+    assert.strictEqual(playRankScore(T('dual', 'wy')), 2500, '本档自己的 2500ms 说了算，不再借用 100ms 先验')
+})
+
+test('从未成功的记录不参与先验：别的键再快也抬不动它', () => {
+    resetPlayRank()
+    for (let i = 0; i < 4; i++) notePlayResult(T('mixed', 'mg'), true, 100)
+    notePlayResult(T('mixed', 'wy'), false) // 本档失败一次、从未成功
+    assert.strictEqual(playRankScore(T('mixed', 'wy')), NEUTRAL_MS)
+})

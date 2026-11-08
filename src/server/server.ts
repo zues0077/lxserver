@@ -41,6 +41,7 @@ import { hasHotSearchItems } from './hotSearchFallback'
 import { getWorkerStatus } from './sourceWorkerHost'
 import { loadGovernorState } from './sourceGovernor'
 import { qualityLedgerSnapshot } from './sourceQualityLedger'
+import { startSourceLedgerPersist } from './sourceLedgerStore'
 import { playRankSnapshot } from './sourcePlayRank'
 import { rateLimitSnapshot } from './sourceRateLimit'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
@@ -14088,6 +14089,13 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       console.warn('[挂载自检] 检查失败（不影响服务运行）:', e?.message || e)
     }
     resolve(null)
+    // 播放侧账本落盘：把排序/沉底/冷却/档位短路的证据存下来，
+    // 重启（换版本、容器自愈）后第一次取链直接用上次结论，不必重新踩坑
+    try {
+      startSourceLedgerPersist(global.lx.dataPath)
+    } catch (e: any) {
+      console.warn('[账本] 落盘初始化失败（不影响服务运行）:', e?.message || e)
+    }
     void registerLocalSyncEvent(wss as LX.SocketServer)
     // 启动 2 分钟后跑一次缓存来源体检（dry-run）：老缓存可能混着音源兜底返回的别曲
     scheduleCacheAuditOnStartup()

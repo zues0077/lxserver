@@ -1,3 +1,5 @@
+import { markLedgerDirty } from './sourceLedgerDirty'
+
 /**
  * 「源 × 平台 × 音质档」失败账本 —— 按档位短路，而不是按源整体降权。
  *
@@ -107,6 +109,7 @@ export const noteQualityResult = (
         }
     }
     ledger.set(key, rec)
+    try { markLedgerDirty() } catch { /* 落盘标记失败不影响取链 */ }
     return rec
 }
 
@@ -205,4 +208,59 @@ export const qualityLedgerSnapshot = (now: number = Date.now()): {
         })
     }
     return { total: ledger.size, blocked }
+}
+
+// ==================== 落盘（重启后不丢学习成果）====================
+// 与 playRank 同理：账本原来只在内存，容器一重启「某个档必败」的证据全没了，
+// 第一首歌又要陪它白吃一次超时。这里只导出还没过期的记录。
+export interface QualityLedgerState {
+    v: 1
+    options: QualityLedgerOptions
+    records: Array<[string, QualityRecord]>
+}
+
+export const exportQualityLedgerState = (now: number = Date.now()): QualityLedgerState => {
+    const records: Array<[string, QualityRecord]> = []
+    for (const [key, rec] of ledger) {
+        if (!rec) continue
+        // 短路已过期且长时间没被触碰的记录没有保存价值
+        const stale = rec.blockedUntil <= now && now - rec.lastAttemptAt > options.idleResetMs
+        if (stale) continue
+        records.push([key, { ...rec }])
+    }
+    return { v: 1, options: { ...options }, records }
+}
+
+/** 恢复。返回载入条数；阈值随账本一起恢复，行为与重启前一致 */
+export const importQualityLedgerState = (state: any, now: number = Date.now()): number => {
+    if (!state || !Array.isArray(state.records)) return 0
+    if (state.options && typeof state.options === 'object') {
+        const o = state.options
+        const pick = (v: any): number => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0)
+        const next: Partial<QualityLedgerOptions> = {}
+        if (pick(o.minSamples)) next.minSamples = pick(o.minSamples)
+        if (pick(o.blockMs)) next.blockMs = pick(o.blockMs)
+        if (pick(o.idleResetMs)) next.idleResetMs = pick(o.idleResetMs)
+        options = { ...options, ...next }
+    }
+    let n = 0
+    for (const item of state.records) {
+        if (!Array.isArray(item) || item.length < 2) continue
+        const [key, rec] = item
+        if (typeof key !== 'string' || !key || !rec) continue
+        const attempts = Number(rec.attempts) || 0
+        const lastAttemptAt = Number(rec.lastAttemptAt) || 0
+        if (!attempts || lastAttemptAt <= 0) continue
+        if (now - lastAttemptAt > options.idleResetMs && Number(rec.blockedUntil) <= now) continue
+        ledger.set(key, {
+            attempts,
+            successes: Number(rec.successes) || 0,
+            lastAttemptAt,
+            lastFailAt: Number(rec.lastFailAt) || 0,
+            blockedUntil: Number(rec.blockedUntil) || 0,
+            blocks: Number(rec.blocks) || 0,
+        })
+        n += 1
+    }
+    return n
 }

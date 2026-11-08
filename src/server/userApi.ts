@@ -16,6 +16,7 @@ import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue, normaliz
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
 import { notePlayResult, rankCandidatesByHistory, adaptiveTimeoutMs } from './sourcePlayRank'
+import { markLedgerDirty } from './sourceLedgerDirty'
 import { clearRateLimit, clearRateLimitForSource, isRateLimitFailure, isRateLimited, noteRateLimit } from './sourceRateLimit'
 import { syncLog } from '../utils/log4js'
 
@@ -1863,6 +1864,7 @@ export const notePlayFailure = (api: any, platform: string, failMessage?: string
     rec.fails += 1
     rec.lastFailAt = Date.now()
     playFailSink.set(key, rec)
+    try { markLedgerDirty() } catch { /* 落盘标记失败不影响投递 */ }
 }
 
 /** 取链成功——立刻撤销沉底/冷却/限流退避 */
@@ -1870,6 +1872,9 @@ export const clearPlayFailure = (api: any, platform: string): void => {
     if (!api?.info) return
     playFailSink.delete(playSinkKey(api.info.owner, api.info.id, platform))
     cooldownSink.delete(playSinkKey(api.info.owner, api.info.id, platform))
+    // 成功即归零阶梯：下次偶发超时回到最短的 90 秒，不因为过去挂过就长期缩短机会
+    cooldownStreak.delete(playSinkKey(api.info.owner, api.info.id, platform))
+    try { markLedgerDirty() } catch { /* 落盘标记失败不影响投递 */ }
     try {
         clearRateLimit(api.info.owner, api.info.id, platform)
         // 刻意不清「源 × 平台 × 档」账本：成功的是**本次请求那一档**，
@@ -1886,14 +1891,25 @@ export const clearPlayFailure = (api: any, platform: string): void => {
 // 冷却在第一轮直接跳过该源。只认超时类失败（取链超时/回源超时）——那是「这个源的
 // 后端现在很慢」的信号，与歌曲无关；软失败（无版权/已下架）不该触发。
 // 可用性保障：冷却不剥夺机会——全部常规源失败后第二轮再试冷却中的源，只是顺序变了。
-const PLAY_COOLDOWN_WINDOW_MS = 90 * 1000
+//
+// **阶梯冷却**（2026-11-08 实测加）：原来固定 90 秒，但裤佬这类源是「时好时坏」——
+// 8 小时里 8 次 5 秒满超时，每次都是「超时→90 秒后再试→又超时」，同一个坑反复踩。
+// 改成连续超时一次拉长一档（90s → 5min → 15min），成功一次立刻归零：
+// 偶发一次超时仍然是 90 秒（不误伤），反复挂死的源才被真正拉开距离。
+export const PLAY_COOLDOWN_STEPS_MS = [90 * 1000, 5 * 60 * 1000, 15 * 60 * 1000]
 const cooldownSink = new Map<string, number>()
+const cooldownStreak = new Map<string, number>()
 const COOLDOWN_MSG_RE = /超时/
 
 /** 取链失败后按错误信息记账：超时类失败才进冷却账本 */
 export const notePlayCooldown = (api: any, platform: string, failMessage: string): void => {
     if (!api?.info || !COOLDOWN_MSG_RE.test(String(failMessage || ''))) return
-    cooldownSink.set(playSinkKey(api.info.owner, api.info.id, platform), Date.now() + PLAY_COOLDOWN_WINDOW_MS)
+    const key = playSinkKey(api.info.owner, api.info.id, platform)
+    const streak = (cooldownStreak.get(key) || 0) + 1
+    cooldownStreak.set(key, streak)
+    const windowMs = PLAY_COOLDOWN_STEPS_MS[Math.min(streak, PLAY_COOLDOWN_STEPS_MS.length) - 1]
+    cooldownSink.set(key, Date.now() + windowMs)
+    try { markLedgerDirty() } catch { /* 落盘标记失败不影响投递 */ }
 }
 
 /** 按「是否处于回源超时冷却期」把候选分成两轮：第一轮试 hot，全败后第二轮试 cooled */
@@ -1910,6 +1926,65 @@ export const partitionByCooldown = (
         ;(until > now ? cooled : hot).push(api)
     }
     return { hot, cooled }
+}
+
+/** 沉底 / 超时冷却 / 阶梯计数三份内存账本的落盘结构（重启后不丢学习成果） */
+export interface PlaySinkState {
+    v: 1
+    fails: Array<[string, PlaySinkRecord]>
+    cooldowns: Array<[string, number]>
+    streaks: Array<[string, number]>
+}
+
+export const exportPlaySinkState = (now: number = Date.now()): PlaySinkState => {
+    const fails: Array<[string, PlaySinkRecord]> = []
+    for (const [key, rec] of playFailSink) {
+        if (!rec || !(now - rec.lastFailAt < PLAY_SINK_WINDOW_MS)) continue
+        fails.push([key, { ...rec }])
+    }
+    const cooldowns: Array<[string, number]> = []
+    for (const [key, until] of cooldownSink) {
+        if (until > now) cooldowns.push([key, until])
+    }
+    return { v: 1, fails, cooldowns, streaks: [...cooldownStreak] }
+}
+
+/** 恢复。返回载入的条目数；异常一律吞掉（账本丢了只是从头学，不能挡住启动） */
+export const importPlaySinkState = (state: any, now: number = Date.now()): number => {
+    if (!state) return 0
+    let n = 0
+    if (Array.isArray(state.fails)) {
+        for (const item of state.fails) {
+            if (!Array.isArray(item) || item.length < 2) continue
+            const [key, rec] = item
+            if (typeof key !== 'string' || !key || !rec) continue
+            const lastFailAt = Number(rec.lastFailAt) || 0
+            if (!lastFailAt || now - lastFailAt >= PLAY_SINK_WINDOW_MS) continue
+            playFailSink.set(key, { fails: Number(rec.fails) || 1, lastFailAt })
+            n += 1
+        }
+    }
+    if (Array.isArray(state.cooldowns)) {
+        for (const item of state.cooldowns) {
+            if (!Array.isArray(item) || item.length < 2) continue
+            const [key, until] = item
+            if (typeof key !== 'string' || !key) continue
+            const ts = Number(until) || 0
+            if (ts <= now) continue
+            cooldownSink.set(key, ts)
+            n += 1
+        }
+    }
+    if (Array.isArray(state.streaks)) {
+        for (const item of state.streaks) {
+            if (!Array.isArray(item) || item.length < 2) continue
+            const [key, streak] = item
+            if (typeof key !== 'string' || !key) continue
+            const v = Number(streak) || 0
+            if (v > 0) cooldownStreak.set(key, Math.min(v, 99))
+        }
+    }
+    return n
 }
 
 /**
@@ -2686,7 +2761,7 @@ export async function callUserApiGetMusicUrl(
         // 全部常规源失败后第二轮再试它们（冷却只改顺序、不剥夺机会，可用性不变）
         const { hot, cooled } = partitionByCooldown(candidates, source)
         if (cooled.length) {
-            console.log(`[自定义源] ${cooled.length} 个音源处于回源超时冷却期（90s 内先跳过，全败后兜底再试）：` +
+            console.log(`[自定义源] ${cooled.length} 个音源处于回源超时冷却期（先跳过，全败后兜底再试）：` +
                 cooled.map((a: any) => a.info?.name).join('、'))
         }
         const passSeq: Array<{ api: any; inCooldownPass: boolean }> = [

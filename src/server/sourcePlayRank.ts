@@ -19,6 +19,8 @@
  * 账本全在内存，进程重启即清零；单条记录 40 字节级，条目数有上限。
  */
 
+import { markLedgerDirty } from './sourceLedgerDirty'
+
 export interface PlayRankTarget {
     owner: string
     id: string
@@ -68,6 +70,7 @@ export const notePlayResult = (
     }
     rec.attempts += 1
     rec.lastAt = now
+    try { markLedgerDirty() } catch { /* 落盘标记失败不影响排序 */ }
     if (ok) {
         rec.successes += 1
         // 单次异常值不能把均值带飞：上限跟着当前均值走（最多 4 倍），
@@ -114,13 +117,78 @@ export const adaptiveTimeoutMs = (target: PlayRankTarget): number => {
     return Math.min(ADAPTIVE_TIMEOUT_MAX_MS, Math.max(ADAPTIVE_TIMEOUT_MIN_MS, want))
 }
 
+/** 同一源在「别的档 / 别的平台」上的最好成绩，本档没样本时当先验 */
+export interface PlayRankPrior {
+    /** 同源同平台的其它档位 */
+    samePlatform?: number
+    /** 同源任意平台 */
+    anyKey?: number
+}
+
+/** 先验索引：`owner:id` → 各平台最好成绩 + 全局最好成绩 */
+export interface PlayRankPriorIndex {
+    byKey: Map<string, { byPlatform: Map<string, number>; anyKey: number }>
+}
+
+/**
+ * 一次性算出每个源「别的键」上的最好成绩，供本档没样本时当先验。
+ *
+ * 为什么需要：2026-11-08 实测，容器重启后账本清零，`裤佬 wy:320k` 先攒到 9 次样本
+ * （EWMA 1798ms）排在第一，`墨澜 wy:320k` 只被试了 1 次（160ms）——**样本不足
+ * `MIN_TRUST` 一律给中性分 1200ms**，于是 1798ms 的源稳稳压在 160ms 的源前面：
+ * 同一首歌 17952 要 728~2661ms、17950 只要 136~239ms。可墨澜在 mg 上早有 4 次样本
+ * （426ms），这条证据本来就能说明「这个源整体不慢」。
+ *
+ * 所以本档没证据时先看同源别的键；**只用来提前、不用来惩罚**
+ * （`playRankScore` 里取 `Math.min(NEUTRAL_MS, prior)`），
+ * 本档攒到 2 次样本后自动失效，别的平台的快慢不会长期决定这里的顺序。
+ */
+export const buildPlayRankPriors = (): PlayRankPriorIndex => {
+    const byKey = new Map<string, { byPlatform: Map<string, number>; anyKey: number }>()
+    for (const [key, rec] of stats) {
+        if (rec.successes === 0 || rec.ewmaMs <= 0) continue
+        const parts = key.split(':')
+        if (parts.length < 4) continue
+        const platform = parts[parts.length - 2]
+        const ownerId = parts.slice(0, parts.length - 2).join(':')
+        let cur = byKey.get(ownerId)
+        if (!cur) {
+            cur = { byPlatform: new Map(), anyKey: Number.POSITIVE_INFINITY }
+            byKey.set(ownerId, cur)
+        }
+        const prev = cur.byPlatform.get(platform)
+        if (prev === undefined || rec.ewmaMs < prev) cur.byPlatform.set(platform, rec.ewmaMs)
+        if (rec.ewmaMs < cur.anyKey) cur.anyKey = rec.ewmaMs
+    }
+    return { byKey }
+}
+
+/** 取某个源的先验（平台维度优先，回落到全局最好） */
+const priorFor = (index: PlayRankPriorIndex | undefined, owner: string, id: string, platform: string): PlayRankPrior | undefined => {
+    const entry = index?.byKey.get(`${owner}:${id}`)
+    if (!entry) return undefined
+    return {
+        samePlatform: entry.byPlatform.get(platform),
+        anyKey: Number.isFinite(entry.anyKey) ? entry.anyKey : undefined,
+    }
+}
+
 /**
  * 排序分：越小越靠前。
- * 无样本 / 样本不足 → `NEUTRAL_MS`；从未成功 → `Infinity`（垫底）。
+ * 无样本 / 样本不足 → 跨档先验（若比中性分更好）→ 否则 `NEUTRAL_MS`；从未成功 → `Infinity`。
  */
-export const playRankScore = (target: PlayRankTarget, now: number = Date.now()): number => {
+export const playRankScore = (
+    target: PlayRankTarget,
+    now: number = Date.now(),
+    prior?: PlayRankPrior,
+): number => {
     const rec = stats.get(playRankKey(target))
-    if (!rec || rec.attempts < MIN_TRUST) return NEUTRAL_MS
+    if (!rec || rec.attempts < MIN_TRUST) {
+        // 有一次失败记录但从未成功：不给先验，别拿别的键把它抬上来
+        if (rec && rec.successes === 0 && rec.attempts > 0) return NEUTRAL_MS
+        const priorMs = prior?.samePlatform ?? prior?.anyKey
+        return priorMs !== undefined && priorMs > 0 ? Math.min(NEUTRAL_MS, priorMs) : NEUTRAL_MS
+    }
     if (rec.successes === 0) return Number.POSITIVE_INFINITY
     const failRate = 1 - rec.successes / rec.attempts
     return rec.ewmaMs + failRate * FAIL_PENALTY_MS
@@ -157,11 +225,17 @@ export const rankCandidatesByHistory = (
     now: number = Date.now(),
 ): any[] => {
     if (!quality || candidates.length < 2) return candidates
+    // 先验一次算完：本档没样本的源用「同源别的键」的成绩提前，
+    // 避免重启后「先被试过的慢源」靠样本数压住「没被试过的快源」
+    const priors = buildPlayRankPriors()
     const scored = candidates.map((api: any) => {
         const info = api?.info || {}
+        const owner = String(info.owner || '')
+        const id = String(info.id || '')
         const score = playRankScore(
-            { owner: String(info.owner || ''), id: String(info.id || ''), platform, quality },
+            { owner, id, platform, quality },
             now,
+            priorFor(priors, owner, id, platform),
         )
         return { api, score }
     })
@@ -220,3 +294,45 @@ export const playRankSnapshot = (limit: number = 12): {
 }
 
 export const resetPlayRank = (): void => { stats.clear() }
+
+// ==================== 落盘（重启后不丢学习成果）====================
+// 2026-11-08 实测：每次更新/重启容器，账本清零 → 第一次听歌又踩回 order.json 排第一的源。
+// 17952 重启后首请求 5320ms（裤佬 5 秒超时→墨澜），之后才稳定在 111~201ms。
+// 这里只导出「还新鲜」的记录，落盘/加载由 sourceLedgerStore 负责。
+export interface PlayRankState {
+    v: 1
+    records: Array<[string, PlayRankRecord]>
+}
+
+/** 6 小时前的成绩不再可信：上游状态会变，别让昨天的慢拖住今天 */
+export const PLAY_RANK_STATE_TTL_MS = 6 * 60 * 60 * 1000
+
+export const exportPlayRankState = (now: number = Date.now()): PlayRankState => {
+    const records: Array<[string, PlayRankRecord]> = []
+    for (const [key, rec] of stats) {
+        if (!rec || !(now - rec.lastAt < PLAY_RANK_STATE_TTL_MS)) continue
+        records.push([key, { ...rec }])
+    }
+    return { v: 1, records }
+}
+
+/** 恢复。返回实际载入的条数；任何异常都不抛，账本是「锦上添花」，不能挡住启动 */
+export const importPlayRankState = (state: any, now: number = Date.now()): number => {
+    if (!state || !Array.isArray(state.records)) return 0
+    let n = 0
+    for (const item of state.records) {
+        if (!Array.isArray(item) || item.length < 2) continue
+        const [key, rec] = item
+        if (typeof key !== 'string' || !key || !rec) continue
+        const attempts = Number(rec.attempts) || 0
+        const successes = Number(rec.successes) || 0
+        const ewmaMs = Number(rec.ewmaMs) || 0
+        const lastAt = Number(rec.lastAt) || 0
+        if (!attempts || lastAt <= 0) continue
+        if (!(now - lastAt < PLAY_RANK_STATE_TTL_MS)) continue
+        if (stats.size >= MAX_ENTRIES) break
+        stats.set(key, { attempts, successes, ewmaMs, lastAt })
+        n += 1
+    }
+    return n
+}
