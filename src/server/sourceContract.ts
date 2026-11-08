@@ -147,7 +147,9 @@ export const inspectSourceContract = (sources: unknown): ContractReport => {
             }
         }
 
-        // ---- qualitys：未知档位属 warn（客户端会丢弃该档，但源仍可用）----
+        // ---- qualitys：未知档位属 warn（客户端丢弃该档，源仍可用）；
+        //      空数组属 error —— 那是「声明了这个平台但一档都不给」，客户端连取链都不会发，
+        //      等于该平台在这份源里直接不可用，和「音质声明不规范」不是一个量级 ----
         if (meta.qualitys === undefined) {
             add(platform, 'qualitys_missing', 'warn', '未声明 qualitys，面板无法展示可用音质')
         } else if (!Array.isArray(meta.qualitys)) {
@@ -158,7 +160,9 @@ export const inspectSourceContract = (sources: unknown): ContractReport => {
                 add(platform, 'qualitys_invalid_item', 'warn', 'qualitys 里有非字符串或空项')
             }
             if (qualities.length === 0) {
-                add(platform, 'qualitys_empty', 'warn', 'qualitys 为空数组，客户端不会对该平台发起取链')
+                add(platform, 'qualitys_empty', 'error',
+                    'qualitys 为空数组：该平台一档都不给，客户端不会发起取链，等于该平台不可用')
+                platformOk = false
             } else {
                 const unknown = qualities.filter(q => !(LX_STANDARD_QUALITIES as readonly string[]).includes(q))
                 if (unknown.length > 0) {

@@ -15,6 +15,7 @@ import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerElig
 import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue } from './sourceContract'
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
+import { notePlayResult, rankCandidatesByHistory } from './sourcePlayRank'
 import { clearRateLimit, clearRateLimitForSource, isRateLimitFailure, isRateLimited, noteRateLimit } from './sourceRateLimit'
 import { syncLog } from '../utils/log4js'
 
@@ -1831,6 +1832,17 @@ const qualityLedgerEnabled = (): boolean => {
 }
 
 /**
+ * 按历史成绩正向排序的开关。默认开。
+ *
+ * 与前两个开关的分工：沉底/短路都只做减法（坏源靠后、必败档不发），
+ * 这个做加法 —— 把实测更快的源提到前面。关掉后回到「只按 order.json 顺序」。
+ */
+const playRankEnabled = (): boolean => {
+    const v = (global.lx && global.lx.config) ? (global.lx.config as any)['customSource.playRank.enabled'] : undefined
+    return v !== false
+}
+
+/**
  * 记一次取链失败——只用于排序，不参与定罪。
  *
  * `failMessage` 用来分流：**限流（429）不进沉底账本**，改走 30 秒短退避。
@@ -2362,17 +2374,48 @@ export async function callUserApiGetMusicUrl(
         if (orderData.length === 0) {
             // 没有排序文件：先把当前顺序冻结落盘，再按这份顺序排 ——
             // 这样「首次启动」和「之后每次启动」用的是同一份顺序。
-            const snapIds = candidates.map((a: any) => String(a?.info?.id || '')).filter(Boolean)
+            //
+            // 注意 candidates 是**按平台过滤过**的（只含声明了该平台的源），
+            // 只拿它冻结会漏掉其它平台的源（实测 37 个源只冻住 23 个），
+            // 漏掉的源在别的平台请求里会被当成「未列出」排到末尾。
+            // 所以：本平台候选在前（保持当前生效顺序）+ 同 owner 其余源按加载顺序补齐。
+            const snapshotIds: string[] = candidates
+                .map((a: any) => String(a?.info?.id || ''))
+                .filter(Boolean)
+            const seen = new Set(snapshotIds)
+            const ownerKey = String(candidates[0]?.info?.owner || 'open')
+            for (const [, api] of loadedApis) {
+                const info: any = api?.info
+                const id = String(info?.id || '')
+                if (!id || seen.has(id)) continue
+                if (String(info?.owner || '') !== ownerKey) continue
+                if (info?.owner === 'open' && info?.enabled === false) continue
+                seen.add(id)
+                snapshotIds.push(id)
+            }
+
             const writePath = orderCandidates.find(p => {
                 try { return fs.existsSync(path.dirname(p)) } catch (e) { return false }
             }) || orderCandidates[orderCandidates.length - 1]
-            if (persistOrderSnapshot(writePath, snapIds)) orderData = snapIds
+            if (persistOrderSnapshot(writePath, snapshotIds)) orderData = snapshotIds
         }
 
         const idToIndex = new Map(orderData.map((id, i) => [id, i]))
         candidates = sortCandidatesByOrder(candidates, idToIndex)
     }
     // =========================================
+
+    // === 按历史成绩正向排序：把实测更快的源提到前面 ===
+    // 沉底只做减法（坏源靠后），这条做加法。依据是「源 × 平台 × 档」的成功耗时 EWMA
+    // 与成功率，样本不足时给中性分、保持原有顺序（见 sourcePlayRank.ts 的注释）。
+    // 放在沉底之前：沉底是最终裁决（近期连续失败必须垫底），不能被历史成绩翻盘。
+    if (candidates.length > 1 && quality && playRankEnabled()) {
+        const ranked = rankCandidatesByHistory(candidates, source, quality)
+        if (ranked.some((api: any, i: number) => api !== candidates[i])) {
+            console.log(`[自定义源] 按历史成绩重排 ${source}/${quality} 候选：${ranked.slice(0, 5).map((a: any) => a.info?.name).join(' > ')}`)
+            candidates = ranked
+        }
+    }
 
     // === 运行时沉底：近期反复失败的音源排到队尾 ===
     // 不写 states.json、不禁用、不删源——只改变尝试顺序。
@@ -2554,6 +2597,26 @@ export async function callUserApiGetMusicUrl(
         } catch { /* 记账失败不影响播放 */ }
     }
 
+    /**
+     * 记一次尝试的「成绩」：成功耗时进 EWMA，失败只加计数。
+     * 与档位账本分开：账本管「要不要跳过这一档」，这里只管「下次谁先上」。
+     */
+    const notePlayPerf = (api: any, ok: boolean, costMs: number = 0): void => {
+        if (!quality) return
+        try {
+            notePlayResult(
+                {
+                    owner: String(api?.info?.owner || ''),
+                    id: String(api?.info?.id || ''),
+                    platform: source,
+                    quality,
+                },
+                ok,
+                costMs,
+            )
+        } catch { /* 排序统计失败不影响播放 */ }
+    }
+
     if (supportedCount === 1) {
         const api = candidates[0]
         const maxRetries = 3
@@ -2563,6 +2626,7 @@ export async function callUserApiGetMusicUrl(
             const perTimeout = budgetForSource(maxRetries - i)
             try {
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (第 ${i + 1}/${maxRetries} 次, 所属: ${api.info.owner})`)
+                const attemptStartedAt = Date.now()
 
                 const rawUrl = await withTimeout(
                     api.callRequest('musicUrl', scriptKeyFor(api), {
@@ -2582,6 +2646,7 @@ export async function callUserApiGetMusicUrl(
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
                 clearPlayFailure(api, source)
                 noteQuality(api, true)
+                notePlayPerf(api, true, Date.now() - attemptStartedAt)
                 // 单源场景没有对照组（没人证明这首歌能播），只记账不处置
                 reportPlayHardFailures(roundFailures, source, false)
                 const att = { name: api.info.name, status: 'success', message: `第 ${i + 1} 次尝试成功` }
@@ -2593,6 +2658,7 @@ export async function callUserApiGetMusicUrl(
                 lastError = error
                 notePlayFailure(api, source, describeError(error))
                 noteQuality(api, false, describeError(error))
+                notePlayPerf(api, false)
                 roundFailures.push({ api, message: describeError(error) })
                 const att = { name: api.info.name, status: 'fail', message: `第 ${i + 1} 次尝试失败,音源日志：${describeError(error)}` }
                 attempts.push(att)
@@ -2622,6 +2688,7 @@ export async function callUserApiGetMusicUrl(
             const perTimeout = budgetForSource(passSeq.length - candidateIndex)
             try {
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (所属: ${api.info.owner}${inCooldownPass ? ', 冷却兜底轮' : ''})`)
+                const attemptStartedAt = Date.now()
 
                 const rawUrl = await withTimeout(
                     api.callRequest('musicUrl', scriptKeyFor(api), {
@@ -2641,6 +2708,7 @@ export async function callUserApiGetMusicUrl(
                 console.log(`[自定义源] ✓ ${api.info.name} 成功返回链接 (所属: ${api.info.owner})`)
                 clearPlayFailure(api, source)
                 noteQuality(api, true)
+                notePlayPerf(api, true, Date.now() - attemptStartedAt)
                 // 本源成功 = 这首歌在这个平台确定可播 → 本轮硬故障失败的源有了对照组
                 reportPlayHardFailures(roundFailures, source, true)
                 const att = { name: api.info.name, status: 'success' }
@@ -2660,6 +2728,7 @@ export async function callUserApiGetMusicUrl(
                 lastError = error
                 notePlayFailure(api, source, failMsg)
                 noteQuality(api, false, failMsg)
+                notePlayPerf(api, false)
                 notePlayCooldown(api, source, failMsg)
                 roundFailures.push({ api, message: failMsg })
                 const att = { name: api.info.name, status: 'fail', message: `音源日志：${failMsg}` }

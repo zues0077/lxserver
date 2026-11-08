@@ -84,10 +84,21 @@ test('未知音质档只 warn，源仍可用', () => {
   assert.strictEqual(r.compliant, true)
 })
 
-test('qualitys 空数组：客户端不会取链，warn', () => {
+test('qualitys 空数组：该平台一档都不给，客户端不会取链 → error', () => {
   const r = inspectSourceContract({ kw: { name: 'x', actions: ['musicUrl'], qualitys: [] } })
+  const hit = r.issues.find(i => i.code === 'qualitys_empty')
+  assert.ok(hit)
+  assert.strictEqual(hit!.severity, 'error')
   assert.ok(codes(r).includes('kw:qualitys_empty'))
-  assert.strictEqual(r.compliant, true)
+  assert.strictEqual(r.compliant, false)
+  // 平台级 ok 也要落下来：面板据此把该平台标成不可用
+  assert.strictEqual((r as any).platforms?.kw?.ok, false)
+})
+
+test('qualitys 空数组与「未声明 qualitys」不是一回事：后者仍只是 warn', () => {
+  const declared = inspectSourceContract({ kw: { name: 'x', actions: ['musicUrl'] } })
+  assert.ok(codes(declared).includes('kw:qualitys_missing'))
+  assert.strictEqual(declared.compliant, true)
 })
 
 test('name 缺失 / type 非 music 都只是 warn', () => {

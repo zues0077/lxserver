@@ -791,9 +791,14 @@ declare namespace LX {
      * 是否按「源 × 平台 × 音质档」短路必然失败的档位 (默认 true)。
      *
      * 某源在某一档连续失败且一次未成功, 就在该档跳过一小时 (到期放行一次探路)。
-     * 与 playSink 的区别: playSink 只改顺序仍会尝试, 这是本次直接不发。
+     * 与 playSink 的区别: playSink 只改顺序仍会尝试, 这里按档把必败源排到最后兜底。
      */
     'customSource.qualityLedger.enabled'?: boolean
+    /**
+     * 按历史成绩(成功率 + 成功耗时 EWMA)给候选源正向排序, 默认开启。
+     * 关闭后只按 order.json 的顺序尝试。
+     */
+    'customSource.playRank.enabled'?: boolean
     /**
      * 本地音乐批量指纹识别的并发线程数 (1~4, 默认 2)。
      *

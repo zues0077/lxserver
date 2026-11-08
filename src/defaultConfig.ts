@@ -225,8 +225,12 @@ const config: LX.Config = {
   'customSource.playSink.enabled': true,
   // 按「源 × 平台 × 音质档」短路：某源在某一档连续失败且零成功，就在该档直接跳过一小时
   // （到期自动放行一次探路，成功即恢复）。与上面沉底的区别：沉底只改顺序仍会试，
-  // 这里是本次不发，省掉整段超时预算（flac 档最明显：一个壳源能耗掉十几秒）。
+  // 这里是按档把「必败的源」排到最后兜底：前面有可用源成功就省掉那几段超时，
+  // 可用源全败时它还会被试一次（不把跨歌曲的证据当成本首歌的判决）。
   'customSource.qualityLedger.enabled': true,
+  // 按历史成绩正向排序：用「源 × 平台 × 档」的成功耗时 EWMA 与成功率打分，
+  // 把实测更快的源提到前面。样本不足（<2 次）不动手，从没成功过的垫底。
+  'customSource.playRank.enabled': true,
 }
 
 export default config
