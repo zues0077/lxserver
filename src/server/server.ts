@@ -592,12 +592,18 @@ const canResolveSource = (source: string, username: string): boolean => {
  * `Date.now() >= deadline` 直接返回 null —— 表现为「B站兜底：搜到了 BV 号，但永远投不上」，
  * 小爱 8/8 次全部落在「解析超时 / 落到公开源」。
  *
- * 现在拆成两段独立预算：原源 10 秒 + 换源 10 秒，且换源搜索原源阶段就开始跑（并行），
+ * 现在拆成两段独立预算：原源 8 秒 + 换源 10 秒，且换源搜索原源阶段就开始跑（并行），
  * 保证换源阶段永远有整整 10 秒可用。
+ *
+ * 原源一侧从 10s 收到 8s（2026-11-08 用户拍板）：实测 17952 冷启动几例里，
+ * 原源阶段的 10s 几乎总是被同一批慢源吃到见底才判失败，多出来的 2s 换不来成功率，
+ * 只是让「这条路不通」晚 2 秒被告知。降到 8s 后最坏链路 8 + 10 + 8(残片抢救) = 26s，
+ * 比原来的 28s 少 2s；能出链的源实测中位 100~200ms，8s 对它们远远够用。
+ * 仍可用环境变量 MUSIC_RESOLVE_DIRECT_MS 覆盖（下限 2000ms）。
  */
 const RESOLVE_DIRECT_BUDGET_MS = (() => {
   const raw = Number(process.env.MUSIC_RESOLVE_DIRECT_MS)
-  return Number.isFinite(raw) && raw >= 2000 ? Math.round(raw) : 10000
+  return Number.isFinite(raw) && raw >= 2000 ? Math.round(raw) : 8000
 })()
 const RESOLVE_SWITCH_BUDGET_MS = (() => {
   const raw = Number(process.env.MUSIC_RESOLVE_SWITCH_MS)
@@ -844,7 +850,7 @@ const resolvePlayableAudio = async (
   let direct: any = null
   try {
     if (options.skipDirect) {
-      // 重试轮直接进换源：首轮原源那 10 秒已经证明这条路走不通，再问一遍是白等
+      // 重试轮直接进换源：首轮原源那 8 秒已经证明这条路走不通，再问一遍是白等
       // （实测 mg 两轮都「解析超时」，用户干等 28 秒）
       console.log(`[自动换源] 重试跳过原源，直接换源：${songInfo.name}`)
     } else {
