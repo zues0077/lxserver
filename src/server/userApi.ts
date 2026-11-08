@@ -15,7 +15,7 @@ import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerElig
 import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue, normalizeQualityList } from './sourceContract'
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
-import { notePlayResult, rankCandidatesByHistory } from './sourcePlayRank'
+import { notePlayResult, rankCandidatesByHistory, adaptiveTimeoutMs } from './sourcePlayRank'
 import { clearRateLimit, clearRateLimitForSource, isRateLimitFailure, isRateLimited, noteRateLimit } from './sourceRateLimit'
 import { syncLog } from '../utils/log4js'
 
@@ -2554,11 +2554,20 @@ export async function callUserApiGetMusicUrl(
      * 1. 单源超时 = (剩余预算 - 800ms) / 剩余源数，下限 5 秒 —— 保证每个源都能上场；
      * 2. 预算见底（<1.5s）立即跳出，不再后台空转。
      */
-    const budgetForSource = (remainingSources: number): number => {
+    const budgetForSource = (api: any, remainingSources: number): number => {
         if (!deadlineAt) return callTimeoutMs
         const left = deadlineAt - Date.now()
         const share = Math.floor((left - 800) / Math.max(1, remainingSources))
-        return Math.max(5000, Math.min(callTimeoutMs, share))
+        // 地板不再固定 5000ms：按该源的历史成绩收紧（见 sourcePlayRank.adaptiveTimeoutMs）。
+        // 只对「已证明很快」的源生效（EWMA×4 夹在 3~5s），无样本/慢源仍是 5s ——
+        // 目的是让挂死的快源早 2 秒换人，而不是把慢源判死。
+        const floor = adaptiveTimeoutMs({
+            owner: String(api?.info?.owner || ''),
+            id: String(api?.info?.id || ''),
+            platform: source,
+            quality: quality || '',
+        })
+        return Math.max(floor, Math.min(callTimeoutMs, share))
     }
     const budgetExhausted = (): boolean => !!deadlineAt && deadlineAt - Date.now() < 1500
     // 本轮取链里失败的音源（用于轮末把硬故障证据交给巡检）
@@ -2626,7 +2635,7 @@ export async function callUserApiGetMusicUrl(
 
         for (let i = 0; i < maxRetries; i++) {
             if (budgetExhausted()) break
-            const perTimeout = budgetForSource(maxRetries - i)
+            const perTimeout = budgetForSource(api, maxRetries - i)
             try {
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (第 ${i + 1}/${maxRetries} 次, 所属: ${api.info.owner})`)
                 const attemptStartedAt = Date.now()
@@ -2688,7 +2697,7 @@ export async function callUserApiGetMusicUrl(
             const { api, inCooldownPass } = passSeq[candidateIndex]
             // 预算见底就别再挨个源打了：调用方早就返回 500，这里继续请求只是白烧上游配额
             if (budgetExhausted()) break
-            const perTimeout = budgetForSource(passSeq.length - candidateIndex)
+            const perTimeout = budgetForSource(api, passSeq.length - candidateIndex)
             try {
                 console.log(`[自定义源] 尝试 ${api.info.name} 获取 ${source} 音乐链接 (所属: ${api.info.owner}${inCooldownPass ? ', 冷却兜底轮' : ''})`)
                 const attemptStartedAt = Date.now()

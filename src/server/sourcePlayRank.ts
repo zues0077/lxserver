@@ -87,6 +87,34 @@ export const getPlayRankRecord = (target: PlayRankTarget): PlayRankRecord | unde
 }
 
 /**
+ * 单源取链超时的自适应上限（ms）。
+ *
+ * 为什么需要它：`budgetForSource()` 原来的下限是**硬编码 5000ms**。那个地板的初衷是
+ * 「保证每个源都能上场」，但对**已知很快**的源是纯浪费 —— 墨澜 EWMA 146ms，它一旦挂死，
+ * 用户就得干等 5 秒才轮到下一个源。实测 17950 全生命周期 344 次成功里夹着
+ * **72 次 5 秒满超时（17%）**，每次白等 5 秒，这才是「首播卡」的主因，不是总预算 8s。
+ *
+ * 规则：`clamp(EWMA × 4, 3000, 5000)`
+ *  - **×4 的余量**：源本身抖得厉害（实测裤佬同一首歌 0.8/1.0/3.6s 都出现过），
+ *    给 2 倍会把偶发慢当成失败，4 倍才留得住；
+ *  - **下限 3000**：已知快源（EWMA ≤ 750ms）才有机会被压到 3s，慢源根本摸不到这个下限；
+ *  - **上限 5000**：与改动前完全一致 —— 裤佬 EWMA 1676ms → 6704 → 夹到 5000，行为不变；
+ *  - **样本不足 / 从未成功 → 5000**：没证据就不猜，保持原样。
+ *
+ * 注意这是「预算」，不是「判定源坏了」：到点只是提前换下一个候选，失败照常记账。
+ */
+export const ADAPTIVE_TIMEOUT_MIN_MS = 3000
+export const ADAPTIVE_TIMEOUT_MAX_MS = 5000
+export const adaptiveTimeoutMs = (target: PlayRankTarget): number => {
+    const rec = stats.get(playRankKey(target))
+    if (!rec || rec.attempts < MIN_TRUST || rec.successes === 0 || rec.ewmaMs <= 0) {
+        return ADAPTIVE_TIMEOUT_MAX_MS
+    }
+    const want = Math.round(rec.ewmaMs * 4)
+    return Math.min(ADAPTIVE_TIMEOUT_MAX_MS, Math.max(ADAPTIVE_TIMEOUT_MIN_MS, want))
+}
+
+/**
  * 排序分：越小越靠前。
  * 无样本 / 样本不足 → `NEUTRAL_MS`；从未成功 → `Infinity`（垫底）。
  */

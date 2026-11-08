@@ -17,6 +17,9 @@ import {
     resetPlayRank,
     playRankSize,
     playRankSnapshot,
+    adaptiveTimeoutMs,
+    ADAPTIVE_TIMEOUT_MIN_MS,
+    ADAPTIVE_TIMEOUT_MAX_MS,
 } from '../src/server/sourcePlayRank'
 
 const T = (id: string, platform = 'wy', quality = '320k') => ({ owner: 'open', id, platform, quality })
@@ -165,4 +168,49 @@ test('只有 25% 相对优势但仍差 300ms 以上时才换位（两个门槛�
     notePlayResult(T('b'), true, 1100)
     notePlayResult(T('b'), true, 1100)
     assert.deepStrictEqual(ids(rankCandidatesByHistory([api('a'), api('b')], 'wy', '320k')), ['b', 'a'])
+})
+
+test('自适应单源超时：无样本 / 样本不足 / 从未成功 → 保持 5s（不猜）', () => {
+    resetPlayRank()
+    assert.strictEqual(adaptiveTimeoutMs(T('unknown')), ADAPTIVE_TIMEOUT_MAX_MS)
+    // 只有 1 次尝试：低于 MIN_TRUST
+    notePlayResult(T('once'), true, 120)
+    assert.strictEqual(adaptiveTimeoutMs(T('once')), ADAPTIVE_TIMEOUT_MAX_MS)
+    // 两次都失败：没有成功样本，无从判断快慢
+    notePlayResult(T('dead'), false)
+    notePlayResult(T('dead'), false)
+    assert.strictEqual(adaptiveTimeoutMs(T('dead')), ADAPTIVE_TIMEOUT_MAX_MS)
+})
+
+test('自适应单源超时：已知快源压到 3s（挂死时少等 2 秒）', () => {
+    resetPlayRank()
+    notePlayResult(T('fast'), true, 140)
+    notePlayResult(T('fast'), true, 150)
+    // EWMA≈150 → 4×150=600 < 3000，夹到下限
+    assert.strictEqual(adaptiveTimeoutMs(T('fast')), ADAPTIVE_TIMEOUT_MIN_MS)
+})
+
+test('自适应单源超时：慢源（EWMA 1.6s）仍是 5s，行为与改动前一致', () => {
+    resetPlayRank()
+    notePlayResult(T('slow'), true, 1600)
+    notePlayResult(T('slow'), true, 1600)
+    assert.strictEqual(adaptiveTimeoutMs(T('slow')), ADAPTIVE_TIMEOUT_MAX_MS)
+})
+
+test('自适应单源超时：中间档给 4 倍 EWMA，且不超过 5s', () => {
+    resetPlayRank()
+    notePlayResult(T('mid'), true, 900)
+    notePlayResult(T('mid'), true, 900)
+    assert.strictEqual(adaptiveTimeoutMs(T('mid')), 3600)
+    resetPlayRank()
+    for (let i = 0; i < 3; i++) notePlayResult(T('mid2'), true, 5000)
+    assert.strictEqual(adaptiveTimeoutMs(T('mid2')), ADAPTIVE_TIMEOUT_MAX_MS)
+})
+
+test('自适应单源超时按「源 × 平台 × 档」隔离：别的档位的成绩不影响这一档', () => {
+    resetPlayRank()
+    notePlayResult(T('dual', 'wy', '128k'), true, 120)
+    notePlayResult(T('dual', 'wy', '128k'), true, 120)
+    assert.strictEqual(adaptiveTimeoutMs(T('dual', 'wy', '128k')), ADAPTIVE_TIMEOUT_MIN_MS)
+    assert.strictEqual(adaptiveTimeoutMs(T('dual', 'wy', '320k')), ADAPTIVE_TIMEOUT_MAX_MS)
 })
