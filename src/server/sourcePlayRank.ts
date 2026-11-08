@@ -100,8 +100,28 @@ export const playRankScore = (target: PlayRankTarget, now: number = Date.now()):
 
 /**
  * 按历史成绩重排候选源；分数相同保持原相对顺序（稳定排序）。
- * 不改入参。
+ *
+ * **换位要过门槛**（`clearlyBetter`）：2026-11-08 的实机对照实验里，同一份「慢源置顶」
+ * 布置，两轮结果互相矛盾（一轮 17952 快 464ms，另一轮反而慢 1268ms）。原因不是算法错，
+ * 而是**源的表现本身在抖**：某首歌上慢一次的源，EWMA 立刻被抬高，下一次就被降级；
+ * 等它恢复又升回来 —— 排序在两套顺序之间来回摆，用户感到的是「有时快有时慢」。
+ *
+ * 所以排序改成「有把握才动」：只有当更优源的分数比当前源**既低 300ms 以上、
+ * 又低 25% 以上**时才换位。判据越保守，顺序越稳；真正必败的源由沉底账本处理，
+ * 这里只负责「明显更快的往前挪一点」。
  */
+export const SWAP_MIN_ABS_MS = 300
+export const SWAP_MIN_REL = 0.25
+
+/** `better` 比 `worse` 好得足够明显吗（不够明显就不换位，保持原顺序） */
+const clearlyBetter = (better: number, worse: number): boolean => {
+    if (better === worse) return false
+    if (!Number.isFinite(worse)) return true
+    if (!Number.isFinite(better)) return false
+    const gain = worse - better
+    return gain >= SWAP_MIN_ABS_MS && gain >= worse * SWAP_MIN_REL
+}
+
 export const rankCandidatesByHistory = (
     candidates: any[],
     platform: string,
@@ -109,16 +129,29 @@ export const rankCandidatesByHistory = (
     now: number = Date.now(),
 ): any[] => {
     if (!quality || candidates.length < 2) return candidates
-    const scored = candidates.map((api: any, index: number) => {
+    const scored = candidates.map((api: any) => {
         const info = api?.info || {}
         const score = playRankScore(
             { owner: String(info.owner || ''), id: String(info.id || ''), platform, quality },
             now,
         )
-        return { api, index, score }
+        return { api, score }
     })
-    scored.sort((a, b) => (a.score === b.score ? a.index - b.index : a.score - b.score))
-    return scored.map(x => x.api)
+    const rest = [...scored]
+    const out: any[] = []
+    while (rest.length > 0) {
+        let bestIdx = 0
+        for (let i = 1; i < rest.length; i++) {
+            if (rest[i].score < rest[bestIdx].score) bestIdx = i
+        }
+        // 队首就是最优（或优势不够明显）时保持原位，避免为一点点差距反复改顺序
+        if (bestIdx === 0 || !clearlyBetter(rest[bestIdx].score, rest[0].score)) {
+            out.push(rest.shift()!.api)
+        } else {
+            out.push(rest.splice(bestIdx, 1)[0].api)
+        }
+    }
+    return out
 }
 
 export const playRankSize = (): number => stats.size

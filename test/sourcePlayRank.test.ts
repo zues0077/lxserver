@@ -128,3 +128,41 @@ test('诊断快照 limit 生效，空账本不报错', () => {
     }
     assert.strictEqual(playRankSnapshot(2).top.length, 2)
 })
+
+test('换位要过门槛：差距不够明显时保持原顺序（避免顺序在两套之间摆动）', () => {
+    resetPlayRank()
+    // 1000ms vs 900ms：只差 100ms、10%，换位没有意义
+    notePlayResult(T('a'), true, 1000)
+    notePlayResult(T('a'), true, 1000)
+    notePlayResult(T('b'), true, 900)
+    notePlayResult(T('b'), true, 900)
+    const ranked = rankCandidatesByHistory([api('a'), api('b')], 'wy', '320k')
+    assert.deepStrictEqual(ids(ranked), ['a', 'b'])
+})
+
+test('换位要过门槛：明显更快（>300ms 且 >25%）才换到前面', () => {
+    resetPlayRank()
+    notePlayResult(T('slow'), true, 1800)
+    notePlayResult(T('slow'), true, 1800)
+    notePlayResult(T('fast'), true, 100)
+    notePlayResult(T('fast'), true, 100)
+    const ranked = rankCandidatesByHistory([api('slow'), api('fast')], 'wy', '320k')
+    assert.deepStrictEqual(ids(ranked), ['fast', 'slow'])
+})
+
+test('只有 25% 相对优势但仍差 300ms 以上时才换位（两个门槛都要满足）', () => {
+    resetPlayRank()
+    // 400 -> 250：差 150ms（<300），相对 37%，仍不换
+    notePlayResult(T('a'), true, 400)
+    notePlayResult(T('a'), true, 400)
+    notePlayResult(T('b'), true, 250)
+    notePlayResult(T('b'), true, 250)
+    assert.deepStrictEqual(ids(rankCandidatesByHistory([api('a'), api('b')], 'wy', '320k')), ['a', 'b'])
+    // 1600 -> 1100：差 500ms 且相对 31%，两个门槛都过 → 换
+    resetPlayRank()
+    notePlayResult(T('a'), true, 1600)
+    notePlayResult(T('a'), true, 1600)
+    notePlayResult(T('b'), true, 1100)
+    notePlayResult(T('b'), true, 1100)
+    assert.deepStrictEqual(ids(rankCandidatesByHistory([api('a'), api('b')], 'wy', '320k')), ['b', 'a'])
+})
