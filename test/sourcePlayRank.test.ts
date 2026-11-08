@@ -16,6 +16,7 @@ import {
     rankCandidatesByHistory,
     resetPlayRank,
     playRankSize,
+    playRankSnapshot,
 } from '../src/server/sourcePlayRank'
 
 const T = (id: string, platform = 'wy', quality = '320k') => ({ owner: 'open', id, platform, quality })
@@ -98,4 +99,32 @@ test('单次异常大值被夹住，不会把均值带飞', () => {
     const before = playRankScore(T('a'))
     notePlayResult(T('a'), true, 6 * 60 * 60 * 1000) // 6 小时的荒谬值
     assert.ok(playRankScore(T('a')) < before * 10)
+})
+
+test('诊断快照：只列有成功样本的源，按分数升序，分数与 ewma+失败惩罚同口径', () => {
+    resetPlayRank()
+    notePlayResult(T('slow'), true, 1800)
+    notePlayResult(T('slow'), true, 1800)
+    notePlayResult(T('fast'), true, 100)
+    notePlayResult(T('fast'), true, 100)
+    notePlayResult(T('half'), true, 200)
+    notePlayResult(T('half'), false)
+    notePlayResult(T('dead'), false)
+    notePlayResult(T('dead'), false)
+    const snap = playRankSnapshot()
+    assert.deepStrictEqual(snap.top.map(r => r.key.split(':')[1]), ['fast', 'half', 'slow'])
+    assert.strictEqual(snap.total, 4)
+    // half：200 + 0.5*FAIL_PENALTY = 950，应当落在 fast(100) 与 slow(1800) 之间
+    assert.strictEqual(snap.top[1].score, 200 + 0.5 * 1500)
+    assert.ok(!snap.top.some(r => r.key.indexOf('dead') >= 0), '从未成功的源不该出现在快照里')
+})
+
+test('诊断快照 limit 生效，空账本不报错', () => {
+    resetPlayRank()
+    assert.deepStrictEqual(playRankSnapshot().top, [])
+    for (const id of ['a', 'b', 'c']) {
+        notePlayResult(T(id), true, 100)
+        notePlayResult(T(id), true, 100)
+    }
+    assert.strictEqual(playRankSnapshot(2).top.length, 2)
 })

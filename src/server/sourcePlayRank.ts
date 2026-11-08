@@ -123,4 +123,39 @@ export const rankCandidatesByHistory = (
 
 export const playRankSize = (): number => stats.size
 
+/** 与 playRankScore 同口径，但直接吃记录（快照里已经拿到记录，不必再查一次表） */
+const scoreOf = (rec: PlayRankRecord): number => {
+    if (rec.attempts < MIN_TRUST) return NEUTRAL_MS
+    if (rec.successes === 0) return Number.POSITIVE_INFINITY
+    const failRate = 1 - rec.successes / rec.attempts
+    return rec.ewmaMs + failRate * FAIL_PENALTY_MS
+}
+
+/**
+ * 诊断快照（/health 用）：按排序分升序给出最能影响顺序的前 N 条。
+ *
+ * 为什么只给「有成功样本」的条目：从未成功的源分数是 Infinity，一律垫底，
+ * 列出来只会淹没真正有用的数据（它们的情况看沉底账本更准）。
+ * 带上 score 而不是只给 ewma，是为了让「为什么它被排到前面」一眼可核对：
+ * score = ewmaMs + 失败率 × FAIL_PENALTY_MS。
+ */
+export const playRankSnapshot = (limit: number = 12): {
+    total: number
+    top: Array<{ key: string; attempts: number; successes: number; ewmaMs: number; score: number }>
+} => {
+    const rows: Array<{ key: string; attempts: number; successes: number; ewmaMs: number; score: number }> = []
+    for (const [key, rec] of stats) {
+        if (rec.successes === 0) continue
+        rows.push({
+            key,
+            attempts: rec.attempts,
+            successes: rec.successes,
+            ewmaMs: Math.round(rec.ewmaMs),
+            score: Math.round(scoreOf(rec)),
+        })
+    }
+    rows.sort((a, b) => a.score - b.score)
+    return { total: stats.size, top: rows.slice(0, Math.max(0, limit)) }
+}
+
 export const resetPlayRank = (): void => { stats.clear() }

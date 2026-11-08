@@ -41,6 +41,7 @@ import { hasHotSearchItems } from './hotSearchFallback'
 import { getWorkerStatus } from './sourceWorkerHost'
 import { loadGovernorState } from './sourceGovernor'
 import { qualityLedgerSnapshot } from './sourceQualityLedger'
+import { playRankSnapshot } from './sourcePlayRank'
 import { rateLimitSnapshot } from './sourceRateLimit'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
@@ -3168,6 +3169,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         playbackLedger: {
           quality: qualityLedgerSnapshot(),
           rateLimit: rateLimitSnapshot(),
+          // 正向排序账本：谁被测出来是快源、凭分数被提到前面（只列有成功样本的）
+          playRank: playRankSnapshot(),
         },
         sourceProbe: getSourceProbeStatus(probeDetail),
         // 慢源独立线程：哪些源进 worker、哪些已熔断、开关状态（r43 实机排障用）
