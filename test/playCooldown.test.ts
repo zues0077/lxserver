@@ -89,3 +89,49 @@ test('阶梯冷却：成功一次立刻归零，下次超时回到最短的 90 �
   assert.strictEqual(partitionByCooldown([a, b], 'kw', at90s).hot.length, 2,
     '成功过一次后，单次超时只冷却 90 秒（不因为历史挂过就长期缩短机会）')
 })
+
+// ---- 冷却源兜底提前（2026-11-08 soak c18/c77/c80：最高 7.4s）----
+// 背景：冷却源原先必须等全部常规源失败才上场，而那三次「同源却更慢」样本里，
+// 冷却中的源其实已经恢复，却要陪跑完前面所有失败。
+import { planCooldownSequence, isPlatformSinkWindow } from '../src/server/userApi'
+
+test('冷却源兜底提前：常规源 >2 个时，有历史成功记录的冷却源插到倒数第 2 个之前', () => {
+  const hot = ['a', 'b', 'c', 'd', 'e'].map(id => mkApi(id))
+  const good = mkApi('cooled-good')
+  const bad = mkApi('cooled-bad')
+  const plan = planCooldownSequence(hot, [good, bad], (api: any) => api.info.id === 'cooled-good', 2)
+  assert.deepStrictEqual(plan.head.map((a: any) => a.info.id), ['a', 'b', 'c'])
+  assert.deepStrictEqual(plan.promoted.map((a: any) => a.info.id), ['cooled-good'])
+  assert.deepStrictEqual(plan.tail.map((a: any) => a.info.id), ['d', 'e'])
+  assert.deepStrictEqual(plan.restCooled.map((a: any) => a.info.id), ['cooled-bad'],
+    '从没成功过的冷却源不提前，仍留队尾')
+  // 拼起来 = 实际尝试顺序：所有源都保留，只改顺序（可用性不变）
+  const seq = [...plan.head, ...plan.promoted, ...plan.tail, ...plan.restCooled].map((a: any) => a.info.id)
+  assert.deepStrictEqual(seq, ['a', 'b', 'c', 'cooled-good', 'd', 'e', 'cooled-bad'])
+})
+
+test('冷却源兜底提前：常规源 ≤2 个时保持原顺序（不把冷却源顶到最前）', () => {
+  const hot = ['a', 'b'].map(id => mkApi(id))
+  const good = mkApi('cooled-good')
+  const plan = planCooldownSequence(hot, [good], () => true, 2)
+  assert.deepStrictEqual(plan.head.map((a: any) => a.info.id), ['a', 'b'])
+  assert.strictEqual(plan.promoted.length, 0)
+})
+
+test('冷却源兜底提前：无可提前的源时等价于原 hot+cooled', () => {
+  const hot = ['a', 'b', 'c', 'd'].map(id => mkApi(id))
+  const cooled = [mkApi('x'), mkApi('y')]
+  const plan = planCooldownSequence(hot, cooled, () => false, 2)
+  assert.deepStrictEqual([...plan.head, ...plan.tail].map((a: any) => a.info.id), ['a', 'b', 'c', 'd'])
+  assert.deepStrictEqual(plan.restCooled.map((a: any) => a.info.id), ['x', 'y'])
+})
+
+// ---- 平台级故障窗口：沉底名单收敛（3h soak 出现「15 个源排到队尾」）----
+test('平台级故障窗口：15/39 判为平台级故障（kg 风控窗口实测值）', () => {
+  assert.strictEqual(isPlatformSinkWindow(15, 39), true)
+  assert.strictEqual(isPlatformSinkWindow(13, 39), true)
+  assert.strictEqual(isPlatformSinkWindow(12, 39), false, '不足候选 1/3 时仍按单源沉底')
+  assert.strictEqual(isPlatformSinkWindow(7, 39), false)
+  assert.strictEqual(isPlatformSinkWindow(8, 20), true)
+  assert.strictEqual(isPlatformSinkWindow(0, 0), false)
+})

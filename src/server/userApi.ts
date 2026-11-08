@@ -15,7 +15,7 @@ import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerElig
 import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue, normalizeQualityList } from './sourceContract'
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
-import { notePlayResult, rankCandidatesByHistory, adaptiveTimeoutMs } from './sourcePlayRank'
+import { notePlayResult, rankCandidatesByHistory, adaptiveTimeoutMs, buildPlayRankPriors } from './sourcePlayRank'
 import { markLedgerDirty } from './sourceLedgerDirty'
 import { clearRateLimit, clearRateLimitForSource, isRateLimitFailure, isRateLimited, noteRateLimit } from './sourceRateLimit'
 import { syncLog } from '../utils/log4js'
@@ -1792,6 +1792,14 @@ const PLAY_SINK_WINDOW_MS = 15 * 60 * 1000
  * 的割裂。沉底的代价只是「下次先试别的源」，成功一次立刻恢复原位，误伤成本极低。
  */
 const PLAY_SINK_MIN_FAILS = 1
+/**
+ * 平台级故障护栏的沉底名单门槛：单平台沉底达到这个数（且占候选 1/3 以上）时，
+ * 更可能是平台整体故障（kg 风控空返回、上游集体失效），不再按单源沉底重排。
+ * 依据：39 个源、5 个平台，正常单平台坏 8 个以上的「恰好同时」场景几乎不存在；
+ * 3h soak 里唯一的超大名单是 15 个（kg 风控窗口），8 的门槛既能拦住它，又远高于
+ * 正常「巡检+播放各自记失败」的日常水位（实测日常 ≤5）。
+ */
+export const PLATFORM_SINK_CALM_MIN = 8
 interface PlaySinkRecord { fails: number; lastFailAt: number }
 const playFailSink = new Map<string, PlaySinkRecord>()
 
@@ -1897,6 +1905,11 @@ export const clearPlayFailure = (api: any, platform: string): void => {
 // 改成连续超时一次拉长一档（90s → 5min → 15min），成功一次立刻归零：
 // 偶发一次超时仍然是 90 秒（不误伤），反复挂死的源才被真正拉开距离。
 export const PLAY_COOLDOWN_STEPS_MS = [90 * 1000, 5 * 60 * 1000, 15 * 60 * 1000]
+/**
+ * 冷却源提前兜底的触发点：常规源只剩这么多个未试时，
+ * 有历史成功记录的冷却源插到它们前面先试（见 planCooldownSequence）。
+ */
+export const COOLDOWN_PROMOTE_LEFT = 2
 const cooldownSink = new Map<string, number>()
 const cooldownStreak = new Map<string, number>()
 const COOLDOWN_MSG_RE = /超时/
@@ -1926,6 +1939,40 @@ export const partitionByCooldown = (
         ;(until > now ? cooled : hot).push(api)
     }
     return { hot, cooled }
+}
+
+/**
+ * 平台级故障窗口判定（沉底名单收敛）。
+ *
+ * 单平台沉底名单 ≥ `PLATFORM_SINK_CALM_MIN` 个、且占候选 1/3 以上时，判为平台级故障窗口：
+ * 此时「谁近期失败过」已不反映单个源的优劣，按单源沉底重排只会把优源压到队尾。
+ */
+export const isPlatformSinkWindow = (sunkLen: number, totalLen: number): boolean =>
+    totalLen > 0 && sunkLen >= PLATFORM_SINK_CALM_MIN && sunkLen * 3 >= totalLen
+
+/**
+ * 冷却源兜底提前：常规源只剩最后 `promoteLeft` 个未试时，把**有历史成功记录**的冷却源
+ * 插到它们前面。纯函数，`proven` 判定该源历史上成功过（见调用处的跨档先验）。
+ *
+ * 返回 `head → promoted → tail → restCooled` 四段，拼起来就是实际尝试顺序。
+ * 没有可提前的源时，等价于原来的 `hot + cooled`。
+ */
+export const planCooldownSequence = (
+    hot: any[],
+    cooled: any[],
+    proven: (api: any) => boolean,
+    promoteLeft: number = 2,
+): { head: any[]; promoted: any[]; tail: any[]; restCooled: any[] } => {
+    if (hot.length <= promoteLeft || cooled.length === 0) return { head: hot, promoted: [], tail: [], restCooled: cooled }
+    const promoted = cooled.filter(proven)
+    if (promoted.length === 0) return { head: hot, promoted: [], tail: [], restCooled: cooled }
+    const cut = hot.length - promoteLeft
+    return {
+        head: hot.slice(0, cut),
+        promoted,
+        tail: hot.slice(cut),
+        restCooled: cooled.filter((a: any) => !promoted.includes(a)),
+    }
 }
 
 /** 沉底 / 超时冷却 / 阶梯计数三份内存账本的落盘结构（重启后不丢学习成果） */
@@ -2101,7 +2148,7 @@ export const verifyUrlPlayable = async (url: string, sourceName: string, timeout
     // 复核自身可用的时间预算：取链整体有硬预算，前面的源已经耗掉大部分时，
     // 这里若仍按满额 3s×2 去校验，就会出现「链接已经拿到、却因为复核超时而整条请求判失败」。
     const verifyTimeout = Math.max(500, Math.min(VERIFY_TIMEOUT_MS, Math.round(timeoutMs ?? VERIFY_TIMEOUT_MS)))
-    const request = async (method: 'head' | 'get'): Promise<{ code?: number; contentType: string }> => {
+    const request = async (method: 'head' | 'get', insecure: boolean = false): Promise<{ code?: number; contentType: string }> => {
         const resp: any = await needle(method, safeUrl, null, {
             follow_max: 2,
             response_timeout: verifyTimeout,
@@ -2111,6 +2158,9 @@ export const verifyUrlPlayable = async (url: string, sourceName: string, timeout
             // 当成「直链」返回，让宿主替它去访问
             lookup: privateNetLookup,
             headers: method === 'get' ? { ...headers, Range: 'bytes=0-0' } : headers,
+            // insecure：跳过证书校验。needle 会把该选项注入 agent.options，
+            // 仅在严格校验因证书类错误抛错后的复核用（见下方 catch 分支）
+            ...(insecure ? { rejectUnauthorized: false } : {}),
         })
         const contentType = String((resp?.headers as any)?.['content-type'] || '').toLowerCase()
         return {
@@ -2144,7 +2194,27 @@ export const verifyUrlPlayable = async (url: string, sourceName: string, timeout
             return `音源 [${sourceName}] 返回的不是音频文件（content-type: ${get.contentType || head.contentType}）`
         }
         return null
-    } catch {
+    } catch (e: any) {
+        // === 证书不匹配 CDN 上的「过期直链」兜底（2026-11-08 soak W-3 实测新增）===
+        // 酷狗 CDN 发的是错误共享证书（altnames 无 *.tx.kugou.com），严格校验在 TLS 层
+        // 就抛错——原先一律放行，导致这类 CDN 上的 404/410/5xx 死链（典型：带时间戳的
+        // 过期直链）从来看不到状态码、照发不误。现在对证书类错误做一次**跳过校验**的复核：
+        // 拿到状态码就按同一套「404/410/5xx 判死、其余放行」的口径判定；
+        // 仍然连不上（真超时/拒连）→ 放行不误杀。实测同一条好链 -k 探测得 206/2048。
+        const code = String(e?.code || '')
+        if (/CERT|ALTNAME|LEAF_SIGNATURE|ISSUER|SSL/i.test(code)) {
+            try {
+                const head2 = await request('head', true)
+                if (isUnplayableStatusCode(head2.code)) {
+                    const get2 = await request('get', true)
+                    if (isUnplayableStatusCode(get2.code)) {
+                        return typeof get2.code === 'number' && get2.code >= 500
+                            ? `音源 [${sourceName}] 返回的链接源站报错（HTTP ${get2.code}）`
+                            : `音源 [${sourceName}] 返回的链接实际不存在（HTTP ${get2.code}）`
+                    }
+                }
+            } catch { /* 复核也失败：按原口径放行，避免误伤 */ }
+        }
         // 网络不通、超时、不支持 HEAD —— 一律当作可用，避免误伤
         return null
     }
@@ -2502,7 +2572,18 @@ export async function callUserApiGetMusicUrl(
     // 沉底只认「同一平台近期连续失败」，且该源任意一次成功即立刻恢复原位。
     if (candidates.length > 1 && playSinkEnabled()) {
         const { fresh, sunk } = partitionByPlaySink(candidates, source)
-        if (sunk.length && fresh.length) {
+        // === 平台级故障护栏（2026-11-08 soak 实测新增）===
+        // 3h soak 里出现过「15 个近期失败的音源已排到队尾」——连 kg 上最快的 K×H测试 都在
+        // 名单里。成因是 kg 搜索风控空返回这类**平台级**临时故障：15 分钟窗口内把所有 kg 源
+        // 各记了一次失败，沉底账本忠实反映成了一个大名单。这不是 15 个源同时坏了，
+        // 按单源沉底重排只会把优源压到队尾、下首歌再绕一遍。所以：单平台沉底名单
+        // 达到 PLATFORM_SINK_CALM_MIN 个且占候选 1/3 以上时，判为平台级故障窗口，
+        // 本轮不做单源沉底（保持 playRank 排好的顺序）；失败记录仍在，「成功即恢复」
+        // 与窗口过期机制照常洗白，平台恢复后名单自然收敛。
+        if (sunk.length && fresh.length && isPlatformSinkWindow(sunk.length, candidates.length)) {
+            console.log(`[自定义源] ${source} 平台 ${sunk.length}/${candidates.length} 个源近期失败，` +
+                `疑似平台级故障窗口，本轮不按单源沉底重排（成功即恢复机制不变）`)
+        } else if (sunk.length && fresh.length) {
             candidates = [...fresh, ...sunk]
             console.log(`[自定义源] ${sunk.length} 个近期失败的音源已排到队尾（不禁用、成功即恢复）：` +
                 sunk.map((a: any) => a.info?.name).join('、'))
@@ -2764,9 +2845,30 @@ export async function callUserApiGetMusicUrl(
             console.log(`[自定义源] ${cooled.length} 个音源处于回源超时冷却期（先跳过，全败后兜底再试）：` +
                 cooled.map((a: any) => a.info?.name).join('、'))
         }
+        // === 冷却源兜底提前（2026-11-08 soak c18/c77/c80 实测新增）===
+        // 原先冷却源必须等**全部**常规源失败才上场，三个「同源却更慢」样本（最高 7.4s）的
+        // 共同模式是：冷却中的源其实已经恢复，却要陪跑完前面所有失败。改为——
+        // 常规源只剩最后 2 个未试时，把**曾成功过的**冷却源插到它们前面先试；
+        // 从没成功过的冷却源仍留队尾（没有证据说明它好，提前只会白吃超时）。
+        // 「曾成功过」看 playRank 跨档先验（同源任意平台/档位有成功记录即算），
+        // 与排序开关无关——这是历史事实，不是策略。
+        // 只影响顺序：冷却源若仍失败，后面剩下的常规源照常试，可用性不变。
+        const priors = buildPlayRankPriors()
+        const provenByHistory = (api: any): boolean => {
+            const entry = priors.byKey.get(`${api?.info?.owner || ''}:${api?.info?.id || ''}`)
+            return !!(entry && Number.isFinite(entry.anyKey))
+        }
+        const plan = planCooldownSequence(hot, cooled, provenByHistory, COOLDOWN_PROMOTE_LEFT)
+        if (plan.promoted.length) {
+            console.log(`[自定义源] ${plan.promoted.length} 个冷却中的源有历史成功记录，` +
+                `提前到剩余 ${COOLDOWN_PROMOTE_LEFT} 个常规源之前兜底：` +
+                plan.promoted.map((a: any) => a.info?.name).join('、'))
+        }
         const passSeq: Array<{ api: any; inCooldownPass: boolean }> = [
-            ...hot.map((api: any) => ({ api, inCooldownPass: false })),
-            ...cooled.map((api: any) => ({ api, inCooldownPass: true })),
+            ...plan.head.map((api: any) => ({ api, inCooldownPass: false })),
+            ...plan.promoted.map((api: any) => ({ api, inCooldownPass: true })),
+            ...plan.tail.map((api: any) => ({ api, inCooldownPass: false })),
+            ...plan.restCooled.map((api: any) => ({ api, inCooldownPass: true })),
         ]
         for (let candidateIndex = 0; candidateIndex < passSeq.length; candidateIndex++) {
             const { api, inCooldownPass } = passSeq[candidateIndex]

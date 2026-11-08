@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import {
     NEUTRAL_MS,
     MIN_TRUST,
+    FAIL_PENALTY_MS,
     notePlayResult,
     playRankScore,
     rankCandidatesByHistory,
@@ -117,8 +118,8 @@ test('诊断快照：只列有成功样本的源，按分数升序，分数与 e
     const snap = playRankSnapshot()
     assert.deepStrictEqual(snap.top.map(r => r.key.split(':')[1]), ['fast', 'half', 'slow'])
     assert.strictEqual(snap.total, 4)
-    // half：200 + 0.5*FAIL_PENALTY = 950，应当落在 fast(100) 与 slow(1800) 之间
-    assert.strictEqual(snap.top[1].score, 200 + 0.5 * 1500)
+    // half：200 + 0.5*FAIL_PENALTY，应当落在 fast(100) 与 slow(1800) 之间
+    assert.strictEqual(snap.top[1].score, 200 + 0.5 * FAIL_PENALTY_MS)
     assert.ok(!snap.top.some(r => r.key.indexOf('dead') >= 0), '从未成功的源不该出现在快照里')
 })
 
@@ -251,4 +252,23 @@ test('从未成功的记录不参与先验：别的键再快也抬不动它', ()
     for (let i = 0; i < 4; i++) notePlayResult(T('mixed', 'mg'), true, 100)
     notePlayResult(T('mixed', 'wy'), false) // 本档失败一次、从未成功
     assert.strictEqual(playRankScore(T('mixed', 'wy')), NEUTRAL_MS)
+})
+
+// ---- 失败惩罚上调（2026-11-08 soak：排前源连续失败两轮才让位）----
+test('失败惩罚 3000ms：快但一半失败的源落到健康源之后', () => {
+    resetPlayRank()
+    // 300ms 级 EWMA + 50% 失败率 = 300 + 1500 = 1800 > 中性 1200
+    notePlayResult(T('flaky'), true, 300)
+    notePlayResult(T('flaky'), false)
+    assert.strictEqual(playRankScore(T('flaky')), 300 + 0.5 * FAIL_PENALTY_MS)
+    assert.ok(playRankScore(T('flaky')) > NEUTRAL_MS,
+        '第一轮失败就该落到中性分之下，不必等第二轮超时把它打进冷却')
+})
+
+test('失败惩罚不误伤全成功的快源：300ms 全成功仍远优于中性分', () => {
+    resetPlayRank()
+    notePlayResult(T('clean'), true, 300)
+    notePlayResult(T('clean'), true, 300)
+    assert.strictEqual(playRankScore(T('clean')), 300)
+    assert.ok(playRankScore(T('clean')) < NEUTRAL_MS)
 })

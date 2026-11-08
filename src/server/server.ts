@@ -10227,7 +10227,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                         return u;
                       }
                     } catch (e: any) {
-                      console.warn(`[歌曲播放] HEAD 校验重定向失败: ${e.message}`);
+                      // 证书类错误（酷狗 CDN 发错误共享证书，altnames 不匹配，2026-11-08 实测）：
+                      // 每首 kg 歌都会触发一条，且链接照常返回、行为正确——降级为普通日志并
+                      // 不打印 URL，避免刷屏淹没真正的 warn。其余错误保持 warn。
+                      const ecode = String(e?.code || '')
+                      if (/CERT|ALTNAME|LEAF_SIGNATURE|ISSUER|SSL/i.test(ecode)) {
+                        console.log(`[歌曲播放] HEAD 校验跳过（CDN 证书不匹配 ${ecode}，链接照常返回）`)
+                      } else {
+                        console.warn(`[歌曲播放] HEAD 校验重定向失败: ${e.message}`);
+                      }
                     }
                     return u
                   }
