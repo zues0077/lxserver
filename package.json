@@ -98,7 +98,7 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
-  "nodemonConfig": {
+    "nodemonConfig": {
     "ext": "js,ts",
     "ignore": [
       "data/",
@@ -106,5 +106,13 @@
       "config.js"
     ],
     "exec": "npx tsx ./src/index.ts"
+  },
+  "overrides": {
+    "webdav": {
+      "minimatch": "^11.0.1"
+    },
+    "readdir-glob": {
+      "minimatch": "^11.0.1"
+    }
   }
 }
