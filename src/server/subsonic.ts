@@ -3819,11 +3819,24 @@ class SubsonicHandler {
                     return allItems
                 }
 
-                let allItems = await collectItems()
-                // 空结果大概率是被限速（非真无结果）：退避后重试一次
-                if (allItems.length === 0) {
-                    await sleep(THROTTLE_RETRY_MS)
-                    allItems = await collectItems()
+                // 限速防护：某源在 8 源并发脉冲下被外部限流时，可能返回空列表（status=1 但
+                // data.lists 为空，如酷狗 complexsearch 对单 IP 的限流）或直接抛错。空结果 / 异常
+                // 都退避重试，退避时长逐次加大（700ms → 1500ms），跨过限速窗口救回该源。
+                const MAX_SOURCE_RETRIES = 2
+                let allItems: any[] = []
+                let lastErr: any = null
+                for (let attempt = 0; attempt <= MAX_SOURCE_RETRIES; attempt++) {
+                    try {
+                        allItems = await collectItems()
+                        lastErr = null
+                    } catch (err: any) {
+                        lastErr = err
+                    }
+                    if (allItems.length > 0) break
+                    if (attempt < MAX_SOURCE_RETRIES) await sleep(THROTTLE_RETRY_MS * (attempt + 1))
+                }
+                if (lastErr && allItems.length === 0) {
+                    subsonicLog.error(`[Subsonic] Online search failed for source=${source} after ${MAX_SOURCE_RETRIES + 1} attempts:`, lastErr?.message || lastErr)
                 }
 
                 for (const raw of allItems.slice(0, targetLimit)) {
