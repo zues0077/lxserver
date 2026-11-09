@@ -20,6 +20,7 @@ import { subsonicLog } from '@/utils/log4js'
 import { fetchGenres, fetchRadios, fetchPlaylistsByGenre, fetchRadioSongs, fetchPlaylistSongs, fetchSongsByGenre } from '@/server/utils/discovery'
 import { listRadioStations, getRadioStation, addRadioStation, updateRadioStation, removeRadioStation } from '@/server/radioStations'
 import { makeAggregateSongId } from '@/server/utils/aggregateId'
+import { ALL_AGGREGATE_SOURCES, isExtraSearchSource, searchExtraSource, adaptExtraSearchItem } from '@/server/utils/aggregateSearch'
 
 // 音乐源歌单 → 电台 列表缓存（避免每次 getInternetRadioStations 都枚举全部音源实拉）
 let playlistRadioCache: { ts: number; stations: any[] } | null = null
@@ -3764,7 +3765,10 @@ class SubsonicHandler {
 
     private async fetchOnlineSearchSongs(cleanQuery: string, sources: string[], limit: number = 30): Promise<{ music: LX.Music.MusicInfo, listId: string }[]> {
         if (!cleanQuery) return []
-        const validSources = sources.filter(s => ['wy', 'tx', 'kw', 'kg', 'mg'].includes(s) && musicSdk[s]?.musicSearch?.search)
+        const validSources = sources.filter(s =>
+            (['wy', 'tx', 'kw', 'kg', 'mg'].includes(s) && (musicSdk as any)[s]?.musicSearch?.search) ||
+            isExtraSearchSource(s),
+        )
         const cacheKey = `${cleanQuery.toLowerCase()}::${validSources.join(',')}`
         const cached = this.onlineSearchCache.get(cacheKey)
         if (cached && cached.expiresAt > Date.now()) return cached.results
@@ -3788,7 +3792,9 @@ class SubsonicHandler {
                 // （实测「黄霄雲」(繁) 各源合计仅 5 条，「黄霄云」(简) 有 203 条）
                 for (const kw of buildQueryVariants(cleanQuery)) {
                     for (let page = 1; page <= pagesToFetch; page++) {
-                        const searchRes = await musicSdk[source].musicSearch.search(kw, page, pageSize)
+                        const searchRes = isExtraSearchSource(source)
+                            ? await searchExtraSource(source, kw, page, pageSize)
+                            : await (musicSdk as any)[source].musicSearch.search(kw, page, pageSize)
                         const list = Array.isArray(searchRes?.list) ? searchRes.list : []
                         if (list.length === 0) break
 
@@ -3804,7 +3810,8 @@ class SubsonicHandler {
                     if (allItems.length >= targetLimit) break
                 }
 
-                for (const item of allItems.slice(0, targetLimit)) {
+                for (const raw of allItems.slice(0, targetLimit)) {
+                    const item = isExtraSearchSource(source) ? adaptExtraSearchItem(raw, source) : raw
                     const songmid = String(item.songmid || item.id || '')
                     const id = makeAggregateSongId(source, songmid)
                     const hash = item.hash || item.meta?.hash || item.types?.[0]?.hash || ''
@@ -4012,8 +4019,8 @@ class SubsonicHandler {
             const colonIdx = rawQuery.indexOf(':') !== -1 ? rawQuery.indexOf(':') : rawQuery.indexOf('：')
             cleanQuery = rawQuery.slice(colonIdx + 1).trim()
         } else {
-            // 检查指定的音源前缀: wy:, tx:, kw:, kg:, mg:
-            const knownSources = ['wy', 'tx', 'kw', 'kg', 'mg']
+            // 检查指定的音源前缀: wy:, tx:, kw:, kg:, mg:, bili:, soda:, kglite:
+            const knownSources: string[] = [...ALL_AGGREGATE_SOURCES]
             let matchedPrefixSource = ''
             for (const s of knownSources) {
                 if (lowerQuery.startsWith(`${s}:`) || lowerQuery.startsWith(`${s}：`)) {
@@ -4028,6 +4035,7 @@ class SubsonicHandler {
                 cleanQuery = rawQuery.slice(colonIdx + 1).trim()
             } else if (lowerQuery.startsWith('all:') || lowerQuery.startsWith('all：')) {
                 searchMode = 'force_online'
+                targetOnlineSources = [...ALL_AGGREGATE_SOURCES]
                 const colonIdx = rawQuery.indexOf(':') !== -1 ? rawQuery.indexOf(':') : rawQuery.indexOf('：')
                 cleanQuery = rawQuery.slice(colonIdx + 1).trim()
             } else {
@@ -4036,6 +4044,7 @@ class SubsonicHandler {
                     searchMode = 'local_only'
                 } else if (requestedSource === 'all') {
                     searchMode = 'force_online'
+                    targetOnlineSources = [...ALL_AGGREGATE_SOURCES]
                 } else if (knownSources.includes(requestedSource)) {
                     searchMode = 'force_online'
                     targetOnlineSources = [requestedSource]
