@@ -13,9 +13,12 @@
  *      `LX.Music.MusicInfo` 期望的字段，避免改动五行 musicSdk 的既有映射。
  *
  * 设计要点：
- * - kglite 与 kg 同源（都是酷狗曲库），但用户明确要求「独立搜」——
- *   所以当作独立源接入（id 带 `kglite_` 前缀，不与 kg 折叠）。代价是
- *   kg/kglite 会各出一份相同歌曲，前端按 id 去重不会合并，这是预期行为。
+ * - kglite 与 kg 同源（都是酷狗曲库），但用户明确要求「独立搜」，所以当作
+ *   独立源接入（id 带 `kglite_` 前缀，保证跨源 id 不撞）。
+ *   注意：`fetchOnlineSearchSongs` 之后还有一层跨源同名去重
+ *   （key = 歌名@主歌手，priority 里 kg 排在 kglite 之前），因此 source=all
+ *   的输出里 kglite 的同曲通常被折叠进 kg —— **歌曲不丢，只是不单独显名**；
+ *   单源 `kglite:` 搜索不受影响。
  * - kglite 搜索**匿名即可**（searchSongs 无凭据时造最小设备指纹），
  *   不必依赖已配置的账号 Cookie，聚合搜索不会因缺账号而缺席。
  * - bilibili 匿名可搜，但会抛 412 风控 / 非 0 code；soda 匿名可用。
