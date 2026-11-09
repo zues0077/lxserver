@@ -19,6 +19,7 @@ import { proxyCoverImage } from '@/server/coverProxy'
 import { subsonicLog } from '@/utils/log4js'
 import { fetchGenres, fetchRadios, fetchPlaylistsByGenre, fetchRadioSongs, fetchPlaylistSongs, fetchSongsByGenre } from '@/server/utils/discovery'
 import { listRadioStations, getRadioStation, addRadioStation, updateRadioStation, removeRadioStation } from '@/server/radioStations'
+import { makeAggregateSongId } from '@/server/utils/aggregateId'
 
 // 音乐源歌单 → 电台 列表缓存（避免每次 getInternetRadioStations 都枚举全部音源实拉）
 let playlistRadioCache: { ts: number; stations: any[] } | null = null
@@ -3805,7 +3806,7 @@ class SubsonicHandler {
 
                 for (const item of allItems.slice(0, targetLimit)) {
                     const songmid = String(item.songmid || item.id || '')
-                    const id = `${source}_${songmid}`
+                    const id = makeAggregateSongId(source, songmid)
                     const hash = item.hash || item.meta?.hash || item.types?.[0]?.hash || ''
                     const music: LX.Music.MusicInfo = {
                         id,

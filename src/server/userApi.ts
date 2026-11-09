@@ -142,6 +142,37 @@ export function describeError(e: any): string {
     return String(e)
 }
 
+/**
+ * 把换源 / 取链失败的错误归类成一个机器可读的语义码，用于换源日志的结构化前缀。
+ *
+ * 背景（T13，借 fuzz1og/mplayer#140「失败靠 catch→换源 + 语义化错误码」的思路）：
+ * 此前换源失败只走 `console.error('[自定义源] ... 失败:', describeError(e))`，
+ * 文本没有稳定 code，巡检 / 排障只能肉眼扫。补一个 code 后，换源日志从「一串中文」
+ * 升级为「[CODE] 中文」——既人读也机读（grep / 统计都方便）。
+ *
+ * 与 sourceContract.ts 的 ContractIssue.code 风格一致：短、可读、可 grep。
+ * 分类尽力而为：优先用 error 自带的 code（脚本 / 上游若带），再按 message 关键词，
+ * 都匹配不上回退 SCRIPT_ERROR。**绝不抛异常、绝不改变换源行为**，仅用于日志前缀。
+ */
+export type SwitchErrorCode =
+    | 'NO_CANDIDATE'
+    | 'SWITCH_TIMEOUT'
+    | 'INVALID_URL'
+    | 'UNPLAYABLE'
+    | 'RATE_LIMITED'
+    | 'ALL_EXHAUSTED'
+    | 'SCRIPT_ERROR'
+
+export function classifySwitchError(e: any): SwitchErrorCode {
+    if (e && typeof e.code === 'string' && e.code) return e.code as SwitchErrorCode
+    const msg = describeError(e) || ''
+    if (/取链超时|超时（超过|timed out|timeout/i.test(msg)) return 'SWITCH_TIMEOUT'
+    if (/429|rate.?limit|请求过于频繁|限流/i.test(msg)) return 'RATE_LIMITED'
+    if (/无效的链接|不是可用链接|无可用链接|没有返回可用|返回值不是/i.test(msg)) return 'INVALID_URL'
+    if (/链接不可播放|不可播放|播放失败|地址无效|找不到该|404|403|unplayable/i.test(msg)) return 'UNPLAYABLE'
+    return 'SCRIPT_ERROR'
+}
+
 /** 把沙箱日志的多个参数拼成一行文本（非字符串参数走 describeError 兜底） */
 function formatLogArgs(args: any[]): string {
     return args
@@ -2706,7 +2737,9 @@ export async function callUserApiGetMusicUrl(
             errMsg = `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
         }
         if (onProgress) await onProgress({ name: '系统', status: 'fail', message: errMsg })
+        console.error(`[自定义源][NO_CANDIDATE] 无可用源可取链 ${source}: ${errMsg}`)
         const err: any = new Error(errMsg)
+        err.code = 'NO_CANDIDATE'
         err.allSourcesExhausted = true
         throw err
     }
@@ -2843,7 +2876,7 @@ export async function callUserApiGetMusicUrl(
                 if (onProgress) await onProgress(att)
                 return { url, type: quality, sourceName: api.info.name, sourceId: api.info.id, attempts, hasMoreSources: false }
             } catch (error: any) {
-                console.error(`[自定义源] ${api.info.name} 失败 (第 ${i + 1}/${maxRetries} 次):`, `音源日志：${describeError(error)}`)
+                console.error(`[自定义源][${classifySwitchError(error)}] ${api.info.name} 失败 (第 ${i + 1}/${maxRetries} 次):`, `音源日志：${describeError(error)}`)
                 lastError = error
                 notePlayFailure(api, source, describeError(error))
                 noteQuality(api, false, describeError(error))
@@ -2952,7 +2985,7 @@ export async function callUserApiGetMusicUrl(
                 }
             } catch (error: any) {
                 const failMsg = describeError(error)
-                console.error(`[自定义源] ${api.info.name} 失败:`, `音源日志：${failMsg}`)
+                console.error(`[自定义源][${classifySwitchError(error)}] ${api.info.name} 失败:`, `音源日志：${failMsg}`)
                 lastError = error
                 notePlayFailure(api, source, failMsg)
                 noteQuality(api, false, failMsg)
@@ -3022,7 +3055,9 @@ export async function callUserApiGetMusicUrl(
         ? `自定义源 [${candidates[0].info.name}] 解析失败`
         : `已尝试了 ${supportedCount} 个支持 ${source} 平台的源，但全部解析失败`
 
+    console.error(`[自定义源][ALL_EXHAUSTED] ${detailMsg} (音源日志: ${describeError(lastError)})`)
     const finalError: any = new Error(`${detailMsg} (音源日志: ${describeError(lastError)})`)
+    finalError.code = 'ALL_EXHAUSTED'
     finalError.attempts = attempts
     throw finalError
 }
