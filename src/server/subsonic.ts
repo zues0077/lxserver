@@ -21,6 +21,7 @@ import { fetchGenres, fetchRadios, fetchPlaylistsByGenre, fetchRadioSongs, fetch
 import { listRadioStations, getRadioStation, addRadioStation, updateRadioStation, removeRadioStation } from '@/server/radioStations'
 import { makeAggregateSongId } from '@/server/utils/aggregateId'
 import { ALL_AGGREGATE_SOURCES, isExtraSearchSource, searchExtraSource, adaptExtraSearchItem } from '@/server/utils/aggregateSearch'
+import { runWithConcurrency, sleep } from '@/server/utils/concurrency'
 
 // 音乐源歌单 → 电台 列表缓存（避免每次 getInternetRadioStations 都枚举全部音源实拉）
 let playlistRadioCache: { ts: number; stations: any[] } | null = null
@@ -3777,7 +3778,12 @@ class SubsonicHandler {
         // 每个平台一次取足上限，后续 songOffset 分页复用同一批稳定结果。
         const targetLimit = 50
 
-        await Promise.all(validSources.map(async source => {
+        // T9+ 分批/限流：用 worker 池把「同时搜索的源数」限制在 MAX_CONCURRENT_SOURCES，
+        // 避免 8 源并发从单 IP 打爆外部 API 触发限速（实测 8 源并发随机掉源）。
+        // 某源因限速返回空时，退避 THROTTLE_RETRY_MS 后重试一次把它救回来。
+        const MAX_CONCURRENT_SOURCES = 3
+        const THROTTLE_RETRY_MS = 700
+        await runWithConcurrency(validSources, MAX_CONCURRENT_SOURCES, async (source) => {
             const results: { music: LX.Music.MusicInfo, listId: string }[] = []
             sourceResults.set(source, results)
             try {
@@ -3785,29 +3791,39 @@ class SubsonicHandler {
                 const pageSize = source === 'kg' ? Math.min(targetLimit, 100) : source === 'wy' ? 20 : 30
                 const pagesToFetch = Math.min(Math.ceil(targetLimit / pageSize), 3) // 最多自动抓取前 3 页
 
-                const allItems: any[] = []
-                const existingIds = new Set<string>()
+                const collectItems = async (): Promise<any[]> => {
+                    const allItems: any[] = []
+                    const existingIds = new Set<string>()
 
-                // [新增] 简繁变体补搜：原词命中不足时换个字形再搜一轮
-                // （实测「黄霄雲」(繁) 各源合计仅 5 条，「黄霄云」(简) 有 203 条）
-                for (const kw of buildQueryVariants(cleanQuery)) {
-                    for (let page = 1; page <= pagesToFetch; page++) {
-                        const searchRes = isExtraSearchSource(source)
-                            ? await searchExtraSource(source, kw, page, pageSize)
-                            : await (musicSdk as any)[source].musicSearch.search(kw, page, pageSize)
-                        const list = Array.isArray(searchRes?.list) ? searchRes.list : []
-                        if (list.length === 0) break
+                    // [新增] 简繁变体补搜：原词命中不足时换个字形再搜一轮
+                    // （实测「黄霄雲」(繁) 各源合计仅 5 条，「黄霄云」(简) 有 203 条）
+                    for (const kw of buildQueryVariants(cleanQuery)) {
+                        for (let page = 1; page <= pagesToFetch; page++) {
+                            const searchRes = isExtraSearchSource(source)
+                                ? await searchExtraSource(source, kw, page, pageSize)
+                                : await (musicSdk as any)[source].musicSearch.search(kw, page, pageSize)
+                            const list = Array.isArray(searchRes?.list) ? searchRes.list : []
+                            if (list.length === 0) break
 
-                        for (const item of list) {
-                            const songmid = String(item.songmid || item.id || '')
-                            if (!songmid || existingIds.has(songmid)) continue
-                            existingIds.add(songmid)
-                            allItems.push(item)
+                            for (const item of list) {
+                                const songmid = String(item.songmid || item.id || '')
+                                if (!songmid || existingIds.has(songmid)) continue
+                                existingIds.add(songmid)
+                                allItems.push(item)
+                            }
+
+                            if (allItems.length >= targetLimit) break
                         }
-
                         if (allItems.length >= targetLimit) break
                     }
-                    if (allItems.length >= targetLimit) break
+                    return allItems
+                }
+
+                let allItems = await collectItems()
+                // 空结果大概率是被限速（非真无结果）：退避后重试一次
+                if (allItems.length === 0) {
+                    await sleep(THROTTLE_RETRY_MS)
+                    allItems = await collectItems()
                 }
 
                 for (const raw of allItems.slice(0, targetLimit)) {
@@ -3843,7 +3859,7 @@ class SubsonicHandler {
             } catch (err: any) {
                 subsonicLog.error(`[Subsonic] Online search error for source=${source}:`, err?.message || err)
             }
-        }))
+        })
 
         const interleaved: { music: LX.Music.MusicInfo, listId: string }[] = []
         const maxLength = Math.max(0, ...validSources.map(source => sourceResults.get(source)?.length || 0))
