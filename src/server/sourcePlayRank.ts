@@ -316,12 +316,16 @@ export const resetProbeState = (): void => { lastProbeAt.clear() }
  *  1. 平台在 `PROBE_PLATFORMS` 且距上次试探 ≥ `PROBE_INTERVAL_MS`；
  *  2. 队首（调用方排好序后的第一个）稳定成功：successes ≥ `PROBE_MIN_TOP_SUCCESSES`
  *     且失败 ≤ `PROBE_TOP_MAX_FAILS`；
- *  3. 候选里有「本平台未证明 + 有跨平台成功史」的源：
+ *  3. 候选里有「本平台未证明」的源（Y.11-6 放宽，2026-11-09 用户拍板）：
  *     - 本平台无记录 / 样本不足 MIN_TRUST（从没真正跑过），或
  *     - 失败-only 但已过降级时钟（旧失败证据过期，见 `STALE_FAIL_MS`）。
  *     刚失败不久的（新鲜 Infinity）**不**试探——最近证据是负的。
+ *     原「必须有跨平台成功史」的门槛已移除：被锁源恰恰最缺证据（唯一记录可能已被
+ *     TTL 清空），绑证据 = 永远 0 次试探机会——生产 tx 上 84ms 的西瓜聚合源整小时
+ *     0 次资格就是这个原因。
  *
- * 多个候选时取跨平台证据最好的（anyKey 最小）。返回后由调用方把它插到队首，
+ * 多个候选时按先验择优：有证据的（samePlatform / anyKey×折扣）排在完全无证据的
+ * （按 `NEUTRAL_MS` 计）前面。返回后由调用方把它插到队首，
  * 并用 `PROBE_BUDGET_MS` 收紧预算；返回 undefined 表示本轮不试探。
  */
 export const planProbeCandidate = (
@@ -350,15 +354,17 @@ export const planProbeCandidate = (
         const api = candidates[i]
         const owner = String(api?.info?.owner || '')
         const id = String(api?.info?.id || '')
-        const entry = index.byKey.get(`${owner}:${id}`)
-        // 没有任何跨平台成功史 = 没有值得探索的证据
-        if (!entry || !Number.isFinite(entry.anyKey)) continue
         const rec = stats.get(playRankKey({ owner, id, platform, quality }))
+        // 刚失败不久的（失败-only 且未过降级时钟）不试探，哪怕样本数还没到 MIN_TRUST
+        // ——最近证据是负的，别把刚翻车的源又推上队首
+        if (rec && rec.successes === 0 && now - rec.lastAt < STALE_FAIL_MS) continue
         const unproven = !rec || rec.attempts < MIN_TRUST
         const staleFailOnly = !!rec && rec.successes === 0 && now - rec.lastAt >= STALE_FAIL_MS
         if (!unproven && !staleFailOnly) continue
         const pf = priorFor(index, owner, id, platform)
-        const priorMs = pf?.samePlatform ?? entry.anyKey * ANYKEY_DISCOUNT
+        // 完全无证据的源按中性分参与择优：有实测先验的候选天然排它前面
+        const priorMs = pf?.samePlatform
+            ?? (pf?.anyKey !== undefined ? pf.anyKey * ANYKEY_DISCOUNT : NEUTRAL_MS)
         if (!best || priorMs < best.priorMs) best = { api, priorMs }
     }
     if (!best) return undefined

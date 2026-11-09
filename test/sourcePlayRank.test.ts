@@ -350,17 +350,13 @@ test('ε-greedy 试探：首选稳定成功 + 候选本平台未证明 + 有跨�
         '过间隔后可再试探')
 })
 
-test('ε-greedy 试探：首选不稳 / 无跨平台证据 / 平台未开 → 不试探', () => {
+test('ε-greedy 试探：首选不稳 / 平台未开 → 不试探', () => {
     const t0 = Date.now()
     // 首选只成功 3 次：不稳，不花探索预算
     resetPlayRank(); resetProbeState()
     for (let i = 0; i < 3; i++) notePlayResult(T('top2', 'tx'), true, 200)
     notePlayResult(T('c', 'kw'), true, 100)
     assert.strictEqual(planProbeCandidate([api('top2'), api('c'), api('d')], 'tx', '320k', t0), undefined)
-    // 首选稳但候选没有任何跨平台成功史：没有值得探索的证据
-    resetPlayRank(); resetProbeState()
-    for (let i = 0; i < 11; i++) notePlayResult(T('top3', 'tx'), true, 200)
-    assert.strictEqual(planProbeCandidate([api('top3'), api('n1'), api('n2')], 'tx', '320k', t0), undefined)
     // 平台未开（wy 不在清单）
     resetPlayRank(); resetProbeState()
     for (let i = 0; i < 11; i++) notePlayResult(T('top4', 'wy'), true, 200)
@@ -372,10 +368,33 @@ test('ε-greedy 试探：首选不稳 / 无跨平台证据 / 平台未开 → �
     notePlayResult(T('h', 'kw'), true, 100)
     notePlayResult(T('h', 'kg'), false, 0, t0)
     notePlayResult(T('h', 'kg'), false, 0, t0)
-    assert.strictEqual(planProbeCandidate([api('top5'), api('h'), api('n3')], 'kg', '320k', t0),
-        undefined, '新鲜失败不试探')
+    notePlayResult(T('h2', 'kg'), false, 0, t0) // 备选也新鲜失败：全部候选都不合格
+    assert.strictEqual(planProbeCandidate([api('top5'), api('h'), api('h2')], 'kg', '320k', t0),
+        undefined, '新鲜失败不试探（全部候选都新鲜失败）')
     assert.ok(planProbeCandidate([api('top5'), api('h'), api('n3')], 'kg', '320k', t0 + STALE_FAIL_MS + 1),
         '过期失败可试探')
+})
+
+test('Y.11-6 放宽资格：无跨平台证据的本平台未证明源也可探（按中性分）', () => {
+    // 复刻生产 tx 西瓜聚合源场景：唯一 kw 证据已被 6h TTL 清空 = 候选完全无记录。
+    // 旧判定要求跨平台证据 → 整小时 0 次试探资格；放宽后必须有试探机会。
+    resetPlayRank(); resetProbeState()
+    const t0 = Date.now()
+    for (let i = 0; i < 11; i++) notePlayResult(T('top3', 'tx'), true, 200)
+    const probe = planProbeCandidate([api('top3'), api('n1'), api('n2')], 'tx', '320k', t0)
+    assert.ok(probe, '完全无记录的未证明源也应有试探资格')
+    assert.strictEqual(probe!.priorMs, NEUTRAL_MS, '无证据候选按中性分参与择优')
+})
+
+test('Y.11-6 放宽资格：有证据的候选优先于完全无证据的候选', () => {
+    resetPlayRank(); resetProbeState()
+    const t0 = Date.now()
+    for (let i = 0; i < 11; i++) notePlayResult(T('topx', 'tx'), true, 200)
+    notePlayResult(T('ev', 'kw'), true, 100) // ev：kw 有 100ms 成功史
+    const probe = planProbeCandidate([api('topx'), api('bare'), api('ev')], 'tx', '320k', t0)
+    assert.ok(probe)
+    assert.strictEqual(probe!.api.info.id, 'ev', '有证据（130）排在无证据（1200）前面')
+    assert.strictEqual(probe!.priorMs, 100 * ANYKEY_DISCOUNT)
 })
 
 test('试探成功重置：清掉失败史，从这次成功重新竞争', () => {
