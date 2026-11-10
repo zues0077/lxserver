@@ -11417,6 +11417,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'subsonic.lyricTranslation': global.lx.config['subsonic.lyricTranslation'] ?? true,
             'subsonic.cacheOnPlay': global.lx.config['subsonic.cacheOnPlay'] ?? false,
             'subsonic.playCacheFirst': global.lx.config['subsonic.playCacheFirst'] ?? true,
+            'subsonic.playCacheAnyQuality': global.lx.config['subsonic.playCacheAnyQuality'] ?? true,
             'subsonic.quality.enabled': global.lx.config['subsonic.quality.enabled'] ?? true,
             'subsonic.quality.priority': global.lx.config['subsonic.quality.priority'] ?? 'flac,320k,128k',
             'subsonic.quality.clientCapMode': global.lx.config['subsonic.quality.clientCapMode'] ?? 'soft',
@@ -11827,6 +11828,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (newConfig['subsonic.lyricTranslation'] !== undefined) global.lx.config['subsonic.lyricTranslation'] = newConfig['subsonic.lyricTranslation']
               if (newConfig['subsonic.cacheOnPlay'] !== undefined) global.lx.config['subsonic.cacheOnPlay'] = newConfig['subsonic.cacheOnPlay']
               if (newConfig['subsonic.playCacheFirst'] !== undefined) global.lx.config['subsonic.playCacheFirst'] = newConfig['subsonic.playCacheFirst']
+              if (newConfig['subsonic.playCacheAnyQuality'] !== undefined) global.lx.config['subsonic.playCacheAnyQuality'] = newConfig['subsonic.playCacheAnyQuality']
               if (newConfig['subsonic.quality.enabled'] !== undefined) global.lx.config['subsonic.quality.enabled'] = !!newConfig['subsonic.quality.enabled']
               if (newConfig['subsonic.quality.priority'] !== undefined) global.lx.config['subsonic.quality.priority'] = String(newConfig['subsonic.quality.priority'])
               if (newConfig['subsonic.quality.clientCapMode'] !== undefined && ['hard', 'soft'].includes(newConfig['subsonic.quality.clientCapMode'])) global.lx.config['subsonic.quality.clientCapMode'] = newConfig['subsonic.quality.clientCapMode']
@@ -11933,6 +11935,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 'subsonic.lyricTranslation': global.lx.config['subsonic.lyricTranslation'],
                 'subsonic.cacheOnPlay': global.lx.config['subsonic.cacheOnPlay'],
                 'subsonic.playCacheFirst': global.lx.config['subsonic.playCacheFirst'],
+                'subsonic.playCacheAnyQuality': global.lx.config['subsonic.playCacheAnyQuality'],
                 'subsonic.quality.enabled': global.lx.config['subsonic.quality.enabled'],
                 'subsonic.quality.priority': global.lx.config['subsonic.quality.priority'],
                 'subsonic.quality.clientCapMode': global.lx.config['subsonic.quality.clientCapMode'],

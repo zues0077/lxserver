@@ -16,6 +16,31 @@ const commonHeaders = {
 }
 
 /**
+ * 腾讯标签配置接口的成功码：实测返回 code:0（不是 200）。
+ * 旧实现按 `code !== 200` 判定为异常 → fetchGenres 恒返回空数组，
+ * Subsonic getGenres / 流派发现全废。保留 200 兼容旧版或代理返回。
+ * 来源：上游 PR #468，2026-11-09 移植。
+ */
+export const isTagConfSuccess = (body: any): boolean =>
+    body?.code === 0 || body?.code === 200
+
+/**
+ * 分类名含 HTML 数字实体（如 `R&#38;B`），直接回给客户端会显示成乱码。
+ * 用 fromCodePoint 支持完整 Unicode；非法码点保留原实体文本，避免抛错。
+ * 来源：上游 PR #468，2026-11-09 移植。
+ */
+export const decodeEntities = (s: string): string =>
+    String(s).replace(/&#(\d+);/g, (match, n) => {
+        const cp = Number(n)
+        if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff) return match
+        try {
+            return String.fromCodePoint(cp)
+        } catch {
+            return match
+        }
+    })
+
+/**
  * 获取流派分类 (Genres)
  */
 export const fetchGenres = async () => {
@@ -28,7 +53,8 @@ export const fetchGenres = async () => {
             headers: commonHeaders
         }).promise
 
-        if (body.code !== 200) {
+        // [修复] 接口成功时 code 为 0，旧判据会误判为异常并恒返回空数组
+        if (!isTagConfSuccess(body)) {
             console.error('[发现页] fetchGenres 接口异常:', body)
             return []
         }
@@ -45,7 +71,7 @@ export const fetchGenres = async () => {
         }
 
         return allItems.map((item: any) => ({
-            value: item.categoryName,
+            value: decodeEntities(item.categoryName),
             id: item.categoryId.toString(),
             songCount: 1000,
             albumCount: 100

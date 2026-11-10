@@ -134,6 +134,7 @@ const config: LX.Config = {
   'subsonic.lyricTranslation': true, // 是否在 Subsonic 歌词中包含翻译
   'subsonic.cacheOnPlay': false, // 是否在 Subsonic 播放时触发服务器缓存保存（落盘）
   'subsonic.playCacheFirst': true, // 是否在 Subsonic 播放时优先使用服务器已有的本地缓存/下载文件直接传输
+  'subsonic.playCacheAnyQuality': true, // 任意音质兜底: 精确音质探测未命中时, 允许命中任意音质的本地缓存/下载文件直接回传(默认开启)
   'subsonic.quality.enabled': true, // 音质优选总开关: 按优先级主动选最优可用音质(非失败降级); 关闭则 stream 仅单次解析
   'subsonic.quality.priority': 'flac,320k,128k', // 音质优先级(从高到低, 逗号分隔), 按此顺序主动优选
   'subsonic.quality.clientCapMode': 'soft', // 客户端 maxBitrate 上界模式: hard 仅选≤上限的最高优先级; soft 上限内都取不到再突破上限选更高优先级

@@ -55,7 +55,7 @@ const REQUIRED_FIELDS = [
   'subsonic.publicLeaderboards', 'subsonic.leaderboardSource',
   'subsonic.sharedListMode', 'subsonic.sharedListSort',
   'subsonic.onlineSearch', 'subsonic.onlineSearchMode', 'subsonic.onlineSearchSources',
-  'subsonic.lyricTranslation', 'subsonic.cacheOnPlay', 'subsonic.playCacheFirst',
+  'subsonic.lyricTranslation', 'subsonic.cacheOnPlay', 'subsonic.playCacheFirst', 'subsonic.playCacheAnyQuality',
   'subsonic.dislikeRating', 'subsonic.linkRatingToDislike', 'subsonic.linkDislikeToRating',
   'subsonic.hideDisliked', 'subsonic.dislikeNoRecommend', 'subsonic.dislikeRequireSinger',
   'subsonic.dislikeNormalizeName', 'subsonic.dislikeCrossSource', 'subsonic.dislikeDuetMode',

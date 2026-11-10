@@ -546,6 +546,9 @@ if (envParams.SUBSONIC_CACHE_ON_PLAY !== undefined) {
 if (envParams.SUBSONIC_PLAY_CACHE_FIRST !== undefined) {
   setBoolConfig('subsonic.playCacheFirst', envParams.SUBSONIC_PLAY_CACHE_FIRST)
 }
+if (envParams.SUBSONIC_PLAY_CACHE_ANY_QUALITY !== undefined) {
+  setBoolConfig('subsonic.playCacheAnyQuality', envParams.SUBSONIC_PLAY_CACHE_ANY_QUALITY)
+}
 if (envParams.SUBSONIC_QUALITY_ENABLED !== undefined) {
   setBoolConfig('subsonic.quality.enabled', envParams.SUBSONIC_QUALITY_ENABLED)
 }

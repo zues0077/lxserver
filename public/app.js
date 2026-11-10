@@ -2874,6 +2874,9 @@ class App {
             if (form.elements['subsonic.playCacheFirst']) {
                 form.elements['subsonic.playCacheFirst'].checked = config['subsonic.playCacheFirst'] !== false;
             }
+            if (form.elements['subsonic.playCacheAnyQuality']) {
+                form.elements['subsonic.playCacheAnyQuality'].checked = config['subsonic.playCacheAnyQuality'] !== false;
+            }
 
             // 不喜欢 / 评分联动
             if (form.elements['subsonic.dislikeRating'] !== undefined) {
@@ -3683,6 +3686,7 @@ class App {
             'subsonic.lyricTranslation': formData.get('subsonic.lyricTranslation') === 'on',
             'subsonic.cacheOnPlay': formData.get('subsonic.cacheOnPlay') === 'on',
             'subsonic.playCacheFirst': formData.get('subsonic.playCacheFirst') === 'on',
+            'subsonic.playCacheAnyQuality': formData.get('subsonic.playCacheAnyQuality') === 'on',
             'subsonic.dislikeRating': Number(formData.get('subsonic.dislikeRating') || 1),
             'subsonic.hideDisliked': formData.get('subsonic.hideDisliked') === 'on',
             'subsonic.dislikeCrossSource': formData.get('subsonic.dislikeCrossSource') === 'on',

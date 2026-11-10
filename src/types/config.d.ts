@@ -532,6 +532,12 @@ declare namespace LX {
     'subsonic.playCacheFirst'?: boolean
 
     /**
+     * 是否启用任意音质兜底 (默认 true)。开启后, 精确音质探测未命中时, 命中任意音质的本地缓存/下载文件也会直接回传,
+     * 使下载的高音质缓存(如 flac)可被低码率播放复用; 关闭则仅精确音质命中才回传本地缓存
+     */
+    'subsonic.playCacheAnyQuality'?: boolean
+
+    /**
      * Subsonic 服务端转码总开关 (默认 false)。开启后,当音源无客户端请求音质(及更低音质)时,
      * 服务端拉取最高可用音质并经 ffmpeg 降码率后流式发给客户端,节省客户端流量(需服务端安装 ffmpeg)。
      */
