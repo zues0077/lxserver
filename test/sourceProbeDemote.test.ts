@@ -74,7 +74,7 @@ test('关闭阈值配成 1 时降权必然关闭（本来就没有第二次）',
 test('第一次失败只降权：failCount=1、demotedAt 点亮、绝不 autoDisabled', () => {
     const p = ps()
     const r = notePlatformFailure(p, { demoteThreshold: 1, failThreshold: 2, now: 1000 })
-    assert.deepStrictEqual(r, { demoted: true, demoteStarted: true })
+    assert.deepStrictEqual(r, { demoted: true, demoteStarted: true, counted: true })
     assert.strictEqual(p.failCount, 1)
     assert.strictEqual(p.demotedAt, 1000)
     assert.strictEqual(p.autoDisabled, false, '第一次失败绝不能关平台')

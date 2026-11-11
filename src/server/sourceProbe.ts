@@ -73,6 +73,24 @@ export interface PlatformProbeState {
    */
   suspectSkipUntil?: number
   /**
+   * 连续**软失败**次数（本机网络 / 平台限流 / 风控这类「不是音源自己坏了」的失败）。
+   *
+   * 为什么不并进 failCount：failCount 直接决定「关平台」和「删音源」两件不可逆的事，
+   * 而实测本机网络抖一下就失败是常态 —— 让抖动去凑那两个阈值，等于按网络质量删好源。
+   * 但也不能无限豁免（真有源长期超时），所以连续 SOFT_PROMOTE_AFTER 次软失败折成一次硬证据。
+   * 成功一次即清零。
+   */
+  softCount?: number
+  /**
+   * 本轮「被赦免」的时间戳（0/未设置 = 本轮有真实结论）。
+   *
+   * 赦免有三种：平台侧疑似异常（整档 / 只赦免软失败）、停探期的哨兵样本、快速复检轮。
+   * 赦免只把 status 改成 unknown，但 failCount 仍 > 0 —— 而全平台失效判定把
+   * `failCount > 0` 当失败证据，于是「平台层写暂缓处置、整源层照样起 3 天删除倒计时」。
+   * 这个字段就是用来把「本轮没结论」和「本轮真失败」区分开的（见 evalAllDown）。
+   */
+  deferredAt?: number
+  /**
    * 上一次「自动恢复」的时间戳。
    *
    * 用来防抖：实测某个源（Hei Music源/wy）在 3 小时里被「自动关闭 → 自动恢复」来回折腾 6 次 ——
@@ -400,6 +418,9 @@ export const evalAllDown = (
     lastOkAt = Math.max(lastOkAt, Number(ps.lastOkAt) || 0)
     if (ps.status === 'ok') { allDown = false; break }
     if (ps.status === 'skipped') continue
+    // 本轮被赦免（平台侧疑似异常 / 停探哨兵 / 快速复检轮）→ 只是「没拿到结论」，
+    // 既不能当失败证据，也不能阻断 allDown（阻断就又回到「全平台都没定论 → 永不删除」的老死锁）。
+    if (Number(ps.deferredAt) > 0) continue
     if (ps.status === 'down' || ps.failCount > 0) { hasEvidence = true; continue }
     allDown = false
     break
@@ -1247,7 +1268,15 @@ export interface FailureNoteOptions {
   demoteThreshold: number
   failThreshold: number
   now?: number
+  /**
+   * 这次失败是否属于音源自身的硬故障（见 isHardFailure）。
+   * 缺省 true —— 老调用方不传时行为与升级前完全一致。
+   */
+  hard?: boolean
 }
+
+/** 连续几次软失败折成一次硬证据（防「长期超时」的真死源被永久豁免） */
+const SOFT_PROMOTE_AFTER = 3
 
 /**
  * 记一次平台侧探测失败，并按「先降权、后关平台」的阶梯推进。
@@ -1255,23 +1284,46 @@ export interface FailureNoteOptions {
  * 只负责 failCount 与降权标记；「是否够格关平台」由调用方用 disableThresholdFor 判定
  * （那里还有「刚恢复过的平台要双倍证据」的防抖），本函数绝不碰 autoDisabled / states.json。
  *
- * @returns demoteStarted=true 表示本次是**首次**进入降权观察（调用方据此只打一条日志）
+ * v1.5.54（检测科学化，用户 2026-11-11 拍板）：软失败**不进 failCount**。
+ * 原因：failCount 直接决定「关平台」和「删音源」两件不可逆动作，而本机网络抖一下失败是常态；
+ * 让抖动凑满阈值，等于按网络质量删好源。软失败仍然降权（代价极小），但连续
+ * SOFT_PROMOTE_AFTER 次会折成一次硬证据 —— 长期超时的真死源照样能被处置。
+ *
+ * @returns demoteStarted=true 表示本次是**首次**进入降权观察（调用方据此只打一条日志）；
+ *          counted=false 表示这次失败没有计入 failCount（软失败且未达折算次数）
  */
 export const notePlatformFailure = (
   ps: PlatformProbeState,
   opts: FailureNoteOptions,
-): { demoted: boolean; demoteStarted: boolean } => {
+): { demoted: boolean; demoteStarted: boolean; counted: boolean } => {
   const now = opts.now ?? Date.now()
+  const hard = opts.hard !== false
+
+  if (!hard) {
+    ps.softCount = Math.min(99, Number(ps.softCount || 0) + 1)
+    if (ps.softCount < SOFT_PROMOTE_AFTER) {
+      // 已经关掉的平台不参与降权：它在 states.json 里已不可选，排序层看不到它
+      if (ps.autoDisabled) return { demoted: isDemoteActive(ps, now), demoteStarted: false, counted: false }
+      const demoteStarted = !isDemoteActive(ps, now)
+      if (demoteStarted) ps.demotedAt = now
+      return { demoted: true, demoteStarted, counted: false }
+    }
+    // 连续软失败到折算线：清软计数，按一次硬证据继续走下面的正常流程
+    ps.softCount = 0
+  } else {
+    ps.softCount = 0
+  }
+
   // 失败计数上限 99，避免「连续失败 N 次」在停探期/关闭后只增不减变成无意义的极大值
   ps.failCount = Math.min(99, Number(ps.failCount || 0) + 1)
   const threshold = Math.max(0, Math.round(Number(opts.demoteThreshold) || 0))
   // 已经关掉的平台不参与降权：它在 states.json 里已经不可选，排序层看不到它
   if (!threshold || ps.autoDisabled || ps.failCount < threshold) {
-    return { demoted: isDemoteActive(ps, now), demoteStarted: false }
+    return { demoted: isDemoteActive(ps, now), demoteStarted: false, counted: true }
   }
   const demoteStarted = !isDemoteActive(ps, now)
   if (demoteStarted) ps.demotedAt = now
-  return { demoted: true, demoteStarted }
+  return { demoted: true, demoteStarted, counted: true }
 }
 
 /** 探测成功：立刻撤销降权（与「任意一次成功即恢复原位」的沉底语义保持一致） */
@@ -1755,6 +1807,9 @@ export async function runSourceProbe(
 
         let ok = false
         let lastError = ''
+        // 赦免标记是「本轮」语义：探测前先清掉，避免上一轮的标记一直粘着，
+        // 让这个平台永远不参与全平台失效判定
+        platformState.deferredAt = 0
         for (const song of job.songs) {
           const outcome = await probePlatform(job.target, job.platform, song, conf)
           if (outcome.ok) { ok = true; break }
@@ -1764,6 +1819,8 @@ export async function runSourceProbe(
 
         if (ok) {
           platformState.failCount = 0
+          platformState.softCount = 0
+          platformState.deferredAt = 0
           platformState.lastOkAt = Date.now()
           platformState.lastError = ''
           // 成功一次即撤销降权：顺序上的惩罚必须能被一次真实成功立刻抹掉
@@ -1790,10 +1847,15 @@ export async function runSourceProbe(
           const noted = notePlatformFailure(platformState, {
             demoteThreshold: conf.demoteThreshold,
             failThreshold: conf.failThreshold,
+            // 检测科学化的核心一步：本机网络/限流/风控类失败只降权，不计入关闭与删除的阈值
+            hard: isHardFailure(lastError),
           })
           platformState.lastError = shorten(lastError)
           // 是否「不可用」要等平台侧系统性判定后再落定，这里先按证据不足处理
           platformState.status = 'unknown'
+          // 快速复检轮只做「恢复」，单平台单曲的失败不构成任何处置证据 → 打赦免标，
+          // 免得这轮的 failCount 被后面的「全平台失效」判定当成定罪证据
+          if (options.restoreOnly) platformState.deferredAt = Date.now()
           if (noted.demoteStarted) {
             result.demoted.push(`${job.target.name}/${job.platform}`)
             console.log(`[音源巡检] ↓ 已降权观察: ${job.target.name} / ${job.platform}` +
@@ -1897,6 +1959,8 @@ export async function runSourceProbe(
         // 「用最少的证据做最重的处置」——哨兵的职责是观测平台是否恢复，不是定罪。
         if ((suspectSkipCounts.get(platform) ?? 0) > 0) {
           ps.status = 'unknown'
+          // 哨兵样本只用来观测平台是否恢复，不构成对本源的定罪证据
+          ps.deferredAt = Date.now()
           continue
         }
         if (suspectPlatforms.has(platform)) {
@@ -1904,11 +1968,16 @@ export async function runSourceProbe(
           // 有对照组时只赦免软失败 —— 已经证明曲目能播，命中硬故障特征的就是这个音源自己的后端挂了
           if (fullSuspectPlatforms.has(platform) || !isHardFailure(ps.lastError)) {
             ps.status = 'unknown'
+            // 关键：赦免必须一路穿透到「整源删除」判定。只改 status 不改证据，
+            // 就会出现「日志写暂缓处置、整源却照样起 3 天删除倒计时」（2026-11-11 实测 6 个源中招）。
+            ps.deferredAt = Date.now()
             result.platformsDeferred++
             continue
           }
         }
         ps.status = 'down'
+        // 真实定罪 → 清掉赦免标，让这次的失败正常参与全平台失效判定
+        ps.deferredAt = 0
         result.platformsDown++
         if (conf.autoDisablePlatform && !ps.autoDisabled) {
           ps.autoDisabled = true
