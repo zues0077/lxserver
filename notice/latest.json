@@ -1,6 +1,6 @@
 {
     "comment": "本仓库（zues0077/lxserver）自有版本线的更新来源。version 由 scripts/set-version.js 在发版时自动同步，勿手改。前端 /js/notification-engine.js 只认这个文件与 notification.json，不会回落上游 PostHog，避免把上游 2.x 误报成本仓库的新版本。",
-    "version": "v1.5.51",
+    "version": "v1.5.53",
     "url": "https://github.com/zues0077/lxserver/releases",
     "notes": "当前已是最新版本。本项目为独立维护的版本线，更新请关注 zues0077/lxserver。"
 }
