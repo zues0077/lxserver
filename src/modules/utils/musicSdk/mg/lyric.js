@@ -21,7 +21,7 @@ const mrcTools = {
 
       const startTime = parseInt(result[1])
       let time = startTime
-      let ms = time % 1000
+      let ms = (time % 1000).toString().padStart(3, '0')
       time /= 1000
       let m = parseInt(time / 60).toString().padStart(2, '0')
       time %= 60
@@ -66,39 +66,43 @@ const mrcTools = {
       return this.parseLyric(decrypt(text))
     })
   },
+  // Legacy implementation retained for reference; inactive.
+  // getLrc(url) {
+  //     return this.getText(url).then(text => {
+  //       // 咪咕的lrcUrl可能返回纯文本歌词（没有时间标签）
+  //       // 需要检查并添加假时间标签
+  //       const lines = text.split('\n')
+  //       const hasTimeTag = /^\[(\d+):(\d+)\.(\d+)\]/.test(text)
+  //
+  //       // 如果已经有时间标签，直接返回
+  //       if (hasTimeTag) {
+  //         const linesWithTime = lines.filter(line => /^\[(\d+):(\d+)\.(\d+)\]/.test(line))
+  //         // 如果大部分行都有时间标签（>50%），认为是标准LRC
+  //         if (linesWithTime.length > lines.length * 0.5) {
+  //           return { lxlyric: '', lyric: text }
+  //         }
+  //       }
+  //
+  //       // 否则，为纯文本歌词添加假时间标签
+  //       let currentTime = 0
+  //       const lrcLines = lines.map((line, index) => {
+  //         line = line.trim()
+  //         if (!line || line.startsWith('@')) return '' // 跳过空行和头部
+  //
+  //         // 为每行添加时间标签，每行间隔3秒
+  //         const minutes = Math.floor(currentTime / 60)
+  //         const seconds = currentTime % 60
+  //         const timeTag = `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.00]`
+  //         currentTime += 3
+  //
+  //         return `${timeTag}${line}`
+  //       }).filter(line => line) // 移除空行
+  //
+  //       return { lxlyric: '', lyric: lrcLines.join('\n') }
+  //     })
+  //   }
   getLrc(url) {
-    return this.getText(url).then(text => {
-      // 咪咕的lrcUrl可能返回纯文本歌词（没有时间标签）
-      // 需要检查并添加假时间标签
-      const lines = text.split('\n')
-      const hasTimeTag = /^\[(\d+):(\d+)\.(\d+)\]/.test(text)
-
-      // 如果已经有时间标签，直接返回
-      if (hasTimeTag) {
-        const linesWithTime = lines.filter(line => /^\[(\d+):(\d+)\.(\d+)\]/.test(line))
-        // 如果大部分行都有时间标签（>50%），认为是标准LRC
-        if (linesWithTime.length > lines.length * 0.5) {
-          return { lxlyric: '', lyric: text }
-        }
-      }
-
-      // 否则，为纯文本歌词添加假时间标签
-      let currentTime = 0
-      const lrcLines = lines.map((line, index) => {
-        line = line.trim()
-        if (!line || line.startsWith('@')) return '' // 跳过空行和头部
-
-        // 为每行添加时间标签，每行间隔3秒
-        const minutes = Math.floor(currentTime / 60)
-        const seconds = currentTime % 60
-        const timeTag = `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.00]`
-        currentTime += 3
-
-        return `${timeTag}${line}`
-      }).filter(line => line) // 移除空行
-
-      return { lxlyric: '', lyric: lrcLines.join('\n') }
-    })
+    return this.getText(url).then(text => ({ lxlyric: '', lyric: text }))
   },
   getTrc(url) {
     if (!url) return Promise.resolve('')
@@ -108,10 +112,13 @@ const mrcTools = {
     // [修复] 原来判的是 `songInfo.mrcUrl == null`，但前端把 URL 参数原样带过来时
     // 缺省会传空字符串（'' == null 为 false），于是永远不查接口、直接拿空 URL 去取词，
     // 结果所有走「歌单/专辑/榜单」进来的咪咕歌都报「获取歌词失败」（实测 0/10）。
-    // 真正的判据是「两个歌词地址都没有」。
+    // 真正的判据是「两个歌词地址都没有」。（本仓库自有修复，保留）
     if (songInfo.mrcUrl || songInfo.lrcUrl) return songInfo
-    if (!songInfo.copyrightId) return songInfo
-    return getMusicInfo(songInfo.copyrightId).then(info => info || songInfo)
+    // 上游 v2.2.0 统一按 songmid 查询；回落 copyrightId 兼容只带旧字段的调用
+    // Legacy: getMusicInfo(songInfo.copyrightId)
+    const id = songInfo.songmid || songInfo.copyrightId
+    if (!id) return songInfo
+    return getMusicInfo(id).then(info => info || songInfo)
   },
   getLyric(songInfo) {
     return {

@@ -13,8 +13,13 @@ export default {
   total: 0,
   page: 0,
   allPage: 1,
+  // Legacy implementation retained for reference; inactive.
+  // musicSearch(str, page, limit) {
+  //     const searchRequest = httpFetch(`https://songsearch.kugou.com/song_search_v2?keyword=${encodeURIComponent(str)}&page=${page}&pagesize=${limit}&userid=0&clientver=&platform=WebFilter&filter=2&iscorrection=1&privilege_filter=0&area_code=1`)
+  //     return searchRequest.promise.then(({ body }) => body)
+  //   }
   musicSearch(str, page, limit) {
-    const searchRequest = httpFetch(`https://songsearch.kugou.com/song_search_v2?keyword=${encodeURIComponent(str)}&page=${page}&pagesize=${limit}&userid=0&clientver=&platform=WebFilter&filter=2&iscorrection=1&privilege_filter=0&area_code=1`)
+    const searchRequest = httpFetch(`http://songsearch.kugou.com/song_search_v2?platform=AndroidFilter&iscorrection=1&keyword=${encodeURIComponent(str)}&hifiquality=0&pagesize=${limit}&PrivilegeFilter=0&page=${page}`)
     return searchRequest.promise.then(({ body }) => body)
   },
   filterData(rawData) {
@@ -54,12 +59,14 @@ export default {
     }
     return {
       singer: decodeName(formatSingerName(rawData.Singers, 'name')),
-      // 歌手 id：点作者名 → 歌手主页
+      // 歌手 id：点作者名 → 歌手主页（本仓库自有改动，保留）
       artistId: Array.isArray(rawData.Singers) && rawData.Singers[0]?.id != null ? String(rawData.Singers[0].id) : undefined,
-      name: decodeName(rawData.SongName),
+      // 上游 v2.2.0：优先 OriSongName + Suffix，避免深页翻唱因歌手名较短挤到前列
+      name: decodeName(rawData.OriSongName ? `${rawData.OriSongName}${rawData.Suffix ? ` ${rawData.Suffix}` : ''}` : rawData.SongName),
       albumName: decodeName(rawData.AlbumName),
       albumId: rawData.AlbumID,
       songmid: rawData.Audioid,
+      albumAudioId: rawData.MixSongID,
       source: 'kg',
       interval: formatPlayTime(rawData.Duration),
       _interval: rawData.Duration,
