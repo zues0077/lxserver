@@ -45,6 +45,7 @@ import { startSourceLedgerPersist } from './sourceLedgerStore'
 import { playRankSnapshot } from './sourcePlayRank'
 import { rateLimitSnapshot } from './sourceRateLimit'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
+import { cleanupUserSources } from './userSourceCleanup'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
 import { getAppVersion } from '@/utils/version'
@@ -3769,6 +3770,22 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     } catch (err) {
                       console.error(`[用户管理] 删除用户 ${user.name} 的数据目录失败:`, err)
                       // 继续删除其他用户，不中断流程
+                    }
+                    // 上游 v2.2.0：自定义音源空间（users/source/<name>）不在 user.dataPath 内，
+                    // 旧逻辑会永久残留脚本/顺序/状态/巡检记录。这里连带清理，
+                    // 但绝不触碰 _open 公共空间与其他用户（见 userSourceCleanup.ts）。
+                    try {
+                      const sourceCleanup = cleanupUserSources(
+                        process.env.DATA_PATH || path.join(process.cwd(), 'data'),
+                        user.name,
+                      )
+                      if (sourceCleanup.removed) {
+                        console.log(`[用户管理] 已清理用户 ${user.name} 的自定义音源空间: ${sourceCleanup.dir}`)
+                      } else if (sourceCleanup.error) {
+                        console.error(`[用户管理] 清理用户 ${user.name} 的自定义音源空间失败:`, sourceCleanup.error)
+                      }
+                    } catch (err) {
+                      console.error(`[用户管理] 清理用户 ${user.name} 的自定义音源空间异常:`, err)
                     }
                   }
                 } else {
