@@ -6362,6 +6362,16 @@
                         <option value="3">3</option>
                         <option value="4">4</option>
                     </select>
+                </div>
+                <div class="flex items-center gap-1.5 flex-wrap mt-2" id="identify-sources-row">
+                    <span class="text-[11px] t-text-muted">智能检测平台</span>
+                    <label class="inline-flex items-center gap-1 text-[11px] t-text-main cursor-pointer"><input type="checkbox" class="identify-source-cb" value="tx" checked onchange="LocalMusicManager.saveIdentifySources()"> QQ</label>
+                    <label class="inline-flex items-center gap-1 text-[11px] t-text-main cursor-pointer"><input type="checkbox" class="identify-source-cb" value="wy" checked onchange="LocalMusicManager.saveIdentifySources()"> 网易</label>
+                    <label class="inline-flex items-center gap-1 text-[11px] t-text-main cursor-pointer"><input type="checkbox" class="identify-source-cb" value="kg" checked onchange="LocalMusicManager.saveIdentifySources()"> 酷狗</label>
+                    <label class="inline-flex items-center gap-1 text-[11px] t-text-main cursor-pointer"><input type="checkbox" class="identify-source-cb" value="kw" checked onchange="LocalMusicManager.saveIdentifySources()"> 酷我</label>
+                    <label class="inline-flex items-center gap-1 text-[11px] t-text-main cursor-pointer"><input type="checkbox" class="identify-source-cb" value="mg" checked onchange="LocalMusicManager.saveIdentifySources()"> 咪咕</label>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
                     <button id="btn-batch-identify-start" onclick="LocalMusicManager.startBatchIdentify()"
                         class="ml-auto px-4 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold rounded-xl transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed">
                         开始识别

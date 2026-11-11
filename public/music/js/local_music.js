@@ -2510,6 +2510,11 @@ window.LocalMusicManager = {
             const saved = localStorage.getItem('lx_local_identify_threads');
             if (saved && ['1', '2', '3', '4'].includes(saved)) threadsEl.value = saved;
         }
+        // [T18] 初始化「智能检测平台」勾选状态（读 localStorage，缺省全选）
+        const savedSources = this.getIdentifySources();
+        document.querySelectorAll('.identify-source-cb').forEach(cb => {
+            cb.checked = savedSources.includes(cb.value);
+        });
         const results = document.getElementById('batch-identify-results');
         if (results) {
             results.innerHTML = `<div class="flex flex-col items-center justify-center h-full opacity-30">
@@ -2907,8 +2912,33 @@ window.LocalMusicManager = {
         this.refresh();
     },
 
+    // [T18] 智能检测/自动关联可用的关联平台（用户可在设置里勾选/禁用）。
+    // 缺省回退全 5 平台；向后兼容，不影响未配置用户的行为。
+    getIdentifySources() {
+        try {
+            const raw = localStorage.getItem('lx_local_identify_sources');
+            if (raw) {
+                const arr = JSON.parse(raw);
+                if (Array.isArray(arr) && arr.length > 0) return arr;
+            }
+        } catch (e) { /* 解析失败按缺省处理 */ }
+        return ['tx', 'wy', 'kg', 'kw', 'mg'];
+    },
+
+    // [T18] 保存用户勾选的「智能检测平台」到 localStorage（全部取消则回退全平台）
+    saveIdentifySources() {
+        try {
+            const checked = Array.from(document.querySelectorAll('.identify-source-cb:checked')).map(cb => cb.value);
+            if (checked.length > 0) {
+                localStorage.setItem('lx_local_identify_sources', JSON.stringify(checked));
+            } else {
+                localStorage.removeItem('lx_local_identify_sources'); // 全不选 = 回退缺省全平台
+            }
+        } catch (e) { console.warn('[T18] 保存智能检测平台失败:', e); }
+    },
+
     async findBestMatch(localItem) {
-        const sources = ['tx', 'wy', 'kg', 'kw', 'mg'];
+        const sources = this.getIdentifySources();
         const targetSecs = this.parseInterval(localItem.interval);
         if (targetSecs <= 0) return null;
 

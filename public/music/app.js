@@ -6849,7 +6849,10 @@ async function fetchSongUrl(song, quality, isRetry = false, isSilent = false, op
             return {
                 url: finalUrl,
                 sourceType: 'normal',
-                quality: result.type || quality,
+                // [T5 修正] result.type 可能只是来源类型标记（如本地缓存命中返回 'local'），
+                // 并非音质档。真实音质在 result.quality（服务端本地缓存分支已返回 cached.quality）。
+                // 仅当 type 是有效音质档时才用它，否则回退 result.quality，再兜底请求档位 quality。
+                quality: (result.type && result.type !== 'local') ? result.type : (result.quality || quality),
                 sourceName: result.sourceName,
                 sourceId: result.sourceId,
                 hasMoreSources: !!result.hasMoreSources,
