@@ -36,6 +36,7 @@ import { isThrottled } from './sourceGovernor'
 import { beginProbeQuiet, endProbeQuiet } from './probeQuiet'
 import { beginHostActivity, endHostActivity } from './sourceActivity'
 import { moveScriptToTrash, listTrash } from './sourceTrash'
+import { hasRecentSuccess } from './sourcePlayRank'
 import type { ScheduledTask, TaskExecutionResult } from './task/types'
 
 export const PROBE_TASK_ID = 'custom_source_health_probe'
@@ -292,6 +293,8 @@ export interface ProbeConfig {
    */
   allDownDays: number
   probeOnNewSource: boolean
+  /** 真实播放数据优先：7 天内真播成功过的「源×平台」本轮不再合成探测（默认开） */
+  preferPlayRank: boolean
   testSongs: Record<string, Partial<ProbeTestSong>>
   /** 平台失败率超过该比例即视为「平台侧系统性异常」，本轮暂缓自动处置 */
   systemicFailureRatio: number
@@ -519,6 +522,8 @@ export const configOf = (): ProbeConfig => {
     // 0 = 关闭时间窗（判定当轮即移除，等同老行为）；上限 90 天，避免配置写错把清理拖成永久。
     allDownDays: Math.min(90, nonNegativeNumber(c['customSource.probe.allDownDays'], 3)),
     probeOnNewSource: c['customSource.probe.probeOnNewSource'] !== false,
+    // 真实播放数据优先：7 天内真播成功过的「源×平台」本轮不拿测试曲去探（默认开）
+    preferPlayRank: c['customSource.probe.preferPlayRank'] !== false,
     testSongs: rawTestSongs && typeof rawTestSongs === 'object' && !Array.isArray(rawTestSongs) ? rawTestSongs : {},
     systemicFailureRatio: ratioNumber(c['customSource.probe.systemicFailureRatio'], DEFAULT_SYSTEMIC_RATIO),
     suspectMaxOkRatio: ratioNumber(c['customSource.probe.suspectMaxOkRatio'], DEFAULT_SUSPECT_MAX_OK_RATIO),
@@ -1275,6 +1280,9 @@ export interface FailureNoteOptions {
   hard?: boolean
 }
 
+/** 「真实播放成功」的有效窗口：7 天内（v1.5.54 巡检真实数据优先） */
+const PLAY_RANK_FRESH_MS = 7 * 86400_000
+
 /** 连续几次软失败折成一次硬证据（防「长期超时」的真死源被永久豁免） */
 const SOFT_PROMOTE_AFTER = 3
 
@@ -1768,6 +1776,8 @@ export async function runSourceProbe(
     let cursor = 0
     /** 因超出总时长预算而未探测的任务数（下一轮会排在最前面） */
     let budgetCut = 0
+    /** 因「7 天内有真实播放成功」而跳过合成探测的数量（v1.5.54） */
+    let skippedByPlayRank = 0
     // 平台级节流：同一平台的两次探测之间至少间隔 conf.throttleMs。
     // 全量巡检 139 个平台里，单个平台往往排着 20~30 个源；并发全开时同一平台会瞬时收到
     // 好几个请求，这正是最容易触发平台风控（以及被平台侧判定为异常流量）的形态。
@@ -1804,6 +1814,19 @@ export async function runSourceProbe(
         const status = statusFor(job.target.owner)
         const platformState = status.sources[job.target.id].platforms[job.platform]
         result.platformsChecked++
+
+        // ---- 真实播放数据优先（v1.5.54，用户 2026-11-11 拍板的 C 项）----
+        // 最近 7 天这个「源 × 平台」在真实播放链路里成功取过链 → 本轮不拿测试曲去试。
+        // 理由：合成探测的测试曲本身可能不可播，用它否定一个用户天天在用的源不划算。
+        // 标记 deferredAt = 本轮无新证据：既不参与定罪，也不阻断「全平台失效」判定。
+        if (conf.preferPlayRank && hasRecentSuccess(
+          { owner: job.target.owner, id: job.target.id, platform: job.platform }, PLAY_RANK_FRESH_MS)) {
+          platformState.deferredAt = Date.now()
+          platformState.lastCheckAt = Date.now()
+          result.platformsSkipped++
+          skippedByPlayRank++
+          continue
+        }
 
         let ok = false
         let lastError = ''
@@ -2049,6 +2072,7 @@ export async function runSourceProbe(
     result.message =
       `巡检 ${targets.length} 个音源的 ${result.platformsChecked} 个平台：` +
       `可用 ${result.platformsOk}、不可用 ${result.platformsDown}、跳过 ${result.platformsSkipped}` +
+      (skippedByPlayRank ? `（其中 ${skippedByPlayRank} 个因 7 天内有真实播放成功而免测）` : '') +
       (result.platformsDeferred ? `（另有 ${result.platformsDeferred} 个失败因平台疑似异常暂缓，未计入不可用）` : '') +
       (result.demoted.length ? `；降权观察 ${result.demoted.length} 个（仅排到换源队尾）` : '') +
       (result.newlyDisabled.length ? `；新关闭 ${result.newlyDisabled.length} 个平台` : '') +

@@ -36,6 +36,12 @@ export interface PlayRankRecord {
     /** 成功耗时的指数加权均值（ms），0 表示还没有成功样本 */
     ewmaMs: number
     lastAt: number
+    /**
+     * 最后一次**成功**的时间戳（v1.5.54）。
+     * 与 lastAt 的区别：lastAt 每次尝试都会刷新（含失败），所以它回答不了
+     * 「最近到底成功过没有」—— 而巡检「真实播放数据优先」必须问的就是这句话。
+     */
+    lastOkAt?: number
 }
 
 /** 没有足够证据时的中性分：不鼓励也不惩罚，靠原有顺序决定 */
@@ -81,6 +87,7 @@ export const notePlayResult = (
     try { markLedgerDirty() } catch { /* 落盘标记失败不影响排序 */ }
     if (ok) {
         rec.successes += 1
+        rec.lastOkAt = now
         // 单次异常值不能把均值带飞：上限跟着当前均值走（最多 4 倍），
         // 没有历史时才用 60s 的绝对上限。
         const raw = Math.max(0, Number(costMs) || 0)
@@ -95,6 +102,32 @@ export const notePlayResult = (
 export const getPlayRankRecord = (target: PlayRankTarget): PlayRankRecord | undefined => {
     const rec = stats.get(playRankKey(target))
     return rec ? { ...rec } : undefined
+}
+
+/**
+ * 该「源 × 平台」最近窗口内**真实播放成功**过吗（v1.5.54，巡检「真实数据优先」的判据）
+ *
+ * 为什么巡检要用它：合成探测（拿测试曲去试）有两个固有缺陷 —— 一是测试曲本身可能不可播，
+ * 二是一次采样代表不了「用户点歌时到底行不行」。而这条记录来自真实播放链路，
+ * 有近期成功证据的源没必要再探，既省时间也少一次误判机会。
+ *
+ * 只看 successes>0 且 `lastOkAt` 在窗口内：不能用 lastAt（它连失败也刷新）。
+ * 内存账本，进程重启即清零 —— 重启后没有证据就照常探测，属于保守方向。
+ */
+export const hasRecentSuccess = (
+    target: { owner: string; id: string; platform: string },
+    withinMs: number = 7 * 24 * 3600 * 1000,
+    now: number = Date.now(),
+): boolean => {
+    const prefix = `${(target && target.owner) || ''}:${(target && target.id) || ''}:${(target && target.platform) || ''}:`
+    let lastOkAt = 0
+    for (const [key, rec] of stats) {
+        if (!key.startsWith(prefix)) continue
+        if (!rec || rec.successes <= 0) continue
+        const okAt = Number(rec.lastOkAt) || 0
+        if (okAt > lastOkAt) lastOkAt = okAt
+    }
+    return lastOkAt > 0 && now - lastOkAt <= withinMs
 }
 
 /**

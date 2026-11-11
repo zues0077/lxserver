@@ -198,7 +198,10 @@ const cfg = (): GuardConfig => {
             sampleIntervalMs: envNum('SOURCE_GUARD_SAMPLE_INTERVAL_MS', 2000),
             windowMs: envNum('SOURCE_GUARD_WINDOW_MS', 15000),
             probeEnabled: envBool('SOURCE_GUARD_PROBE_ENABLED', true),
-            probeWindowMs: envNum('SOURCE_GUARD_PROBE_WINDOW_MS', 3000),
+            // v1.5.54：3s → 15s。3 秒窗口会把「播放/下载/重载收尾的 CPU 衰减」当成某个源的热点
+            // （2026-11-11 实测：星澜聚合音源源码里 0 个 setInterval，被隔离后也从未复现，
+            //  而隔离那一刻正好是 87% 尖峰回落 —— 典型误判）。15s 才能摊平瞬时抖动。
+            probeWindowMs: envNum('SOURCE_GUARD_PROBE_WINDOW_MS', 15000),
             probeMaxScripts: envNum('SOURCE_GUARD_PROBE_MAX_SCRIPTS', 6),
             /**
              * 启动静默期默认 5 分钟。
@@ -999,6 +1002,9 @@ const buildSpikeSnapshot = (): string => {
     return parts.join(' | ')
 }
 
+/** 卸载后等待残留自旋退出的沉降时间（v1.5.54 起固定 3s，不再跟探测窗口等长） */
+const PROBE_SETTLE_MS = 3000
+
 const scheduleSampler = (): void => {
     if (sampler || probing || !cfg().enabled) return
     lastCpu = process.cpuUsage()
@@ -1173,8 +1179,9 @@ const runProbe = async (deps: GuardDeps, baseline: number): Promise<void> => {
         for (const ref of candidates) {
             // 只卸载这一个，其余音源不受影响
             deps.unload(ref.owner, ref.id)
-            // 先给残留自旋一点退出时间，再测一个干净的窗口
-            await sleep(current.probeWindowMs)
+            // 先给残留自旋一点退出时间，再测一个干净的窗口。
+            // 固定 3s：探测窗口本身已经拉到 15s，沉降不需要再等一个窗口那么久。
+            await sleep(PROBE_SETTLE_MS)
             const after = await sampleCpuOver(current.probeWindowMs)
             const drop = baseline - after
 
@@ -1182,20 +1189,33 @@ const runProbe = async (deps: GuardDeps, baseline: number): Promise<void> => {
             // 原来用 max(10%, 基线×40%)，246 上实测偏松 —— 8 条隔离全由这条判据触发，
             // 其中至少一例（全豆要）解除后 CPU 长期 0.4~0.6%、重启也未复发，属误判。
             // 提到 max(15%, 基线×60%)：宁可漏一次（下一轮采样还会再报），也别把正常音源关掉。
-            if (drop < Math.max(15, baseline * 0.6)) {
-                console.log(`[自检护栏] 复检排除: ${ref.name}，卸载后 CPU ${after.toFixed(1)}%（降幅 ${drop.toFixed(1)}% 未达门槛 ${Math.max(15, baseline * 0.6).toFixed(1)}%），已恢复加载`)
+            const need = Math.max(15, baseline * 0.6)
+            if (drop < need) {
+                console.log(`[自检护栏] 复检排除: ${ref.name}，卸载后 CPU ${after.toFixed(1)}%（降幅 ${drop.toFixed(1)}% 未达门槛 ${need.toFixed(1)}%），已恢复加载`)
                 await deps.reload(ref.owner, ref.id)
                 continue
             }
 
-            // 命中：卸载后 CPU 明显回落
+            // ---- 二次确认（v1.5.54，用户 2026-11-11 拍板的 D 项）----
+            // 单次采样仍可能是巧合（比如同一时刻别的任务正好结束）。源码此刻仍是卸载状态，
+            // 直接再测一个同长窗口：两次都达标才算真凶，否则视为噪声、恢复加载。
+            const after2 = await sampleCpuOver(current.probeWindowMs)
+            const drop2 = baseline - after2
+            if (drop2 < need) {
+                console.log(`[自检护栏] 复检排除（二次采样不达标）: ${ref.name}，第一次 ${after.toFixed(1)}%（降 ${drop.toFixed(1)}%），` +
+                    `第二次 ${after2.toFixed(1)}%（降 ${drop2.toFixed(1)}% < 门槛 ${need.toFixed(1)}%），已恢复加载`)
+                await deps.reload(ref.owner, ref.id)
+                continue
+            }
+
+            // 命中：两次独立采样都显示「卸载后 CPU 明显回落」
             confirmed.push(ref.name)
             if (current.mode === 'isolate') {
                 const script = readSourceScript(ref)
                 // reason 里记全三个数：降幅 / 卸载后残留 / 探测前基线。
                 // 只记 after 会写成「卸载它之后 CPU 仍占 0.4%」，读起来像「它没占 CPU 却被判了」，
                 // 实际判据是降幅；三个数都给出来，用户自己能复核是不是误判。
-                const reason = `cpu_probe:drop=${drop.toFixed(1)},after=${after.toFixed(1)},base=${baseline.toFixed(1)}`
+                const reason = `cpu_probe:drop=${drop.toFixed(1)},after=${after.toFixed(1)},base=${baseline.toFixed(1)},confirm=${after2.toFixed(1)}`
                 const record = recordIsolation(ref, script ? fingerprintOf(script) : '', 'A', reason, 'probe')
                 activeIsolations.set(recordKey(ref.owner, ref.id), record)
                 console.warn(`[自检护栏] ✓ 复检确认热点并已隔离: ${ref.name} (${ref.id})，卸载后 CPU ${after.toFixed(1)}%（基线 ${baseline.toFixed(1)}%）`)
