@@ -129,6 +129,8 @@ export class SourceWorkerHost {
     private pending = new Map<number, PendingCall>()
     private nextCallId = 0
     private disposed = false
+    /** worker 内脚本 lx.send('inited') 声明的能力表，由 ready 消息带回（A' 主线程不再 eval 脚本时要用） */
+    sources: Record<string, any> = {}
 
     constructor(readonly data: SourceWorkerData, private readonly onDead: () => void) {
         const env: Record<string, string> = { NODE_ENV: process.env.NODE_ENV || 'production' }
@@ -153,7 +155,11 @@ export class SourceWorkerHost {
                 WORKER_START_TIMEOUT_MS,
             )
             this.worker.on('message', (msg: WorkerToMainMessage) => {
-                if (msg.type === 'ready') { finish(); return }
+                if (msg.type === 'ready') {
+                    this.sources = msg.sources || {}
+                    finish()
+                    return
+                }
                 if (msg.type === 'fatal') { finish(new Error(`worker 启动失败: ${msg.message}`)); return }
                 if (msg.type === 'log') {
                     const line = msg.text

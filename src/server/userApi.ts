@@ -11,7 +11,7 @@ import {
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure, isPlatformDemoted } from './sourceProbe'
 import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor, listWorkerPresetCandidates } from './sourceGovernor'
-import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible } from './sourceWorkerHost'
+import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible, getSourceWorker } from './sourceWorkerHost'
 import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue, normalizeQualityList } from './sourceContract'
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
@@ -1260,12 +1260,117 @@ async function createLxRequest(
     }
 }
 
-// 加载自定义源脚本
-export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
-    // 从脚本中提取元数据
-    const metadata = extractMetadata(apiInfo.script)
-    const fullApiInfo = { ...apiInfo, ...metadata }
+/**
+ * A' 实验开关（仅测试容器用）：让已被 governor 记为慢源的脚本「整实例」只在
+ * 独立线程 eval，主线程完全不 eval 脚本 —— 脚本自排的 600s 健康探测定时器
+ * 及其同步重活因此不会落在主线程。默认关闭，实机用环境变量开/关做 A/B 对比。
+ */
+const WORKER_ONLY_ENABLED = process.env.CUSTOM_SOURCE_WORKER_ONLY === '1'
 
+/** 该源是否在 governor 的慢源记录里（脚本指纹变了就不认旧记录）。 */
+function isWorkerOnlyCandidate(owner: string, id: string): boolean {
+    try {
+        const currentHash = loadedScriptHashes.get(`${owner}/${id}`)
+        return listWorkerPresetCandidates().some(item =>
+            item.owner === owner
+            && item.id === id
+            && (!item.scriptHash || !currentHash || item.scriptHash === currentHash))
+    } catch { return false }
+}
+
+/**
+ * 构造一个「只有壳」的实例：脚本本体、定时器、lx.request 全在 worker。
+ * sources/契约由 worker 的 ready 消息回填，callRequest 优先转发 worker。
+ *
+ * ②缺陷修复（2026-11-12）：worker 调用**基础设施故障**（超时/ready 失败/worker 退出/
+ * postMessage 失败）且 `fallbackToMain` 开启时，不再是抛「独立线程不可用」，
+ * 而是**惰性构建一份主线程 vm2 兜底实例**把本次调用跑完 —— 与普通双路源
+ * （loadUserApi 的 callRequest，tryWorkerCall handled=false 时落回 runWithGovernor
+ * 主线程路径）的语义对齐。脚本业务失败（fromScript）仍原样抛给上层换源，不回退重跑。
+ */
+async function loadWorkerOnlyApi(apiInfo: UserApiInfo, fullApiInfo: any): Promise<any> {
+    const owner = fullApiInfo.owner
+    const id = apiInfo.id
+    const workerInfo = { owner, id, name: fullApiInfo.name, script: fullApiInfo.script }
+
+    markWorkerEligible(owner, id, workerInfo, true)
+    const host = getSourceWorker(workerInfo)
+    await host.ready
+    const sources = host.sources || {}
+    const contractReport = inspectSourceContract(sources)
+
+    let disposed = false
+    /** 主线程兜底实例（惰性）：仅在 worker 基础设施故障且允许回退时构建一次 */
+    let fallbackInstance: any = null
+    let fallbackBuilding: Promise<any> | null = null
+    const buildFallback = async (): Promise<any> => {
+        if (fallbackInstance) return fallbackInstance
+        if (!fallbackBuilding) {
+            fallbackBuilding = buildMainThreadApiInstance(apiInfo, fullApiInfo)
+                .then(inst => {
+                    fallbackInstance = inst
+                    console.warn(`[自定义源-worker-only] ${fullApiInfo.name} 已构建主线程兜底实例（worker 基础设施故障回退）`)
+                    return inst
+                })
+                .catch((e: any) => {
+                    console.error(`[自定义源-worker-only] ${fullApiInfo.name} 主线程兜底实例构建失败: ${e?.message || e}`)
+                    throw e
+                })
+                .finally(() => { fallbackBuilding = null })
+        }
+        return fallbackBuilding
+    }
+    const apiInstance = {
+        info: { ...fullApiInfo, sources, contract: contractReport },
+        handlers: new Map<string, Function>(),
+        timers: new Set<any>(),
+        pendingAborts: new Set<() => void>(),
+        dispose: () => {
+            if (disposed) return
+            disposed = true
+            disposeSourceWorker(owner, id)
+            if (fallbackInstance) {
+                try { fallbackInstance.dispose() } catch { /* 兜底实例释放失败不影响主流程 */ }
+                fallbackInstance = null
+            }
+        },
+        callRequest: async (action: string, source: string, info: any) => {
+            if (disposed) throw new Error(`源 ${fullApiInfo.name} 已被卸载`)
+            const r = await tryWorkerCall(workerInfo, action, source, info)
+            if (r.handled) {
+                if (r.error) throw r.error
+                return r.value
+            }
+            // handled=false = worker 基础设施故障且 fallbackToMain（见 workerFailureDecision）。
+            // 惰性构建主线程兜底实例，把本次调用跑完；构建/执行失败则把原 worker 错误抛上层换源。
+            try {
+                const inst = await buildFallback()
+                return await inst.callRequest(action, source, info)
+            } catch (fbErr: any) {
+                const reason = fbErr?.message || fbErr
+                throw r.error || new Error(`源 ${fullApiInfo.name} 的独立线程不可用（主线程兜底失败: ${reason}）`)
+            }
+        },
+    }
+    loadedApis.set(`${owner}_${id}`, apiInstance)
+    console.log(`[自定义源-worker-only] ✓ ${fullApiInfo.name} 整实例已在独立线程（主线程不再 eval 脚本），支持平台: ${Object.keys(sources).join(', ')}`)
+    return { success: true, apiInstance, error: null }
+}
+
+/**
+ * 主线程 vm2/vm 沙箱实例构建器（原 loadUserApi 的 eval 段抽出）。
+ *
+ * 两个调用方：
+ *  1. loadUserApi 正常加载路径；
+ *  2. loadWorkerOnlyApi 的②回退路径（worker 基础设施故障时惰性构建，跑完本次调用）。
+ *
+ * 注意与 loadWorkerOnlyApi 的差异：这里会真正 eval 脚本并注册定时器，
+ * 因此只允许在「worker 已经不可用」时构建，不得与 worker-only 实例并存常驻。
+ *
+ * 只做「构建 + eval + inited 等待 + 返回实例」；loadedApis 登记、temp 处置、
+ * requireUnsafe 探测留在 loadUserApi 包装层。
+ */
+async function buildMainThreadApiInstance(apiInfo: UserApiInfo, fullApiInfo: any): Promise<any> {
     // 创建事件处理映射
     const eventHandlers = new Map<string, Function>()
     let registeredSources: any = {}
@@ -1710,16 +1815,9 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
             }
         }
 
-        // 临时验证/分析实例只用于提取注册源信息，不加入运行时注册表，
-        // 且必须立即 dispose，防止验证脚本遗留更新嗅探定时器或网络请求。
-        if (fullApiInfo.owner === 'temp') {
-            disposeInstance()
-        } else {
-            loadedApis.set(`${fullApiInfo.owner}_${apiInfo.id}`, apiInstance)
-        }
         console.log(`[自定义源] ✓ 成功加载: ${fullApiInfo.name} v${fullApiInfo.version} (所属: ${fullApiInfo.owner})`)
         console.log(`[自定义源]   支持平台: ${Object.keys(registeredSources).join(', ')}`)
-        return { success: true, apiInstance, error: null }
+        return apiInstance
     } catch (error: any) {
         // 加载失败时同样要回收已创建的定时器/在途请求，避免半成品实例泄漏
         disposeInstance()
@@ -1727,7 +1825,37 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
         if (error.stack && error.message !== 'REQUIRE_UNSAFE_VM') {
             console.error(`[自定义源] [错误堆栈] ${fullApiInfo.name}:`, error.stack)
         }
+        throw error
+    }
+}
 
+// 加载自定义源脚本
+export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
+    // 从脚本中提取元数据
+    const metadata = extractMetadata(apiInfo.script)
+    const fullApiInfo = { ...apiInfo, ...metadata }
+
+    // A' 分支：慢源整实例进 worker；加载失败自动回退主线程原路径，不阻断音源可用性。
+    if (WORKER_ONLY_ENABLED && fullApiInfo.owner !== 'temp' && isWorkerOnlyCandidate(fullApiInfo.owner, apiInfo.id)) {
+        try {
+            return await loadWorkerOnlyApi(apiInfo, fullApiInfo)
+        } catch (e: any) {
+            console.warn(`[自定义源-worker-only] ${fullApiInfo.name} 独立线程加载失败，回退主线程: ${e?.message || e}`)
+            disposeSourceWorker(fullApiInfo.owner, apiInfo.id)
+        }
+    }
+
+    try {
+        const apiInstance = await buildMainThreadApiInstance(apiInfo, fullApiInfo)
+        // 临时验证/分析实例只用于提取注册源信息，不加入运行时注册表，
+        // 且必须立即 dispose，防止验证脚本遗留更新嗅探定时器或网络请求。
+        if (fullApiInfo.owner === 'temp') {
+            apiInstance.dispose()
+        } else {
+            loadedApis.set(`${fullApiInfo.owner}_${apiInfo.id}`, apiInstance)
+        }
+        return { success: true, apiInstance, error: null }
+    } catch (error: any) {
         let isRequireUnsafe = !apiInfo.allowUnsafeVM && (error.message === 'REQUIRE_UNSAFE_VM' || error.message.includes('初始化超时') || error.message.includes('timeout'))
 
         // 如果在 VM2 模式下加载失败，且系统允许 VM 模式，尝试测试原生 VM 模式能否成功加载

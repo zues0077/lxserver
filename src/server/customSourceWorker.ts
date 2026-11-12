@@ -70,17 +70,34 @@ async function boot(data: SourceWorkerData) {
 
     const track = (id: any) => { timers.add(id); return id }
     const untrack = (id: any) => { timers.delete(id) }
+    // A' 可观测：worker 内脚本自排定时器的同步重活只占本线程。显式留痕，
+    // 实机才好判定「主线程是否还被卡」——日志里看到这条就说明重活没落到主线程。
+    // 阈值 2s 与主线程 SLOW_CALLBACK_ATTRIBUTE_MS 对齐。
+    const WORKER_SLOW_TIMER_MS = 2000
+    const reportWorkerTimer = (kind: string, ms: number | undefined, costMs: number) => {
+        if (costMs < WORKER_SLOW_TIMER_MS) return
+        post({
+            type: 'log',
+            level: 'warn',
+            text: `[worker:${name}] ${kind} 回调同步耗时 ${costMs}ms（标称周期 ${typeof ms === 'number' ? ms : '-'}ms，仅在独立线程内，未占用主线程）`,
+        })
+    }
     const setT = (fn: Function, ms?: number, ...args: any[]) => {
         let id: any
         id = setTimeout(() => {
             untrack(id)
-            if (!disposed) { try { fn(...args) } catch (e: any) { post({ type: 'log', level: 'warn', text: `[worker:${name}] 定时器回调异常: ${e?.message || e}` }) } }
+            if (disposed) return
+            const startedAt = Date.now()
+            try { fn(...args) } catch (e: any) { post({ type: 'log', level: 'warn', text: `[worker:${name}] 定时器回调异常: ${e?.message || e}` }) }
+            finally { reportWorkerTimer('定时器', ms, Date.now() - startedAt) }
         }, typeof ms === 'number' ? ms : 0)
         return track(id)
     }
     const setI = (fn: Function, ms?: number, ...args: any[]) => track(setInterval(() => {
         if (disposed) return
+        const startedAt = Date.now()
         try { fn(...args) } catch (e: any) { post({ type: 'log', level: 'warn', text: `[worker:${name}] 间隔定时器异常: ${e?.message || e}` }) }
+        finally { reportWorkerTimer('间隔定时器', ms, Date.now() - startedAt) }
     }, typeof ms === 'number' ? ms : 0))
     const clearT = (t: any) => { untrack(t); clearTimeout(t); clearInterval(t) }
 
