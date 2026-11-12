@@ -28,18 +28,51 @@ import { localTime } from './time'
 // stdout -> 文件桥接
 // ---------------------------------------------------------------------------
 
-const LOG_PATH = process.env.LOG_PATH || path.join(process.cwd(), 'data', 'logs')
-const STDOUT_LOG_FILE = path.join(LOG_PATH, 'stdout.log')
+/**
+ * 日志目录允许后续重配：本模块是 index.ts 的第一个 import，模块加载时
+ * `global.lx` 还没赋值，拿不到最终的 logPath。因此先按 env / 默认值初始化，
+ * index.ts 设好 `global.lx` 后调用 configureStdoutBridge(global.lx.logPath)
+ * 重定位，消除「app.log 读 global.lx、stdout.log 读 process.env」两套口径。
+ */
+let configuredLogPath: string | null = null
+const fallbackLogPath = (): string => process.env.LOG_PATH || path.join(process.cwd(), 'data', 'logs')
+const currentLogPath = (): string => configuredLogPath || fallbackLogPath()
+const currentLogFile = (): string => path.join(currentLogPath(), 'stdout.log')
+
 /** 单个日志文件上限（诊断用途，超限截断重来，避免无界增长占满磁盘） */
 const STDOUT_LOG_MAX_BYTES = 8 * 1024 * 1024
 
+let initializedFor: string | null = null
 let stdoutLogSize = 0
-try {
-  fs.mkdirSync(LOG_PATH, { recursive: true })
-  stdoutLogSize = fs.statSync(STDOUT_LOG_FILE).size
-} catch {
-  /* 目录不可写时静默降级：不影响主流程，只是没有桥接日志 */
+
+const initLogFile = (): void => {
+  const dir = currentLogPath()
+  if (initializedFor === dir) return
+  initializedFor = dir
+  stdoutLogSize = 0
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    stdoutLogSize = fs.statSync(currentLogFile()).size
+  } catch {
+    /* 目录不可写时静默降级：不影响主流程，只是没有桥接日志 */
+  }
 }
+
+/**
+ * 由 index.ts 在 `global.lx.logPath` 赋值后调用，把 stdout.log 重定位到与
+ * app.log / errors.log 完全相同的日志目录（P-1108 每轮独立日志目录由此生效）。
+ * 路径未变或重复调用是 no-op；容器里 env 与 global.lx 同源，不会发生文件分裂。
+ */
+export const configureStdoutBridge = (logPath?: string): void => {
+  const next = logPath ? String(logPath) : fallbackLogPath()
+  if (configuredLogPath === next) return
+  configuredLogPath = next
+  initializedFor = null
+  initLogFile()
+}
+
+// 模块加载即初始化一次，保证 installStdoutBridge 之前桥接可用
+initLogFile()
 
 const stringifyArg = (arg: unknown): string => {
   if (typeof arg === 'string') return arg
@@ -53,14 +86,16 @@ const stringifyArg = (arg: unknown): string => {
 
 /** 写一行到 stdout.log（绝不调用 console.*，避免递归） */
 const appendStdoutLog = (level: string, args: unknown[]): void => {
+  initLogFile() // 惰性：env 变化 / configure 重定位后自动切到新目录
   if (stdoutLogSize < 0) return // 初始化失败，已降级
   try {
     const line = `[${localTime()}] [${level}] ${args.map(stringifyArg).join(' ')}\n`
+    const file = currentLogFile()
     if (stdoutLogSize > STDOUT_LOG_MAX_BYTES) {
-      fs.truncateSync(STDOUT_LOG_FILE, 0)
+      fs.truncateSync(file, 0)
       stdoutLogSize = 0
     }
-    fs.appendFileSync(STDOUT_LOG_FILE, line)
+    fs.appendFileSync(file, line)
     stdoutLogSize += Buffer.byteLength(line)
   } catch {
     /* 忽略写失败 */

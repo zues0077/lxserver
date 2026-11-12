@@ -28,7 +28,9 @@ COPY --from=builder ./source-code/build-output ./
 
 VOLUME /server/data
 ENV DATA_PATH='/server/data'
-ENV LOG_PATH='/server/data/logs'
+# P-1108：每轮换容器会新建本轮 logs-test-* 挂到 /server/logs，
+# 默认 LOG_PATH 必须指向它，否则日志落回共享 data/logs、跨轮次混进旧日志（P-1430）
+ENV LOG_PATH='/server/logs'
 
 EXPOSE 9527
 ENV NODE_ENV='production'

@@ -19545,6 +19545,14 @@ let searchTipsDebounceTimer = null;
 let currentSelectedTipIndex = -1;
 let currentTipAbortController = null;
 
+// bili / soda 没有平台联想接口（服务端 resolveTipProviders 诚实返回 []）。
+// 选这两源时不发请求、不弹恒空的联想框；切换音源时也要把残留的框收起来。
+function isTipSourceDisabled() {
+    const el = document.getElementById('search-source');
+    const s = el ? el.value : 'kw';
+    return s === 'bili' || s === 'soda';
+}
+
 function initSearchTips() {
     const searchInput = document.getElementById('search-input');
     const suggestionsContainer = document.getElementById('search-suggestions');
@@ -19554,6 +19562,11 @@ function initSearchTips() {
     searchInput.addEventListener('input', (e) => {
         const query = e.target.value.trim();
         clearTimeout(searchTipsDebounceTimer);
+
+        if (isTipSourceDisabled()) {
+            hideSearchSuggestions();
+            return;
+        }
 
         if (!query) {
             hideSearchSuggestions();
@@ -19567,10 +19580,17 @@ function initSearchTips() {
 
     searchInput.addEventListener('focus', () => {
         const query = searchInput.value.trim();
-        if (query) {
+        if (query && !isTipSourceDisabled()) {
             suggestionsContainer.classList.remove('hidden');
         }
     });
+
+    const searchSourceEl = document.getElementById('search-source');
+    if (searchSourceEl) {
+        searchSourceEl.addEventListener('change', () => {
+            if (isTipSourceDisabled()) hideSearchSuggestions();
+        });
+    }
 
     searchInput.addEventListener('keydown', (e) => {
         const list = document.getElementById('search-suggestions-list');
@@ -19619,8 +19639,17 @@ function updateTipSelection(items) {
 
 async function fetchSearchTips(query) {
     if (currentTipAbortController) currentTipAbortController.abort();
-    currentTipAbortController = new AbortController();
-    const signal = currentTipAbortController.signal;
+    currentTipAbortController = null;
+
+    // 这两源没有联想能力，服务端会返回 []；直接不发请求，避免弹出恒空的建议框。
+    if (isTipSourceDisabled()) {
+        hideSearchSuggestions();
+        return;
+    }
+
+    const controller = new AbortController();
+    currentTipAbortController = controller;
+    const signal = controller.signal;
 
     const source = (document.getElementById('search-source')) ? document.getElementById('search-source').value : 'kw';
     try {
