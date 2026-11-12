@@ -22,6 +22,13 @@ import { listRadioStations, getRadioStation, addRadioStation, updateRadioStation
 import { makeAggregateSongId } from '@/server/utils/aggregateId'
 import { ALL_AGGREGATE_SOURCES, isExtraSearchSource, searchExtraSource, adaptExtraSearchItem } from '@/server/utils/aggregateSearch'
 import { runWithConcurrency, sleep } from '@/server/utils/concurrency'
+import {
+  RATING_PLAYLIST_PREFIX,
+  parseRatingPlaylistId,
+  isRatingPlaylistId,
+  ratingPlaylistName,
+  groupSongsByRating,
+} from '@/server/utils/ratingPlaylist'
 
 // 音乐源歌单 → 电台 列表缓存（避免每次 getInternetRadioStations 都枚举全部音源实拉）
 let playlistRadioCache: { ts: number; stations: any[] } | null = null
@@ -1641,6 +1648,91 @@ class SubsonicHandler {
         }, format)
     }
 
+    /**
+     * 汇总本地已有歌曲（去重），供 1–5 星虚拟评分歌单反查。
+     * 说明：本仓库 ratings 只存 id→星级、没有歌曲快照，未落进本地列表或
+     * 收藏专辑的在线歌曲无法回填，故不会出现在虚拟歌单里（本地能力边界）。
+     */
+    private async collectLocalSongsForRating(username: string): Promise<LX.Music.MusicInfo[]> {
+        const userSpace = getUserSpace(username)
+        const listData = await userSpace.listManage.getListData()
+        const all = new Map<string, LX.Music.MusicInfo>()
+        const push = (list: any) => {
+            for (const m of (list || [])) {
+                if (m && m.id && !all.has(m.id)) all.set(m.id, m as LX.Music.MusicInfo)
+            }
+        }
+        push(listData.loveList)
+        push(listData.defaultList)
+        for (const l of (listData.userList || [])) push((l as any).list)
+        try {
+            const libAlbums = await this.getLibraryData(username, 'albums')
+            for (const alb of libAlbums) {
+                const source = alb.source || 'wy'
+                for (const s of (alb.list || [])) {
+                    const songId = `${source}_${s.songmid || s.songId}`
+                    if (all.has(songId)) continue
+                    all.set(songId, {
+                        id: songId,
+                        name: s.name,
+                        singer: s.singer,
+                        source,
+                        songmid: s.songmid,
+                        interval: s.interval || '0',
+                        img: s.img,
+                        meta: {
+                            picUrl: s.img,
+                            albumName: s.albumName || alb.name,
+                            albumId: s.albumMid || alb.id,
+                        },
+                    } as any)
+                }
+            }
+        } catch (err) {
+            subsonicLog.warn('[Subsonic] 评分歌单汇总收藏专辑失败:', err)
+        }
+        return [...all.values()]
+    }
+
+    /**
+     * 1–5 星虚拟评分歌单（只读）。单独走这个分支是为了**跳过 hideDisliked**：
+     * 该配置默认 true，1 星（低分=不喜欢）会被 filterDislikedSongs 整批剔空。
+     */
+    private async handleGetRatingPlaylist(res: http.ServerResponse, username: string, star: number, format: string) {
+        const meta = await this.getUserSubsonicMeta(username)
+        const grouped = groupSongsByRating(await this.collectLocalSongsForRating(username), meta.ratings || {})
+        const musics = grouped.get(star) || []
+        const id = `${RATING_PLAYLIST_PREFIX}${star}`
+        const playlistMeta = {
+            id,
+            name: ratingPlaylistName(star),
+            comment: '按评分汇总的虚拟歌单（只读）',
+            owner: username,
+            public: false,
+            songCount: musics.length,
+            duration: musics.reduce((sum: number, m: any) => sum + this.parseDuration(m.interval), 0),
+            created: new Date().toISOString(),
+            changed: new Date().toISOString(),
+            coverArt: (musics[0] as any)?.meta?.picUrl || (musics[0] as any)?.img || 'logo',
+        }
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                playlist: {
+                    ...playlistMeta,
+                    entry: musics.map((m: LX.Music.MusicInfo) => this.musicToSongFlat(m, id, undefined, username)),
+                },
+            }, format)
+        }
+        return this.sendResponse(res, {
+            playlist: {
+                attrs: playlistMeta,
+                children: {
+                    entry: musics.map((m: LX.Music.MusicInfo) => this.musicToSongXml(m, id, undefined, username)),
+                },
+            },
+        }, format)
+    }
+
     private async handleGetPlaylists(res: http.ServerResponse, username: string, format: string) {
         const userSpace = getUserSpace(username)
         const listData = await userSpace.listManage.getListData()
@@ -1709,6 +1801,20 @@ class SubsonicHandler {
             }
         }
 
+        // [新增] 1–5 星虚拟评分歌单（只读；对标上游「Subsonic 评分歌单」）
+        // 5 个桶恒列出，空的显示 0 首，客户端歌单列表稳定可预期。
+        try {
+            const meta = await this.getUserSubsonicMeta(username)
+            const grouped = groupSongsByRating(await this.collectLocalSongsForRating(username), meta.ratings || {})
+            for (let star = 1; star <= 5; star++) {
+                const musics = grouped.get(star) || []
+                const coverArt = (musics[0] as any)?.meta?.picUrl || (musics[0] as any)?.img || 'logo'
+                playlists.push(buildPlaylist(`${RATING_PLAYLIST_PREFIX}${star}`, ratingPlaylistName(star), musics, undefined, coverArt))
+            }
+        } catch (err) {
+            subsonicLog.error('[Subsonic] 添加评分歌单失败:', err)
+        }
+
         if (format === 'json') {
             return this.sendResponse(res, { playlists: { playlist: playlists } }, format)
         }
@@ -1728,6 +1834,11 @@ class SubsonicHandler {
         // [新增] 共享歌单(歌单)虚拟只读播放列表
         if (id.startsWith('pl_')) {
             return this.handleGetSharedPlaylist(res, username, id, format)
+        }
+        // [新增] 1–5 星虚拟评分歌单（只读；跳过 hideDisliked，见 handleGetRatingPlaylist 注释）
+        const ratingStar = parseRatingPlaylistId(id)
+        if (ratingStar !== null) {
+            return this.handleGetRatingPlaylist(res, username, ratingStar, format)
         }
 
         const userSpace = getUserSpace(username)
@@ -1796,6 +1907,7 @@ class SubsonicHandler {
         if (!playlistId) return this.sendError(res, 10, 'Required parameter is missing: playlistId', format)
         if (playlistId.startsWith('lb_')) return this.sendError(res, 0, '排行榜为只读播放列表，不支持修改', format)
         if (playlistId.startsWith('pl_')) return this.sendError(res, 0, '共享歌单为只读播放列表，不支持修改', format)
+        if (isRatingPlaylistId(playlistId)) return this.sendError(res, 0, '评分歌单为只读播放列表，不支持修改', format)
 
         try {
             const userSpace = getUserSpace(username)
@@ -1902,6 +2014,7 @@ class SubsonicHandler {
         if (!id) return this.sendError(res, 10, 'Required parameter is missing: id', format)
         if (id.startsWith('lb_')) return this.sendError(res, 0, '排行榜为只读播放列表，不支持删除', format)
         if (id.startsWith('pl_')) return this.sendError(res, 0, '共享歌单为只读播放列表，不支持删除', format)
+        if (isRatingPlaylistId(id)) return this.sendError(res, 0, '评分歌单为只读播放列表，不支持删除', format)
         if (id === 'default' || id === 'love') {
             return this.sendError(res, 0, 'Built-in playlists cannot be deleted', format)
         }
