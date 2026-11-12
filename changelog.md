@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.5.54
+
+### 🔍 聚合搜索联想加固（P2-1）
+
+- 新增 `tipSearchSuggest.ts`：`source=all` 并发 5 个 `musicSdk` 源（`kglite→kg`），合并按「票数 → 精确/前缀匹配 → 原排名 → 平台序」字典序，不搞加权评分；`bili` / `soda` 无联想接口，诚实返回 `[]`，不拿搜索凑数。
+- 单飞 + 并发上限：`fetchTipsWithSingleFlight` 合并同 query 并发，`acquireTipGroupSlot` / `releaseTipGroupSlot` 限并发；query 截断 `TIP_QUERY_MAX_LEN=100`、缓存 key 归一、`Cache-Control: no-store`，前端对 bili/soda 不再发请求。
+
+### 📊 Dashboard Overview 日志解析修复（P2-2）
+
+- 新增 `dashboardOverview.ts`：区分 `app` / `stdout` 两种日志格式（`LogFormat`），新增 `STDOUT_LINE_RE` 与 `aggregateLogLines(..., format, windowMs)`，修掉 `stdout_parsed` 恒 0（实机 478/500）。
+- `readLogTail(filePath, maxLines, maxBytes)` 限制读取量，`recentErrors` 收敛到 1h 时间窗，新增 timezone 字段，避免日志时区误判。
+
+### ⭐ Subsonic 评分歌单（P2-4）
+
+- 新增 `ratingPlaylist.ts`：`rating_1` ~ `rating_5` 五个虚拟只读歌单，评分 key 统一用 `music.id`；`collectLocalSongsForRating` 30s TTL 缓存，上限 `RATING_PLAYLIST_MAX_ENTRIES=500`，异常时也返回 5 个空桶，不再整段失败。
+
+### 🎵 Subsonic 歌词覆盖补全
+
+- 新增 `subsonicLyricTarget.ts` 适配层，把 `soda_` / `bili_` / `kglite_` 前缀 id 接进既有 `getFallbackLyric` 五级兜底链；官方源缺词也走 fallback，无词返回 200 空词，不再 error 70。
+- 写 `[subsonic lyric] hit/miss` 日志；8 首真实 id 实机验证全部 `status=ok` / `err=None`（修复前 7/8 error 70）。
+
+### 🧹 日志路径统一与隔离（P-1108）
+
+- `Dockerfile` 默认 `ENV LOG_PATH='/server/logs'`；`stdoutBridge.ts` 改惰性 `configureStdoutBridge(logPath?)`，`index.ts` 在设置 `global.lx.logPath` 后显式调用，消除两处各自读 `LOG_PATH` 的冲突。
+- 实测：仅 `logs-test-v220p2fix/access.log` 变化，`data/logs` 五个文件零变化，`ISOLATION_OK`。
+
+### ✅ 稳定性复核
+
+- E4 长周期内存复核：2h 同等负载 + 30min 撤负载实验，正常序列净 +10.5MB / OLS +3.93 MB/h，1~1.75GB 尖峰均有完整回落证据（−702MB / −1384MB），判定 P2 修复未引入 retained 内存泄漏。
+- 17 项点状修补（联想、overview、评分歌单等）全部通过 964/964 单测与完整构建。
+
 ## v1.5.53
 
 ### 🔍 八源聚合搜索增强（T9/T13）
