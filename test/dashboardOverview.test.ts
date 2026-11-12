@@ -6,8 +6,16 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
-import { parseLogLine, aggregateLogLines } from '../src/server/utils/dashboardOverview'
+import {
+  parseLogLine,
+  aggregateLogLines,
+  readLogTail,
+  DEFAULT_ERROR_WINDOW_MS,
+} from '../src/server/utils/dashboardOverview'
 
 const LOCAL_LINES = [
   '2026-11-12 00:06:34.657 [INFO] sync - [音源巡检] 本轮完成（9490ms）：巡检 44 个音源',
@@ -57,4 +65,69 @@ test('aggregateLogLines: recentErrors 最多保留 maxErrors 条', () => {
     `2026-11-12 00:00:00.00${i % 10} [ERROR] sync - err ${i}`)
   assert.equal(aggregateLogLines(lines, 5).recentErrors.length, 5)
   assert.equal(aggregateLogLines([], 5).parsed, 0)
+})
+
+// --- 17 项加固新增护栏 ---------------------------------------------------
+
+// 17953 stdout.log 真实样本（14:00 报告：旧解析器 139/139 采样 stdout_parsed 恒 0）
+const STDOUT_LINES = [
+  '[2026-11-12 06:52:34.977] [TIMER] [定时器注册] timeout 间隔 645336ms @ stack',
+  '[2026-11-12 05:54:39.410] [WARN] [worker:豆包定制[聚合音源]] 巡检开始',
+  '[2026-11-12 06:05:22.941] [LOG] [平台账号] 咪咕音乐短期凭证已主动保温续期（主账号）',
+  '[2026-11-12 06:10:00.000] [ERROR] [音源] 取链失败',
+]
+
+test('parseLogLine: stdoutBridge 格式能解析，app 格式不被误收', () => {
+  assert.equal(LOCAL_LINES.filter(l => parseLogLine(l, 'stdout') !== null).length, 0)
+  assert.equal(STDOUT_LINES.filter(l => parseLogLine(l, 'app') !== null).length, 0)
+  assert.equal(STDOUT_LINES.filter(l => parseLogLine(l, 'stdout') !== null).length, 4)
+  const item = parseLogLine(STDOUT_LINES[3], 'stdout')!
+  assert.equal(item.level, 'ERROR')
+  assert.equal(item.category, 'stdout')
+  assert.equal(item.time, '2026-11-12 06:10:00.000')
+})
+
+test('aggregateLogLines: stdout 类型汇总出 levels / recentErrors / 时间窗', () => {
+  const o = aggregateLogLines(STDOUT_LINES, 20, 'stdout')
+  assert.equal(o.parsed, 4)
+  assert.equal(o.levels.ERROR, 1)
+  assert.equal(o.levels.LOG, 1)
+  assert.equal(o.levels.TIMER, 1)
+  assert.equal(o.recentErrors.length, 1)
+  assert.ok(o.windowStart && o.windowEnd)
+})
+
+test('recentErrors: 1h 时间窗过滤掉跨轮次历史 ERROR', () => {
+  const lines = [
+    '2026-11-12 00:00:00.000 [ERROR] old - 九小时前的历史错误',
+    '2026-11-12 09:00:00.000 [INFO] sync - 最近一条日志',
+    '2026-11-12 09:00:01.000 [ERROR] now - 当前错误',
+  ]
+  const o = aggregateLogLines(lines, 20, 'app')
+  assert.equal(o.parsed, 3)
+  assert.equal(o.recentErrors.length, 1, '历史 ERROR 不应混进近期告警')
+  assert.equal(o.recentErrors[0].category, 'now')
+  assert.equal(o.recentErrors[0].time, '2026-11-12 09:00:01.000')
+  assert.equal(o.windowEnd, '2026-11-12 09:00:01.000')
+  assert.equal(o.windowStart, '2026-11-12 08:00:01.000')
+  assert.equal(DEFAULT_ERROR_WINDOW_MS, 3_600_000)
+})
+
+test('readLogTail: 只读末尾 N 行；小 maxBytes 从中间截断时丢弃残行', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lx-tail-'))
+  try {
+    const file = path.join(dir, 'stdout.log')
+    const all = Array.from({ length: 100 }, (_, i) =>
+      `2026-11-12 00:00:${String(i).padStart(2, '0')}.000 [INFO] sync - line ${i}`)
+    fs.writeFileSync(file, all.join('\n') + '\n')
+    const tail = await readLogTail(file, 10)
+    assert.equal(tail.length, 10)
+    assert.ok(tail[0].includes('line 90'))
+    assert.ok(tail[9].includes('line 99'))
+    const tiny = await readLogTail(file, 5, 200)
+    assert.ok(tiny.length <= 5)
+    assert.ok(tiny.length > 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

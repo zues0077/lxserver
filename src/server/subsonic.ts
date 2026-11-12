@@ -29,6 +29,26 @@ import {
   ratingPlaylistName,
   groupSongsByRating,
 } from '@/server/utils/ratingPlaylist'
+import { getFallbackLyric, hasLyric } from './lyricFallback'
+import { buildSubsonicLyricTarget, splitSubsonicLyricId } from './utils/subsonicLyricTarget'
+
+/**
+ * 收藏专辑库（albums.json）里的歌曲没有统一的 `music.id`，原先三处反查各拼
+ * `${source}_${s.songmid || s.songId}`，与评分 key（`music.id`）口径不一致：
+ * 评分歌单按 `s.id` 生成 entry，客户端拿这个 id 回来 findMusicById 却按拼接值匹配，
+ * 会查不到歌。统一走这里：优先用歌曲自带 id，没有才回退拼接值。
+ * 评分歌单 / findMusicById / 全量歌曲汇总三处共用，避免改一处漏两处。
+ */
+const albumSongId = (alb: any, s: any): string => String(
+    s?.id || `${alb?.source || 'wy'}_${s?.songmid || s?.songId}`,
+)
+
+/** 评分歌单本地歌曲汇总的短 TTL 缓存（歌曲列表不含评分，评分变化不影响它）。 */
+const RATING_SONGS_TTL_MS = 30_000
+const ratingSongsCache = new Map<string, { ts: number, songs: LX.Music.MusicInfo[] }>()
+
+/** 单个评分歌单最多返回的 entry 数，防止本地上万首时卡住客户端。 */
+const RATING_PLAYLIST_MAX_ENTRIES = 500
 
 // 音乐源歌单 → 电台 列表缓存（避免每次 getInternetRadioStations 都枚举全部音源实拉）
 let playlistRadioCache: { ts: number; stations: any[] } | null = null
@@ -1563,7 +1583,7 @@ class SubsonicHandler {
             for (const alb of libAlbums) {
                 const source = alb.source || 'wy'
                 for (const s of (alb.list || [])) {
-                    const songId = `${source}_${s.songmid || s.songId}`
+                    const songId = albumSongId(alb, s)
                     if (songId === id) {
                         return {
                             music: {
@@ -1654,6 +1674,9 @@ class SubsonicHandler {
      * 收藏专辑的在线歌曲无法回填，故不会出现在虚拟歌单里（本地能力边界）。
      */
     private async collectLocalSongsForRating(username: string): Promise<LX.Music.MusicInfo[]> {
+        const now = Date.now()
+        const cached = ratingSongsCache.get(username)
+        if (cached && now - cached.ts < RATING_SONGS_TTL_MS) return cached.songs
         const userSpace = getUserSpace(username)
         const listData = await userSpace.listManage.getListData()
         const all = new Map<string, LX.Music.MusicInfo>()
@@ -1670,7 +1693,7 @@ class SubsonicHandler {
             for (const alb of libAlbums) {
                 const source = alb.source || 'wy'
                 for (const s of (alb.list || [])) {
-                    const songId = `${source}_${s.songmid || s.songId}`
+                    const songId = albumSongId(alb, s)
                     if (all.has(songId)) continue
                     all.set(songId, {
                         id: songId,
@@ -1691,7 +1714,9 @@ class SubsonicHandler {
         } catch (err) {
             subsonicLog.warn('[Subsonic] 评分歌单汇总收藏专辑失败:', err)
         }
-        return [...all.values()]
+        const songs = [...all.values()]
+        ratingSongsCache.set(username, { ts: now, songs })
+        return songs
     }
 
     /**
@@ -1701,7 +1726,8 @@ class SubsonicHandler {
     private async handleGetRatingPlaylist(res: http.ServerResponse, username: string, star: number, format: string) {
         const meta = await this.getUserSubsonicMeta(username)
         const grouped = groupSongsByRating(await this.collectLocalSongsForRating(username), meta.ratings || {})
-        const musics = grouped.get(star) || []
+        // 上限保护：本地上万首时不把整批 entry 一次性塞给客户端（songCount 与 entry 数保持一致）
+        const musics = (grouped.get(star) || []).slice(0, RATING_PLAYLIST_MAX_ENTRIES)
         const id = `${RATING_PLAYLIST_PREFIX}${star}`
         const playlistMeta = {
             id,
@@ -1813,6 +1839,14 @@ class SubsonicHandler {
             }
         } catch (err) {
             subsonicLog.error('[Subsonic] 添加评分歌单失败:', err)
+            // 汇总异常时 5 个桶仍要恒列（空的显示 0 首），客户端歌单列表稳定、无感。
+            // 用 hasRating 判断避免 try 内已 push 一部分时重复添加。
+            const hasRating = playlists.some(p => String(p.id).startsWith(RATING_PLAYLIST_PREFIX))
+            if (!hasRating) {
+                for (let star = 1; star <= 5; star++) {
+                    playlists.push(buildPlaylist(`${RATING_PLAYLIST_PREFIX}${star}`, ratingPlaylistName(star), [], undefined, 'logo'))
+                }
+            }
         }
 
         if (format === 'json') {
@@ -4227,7 +4261,7 @@ class SubsonicHandler {
         for (const alb of libAlbums) {
             const source = alb.source || 'wy'
             for (const s of (alb.list || [])) {
-                const songId = `${source}_${s.songmid || s.songId}`
+                const songId = albumSongId(alb, s)
                 if (!allSongsMap.has(songId)) {
                     allSongsMap.set(songId, {
                         music: {
@@ -7066,21 +7100,21 @@ class SubsonicHandler {
             return this.handleGetLyricsBySongId(res, username, params, format)
         }
 
-        const lyricsData = {
-            artist: artist,
-            title: title,
-            value: 'Lyrics not found in library. Please use getLyricsBySongId with a valid song ID.'
+        // 本地三列表反查不到时不再吐英文占位文案，改走在线兜底链（按 title/artist 取词）。
+        // 与 /api/music/lyric 对齐：无 id 时按歌名 + 歌手跨源匹配，source 留空即不走定向通道。
+        const target = buildSubsonicLyricTarget('', artist, title, null)
+        let payload: any = null
+        try {
+            payload = await getFallbackLyric(target)
+        } catch (err: any) {
+            subsonicLog.warn(`[subsonic lyric] fallback error (no-id) title=${title} err=${err?.message || err}`)
         }
-
-        if (format === 'json') {
-            return this.sendResponse(res, { lyrics: lyricsData }, format)
+        if (payload && hasLyric(payload)) {
+            subsonicLog.info(`[subsonic lyric] hit from=${payload._fallbackFrom || 'fallback'} source=- id=- name=${title}`)
+            return this.sendLyricResult(res, format, payload, { name: title, singer: artist })
         }
-        return this.sendResponse(res, {
-            lyrics: {
-                attrs: { artist: lyricsData.artist, title: lyricsData.title },
-                children: lyricsData.value
-            }
-        }, format)
+        subsonicLog.info(`[subsonic lyric] miss source=- id=- reason=${title ? 'no-online-lyric' : 'no-title'}`)
+        return this.sendEmptyLyric(res, format, artist, title)
     }
 
     /**
@@ -7143,6 +7177,105 @@ class SubsonicHandler {
         return outLines.join('\n')
     }
 
+    /**
+     * 把 SDK 或兜底链拿到的歌词统一成 Subsonic getLyrics 响应（JSON / XML 两种格式）。
+     * 这段原先只内联在 handleGetLyricsBySongId 里，兜底路径无法复用，故抽出。
+     */
+    private sendLyricResult(
+        res: http.ServerResponse,
+        format: string,
+        lyricInfo: { lyric?: string, tlyric?: string },
+        meta: { name: string, singer: string },
+    ) {
+        const rawLrc = lyricInfo.lyric || ''
+        const transLrc = lyricInfo.tlyric || ''
+        const mergedLrc = this.buildMergedLrc(rawLrc, transLrc)
+        const lines = this.parseLrc(rawLrc)
+        const tlines = transLrc ? this.parseLrc(transLrc) : []
+
+        const structuredLyrics: any[] = [
+            {
+                lang: 'und',
+                synced: lines.some(l => l.start !== undefined),
+                line: lines,
+                displayArtist: meta.singer,
+                displayTitle: meta.name,
+            }
+        ]
+        if (tlines.length > 0) {
+            structuredLyrics.push({
+                lang: 'zh',
+                synced: tlines.some(l => l.start !== undefined),
+                line: tlines,
+                displayArtist: meta.singer,
+                displayTitle: meta.name,
+            })
+        }
+
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                lyricsList: { structuredLyrics },
+                // 兼容标准 Subsonic getLyrics（同频时间戳双行/多行歌词）
+                lyrics: { artist: meta.singer, title: meta.name, value: mergedLrc },
+            }, format)
+        }
+        return this.sendResponse(res, {
+            lyrics: {
+                attrs: { artist: meta.singer, title: meta.name },
+                children: mergedLrc,
+            },
+        }, format)
+    }
+
+    /** 确实没有歌词：返回 200 空词，客户端显示「暂无歌词」，而非 error 70 / 英文占位。 */
+    private sendEmptyLyric(res: http.ServerResponse, format: string, artist: string, title: string) {
+        if (format === 'json') {
+            return this.sendResponse(res, {
+                lyricsList: { structuredLyrics: [] },
+                lyrics: { artist, title, value: '' },
+            }, format)
+        }
+        return this.sendResponse(res, {
+            lyrics: { attrs: { artist, title }, children: '' },
+        }, format)
+    }
+
+    /**
+     * 后 3 源（soda_ / bili_ / kglite_）与 local / 无下划线 id 不在 musicSdk 里，
+     * 原先一律 error 70「Song or source not supported」——正是 14:00 报告
+     * 「8 首只有 1 首出歌词」的根因。这里改走本地已有的五级在线兜底链，
+     * 并记 hit/miss 结果日志（报告候选方向 ②）。
+     */
+    private async tryFallbackLyric(
+        res: http.ServerResponse,
+        username: string,
+        id: string,
+        params: URLSearchParams,
+        format: string,
+    ) {
+        const artist = params.get('artist') || ''
+        const title = params.get('title') || ''
+        const { source } = splitSubsonicLyricId(id)
+        const found = await this.findMusicById(username, id).catch(() => null)
+        const target = buildSubsonicLyricTarget(id, artist, title, found?.music as any)
+        const name = target.name || title
+        const singer = target.singer || artist
+
+        let payload: any = null
+        try {
+            payload = await getFallbackLyric(target)
+        } catch (err: any) {
+            subsonicLog.warn(`[subsonic lyric] fallback error id=${id} err=${err?.message || err}`)
+        }
+
+        if (payload && hasLyric(payload)) {
+            subsonicLog.info(`[subsonic lyric] hit from=${payload._fallbackFrom || 'fallback'} source=${source || '-'} id=${id} name=${name}`)
+            return this.sendLyricResult(res, format, payload, { name, singer })
+        }
+        subsonicLog.info(`[subsonic lyric] miss source=${source || '-'} id=${id} reason=${target.name ? 'no-online-lyric' : 'no-title'}`)
+        return this.sendEmptyLyric(res, format, singer, name)
+    }
+
     private async handleGetLyricsBySongId(res: http.ServerResponse, username: string, params: URLSearchParams, format: string) {
         const id = params.get('id')
         if (!id) return this.sendError(res, 10, 'Required parameter is missing: id', format)
@@ -7156,8 +7289,10 @@ class SubsonicHandler {
             songmid = id.substring(index + 1)
         }
 
+        // 后 3 源 / local / 无下划线 id 不在 musicSdk 里：改走在线兜底链，
+        // 不再一律 error 70（14:00 报告「8 首只有 1 首出歌词」的根因）
         if (!source || !musicSdk[source]) {
-            return this.sendError(res, 70, 'Song or source not supported: ' + id, format)
+            return this.tryFallbackLyric(res, username, id, params, format)
         }
 
         try {
@@ -7197,57 +7332,34 @@ class SubsonicHandler {
                 lrcUrl: (musicMeta as any).lrcUrl || (musicMeta as any).meta?.lrcUrl || '',
             }
 
-            const requestObj = musicSdk[source].getLyric(songInfo)
-            const lyricInfo = await requestObj.promise
+            let lyricInfo: any = null
+            try {
+                const requestObj = musicSdk[source].getLyric(songInfo)
+                lyricInfo = await requestObj.promise
+            } catch (err: any) {
+                subsonicLog.warn(`[Subsonic] SDK 取词失败，转兜底: ${source}_${songmid} ${err?.message || err}`)
+            }
 
-            const rawLrc = lyricInfo.lyric || ''
-            const transLrc = lyricInfo.tlyric || ''
-
-            const mergedLrc = this.buildMergedLrc(rawLrc, transLrc)
-
-            // 转换结构化歌词
-            const lines = this.parseLrc(rawLrc)
-            const tlines = transLrc ? this.parseLrc(transLrc) : []
-
-            const structuredLyrics: any[] = [
-                {
-                    lang: 'und',
-                    synced: lines.some(l => l.start !== undefined),
-                    line: lines,
-                    displayArtist: musicMeta.singer,
-                    displayTitle: musicMeta.name,
+            // 官方源也可能没词（演唱会版 / 已下架 / 纯伴奏），与 /api/music/lyric 对齐走兜底
+            if (!hasLyric(lyricInfo)) {
+                const target = buildSubsonicLyricTarget(id, params.get('artist') || '', params.get('title') || '', musicMeta)
+                const fallback = await getFallbackLyric(target)
+                if (fallback && hasLyric(fallback)) {
+                    subsonicLog.info(`[subsonic lyric] hit from=${fallback._fallbackFrom || 'fallback'} source=${source} id=${id}`)
+                    lyricInfo = fallback
+                } else {
+                    subsonicLog.info(`[subsonic lyric] miss source=${source} id=${id} reason=no-online-lyric`)
                 }
-            ]
-
-            if (tlines.length > 0) {
-                structuredLyrics.push({
-                    lang: 'zh',
-                    synced: tlines.some(l => l.start !== undefined),
-                    line: tlines,
-                    displayArtist: musicMeta.singer,
-                    displayTitle: musicMeta.name,
-                })
             }
 
-            if (format === 'json') {
-                return this.sendResponse(res, {
-                    lyricsList: { structuredLyrics },
-                    // 兼容标准 Subsonic getLyrics (同频时间戳双行/多行歌词)
-                    lyrics: {
-                        artist: musicMeta.singer,
-                        title: musicMeta.name,
-                        value: mergedLrc
-                    }
-                }, format)
+            const meta = {
+                name: musicMeta.name || params.get('title') || '',
+                singer: musicMeta.singer || params.get('artist') || '',
             }
-
-            // XML 模式逻辑
-            return this.sendResponse(res, {
-                lyrics: {
-                    attrs: { artist: musicMeta.singer, title: musicMeta.name },
-                    children: mergedLrc
-                },
-            }, format)
+            if (!hasLyric(lyricInfo)) {
+                return this.sendEmptyLyric(res, format, meta.singer, meta.name)
+            }
+            return this.sendLyricResult(res, format, lyricInfo, meta)
 
         } catch (err: any) {
             subsonicLog.error(`[Subsonic] Lyric fetch error:`, err)

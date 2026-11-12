@@ -28,7 +28,8 @@ export const ratingPlaylistName = (star: number): string => `评分 ${star} 星`
 
 /**
  * 按星级把本地歌曲分桶。评分 key 直接是歌曲 id，无需再拼
- * `${source}_${songmid}`；重复 id 只保留第一次出现的对象。
+ * `${source}_${songmid}`；重复 id 只保留第一次**通过星级校验**的对象
+ * （seen 在星级校验之后才写入，注释与实现保持一致）。
  */
 export const groupSongsByRating = <T extends { id: string }>(
   songs: T[],

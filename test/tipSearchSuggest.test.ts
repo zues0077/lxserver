@@ -13,12 +13,21 @@ import assert from 'node:assert/strict'
 
 import {
   TIP_SOURCES,
+  TIP_QUERY_MAX_LEN,
+  TIP_MAX_INFLIGHT_GROUPS,
   resolveTipProviders,
   mergeTipGroups,
   getCachedTips,
   setCachedTips,
   clearTipCache,
   fetchProviderTips,
+  fetchTipsWithSingleFlight,
+  clearTipInflight,
+  getTipInflightSize,
+  acquireTipGroupSlot,
+  releaseTipGroupSlot,
+  resetTipSlots,
+  getTipActiveGroups,
 } from '../src/server/utils/tipSearchSuggest'
 
 test('resolveTipProviders: all 只展开 5 个 musicSdk 源', () => {
@@ -86,4 +95,57 @@ test('fetchProviderTips: 超时与异常都返回空数组，不拖垮其它源'
     await fetchProviderTips('kw', 'x', async () => [' 有效 ', '', 42 as any, '第二条'], 50),
     [' 有效 ', '第二条'],
   )
+})
+
+// --- 17 项加固新增护栏 ---------------------------------------------------
+
+test('in-flight 单飞：同 provider + 归一 query 并发只打一次上游', async () => {
+  clearTipInflight()
+  let calls = 0
+  const fetcher = async () => {
+    calls++
+    await new Promise(r => setTimeout(r, 20))
+    return ['词A']
+  }
+  const [a, b, c] = await Promise.all([
+    fetchTipsWithSingleFlight('kw', '晴天', fetcher, 200),
+    fetchTipsWithSingleFlight('kw', '晴天', fetcher, 200),
+    fetchTipsWithSingleFlight('kw', '  晴天  ', fetcher, 200),
+  ])
+  assert.equal(calls, 1, '三个并发请求应共享同一个 Promise')
+  assert.deepEqual(a, ['词A'])
+  assert.deepEqual(b, ['词A'])
+  assert.deepEqual(c, ['词A'])
+  assert.equal(getTipInflightSize(), 0, '任务结束后必须从表中清除')
+})
+
+test('in-flight 单飞：失败不钉在表里，下次可重试', async () => {
+  clearTipInflight()
+  let calls = 0
+  const fetcher = async () => { calls++; throw new Error('boom') }
+  assert.deepEqual(await fetchTipsWithSingleFlight('kw', 'x', fetcher, 50), [])
+  assert.deepEqual(await fetchTipsWithSingleFlight('kw', 'x', fetcher, 50), [])
+  assert.equal(calls, 2)
+  assert.equal(getTipInflightSize(), 0)
+})
+
+test('全局并发上限：超限快速失败，release 后可再占用', () => {
+  resetTipSlots()
+  let acquired = 0
+  for (let i = 0; i < TIP_MAX_INFLIGHT_GROUPS + 5; i++) {
+    if (acquireTipGroupSlot()) acquired++
+  }
+  assert.equal(acquired, TIP_MAX_INFLIGHT_GROUPS)
+  assert.equal(getTipActiveGroups(), TIP_MAX_INFLIGHT_GROUPS)
+  releaseTipGroupSlot()
+  assert.equal(acquireTipGroupSlot(), true)
+  resetTipSlots()
+})
+
+test('name 截断常量 100；fetcher 新签名只收 keyword', async () => {
+  assert.equal(TIP_QUERY_MAX_LEN, 100)
+  let got = ''
+  const tips = await fetchProviderTips('kw', 'abc', async (q) => { got = q; return ['x'] }, 100)
+  assert.equal(got, 'abc')
+  assert.deepEqual(tips, ['x'])
 })

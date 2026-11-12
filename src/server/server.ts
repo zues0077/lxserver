@@ -46,8 +46,18 @@ import { playRankSnapshot } from './sourcePlayRank'
 import { rateLimitSnapshot } from './sourceRateLimit'
 import { getSourceProbeStatus, runSourceProbe, PROBE_TASK_ID, PROBE_RESTORE_TASK_ID } from './sourceProbe'
 import { cleanupUserSources } from './userSourceCleanup'
-import { resolveTipProviders, mergeTipGroups, getCachedTips, setCachedTips, fetchProviderTips } from './utils/tipSearchSuggest'
-import { aggregateLogLines } from './utils/dashboardOverview'
+import {
+  TIP_QUERY_MAX_LEN,
+  resolveTipProviders,
+  mergeTipGroups,
+  getCachedTips,
+  setCachedTips,
+  fetchProviderTips,
+  fetchTipsWithSingleFlight,
+  acquireTipGroupSlot,
+  releaseTipGroupSlot,
+} from './utils/tipSearchSuggest'
+import { aggregateLogLines, readLogTail } from './utils/dashboardOverview'
 import { getEventLoopStats } from '@/utils/eventLoopMonitor'
 import { getActiveLongTimers } from '@/utils/stdoutBridge'
 import { getAppVersion } from '@/utils/version'
@@ -8770,30 +8780,37 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       // [新增] 搜索提示 (TipSearch) API
       // P2-1（上游「聚合搜索关键词联想」）：source=all 时并发五个 musicSdk 源，
       // kglite 转 kg；bili/soda 无平台联想接口，诚实返回 []。不动前端键盘绑定。
+      // 17 项加固：name 截断 100 字、全局并发上限、in-flight 单飞、异常记日志、no-store。
       if (pathname === '/api/music/tipSearch' && req.method === 'GET') {
-        const name = urlObj.searchParams.get('name') || ''
+        const name = (urlObj.searchParams.get('name') || '').slice(0, TIP_QUERY_MAX_LEN)
         const source = urlObj.searchParams.get('source') || 'kw'
         const empty = () => {
-          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
           res.end('[]')
         }
         if (!name) { empty(); return }
+        const providers = resolveTipProviders(source)
+        if (providers.length === 0) { empty(); return }
+        // 超限时快速失败：快速打字的旧请求本就该被前端 AbortController 丢弃，
+        // 排队只会让慢请求越堆越多（musicSdk 的 tipSearch 没有 abort 入口）。
+        if (!acquireTipGroupSlot()) { empty(); return }
         try {
-          const providers = resolveTipProviders(source)
-          if (providers.length === 0) { empty(); return }
           const groups = await Promise.all(providers.map(async provider => {
             const cached = getCachedTips(provider, name)
             if (cached) return cached
             const sdk = musicSdk[provider]
             if (!sdk || !sdk.tipSearch || typeof sdk.tipSearch.search !== 'function') return []
-            const tips = await fetchProviderTips(provider, name, (_s, q) => sdk.tipSearch.search(q))
+            const tips = await fetchTipsWithSingleFlight(provider, name, q => sdk.tipSearch.search(q))
             setCachedTips(provider, name, tips)
             return tips
           }))
-          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
           res.end(JSON.stringify(mergeTipGroups(groups, name)))
         } catch (err: any) {
+          console.warn(`[TipSearch] 聚合取词异常 source=${source} name=${name} err=${err?.message || err}`)
           empty()
+        } finally {
+          releaseTipGroupSlot()
         }
         return
       }
@@ -13221,11 +13238,15 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         const lines = Math.min(2000, Math.max(50, Number.isFinite(requested) ? requested : 500))
         const logs: Record<string, ReturnType<typeof aggregateLogLines>> = {}
         for (const type of ['app', 'stdout']) {
+          // stdout.log 是 stdoutBridge 的 `[时间] [级别] 消息` 格式，必须用另一套解析器，
+          // 否则 parsed 恒 0（14:00 长周期采样 139/139 全 0）。
+          const format: 'app' | 'stdout' = type === 'stdout' ? 'stdout' : 'app'
           try {
-            const content = await fs.promises.readFile(path.join(global.lx.logPath, `${type}.log`), 'utf-8')
-            logs[type] = aggregateLogLines(content.split('\n').slice(-lines))
+            // 流式 tail：只读末尾 2MB，不再整文件 readFile + split('\n')
+            const tail = await readLogTail(path.join(global.lx.logPath, `${type}.log`), lines)
+            logs[type] = aggregateLogLines(tail, 20, format)
           } catch {
-            logs[type] = aggregateLogLines([])
+            logs[type] = aggregateLogLines([], 20, format)
           }
         }
         res.writeHead(200, {
@@ -13234,6 +13255,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         })
         res.end(JSON.stringify({
           generatedAt: new Date().toISOString(),
+          // 日志时间是本地墙上时间，generatedAt 是 UTC ISO；明确标注时区避免运维误读 8 小时
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          timezoneOffsetMinutes: -new Date().getTimezoneOffset(),
           version: getAppVersion(),
           nodeVersion: process.version,
           uptimeSeconds: Math.round(process.uptime()),

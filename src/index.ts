@@ -16,7 +16,7 @@ if (typeof (global as any).navigator === 'undefined') {
 }
 
 // 必须排在所有 import 之前：桥接 console.* 与登记长定时器，先于其它模块的副作用
-import '@/utils/stdoutBridge'
+import { configureStdoutBridge } from '@/utils/stdoutBridge'
 
 import { initLogger } from '@/utils/log4js'
 import { startEventLoopMonitor } from '@/utils/eventLoopMonitor'
@@ -281,6 +281,11 @@ global.lx = {
   backupConfigNow,
   getConfigBackupDir,
 }
+
+// stdout.log 与 app.log / errors.log 统一到同一个日志目录：
+// stdoutBridge 是第一个 import，模块加载时 global.lx 尚未赋值，只能先按 env 初始化，
+// 这里在 global.lx 落地后补一次重定位（消除两套 LOG_PATH 口径，见 P-1430 / P-1108）。
+configureStdoutBridge(global.lx.logPath)
 
 const mergeConfigFileEnv = (config: Partial<Record<ENV_PARAMS_Value_Type, string>>) => {
   const envLog = []
