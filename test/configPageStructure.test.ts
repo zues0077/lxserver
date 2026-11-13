@@ -140,7 +140,7 @@ test('分组结构：每个分组都有标题、说明与至少一张卡片', ()
 test('分组导航：每个导航项都能命中一个真实分组', () => {
   const subnav = sliceBetween(configSection, 'id="config-subnav"', '</div>')
   const targets = [...subnav.matchAll(/data-target="([^"]+)"/g)].map(m => m[1])
-  assert.ok(targets.length >= 6, `导航项过少：${targets.length}`)
+  assert.ok(targets.length >= 5, `导航项过少：${targets.length}`)
   // [方案甲] cfg-subsonic 已拆到独立视图自己的 form，子导航只对应 config-form 内的分组
   const cfgFormOnly = sliceBetween(configSection, '<form id="config-form"', '</form>')
   const groupIds = [...cfgFormOnly.matchAll(/<section class="config-group" id="([^"]+)"/g)].map(m => m[1])
