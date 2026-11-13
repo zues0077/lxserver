@@ -44,6 +44,13 @@ export interface StreamTokenPayload {
   title?: string
   /** 写入 mp3 的 ID3 歌手 */
   artist?: string
+  /**
+   * 这条流是给 DLNA / 外部渲染器投放用的。
+   * 投放设备会多次重连同一个 URL（HEAD 后 GET、Range 续传、暂停再播），
+   * 这些都不是「播完了要切歌」，必须跳过米家云投送的 retire / replay-hold 判定。
+   * 米家云投送（/api/music/xiaoai/play）签的 token 不带此字段，行为保持原样。
+   */
+  cast?: boolean
   /** 过期时间戳（毫秒） */
   exp: number
 }
@@ -65,6 +72,7 @@ export const createStreamToken = (target: {
   mp3Path?: string
   title?: string
   artist?: string
+  cast?: boolean
   ttlMs?: number
 }): string => {
   const ttl = Math.max(MIN_TTL_MS, Number(target.ttlMs) || DEFAULT_TTL_MS)
@@ -88,6 +96,7 @@ export const createStreamToken = (target: {
   // ID3 元数据：无论是否走流式转码，都带进 token；流式转码时用来写进 mp3，让设备屏显真歌名
   if (target.title) payload.title = String(target.title)
   if (target.artist) payload.artist = String(target.artist)
+  if (target.cast) payload.cast = true
 
   const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
   return `${encoded}.${sign(encoded)}`
@@ -144,6 +153,7 @@ export const buildStreamUrl = (
     mp3Path?: string
     title?: string
     artist?: string
+    cast?: boolean
   },
 ) => {
   const base = String(baseUrl || '').trim().replace(/\/+$/, '')

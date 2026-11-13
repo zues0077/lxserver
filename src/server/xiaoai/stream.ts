@@ -1451,6 +1451,36 @@ const replayHoldMs = (): number => {
 
 /** 统一入口 */
 export const serveXiaoAiStream = async (req: IncomingMessage, res: ServerResponse, payload: StreamTokenPayload) => {
+  // 投放（DLNA 等外部渲染器）：整套「重拉=这首放完了」的判定必须跳过。
+  // 小爱/电视播一首歌会建多次连接（HEAD 后 GET、Range 续传、暂停后重拉），
+  // 米家云投送那套 retire / replay-hold 会把这些正常重连判成「在重放上一首」并回 410，
+  // 现象就是「能投、播几秒就停、音箱提示播放遇到问题」。
+  if (payload.cast) {
+    if (payload.format === 'mp3') {
+      await serveTranscodedMp3(req, res, payload)
+      return
+    }
+    if (payload.path) {
+      serveLocalFile(req, res, payload.path, payload.filename, payload.sid, Number(payload.durationMs) || 0)
+      return
+    }
+    if (payload.url) {
+      await serveRemoteUrl(
+        req,
+        res,
+        payload.url,
+        payload.filename,
+        payload.contentType,
+        payload.sid,
+        Number(payload.durationMs) || 0,
+      )
+      return
+    }
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ success: false, message: 'token 缺少播放目标' }))
+    return
+  }
+
   // 已经换掉的流：音箱播完上一首后拿旧 URL 重拉，这里直接拒绝，
   // 否则它会真的把上一首从头再放一遍（听起来就是「切歌前先响上一首」）
   if (isRetiredStream(payload.sid)) {

@@ -9087,9 +9087,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           // 音箱第一次来要这一路流的时间点：减去投送时刻就是「投送→开始拉流」的真实延迟。
           // 自动切歌的提前量必须覆盖它（还要加上设备起播缓冲），否则新歌总是慢半步，
           // 用户就会听到上一首被重头播了几秒。
-          if (streamPayload.sid && streamPayload.sid === lastXiaoAiStreamSid) {
-            // 同一路流的连接次数：设备「拉了不播」会反复 Range 重连，
-            // 这是「服务端是否在推字节」之外更可靠的判据
+          if (!streamPayload.cast && streamPayload.sid && streamPayload.sid === lastXiaoAiStreamSid) {
+            // 投放流的重连是设备正常行为，不能算进米家云投送的「同一路流连接次数」
             lastXiaoAiStreamConns += 1
             if (!lastXiaoAiStreamAt) lastXiaoAiStreamAt = Date.now()
           }
@@ -9327,6 +9326,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 mp3Path?: string
                 title?: string
                 artist?: string
+                cast?: boolean
               } = {
                 url: rawUrl,
                 filename: `${title || 'track'}.mp3`,
@@ -9334,6 +9334,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 durationMs,
                 title,
                 artist,
+                // 标记为「投放流」：设备多次重连属于正常行为，不能被米家云投送的
+                // 「播完重拉 = 切歌」逻辑判成重放上一首而回 410。
+                cast: true,
               }
               if (wantMp3) {
                 streamTarget.format = 'mp3'
