@@ -176,6 +176,15 @@ window.soundEffects = (function () {
 
         pitchShifterInitPromise = (async () => {
             try {
+                // [P-1471] 非安全上下文（http:// 直连 IP）下 AudioContext.audioWorklet 不存在，
+                // addModule 会抛 TypeError 且每次开音效都报一遍；变声在该场景下本来就不可能工作。
+                // 其他音效（EQ/混响/3D）的图在本函数之前已建好，不受影响，照常工作。
+                if (!audioContext.audioWorklet) {
+                    if (settings.pitch !== 1.0) {
+                        console.warn('[SoundEffects] audioWorklet unavailable (insecure context, e.g. http://). Pitch shifting disabled; EQ/reverb/3D still active.');
+                    }
+                    return null;
+                }
                 console.log('[SoundEffects] Loading Pitch Shifter Module from /music/js/pitch-shifter/phase-vocoder.js');
                 await audioContext.audioWorklet.addModule('/music/js/pitch-shifter/phase-vocoder.js');
 
@@ -692,11 +701,6 @@ window.soundEffects = (function () {
         getContext: () => audioContext || window._sharedAudioContext || null,
         getSourceNode: () => mediaSource || window._sharedAudioSourceNode || null,
         getAnalyser: () => analyser || window._sharedAudioAnalyser || null,
-        // DSP 图是否真的建成（mediaSource -> EQ -> ... -> analyser -> destination 全部就绪）。
-        // 注意：getAnalyser()/getContext() 会退回全局共享节点，DSP 图没建时也可能返回非空，
-        // 因此外部（如 visualizer）判断「能不能复用 effects 的节点」必须用这个，不能用 getAnalyser() 判空。详见 P-1471。
-        hasGraph: () => !!(audioContext && isGraphBuilt && analyser && mediaSource),
-        hasActiveEffects: hasActiveEffects,
         setReverbGain: function (type, val) {
             if (!audioContext || !isGraphBuilt) init(true);
             if (type === 'main') settings.reverb.mainGain = val;
