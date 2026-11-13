@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.5.57
+
+- **移除 A' 实验开关（workerOnly）**：`customSource.workerOnly.enabled` 相关配置/前端/测试全部删除（A/B 实测无实质收益），方案完整档案见 `docs/archive/worker-only-aprime.md`。
+- **自适应响应体上限持久化**（治聚合音源脚本重响应卡顿，如豆包定制 8.3s 主线程同步回调）：
+  - 降闸门槛从「窗口内第 2 次」改为**单次命中即降**；
+  - 上限记录落盘 `data/source-body-limits.json`（500ms 节流），TTL 30min → **24h**（命中刷新），重启自动恢复，源重新加载/服务重启不再「先卡一次再学」；
+  - 慢定时器回调（`reportSlowTimerCallback`）同步计入 governor 慢源账本，脚本自排重活可被降速治理。
+- 新增单测 `test/adaptiveBodyLimitPersist.test.ts`（5 项），全套 972/972。
+
 ## v1.5.56
 
 - 正式合入上游 v2.2.0 三项移植（P2-1/P2-2/P2-4）+ p2 加固（统一 LOG_PATH + Subsonic 歌词兜底接线），内容见下节（原挂在 v1.5.54 标题下，实际于本版首次发版）。
