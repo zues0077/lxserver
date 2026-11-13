@@ -1,6 +1,16 @@
 # Changelog
 
-## v1.5.54
+## v1.5.56
+
+- 正式合入上游 v2.2.0 三项移植（P2-1/P2-2/P2-4）+ p2 加固（统一 LOG_PATH + Subsonic 歌词兜底接线），内容见下节（原挂在 v1.5.54 标题下，实际于本版首次发版）。
+
+## v1.5.55
+
+- 停用源复检零成本策略：after-import 源不再主动探测（放音期整轮跳过 + 全局串行化），仅 probe-dead 低频复检；移除 after-import→probe-dead 升级路径。
+- disableReason 标签 hunter 联动：v1.13.6 豁免 after-import 拦截、probe-dead 语义化文案、冻结改写优先于同名 skip、`/api/service/toggle` 透传 reason。
+- A' 开关内置：`customSource.workerOnly.enabled`（默认关，env `CUSTOM_SOURCE_WORKER_ONLY=1`）。
+
+## v1.5.56 上游移植内容（P2-1/P2-2/P2-4）
 
 ### 🔍 聚合搜索联想加固（P2-1）
 
