@@ -9084,15 +9084,54 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
       // 播放流地址：音箱本身没有登录态，只能靠 URL 里的签名 token 授权，因此这里不做会话鉴权
       // 路径可能带音频后缀（/stream.mp3、/stream.m4a …）：音箱靠后缀判断解码方式，
       // 所以投送地址会按真实格式补后缀，这里两种写法都要认
-      if ((pathname === '/api/music/xiaoai/stream' || /^\/api\/music\/xiaoai\/stream\.[a-z0-9]{2,5}$/i.test(pathname)) && req.method === 'GET') {
+      const isXiaoAiStreamPath =
+        pathname === '/api/music/xiaoai/stream' ||
+        /^\/api\/music\/xiaoai\/stream\.[a-z0-9]{2,5}$/i.test(pathname)
+      if (isXiaoAiStreamPath && (req.method === 'GET' || req.method === 'HEAD')) {
         try {
           const streamPayload = parseStreamToken(urlObj.searchParams.get('token') || '')
+          // DLNA 渲染器（小爱/电视）几乎都会先发 HEAD 探 Content-Type/长度，再决定要不要 GET。
+          // 这里以前只认 GET，HEAD 落到后面的会话鉴权层直接 401 → 设备立刻放弃，表现就是
+          // 「能投送、没声音、传输状态 STOPPED、音箱提示播放遇到问题」。
+          // HEAD 只回头部，不参与流生命周期（不计重连次数、不算重拉）。
+          if (req.method === 'HEAD') {
+            const extMatch = pathname.toLowerCase().match(/\.[a-z0-9]{2,5}$/)
+            const ext = extMatch ? extMatch[0] : ''
+            const mime = ext === '.flac'
+              ? 'audio/flac'
+              : ext === '.m4a'
+                ? 'audio/mp4'
+                : ext === '.aac'
+                  ? 'audio/aac'
+                  : ext === '.ogg' || ext === '.opus'
+                    ? 'audio/ogg'
+                    : ext === '.wav'
+                      ? 'audio/wav'
+                      : streamPayload.format === 'mp3'
+                        ? 'audio/mpeg'
+                        : (String(streamPayload.contentType || '').split(';')[0].trim() || 'audio/mpeg')
+            const headHeaders: Record<string, string> = {
+              'Content-Type': mime,
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': 'no-store',
+            }
+            // 本地缓存文件能给出准确长度；远端中转给不出，宁可不写也不写错
+            if (streamPayload.path) {
+              try {
+                headHeaders['Content-Length'] = String(fs.statSync(streamPayload.path).size)
+              } catch {
+                /* 文件不在就省略长度 */
+              }
+            }
+            res.writeHead(200, headHeaders)
+            res.end()
+            return
+          }
           // 音箱第一次来要这一路流的时间点：减去投送时刻就是「投送→开始拉流」的真实延迟。
           // 自动切歌的提前量必须覆盖它（还要加上设备起播缓冲），否则新歌总是慢半步，
           // 用户就会听到上一首被重头播了几秒。
-          if (streamPayload.sid && streamPayload.sid === lastXiaoAiStreamSid) {
-            // 同一路流的连接次数：设备「拉了不播」会反复 Range 重连，
-            // 这是「服务端是否在推字节」之外更可靠的判据
+          if (!streamPayload.cast && streamPayload.sid && streamPayload.sid === lastXiaoAiStreamSid) {
+            // 投放流的重连是设备正常行为，不能算进米家云投送的「同一路流连接次数」
             lastXiaoAiStreamConns += 1
             if (!lastXiaoAiStreamAt) lastXiaoAiStreamAt = Date.now()
           }
@@ -9277,6 +9316,86 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             .listDevices(refresh)
             .then(result => sendJson({ success: true, ...result, config: xiaoAiService.getPublicConfig() }))
             .catch((error: any) => failed(error, '获取小爱设备失败'))
+          return
+        }
+
+        // --- 为「投放」（DLNA/UPnP 渲染器）签发带后缀的播放地址 ---
+        //
+        // 与「投送小爱」共用同一条流通道（token 签名 + serveXiaoAiStream），但**不碰任何
+        // 小米设备**：只把地址签出来交给调用方（手机 App 会把它推给音箱/电视）。
+        //
+        // 为什么必须走这条而不是 /api/music/download：
+        // 音箱/电视是**按 URL 后缀挑解码器**的（见 streamToken.buildStreamUrl 的注释），
+        // 而 download 中转的路径恒为 /api/music/download、没有后缀 → 设备直接判成无法播放
+        // （小爱实测提示「播放遇到问题，稍后再试」）。这里签出来的地址形如
+        //   /api/music/xiaoai/stream.mp3?token=…
+        // 后缀来自真实 Content-Type；要求 format=mp3 时走既有转码通道（源是 mp3 则不重复压）。
+        if (pathname === '/api/music/xiaoai/stream-url' && req.method === 'POST') {
+          void readJsonBody().then(async body => {
+            try {
+              const username = resolveXiaoAiUser(req) || '_open'
+              const rawUrl = String(body.url || '').trim()
+              if (!rawUrl) {
+                failed(new Error('缺少 url'), '签发投放地址失败', 'warn')
+                return
+              }
+              const wantMp3 = body.format === 'mp3'
+              const title = String(body.title || '').trim()
+              const artist = String(body.artist || '').trim()
+              const durationMs = Number(body.durationMs) || 0
+              const contentType = String(body.contentType || '').trim()
+              const config = loadXiaoAiConfig()
+              // 投放（DLNA）时优先用调用方给的地址：设备必须能访问「手机正在用的那个地址」。
+              // config.serverBaseUrl 是给小米云投送用的（可能指向另一个端口/域名），
+              // 测试容器共用生产 data 时会把它签成生产端口，排障极易误判。
+              const requestedBase = String(body.baseUrl || '').trim().replace(/\/+$/, '')
+              const baseUrl = /^https?:\/\//i.test(requestedBase)
+                ? requestedBase
+                : resolvePlayBaseUrl(req, config.serverBaseUrl)
+              const streamPath = config.streamPath || '/api/music/xiaoai/stream'
+
+              // 转码产物的缓存键：按歌名/歌手/来源地址稳定，同一首重投能命中上次的文件
+              const songKey = {
+                id: String(body.songId || rawUrl),
+                name: title || 'track',
+                singer: artist,
+              }
+              const streamTarget: {
+                url: string
+                filename: string
+                contentType?: string
+                durationMs?: number
+                format?: 'mp3'
+                mp3Path?: string
+                title?: string
+                artist?: string
+                cast?: boolean
+              } = {
+                url: rawUrl,
+                filename: `${title || 'track'}.mp3`,
+                contentType,
+                durationMs,
+                title,
+                artist,
+                // 标记为「投放流」：设备多次重连属于正常行为，不能被米家云投送的
+                // 「播完重拉 = 切歌」逻辑判成重放上一首而回 410。
+                cast: true,
+              }
+              if (wantMp3) {
+                streamTarget.format = 'mp3'
+                streamTarget.mp3Path = mp3CachePath(username, songKey, '320k')
+              }
+
+              const streamUrl = buildStreamUrl(baseUrl, streamPath, streamTarget)
+              syncLog.info(
+                `[Cast] 签发投放地址：${title || '(未知曲目)'}${artist ? ' - ' + artist : ''}｜` +
+                  `${wantMp3 ? 'mp3 转码' : contentType || '原格式'}｜${baseUrl}`,
+              )
+              sendJson({ success: true, data: { streamUrl, format: wantMp3 ? 'mp3' : contentType || '' } })
+            } catch (error: any) {
+              failed(error, '签发投放地址失败')
+            }
+          })
           return
         }
 
