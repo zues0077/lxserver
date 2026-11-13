@@ -27,7 +27,9 @@ function sliceBetween(source: string, startMark: string, endMark: string): strin
 }
 
 const configSection = sliceBetween(html, '<!-- 系统配置视图 -->', '<!-- WebDAV 同步与云端备份视图')
+// [方案甲] Subsonic 拆成独立视图后是第二个 form，字段契约按「config-form + subsonic-form」合并校验
 const formBlock = sliceBetween(configSection, '<form id="config-form"', '</form>')
+    + sliceBetween(configSection, '<form id="subsonic-form"', '</form>')
 
 /** 配置页必须保留的全部字段（server.ts 按 name 取值的契约） */
 const REQUIRED_FIELDS = [
@@ -139,7 +141,9 @@ test('分组导航：每个导航项都能命中一个真实分组', () => {
   const subnav = sliceBetween(configSection, 'id="config-subnav"', '</div>')
   const targets = [...subnav.matchAll(/data-target="([^"]+)"/g)].map(m => m[1])
   assert.ok(targets.length >= 6, `导航项过少：${targets.length}`)
-  const groupIds = [...configSection.matchAll(/<section class="config-group" id="([^"]+)"/g)].map(m => m[1])
+  // [方案甲] cfg-subsonic 已拆到独立视图自己的 form，子导航只对应 config-form 内的分组
+  const cfgFormOnly = sliceBetween(configSection, '<form id="config-form"', '</form>')
+  const groupIds = [...cfgFormOnly.matchAll(/<section class="config-group" id="([^"]+)"/g)].map(m => m[1])
   assert.deepEqual(targets, groupIds, '导航项与分组的顺序/id 不一致')
 })
 

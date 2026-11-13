@@ -182,6 +182,15 @@
                     <span>系统配置</span>
                 </a>
 
+                <a href="#" class="nav-item" data-view="subsonic">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 18V5l12-2v13" />
+                        <circle cx="6" cy="18" r="3" />
+                        <circle cx="18" cy="16" r="3" />
+                    </svg>
+                    <span>Subsonic</span>
+                </a>
+
                 <!-- 新增：WebDAV同步菜单 -->
                 <a href="#" class="nav-item" data-view="webdav">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -930,7 +939,6 @@
                             <button type="button" class="config-subnav-item" data-target="cfg-storage">存储与备份</button>
                             <button type="button" class="config-subnav-item" data-target="cfg-webdav-group">WebDAV</button>
                             <button type="button" class="config-subnav-item" data-target="cfg-network">网络代理</button>
-                            <button type="button" class="config-subnav-item" data-target="cfg-subsonic">Subsonic</button>
                             <button type="button" class="config-subnav-item" data-target="cfg-advanced">高级</button>
                         </div>
                         <div class="config-search">
@@ -1732,6 +1740,287 @@
                         </section>
 
                         <!-- ============ Subsonic ============ -->
+
+                        <!-- ============ 高级 ============ -->
+                        <section class="config-group" id="cfg-advanced">
+                            <div class="config-group-head">
+                                <h3>高级</h3>
+                                <p>影响全局的巡检与安全开关，改动前请确认风险</p>
+                            </div>
+                            <div class="config-group-grid" data-cols="3">
+
+                                <div class="config-card glass">
+                                    <div class="config-card-header">
+                                        <div class="config-card-icon"
+                                            style="background: linear-gradient(135deg, #64748b, #475569);">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2">
+                                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                                <polyline points="14 2 14 8 20 8" />
+                                                <line x1="8" y1="13" x2="16" y2="13" />
+                                                <line x1="8" y1="17" x2="13" y2="17" />
+                                            </svg>
+                                        </div>
+                                        <div class="config-card-head-text">
+                                            <h3 class="config-card-title">日志与排障</h3>
+                                            <p class="config-card-desc">统一控制服务端日志详细程度</p>
+                                        </div>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="config-field">
+                                            <label class="config-label">日志级别</label>
+                                            <select name="log.level" class="form-input config-input">
+                                                <option value="off">关闭（只记常规运行日志，推荐）</option>
+                                                <option value="debug">音源详细日志（排查取链失败）</option>
+                                                <option value="subsonic">Subsonic 请求日志（排查客户端兼容）</option>
+                                                <option value="verbose">全部详细（排障时临时开启）</option>
+                                            </select>
+                                            <small class="config-hint">长期开启会明显增加日志体积。原来分散在「基础」「Subsonic」两处的
+                                                DEBUG 开关已合并到这里，选「全部详细」等同于两个都开。</small>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card glass">
+                                    <div class="config-card-header">
+                                        <div class="config-card-icon"
+                                            style="background: linear-gradient(135deg, #0ea5e9, #0284c7);">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2">
+                                                <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                                            </svg>
+                                        </div>
+                                        <div class="config-card-head-text">
+                                            <h3 class="config-card-title">自定义音源巡检</h3>
+                                            <p class="config-card-desc">定时探测音源平台是否还能解析出可用链接</p>
+                                        </div>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="config-toggle-row">
+                                            <div class="config-toggle-info">
+                                                <span class="config-toggle-label">启用音源平台可用性巡检</span>
+                                                <span class="config-toggle-desc">失效平台可按下方策略自动关闭解析</span>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" name="customSource.probe.enabled" />
+                                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                            </label>
+                                        </div>
+                                        <div class="config-subhead">节奏</div>
+                                        <div class="config-field-row">
+                                            <div class="config-field">
+                                                <label class="config-label">巡检间隔（分钟）</label>
+                                                <input type="number" name="customSource.probe.intervalMinutes"
+                                                    class="form-input config-input" value="360" min="5" />
+                                                <small class="config-hint">默认 360（6 小时）。太短等于持续探测第三方平台，容易触发对方限流</small>
+                                            </div>
+                                            <div class="config-field">
+                                                <label class="config-label">探测并发数</label>
+                                                <input type="number" name="customSource.probe.concurrency"
+                                                    class="form-input config-input" value="6" min="1" max="8" />
+                                                <small class="config-hint">1–8。实测 40 源 / 151 平台：并发 6 约 130 秒，并发 2 约
+                                                    390 秒</small>
+                                            </div>
+                                        </div>
+                                        <div class="config-field">
+                                            <label class="config-label">连续失败几次后降权观察</label>
+                                            <input type="number" name="customSource.probe.demoteThreshold"
+                                                class="form-input config-input" value="1" min="0" />
+                                            <small class="config-hint">默认 1：第一次取链失败只把该平台排到换源队尾，不关平台；连续失败到下面设定的次数才关闭。填 0 关闭降权</small>
+                                        </div>
+                                        <div class="config-field">
+                                            <label class="config-label">判定失效所需连续失败次数</label>
+                                            <input type="number" name="customSource.probe.failThreshold"
+                                                class="form-input config-input" value="2" min="1" />
+                                            <small class="config-hint">调高可减少误判，但失效平台会更晚被关闭</small>
+                                        </div>
+                                        <div class="config-field">
+                                            <label class="config-label">全平台失效满几天后移除音源</label>
+                                            <input type="number" name="customSource.probe.allDownDays"
+                                                class="form-input config-input" value="3" min="0" max="90" />
+                                            <small class="config-hint">
+                                                默认 3 天。仅当该音源<strong>所有</strong>平台都失效（任一平台恢复即重新计时）才移除，单个平台失效只关那个平台；填 0 表示判定当轮就移除
+                                            </small>
+                                        </div>
+                                        <div class="config-field">
+                                            <label class="config-label">已关闭平台复检间隔（分钟）</label>
+                                            <input type="number" name="customSource.probe.restoreIntervalMinutes"
+                                                class="form-input config-input" value="180" min="0" max="10080" />
+                                            <small class="config-hint">
+                                                默认 180（3 小时）。只复检被自动关闭的平台，成功即恢复，不参与定罪；填 0 关闭。已降速的慢源会被跳过，不重复占用主线程
+                                            </small>
+                                        </div>
+                                        <div class="config-divider"></div>
+                                        <div class="config-subhead">失效处理</div>
+                                        <div class="config-toggle-row">
+                                            <div class="config-toggle-info">
+                                                <span class="config-toggle-label">自动关闭失效平台解析</span>
+                                                <span class="config-toggle-desc">关闭后可在音源「编辑平台」里手动重新开启</span>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" name="customSource.probe.autoDisablePlatform" />
+                                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                            </label>
+                                        </div>
+                                        <div class="config-danger-zone">
+                                            <div class="config-toggle-row">
+                                                <div class="config-toggle-info">
+                                                    <span class="config-toggle-label">全部平台失效时自动移除音源</span>
+                                                    <span class="config-toggle-desc">仅在确认该音源已彻底不可用时开启，误判会造成音源丢失</span>
+                                                </div>
+                                                <label class="toggle-switch">
+                                                    <input type="checkbox" name="customSource.probe.autoRemoveSource" />
+                                                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                                </label>
+                                            </div>
+                                            <div class="config-field">
+                                                <label class="config-label">移除方式</label>
+                                                <select name="customSource.probe.removeMode"
+                                                    class="form-input config-input">
+                                                    <option value="trash">移入回收站（可恢复）</option>
+                                                    <option value="delete">直接删除</option>
+                                                </select>
+                                                <small class="config-hint">
+                                                    「移入回收站」和手动删除的音源，都会出现在 Web 播放器「音源管理 → 回收站」里，可以恢复或彻底删除。
+                                                </small>
+                                            </div>
+                                        </div>
+                                        <div class="config-divider"></div>
+                                        <div class="config-subhead">回收站</div>
+                                        <div class="config-field">
+                                            <label class="config-label">自动清理超过（天）</label>
+                                            <input type="number" name="customSource.trash.retentionDays"
+                                                class="form-input config-input" value="3" min="0" max="3650" />
+                                            <small class="config-hint">默认 3 天，填 0 表示永不自动清理。到期条目会被彻底删除（不可恢复）</small>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card glass">
+                                    <div class="config-card-header">
+                                        <div class="config-card-icon"
+                                            style="background: linear-gradient(135deg, #06b6d4, #0891b2);">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2">
+                                                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                                            </svg>
+                                        </div>
+                                        <div class="config-card-head-text">
+                                            <h3 class="config-card-title">汽水试听兜底</h3>
+                                            <p class="config-card-desc">所有常规通道都没匹配时，是否允许落到汽水匿名 60 秒试听</p>
+                                        </div>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="config-toggle-row">
+                                            <div class="config-toggle-info">
+                                                <span class="config-toggle-label">汽水版权曲允许试听</span>
+                                                <span class="config-toggle-desc">汽水受限曲只有 30/60 秒试听且完整版换源也找不到时，投放试听片段而不是报失败；完整版永远优先。兜底顺序：五平台 → 汽水账号 → B站 →
+                                                    <strong>汽水匿名试听（本开关）</strong>；试听候选不会进下载与小爱投送</span>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" name="soda.allowPreview" />
+                                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                            </label>
+                                        </div>
+                                        <div class="config-field">
+                                            <label class="config-label">试听缓存保留时长（小时）</label>
+                                            <input type="number" name="soda.previewTtlHours"
+                                                class="form-input config-input" value="168" min="1" max="8760" />
+                                            <small class="config-hint">默认 168（7 天）。试听片段存独立 preview 目录，与整曲缓存（6 小时）完全独立，到期自动清理</small>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card glass config-card--danger">
+                                    <div class="config-card-header">
+                                        <div class="config-card-icon"
+                                            style="background: linear-gradient(135deg, #ef4444, #b91c1c);">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2">
+                                                <path
+                                                    d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                                                <line x1="12" y1="9" x2="12" y2="13" />
+                                                <line x1="12" y1="17" x2="12.01" y2="17" />
+                                            </svg>
+                                        </div>
+                                        <div class="config-card-head-text">
+                                            <h3 class="config-card-title">安全开关（高风险）</h3>
+                                            <p class="config-card-desc">放开沙盒限制，请确认脚本来源可信</p>
+                                        </div>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="config-danger-note">
+                                            以下开关会降低隔离级别。开启后若运行了不可信的第三方音源脚本，等同于把服务器交给对方。
+                                        </div>
+                                        <div class="config-toggle-row">
+                                            <div class="config-toggle-info">
+                                                <span class="config-toggle-label">允许 VM 模式运行脚本</span>
+                                                <span class="config-toggle-desc">部分混淆脚本需要原生 VM
+                                                    才能运行。<strong>原生 VM 不具备沙盒安全性，可能导致服务器被执行任意系统命令。</strong></span>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" name="system.allowUnsafeVM" />
+                                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                            </label>
+                                        </div>
+                                        <div class="config-divider"></div>
+                                        <div class="config-field">
+                                            <label class="config-label">歌手信息源优先级</label>
+                                            <select name="singer.sourcePriority" class="form-input config-input">
+                                                <option value="tx,wy">TX 优先</option>
+                                                <option value="wy,tx">WY 优先</option>
+                                                <option value="tx">仅 TX</option>
+                                                <option value="wy">仅 WY</option>
+                                            </select>
+                                            <small class="config-hint">歌手详情、头像与简介的获取来源，网页端与 Subsonic 共用</small>
+                                        </div>
+                                    </div>
+                                </div>
+
+                            </div>
+                        </section>
+
+                        <!-- 保存操作栏 -->
+                        <div class="config-actions-bar glass">
+                            <div class="config-actions-hint">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                    style="width:16px;height:16px;flex-shrink:0;color:var(--accent-primary)">
+                                    <circle cx="12" cy="12" r="10" />
+                                    <line x1="12" y1="16" x2="12" y2="12" />
+                                    <line x1="12" y1="8" x2="12.01" y2="8" />
+                                </svg>
+                                <span>配置修改后需保存生效；带「需重启」标记的项需重启服务端后才生效</span>
+                            </div>
+                            <div class="config-actions-btns">
+                                <button type="button" id="reload-config-btn" class="btn-secondary"
+                                    style="white-space: nowrap; flex-shrink: 0;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                        style="width:15px;height:15px;">
+                                        <polyline points="23 4 23 10 17 10" />
+                                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                                    </svg>
+                                    重新加载
+                                </button>
+                                <button type="submit" class="btn-primary" style="white-space: nowrap; flex-shrink: 0;">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                        style="width:15px;height:15px;">
+                                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                                        <polyline points="17 21 17 13 7 13 7 21" />
+                                        <polyline points="7 3 7 8 15 8" />
+                                    </svg>
+                                    保存配置
+                                </button>
+                            </div>
+                        </div>
+
+                    </form>
+
+                </div>
+
+                <!-- Subsonic 独立视图（从系统配置拆出，方案甲） -->
+                <div id="view-subsonic" class="view">
+                    <form id="subsonic-form" class="config-page">
+
                         <section class="config-group" id="cfg-subsonic">
                             <div class="config-group-head">
                                 <h3>Subsonic</h3>
@@ -2219,246 +2508,7 @@
                             </div>
                         </section>
 
-                        <!-- ============ 高级 ============ -->
-                        <section class="config-group" id="cfg-advanced">
-                            <div class="config-group-head">
-                                <h3>高级</h3>
-                                <p>影响全局的巡检与安全开关，改动前请确认风险</p>
-                            </div>
-                            <div class="config-group-grid" data-cols="3">
-
-                                <div class="config-card glass">
-                                    <div class="config-card-header">
-                                        <div class="config-card-icon"
-                                            style="background: linear-gradient(135deg, #64748b, #475569);">
-                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                                stroke-width="2">
-                                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                                <polyline points="14 2 14 8 20 8" />
-                                                <line x1="8" y1="13" x2="16" y2="13" />
-                                                <line x1="8" y1="17" x2="13" y2="17" />
-                                            </svg>
-                                        </div>
-                                        <div class="config-card-head-text">
-                                            <h3 class="config-card-title">日志与排障</h3>
-                                            <p class="config-card-desc">统一控制服务端日志详细程度</p>
-                                        </div>
-                                    </div>
-                                    <div class="config-card-body">
-                                        <div class="config-field">
-                                            <label class="config-label">日志级别</label>
-                                            <select name="log.level" class="form-input config-input">
-                                                <option value="off">关闭（只记常规运行日志，推荐）</option>
-                                                <option value="debug">音源详细日志（排查取链失败）</option>
-                                                <option value="subsonic">Subsonic 请求日志（排查客户端兼容）</option>
-                                                <option value="verbose">全部详细（排障时临时开启）</option>
-                                            </select>
-                                            <small class="config-hint">长期开启会明显增加日志体积。原来分散在「基础」「Subsonic」两处的
-                                                DEBUG 开关已合并到这里，选「全部详细」等同于两个都开。</small>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div class="config-card glass">
-                                    <div class="config-card-header">
-                                        <div class="config-card-icon"
-                                            style="background: linear-gradient(135deg, #0ea5e9, #0284c7);">
-                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                                stroke-width="2">
-                                                <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-                                            </svg>
-                                        </div>
-                                        <div class="config-card-head-text">
-                                            <h3 class="config-card-title">自定义音源巡检</h3>
-                                            <p class="config-card-desc">定时探测音源平台是否还能解析出可用链接</p>
-                                        </div>
-                                    </div>
-                                    <div class="config-card-body">
-                                        <div class="config-toggle-row">
-                                            <div class="config-toggle-info">
-                                                <span class="config-toggle-label">启用音源平台可用性巡检</span>
-                                                <span class="config-toggle-desc">失效平台可按下方策略自动关闭解析</span>
-                                            </div>
-                                            <label class="toggle-switch">
-                                                <input type="checkbox" name="customSource.probe.enabled" />
-                                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                                            </label>
-                                        </div>
-                                        <div class="config-subhead">节奏</div>
-                                        <div class="config-field-row">
-                                            <div class="config-field">
-                                                <label class="config-label">巡检间隔（分钟）</label>
-                                                <input type="number" name="customSource.probe.intervalMinutes"
-                                                    class="form-input config-input" value="360" min="5" />
-                                                <small class="config-hint">默认 360（6 小时）。太短等于持续探测第三方平台，容易触发对方限流</small>
-                                            </div>
-                                            <div class="config-field">
-                                                <label class="config-label">探测并发数</label>
-                                                <input type="number" name="customSource.probe.concurrency"
-                                                    class="form-input config-input" value="6" min="1" max="8" />
-                                                <small class="config-hint">1–8。实测 40 源 / 151 平台：并发 6 约 130 秒，并发 2 约
-                                                    390 秒</small>
-                                            </div>
-                                        </div>
-                                        <div class="config-field">
-                                            <label class="config-label">连续失败几次后降权观察</label>
-                                            <input type="number" name="customSource.probe.demoteThreshold"
-                                                class="form-input config-input" value="1" min="0" />
-                                            <small class="config-hint">默认 1：第一次取链失败只把该平台排到换源队尾，不关平台；连续失败到下面设定的次数才关闭。填 0 关闭降权</small>
-                                        </div>
-                                        <div class="config-field">
-                                            <label class="config-label">判定失效所需连续失败次数</label>
-                                            <input type="number" name="customSource.probe.failThreshold"
-                                                class="form-input config-input" value="2" min="1" />
-                                            <small class="config-hint">调高可减少误判，但失效平台会更晚被关闭</small>
-                                        </div>
-                                        <div class="config-field">
-                                            <label class="config-label">全平台失效满几天后移除音源</label>
-                                            <input type="number" name="customSource.probe.allDownDays"
-                                                class="form-input config-input" value="3" min="0" max="90" />
-                                            <small class="config-hint">
-                                                默认 3 天。仅当该音源<strong>所有</strong>平台都失效（任一平台恢复即重新计时）才移除，单个平台失效只关那个平台；填 0 表示判定当轮就移除
-                                            </small>
-                                        </div>
-                                        <div class="config-field">
-                                            <label class="config-label">已关闭平台复检间隔（分钟）</label>
-                                            <input type="number" name="customSource.probe.restoreIntervalMinutes"
-                                                class="form-input config-input" value="180" min="0" max="10080" />
-                                            <small class="config-hint">
-                                                默认 180（3 小时）。只复检被自动关闭的平台，成功即恢复，不参与定罪；填 0 关闭。已降速的慢源会被跳过，不重复占用主线程
-                                            </small>
-                                        </div>
-                                        <div class="config-divider"></div>
-                                        <div class="config-subhead">失效处理</div>
-                                        <div class="config-toggle-row">
-                                            <div class="config-toggle-info">
-                                                <span class="config-toggle-label">自动关闭失效平台解析</span>
-                                                <span class="config-toggle-desc">关闭后可在音源「编辑平台」里手动重新开启</span>
-                                            </div>
-                                            <label class="toggle-switch">
-                                                <input type="checkbox" name="customSource.probe.autoDisablePlatform" />
-                                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                                            </label>
-                                        </div>
-                                        <div class="config-danger-zone">
-                                            <div class="config-toggle-row">
-                                                <div class="config-toggle-info">
-                                                    <span class="config-toggle-label">全部平台失效时自动移除音源</span>
-                                                    <span class="config-toggle-desc">仅在确认该音源已彻底不可用时开启，误判会造成音源丢失</span>
-                                                </div>
-                                                <label class="toggle-switch">
-                                                    <input type="checkbox" name="customSource.probe.autoRemoveSource" />
-                                                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                                                </label>
-                                            </div>
-                                            <div class="config-field">
-                                                <label class="config-label">移除方式</label>
-                                                <select name="customSource.probe.removeMode"
-                                                    class="form-input config-input">
-                                                    <option value="trash">移入回收站（可恢复）</option>
-                                                    <option value="delete">直接删除</option>
-                                                </select>
-                                                <small class="config-hint">
-                                                    「移入回收站」和手动删除的音源，都会出现在 Web 播放器「音源管理 → 回收站」里，可以恢复或彻底删除。
-                                                </small>
-                                            </div>
-                                        </div>
-                                        <div class="config-divider"></div>
-                                        <div class="config-subhead">回收站</div>
-                                        <div class="config-field">
-                                            <label class="config-label">自动清理超过（天）</label>
-                                            <input type="number" name="customSource.trash.retentionDays"
-                                                class="form-input config-input" value="3" min="0" max="3650" />
-                                            <small class="config-hint">默认 3 天，填 0 表示永不自动清理。到期条目会被彻底删除（不可恢复）</small>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div class="config-card glass">
-                                    <div class="config-card-header">
-                                        <div class="config-card-icon"
-                                            style="background: linear-gradient(135deg, #06b6d4, #0891b2);">
-                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                                stroke-width="2">
-                                                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-                                            </svg>
-                                        </div>
-                                        <div class="config-card-head-text">
-                                            <h3 class="config-card-title">汽水试听兜底</h3>
-                                            <p class="config-card-desc">所有常规通道都没匹配时，是否允许落到汽水匿名 60 秒试听</p>
-                                        </div>
-                                    </div>
-                                    <div class="config-card-body">
-                                        <div class="config-toggle-row">
-                                            <div class="config-toggle-info">
-                                                <span class="config-toggle-label">汽水版权曲允许试听</span>
-                                                <span class="config-toggle-desc">汽水受限曲只有 30/60 秒试听且完整版换源也找不到时，投放试听片段而不是报失败；完整版永远优先。兜底顺序：五平台 → 汽水账号 → B站 →
-                                                    <strong>汽水匿名试听（本开关）</strong>；试听候选不会进下载与小爱投送</span>
-                                            </div>
-                                            <label class="toggle-switch">
-                                                <input type="checkbox" name="soda.allowPreview" />
-                                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                                            </label>
-                                        </div>
-                                        <div class="config-field">
-                                            <label class="config-label">试听缓存保留时长（小时）</label>
-                                            <input type="number" name="soda.previewTtlHours"
-                                                class="form-input config-input" value="168" min="1" max="8760" />
-                                            <small class="config-hint">默认 168（7 天）。试听片段存独立 preview 目录，与整曲缓存（6 小时）完全独立，到期自动清理</small>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div class="config-card glass config-card--danger">
-                                    <div class="config-card-header">
-                                        <div class="config-card-icon"
-                                            style="background: linear-gradient(135deg, #ef4444, #b91c1c);">
-                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                                stroke-width="2">
-                                                <path
-                                                    d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                                                <line x1="12" y1="9" x2="12" y2="13" />
-                                                <line x1="12" y1="17" x2="12.01" y2="17" />
-                                            </svg>
-                                        </div>
-                                        <div class="config-card-head-text">
-                                            <h3 class="config-card-title">安全开关（高风险）</h3>
-                                            <p class="config-card-desc">放开沙盒限制，请确认脚本来源可信</p>
-                                        </div>
-                                    </div>
-                                    <div class="config-card-body">
-                                        <div class="config-danger-note">
-                                            以下开关会降低隔离级别。开启后若运行了不可信的第三方音源脚本，等同于把服务器交给对方。
-                                        </div>
-                                        <div class="config-toggle-row">
-                                            <div class="config-toggle-info">
-                                                <span class="config-toggle-label">允许 VM 模式运行脚本</span>
-                                                <span class="config-toggle-desc">部分混淆脚本需要原生 VM
-                                                    才能运行。<strong>原生 VM 不具备沙盒安全性，可能导致服务器被执行任意系统命令。</strong></span>
-                                            </div>
-                                            <label class="toggle-switch">
-                                                <input type="checkbox" name="system.allowUnsafeVM" />
-                                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                                            </label>
-                                        </div>
-                                        <div class="config-divider"></div>
-                                        <div class="config-field">
-                                            <label class="config-label">歌手信息源优先级</label>
-                                            <select name="singer.sourcePriority" class="form-input config-input">
-                                                <option value="tx,wy">TX 优先</option>
-                                                <option value="wy,tx">WY 优先</option>
-                                                <option value="tx">仅 TX</option>
-                                                <option value="wy">仅 WY</option>
-                                            </select>
-                                            <small class="config-hint">歌手详情、头像与简介的获取来源，网页端与 Subsonic 共用</small>
-                                        </div>
-                                    </div>
-                                </div>
-
-                            </div>
-                        </section>
-
-                        <!-- 保存操作栏 -->
+                        <!-- 保存操作栏（与系统配置同款） -->
                         <div class="config-actions-bar glass">
                             <div class="config-actions-hint">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -2467,18 +2517,9 @@
                                     <line x1="12" y1="16" x2="12" y2="12" />
                                     <line x1="12" y1="8" x2="12.01" y2="8" />
                                 </svg>
-                                <span>配置修改后需保存生效；带「需重启」标记的项需重启服务端后才生效</span>
+                                <span>与「系统配置」共用同一份配置，保存即写入；带「需重启」标记的项需重启服务端</span>
                             </div>
                             <div class="config-actions-btns">
-                                <button type="button" id="reload-config-btn" class="btn-secondary"
-                                    style="white-space: nowrap; flex-shrink: 0;">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                                        style="width:15px;height:15px;">
-                                        <polyline points="23 4 23 10 17 10" />
-                                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                                    </svg>
-                                    重新加载
-                                </button>
                                 <button type="submit" class="btn-primary" style="white-space: nowrap; flex-shrink: 0;">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                                         style="width:15px;height:15px;">
@@ -2492,7 +2533,6 @@
                         </div>
 
                     </form>
-
                 </div>
 
                 <!-- WebDAV 同步与云端备份视图 (现代化重构) -->
