@@ -166,6 +166,11 @@ class App {
             e.preventDefault();
             this.saveConfig();
         });
+        // [方案甲] Subsonic 独立视图的保存
+        document.getElementById('subsonic-form')?.addEventListener('submit', (e) => {
+            e.preventDefault();
+            this.saveConfig();
+        });
         document.getElementById('reload-config-btn')?.addEventListener('click', async () => {
             await this.saveConfig(true);
             this.loadConfig();
@@ -505,6 +510,7 @@ class App {
             accounts: '平台账号',
             data: '数据查看',
             config: '系统配置',
+            subsonic: 'Subsonic',
             logs: '系统日志',
             webdav: 'WebDAV同步',
             files: '文件管理',
@@ -527,6 +533,7 @@ class App {
                 this.loadUserData();
                 break;
             case 'config':
+            case 'subsonic': // [方案甲] Subsonic 独立视图与系统配置共用同一份 /api/config
                 this.loadConfig();
                 break;
             case 'accounts':
@@ -2603,7 +2610,15 @@ class App {
             const config = await this.request('/api/config');
             this.configLoaded = true;
             this.loadedConfig = config; // 保存原始配置，供 saveConfig 对比「需重启」字段是否变更
-            const form = document.getElementById('config-form');
+            // [方案甲] Subsonic 拆成独立视图后有自己的 <form id="subsonic-form">，
+            // 这里把两个 form 的 elements 合并成一个视图，下面所有 form.elements['…'] 回显代码零改动。
+            const cfgFormEl = document.getElementById('config-form');
+            const subFormEl = document.getElementById('subsonic-form');
+            const form = (cfgFormEl && subFormEl) ? {
+                elements: new Proxy({}, {
+                    get: (t, k) => (cfgFormEl.elements[k] || subFormEl.elements[k] || undefined)
+                })
+            } : (cfgFormEl || subFormEl);
 
             form.elements['serverName'].value = config.serverName || '';
             if (form.elements['log.level']) {
@@ -3544,6 +3559,11 @@ class App {
         if (!this.configLoaded) return;
         const form = document.getElementById('config-form');
         const formData = new FormData(form);
+        // [方案甲] Subsonic 字段在独立视图的 #subsonic-form 里，合并进同一次保存
+        const subFormEl = document.getElementById('subsonic-form');
+        if (subFormEl) {
+            for (const [k, v] of new FormData(subFormEl)) formData.append(k, v);
+        }
 
         // 连接方式：至少保留一种，前端直接拦住（否则后端会静默把根路径改回开启）
         const enablePathCb = form.elements['user.enablePath'];
