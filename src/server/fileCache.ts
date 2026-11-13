@@ -3334,7 +3334,7 @@ export const serveCacheFile = (req: http.IncomingMessage, res: http.ServerRespon
     let filePath = ''
     for (const loc of locations) {
         for (const folder of roots) {
-            const dir = getCacheDir(normalizedUsername, folder === 'music', loc)
+            const dir = getCacheDir(normalizedUsername, folder === 'music' ? true : folder === 'preview' ? 'preview' : false, loc)
             // 允许子目录，但只读取当前缓存目录内的普通文件（包括目录内的符号链接）。
             const checkPath = path.resolve(dir, filename)
             const relativePath = path.relative(path.resolve(dir), checkPath)

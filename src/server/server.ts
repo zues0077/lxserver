@@ -10229,7 +10229,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 const cachedPreview = fileCache.getPreviewCacheItem(verifiedUsername, songInfo, sodaTrialFallback.quality)
                 if (cachedPreview?.filename) {
                   result = {
-                    url: `/api/music/cache/file/${encodeURIComponent(verifiedUsername || '_open')}/${encodeURIComponent(cachedPreview.filename)}?folder=preview`,
+                    // 与 checkCache 同口径：URL 用户段必须用 normalizeUsername 归一（匿名一律 _open，
+                    // 公共免鉴权），否则匿名客户端拿到带自己命名空间的地址会 401
+                    url: `/api/music/cache/file/${encodeURIComponent(fileCache.normalizeUsername(verifiedUsername))}/${encodeURIComponent(cachedPreview.filename)}?folder=preview`,
                     type: 'local',
                     sourceName: '汽水试听（缓存）',
                     sourceId: 'soda-preview-cache',
