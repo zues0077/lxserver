@@ -9237,6 +9237,76 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
 
+        // --- 为「投放」（DLNA/UPnP 渲染器）签发带后缀的播放地址 ---
+        //
+        // 与「投送小爱」共用同一条流通道（token 签名 + serveXiaoAiStream），但**不碰任何
+        // 小米设备**：只把地址签出来交给调用方（手机 App 会把它推给音箱/电视）。
+        //
+        // 为什么必须走这条而不是 /api/music/download：
+        // 音箱/电视是**按 URL 后缀挑解码器**的（见 streamToken.buildStreamUrl 的注释），
+        // 而 download 中转的路径恒为 /api/music/download、没有后缀 → 设备直接判成无法播放
+        // （小爱实测提示「播放遇到问题，稍后再试」）。这里签出来的地址形如
+        //   /api/music/xiaoai/stream.mp3?token=…
+        // 后缀来自真实 Content-Type；要求 format=mp3 时走既有转码通道（源是 mp3 则不重复压）。
+        if (pathname === '/api/music/xiaoai/stream-url' && req.method === 'POST') {
+          void readJsonBody().then(async body => {
+            try {
+              const username = resolveXiaoAiUser(req) || '_open'
+              const rawUrl = String(body.url || '').trim()
+              if (!rawUrl) {
+                failed(new Error('缺少 url'), '签发投放地址失败', 'warn')
+                return
+              }
+              const wantMp3 = body.format === 'mp3'
+              const title = String(body.title || '').trim()
+              const artist = String(body.artist || '').trim()
+              const durationMs = Number(body.durationMs) || 0
+              const contentType = String(body.contentType || '').trim()
+              const config = loadXiaoAiConfig()
+              const baseUrl = resolvePlayBaseUrl(req, config.serverBaseUrl)
+              const streamPath = config.streamPath || '/api/music/xiaoai/stream'
+
+              // 转码产物的缓存键：按歌名/歌手/来源地址稳定，同一首重投能命中上次的文件
+              const songKey = {
+                id: String(body.songId || rawUrl),
+                name: title || 'track',
+                singer: artist,
+              }
+              const streamTarget: {
+                url: string
+                filename: string
+                contentType?: string
+                durationMs?: number
+                format?: 'mp3'
+                mp3Path?: string
+                title?: string
+                artist?: string
+              } = {
+                url: rawUrl,
+                filename: `${title || 'track'}.mp3`,
+                contentType,
+                durationMs,
+                title,
+                artist,
+              }
+              if (wantMp3) {
+                streamTarget.format = 'mp3'
+                streamTarget.mp3Path = mp3CachePath(username, songKey, '320k')
+              }
+
+              const streamUrl = buildStreamUrl(baseUrl, streamPath, streamTarget)
+              syncLog.info(
+                `[Cast] 签发投放地址：${title || '(未知曲目)'}${artist ? ' - ' + artist : ''}｜` +
+                  `${wantMp3 ? 'mp3 转码' : contentType || '原格式'}｜${baseUrl}`,
+              )
+              sendJson({ success: true, data: { streamUrl, format: wantMp3 ? 'mp3' : contentType || '' } })
+            } catch (error: any) {
+              failed(error, '签发投放地址失败')
+            }
+          })
+          return
+        }
+
         // --- 投播 ---
         if (pathname === '/api/music/xiaoai/play' && req.method === 'POST') {
           void readJsonBody().then(async payload => {
