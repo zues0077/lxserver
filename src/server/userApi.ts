@@ -268,8 +268,14 @@ interface DqTaskProbe {
  * 又白白削弱了那个源。
  */
 const BODY_COST_SUSPECT_MS = 1000
-/** 自适应体积闸有效期：到期自动恢复默认上限，避免一次偶发把源永久阉掉 */
-const ADAPTIVE_LIMIT_TTL_MS = 30 * 60 * 1000
+/**
+ * 自适应体积闸有效期。
+ *
+ * 2026-11-13 从 30 分钟改为 24 小时：30 分钟太短，豆包定制的响应体是上游固定行为
+ * （每次都 4.26MB），半小时后再来一次又得「先卡 8 秒再学」。改为 24 小时 + 每次命中刷新，
+ * 让学到的上限基本常驻；同时保留过期语义，避免一次偶发（比如某接口临时返回巨块）永久阉掉源。
+ */
+const ADAPTIVE_LIMIT_TTL_MS = 24 * 60 * 60 * 1000
 /** 自适应闸门的地板：音乐接口正常响应很少超过 1MB，再低就开始误伤正常请求 */
 const ADAPTIVE_LIMIT_FLOOR_BYTES = 1024 * 1024
 /** 判定为体积问题后，把该源上限压到本次体积的这个比例 */
@@ -283,7 +289,104 @@ interface AdaptiveLimit {
     cost: number
 }
 
+/**
+ * 自适应响应体上限（持久化）。
+ *
+ * 为什么必须落盘（2026-11-13 实测）：豆包定制[聚合音源] 的健康探测返回 4.26MB，
+ * 脚本回调同步处理 8.3 秒，是一类「体积 + 脚本自身重活」的复合卡顿。原实现只在内存里
+ * 降闸 30 分钟：**每次重启都重新从 8MB 默认值学一遍**，第一轮探测必然再卡 8 秒
+ * （05:01:24 加载 → 05:02:30 卡 8387ms）。落盘后重启即可直接拦住。
+ *
+ * 与 governor 降速记录的区别（刻意不同）：
+ *   - governor 的降速记录带 scriptHash，脚本更新后旧账作废（新脚本可能已修好）；
+ *   - 响应体上限**不带 scriptHash**，脚本更新不清除 —— 4.26MB 来自上游服务器，
+ *     换脚本版本不会改变上游返回多大的数据。
+ */
 const adaptiveBodyLimits = new Map<string, AdaptiveLimit>()
+/** 自适应闸门落盘路径（与 governor 状态同目录，便于运维一起备份） */
+const getAdaptiveLimitStorePath = (): string => {
+    const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
+    return path.join(dataPath, 'source-body-limits.json')
+}
+/** 只有走过启动加载才允许写盘：单测会大量调用，不能往仓库目录写文件 */
+let adaptiveLimitPersistEnabled = false
+let adaptiveLimitSaveTimer: any = null
+/**
+ * 把落盘内容还原成内存状态（纯函数，便于单测）。
+ *
+ * 过期条目直接丢弃；`limit` 必须落在 [地板, 默认上限] 内，防止手改文件把源阉死或放开。
+ * until 用「max(落盘 until, 载入时刻 + TTL)」：重启视为一次命中，
+ * 让刚学到的上限至少再活满一个 TTL，否则重启后马上过期等于没落盘。
+ */
+export function parsePersistedAdaptiveLimits(
+    raw: any,
+    now: number,
+    ttlMs: number,
+    floorBytes: number,
+    maxBytes: number,
+): Map<string, AdaptiveLimit> {
+    const out = new Map<string, AdaptiveLimit>()
+    for (const [key, value] of Object.entries<any>(raw || {})) {
+        if (!key || !value || typeof value !== 'object') continue
+        const bytes = Number(value.bytes) || 0
+        const cost = Number(value.cost) || 0
+        let limit = Number(value.limit) || 0
+        if (!Number.isFinite(limit) || limit <= 0) continue
+        limit = Math.min(maxBytes, Math.max(floorBytes, Math.round(limit)))
+        const savedUntil = Number(value.until) || 0
+        if (savedUntil > 0 && now > savedUntil + ttlMs) continue // 过期太久，丢弃
+        out.set(key, { limit, until: Math.max(savedUntil, now + ttlMs), bytes, cost })
+    }
+    return out
+}
+function scheduleAdaptiveLimitSave(): void {
+    if (!adaptiveLimitPersistEnabled) return
+    if (adaptiveLimitSaveTimer) return
+    adaptiveLimitSaveTimer = setTimeout(() => {
+        adaptiveLimitSaveTimer = null
+        try {
+            const obj: Record<string, AdaptiveLimit> = {}
+            const now = Date.now()
+            for (const [key, v] of adaptiveBodyLimits) {
+                if (v.until > now) obj[key] = v
+            }
+            const p = getAdaptiveLimitStorePath()
+            const dir = path.dirname(p)
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+            fs.writeFileSync(p, JSON.stringify(obj, null, 2), 'utf-8')
+        } catch (e: any) {
+            console.warn(`[自适应闸门] 落盘失败: ${e?.message || e}`)
+        }
+    }, 500)
+    if (typeof (adaptiveLimitSaveTimer as any)?.unref === 'function') (adaptiveLimitSaveTimer as any).unref()
+}
+/**
+ * 启动时载入已学到的响应体上限。幂等：重复调用只加载一次。
+ * 在 server 启动路径调用；单测不调用 → persistEnabled 保持 false，不会写盘。
+ */
+export function loadPersistedAdaptiveLimits(): number {
+    if (adaptiveLimitPersistEnabled) return adaptiveBodyLimits.size
+    adaptiveLimitPersistEnabled = true
+    try {
+        const p = getAdaptiveLimitStorePath()
+        if (!fs.existsSync(p)) return 0
+        const raw = JSON.parse(fs.readFileSync(p, 'utf-8'))
+        const restored = parsePersistedAdaptiveLimits(
+            raw, Date.now(), ADAPTIVE_LIMIT_TTL_MS,
+            ADAPTIVE_LIMIT_FLOOR_BYTES, CUSTOM_SOURCE_MAX_BODY_BYTES,
+        )
+        for (const [key, v] of restored) adaptiveBodyLimits.set(key, v)
+        if (restored.size > 0) {
+            console.log(`[自适应闸门] 已恢复 ${restored.size} 条响应体上限记录: `
+                + [...restored.entries()].map(([k, v]) => `${k}=${formatBytes(v.limit)}`).join(', '))
+        }
+        return restored.size
+    } catch (e: any) {
+        console.warn(`[自适应闸门] 载入失败（按无记录继续）: ${e?.message || e}`)
+        return 0
+    }
+}
+
 /** 同一源在窗口内命中「超长同步任务」的次数：用于区分偶发与常态 */
 const slowTaskHits = new Map<string, { count: number; since: number }>()
 const SLOW_TASK_HIT_WINDOW_MS = 30 * 60 * 1000
@@ -390,15 +493,27 @@ export function reportSlowTask(meta: DqTaskMeta | undefined, cost: number, probe
 
     let adapted = ''
     if (bytes > ADAPTIVE_LIMIT_FLOOR_BYTES && meta?.owner && meta?.id) {
-        const shouldShrink = bodyIsBlame
-            ? true
-            : (cost >= SLOW_TASK_HARD_MS && hits.count >= 2)
+        // 2026-11-13：脚本自身重活这一条从「窗口内第 2 次才降闸」改成「单次超硬阈值即降闸」。
+        // 原先的 2 次门槛是为了「别为一次偶发牺牲正常源」，但对 豆包定制 这种上游固定返回
+        // 4.26MB、每次都要同步处理 8 秒的源，代价是「第一次卡 8 秒白卡」+「重启后又卡一次」。
+        // 一次 2 秒以上的同步卡顿已远超正常源（实测正常源 <100ms），单次就降闸不会误伤：
+        // 降闸只是把上限压到本次体积的 0.6 倍并在 24h 后自动过期，源仍可用（超限按失败回调换源）。
+        const shouldShrink = bodyIsBlame || cost >= SLOW_TASK_HARD_MS
         if (shouldShrink) {
             const limit = Math.max(ADAPTIVE_LIMIT_FLOOR_BYTES, Math.round(bytes * ADAPTIVE_LIMIT_SHRINK))
             if (limit < effectiveBodyLimit(meta.owner, meta.id)) {
                 adaptiveBodyLimits.set(key, { limit, until: now + ADAPTIVE_LIMIT_TTL_MS, bytes, cost })
+                scheduleAdaptiveLimitSave()
                 adapted = `；已把该源响应体上限降到 ${formatBytes(limit)}`
-                    + `（${ADAPTIVE_LIMIT_TTL_MS / 60000} 分钟内有效，超限按失败回调，脚本自行换源）`
+                    + `（${Math.round(ADAPTIVE_LIMIT_TTL_MS / 3600000)} 小时内有效并已落盘，超限按失败回调，脚本自行换源）`
+            } else {
+                // 已有更严的上限：续期（每次命中刷新 TTL），并确保落盘记录同步
+                const cur = adaptiveBodyLimits.get(key)
+                if (cur) {
+                    cur.until = now + ADAPTIVE_LIMIT_TTL_MS
+                    adaptiveBodyLimits.set(key, cur)
+                    scheduleAdaptiveLimitSave()
+                }
             }
         }
     }
@@ -645,6 +760,14 @@ const reportSlowTimerCallback = (ref: { owner: string; id: string; name: string 
         at: Date.now(),
     })
     if (recentSlowTimerCallbacks.length > MAX_SLOW_TIMER_RECORDS) recentSlowTimerCallbacks.shift()
+
+    // 定时器里的同步重活也要进 governor 的慢源账本（2026-11-13 补）。
+    // 此前这里只写日志，导致「脚本自排定时器做重活」这一类慢源永远不会被降速/搬进 worker：
+    // 实测 豆包定制[聚合音源] 的 600s 健康探测就是这条路径，卡了主线程却查不到账。
+    // 与 callRequest 的同步块共用同一份窗口计数（noteScriptSyncCost 内部按 owner/id 归并）。
+    if (costMs >= SLOW_TASK_HARD_MS) {
+        try { noteScriptSyncCost(ref.owner, ref.id, ref.name, costMs) } catch { /* 记账失败不得影响业务 */ }
+    }
 
     // 回调自身耗时已达卡顿量级 → 立即归因。
     // 这是精确测量，无需等待（也不受）事件循环延迟监控那套会低估的估算值。

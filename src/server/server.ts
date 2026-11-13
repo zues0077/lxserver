@@ -34,7 +34,7 @@ import formidable from 'formidable'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
-import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, getContractSummary, describeError } from './userApi'
+import { initUserApis, loadPersistedAdaptiveLimits, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, getContractSummary, describeError } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation, listIsolations, ISOLATION_MAX_AUTO_RELEASE } from './sourceGuard'
 import { hasHotSearchItems } from './hotSearchFallback'
@@ -14426,6 +14426,9 @@ export const startServer = async (port: number, ip: string) => {
     // 先读回上次运行的慢源记录：加载完音源后会按它把已知慢源预置进独立线程，
     // 避免重启后第一次搜索又把主线程卡十几秒（246 实测 11934ms）
     loadGovernorState()
+    // 读回已学到的「响应体上限」：否则重启后第一轮健康探测又会拿到 4.26MB 卡 8 秒
+    // （豆包定制[聚合音源] 实测，2026-11-13）。必须在 initUserApis 之前，加载期就可能发请求。
+    loadPersistedAdaptiveLimits()
     // 修改：不传参数，默认加载 open + 所有用户源
     await initUserApis()
     console.log('[服务] 自定义源初始化完成')
