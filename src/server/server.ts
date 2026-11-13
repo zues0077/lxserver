@@ -6169,6 +6169,37 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
+      // [P-1471] 前端音频诊断上报：「进度走但无声」这类问题只在浏览器里可观测，
+      // 服务端 access.log/app.log 原本完全看不到。前端 audio-diag.js 采集
+      // （audio error/stalled、ctx suspended-while-playing、静音/零音量、图残缺）并 POST 到这里，
+      // 只写一条 app.log（syncLog.warn），不落库、不回传任何媒体内容。
+      // 去重在前端做（60s 同事件限一条），这里不再限频——诊断通道宁可简单。
+      if (pathname === '/api/music/diag/audio' && req.method === 'POST') {
+        void readBody(req).then(body => {
+          try {
+            const payload = JSON.parse(body || '{}')
+            const ev = typeof payload.ev === 'string' ? payload.ev.slice(0, 64) : 'unknown'
+            const detail = JSON.stringify({
+              data: payload.data ?? null,
+              ctxState: payload.ctxState ?? null,
+              srcNode: payload.srcNode ?? null,
+              hasGraph: payload.hasGraph ?? null,
+              audio: payload.audio ?? null,
+              ua: typeof payload.ua === 'string' ? payload.ua.slice(0, 80) : '',
+            })
+            syncLog.warn(`[audio-diag] ${ev} ${detail.slice(0, 600)}`)
+          } catch {
+            /* 非法 payload 直接忽略：诊断通道不能反过来制造日志噪音 */
+          }
+          res.writeHead(204)
+          res.end()
+        }).catch(() => {
+          res.writeHead(204)
+          res.end()
+        })
+        return
+      }
+
       // Persistent server download queue. These tasks continue after the browser closes.
       if (pathname === '/api/music/cache/queue' && req.method === 'GET') {
         const username = getCacheRequestUsername(req)
