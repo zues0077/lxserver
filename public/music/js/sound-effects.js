@@ -692,6 +692,11 @@ window.soundEffects = (function () {
         getContext: () => audioContext || window._sharedAudioContext || null,
         getSourceNode: () => mediaSource || window._sharedAudioSourceNode || null,
         getAnalyser: () => analyser || window._sharedAudioAnalyser || null,
+        // DSP 图是否真的建成（mediaSource -> EQ -> ... -> analyser -> destination 全部就绪）。
+        // 注意：getAnalyser()/getContext() 会退回全局共享节点，DSP 图没建时也可能返回非空，
+        // 因此外部（如 visualizer）判断「能不能复用 effects 的节点」必须用这个，不能用 getAnalyser() 判空。详见 P-1471。
+        hasGraph: () => !!(audioContext && isGraphBuilt && analyser && mediaSource),
+        hasActiveEffects: hasActiveEffects,
         setReverbGain: function (type, val) {
             if (!audioContext || !isGraphBuilt) init(true);
             if (type === 'main') settings.reverb.mainGain = val;
