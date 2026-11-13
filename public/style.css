@@ -2017,8 +2017,9 @@ body {
 
 /* 宽屏固定列数：避免落到 2 列（卡片被撑到 800px 宽）导致排版忽宽忽窄 */
 @media (min-width: 1240px) {
+    /* [配置页重设计] 3 列等宽改 2 列：字段密度差异大，3 列留白失衡 */
     .config-group-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     /* 只有两张卡的组各占一半，别在右边留个空轨道 */
@@ -2033,6 +2034,25 @@ body {
 }
 
 /* 等高后短卡片底部会留白，让卡片自身变成纵向 flex，内容贴顶、空白落在下方 */
+.config-group-grid > .config-card.config-card--wide {
+    grid-column: 1 / -1;
+}
+
+
+/* [配置页重设计] 分组语义色：卡片左缘色条 + 图标容器底色，替代原来 8 种无序渐变 */
+.config-group[data-accent="blue"]   > .config-group-grid > .config-card { border-left: 3px solid #378ADD; }
+.config-group[data-accent="teal"]   > .config-group-grid > .config-card { border-left: 3px solid #1D9E75; }
+.config-group[data-accent="amber"]  > .config-group-grid > .config-card { border-left: 3px solid #BA7517; }
+.config-group[data-accent="purple"] > .config-group-grid > .config-card { border-left: 3px solid #7F77DD; }
+.config-group[data-accent="coral"]  > .config-group-grid > .config-card { border-left: 3px solid #D85A30; }
+.config-group[data-accent="blue"]   .config-card-icon { background: rgba(55, 138, 221, 0.16); }
+.config-group[data-accent="teal"]   .config-card-icon { background: rgba(29, 158, 117, 0.16); }
+.config-group[data-accent="amber"]  .config-card-icon { background: rgba(186, 117, 23, 0.16); }
+.config-group[data-accent="purple"] .config-card-icon { background: rgba(127, 119, 221, 0.16); }
+.config-group[data-accent="coral"]  .config-card-icon { background: rgba(216, 90, 48, 0.16); }
+.config-group[data-accent="coral"]  .config-card-icon svg,
+.config-group[data-accent="coral"]  .config-card--danger .config-card-icon svg { stroke: #D85A30; }
+
 .config-group-grid > .config-card {
     display: flex;
     flex-direction: column;
@@ -5665,8 +5685,9 @@ input:-webkit-autofill:active {
     /* 这里原来是 sticky bottom，但当时 .content-wrapper 自建了一个永不滚动的滚动容器，
        它根本吸不住（一直是普通流里的位置）。这次修好吸顶后它会突然变成「常驻浮动保存条」，
        常驻浮条会一直盖住页面底部约 60px 内容 —— 用户没要求过，保持原样更像他现在的印象。
-       想改成常驻浮条，把下面这行换回 position: sticky; bottom: 0.75rem 即可。 */
-    position: static;
+       [配置页重设计] 用户拍板换回吸底：改完配置不用滚到底找保存按钮。 */
+    position: sticky;
+    bottom: 0.75rem;
     z-index: 780;
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
