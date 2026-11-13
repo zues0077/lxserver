@@ -806,6 +806,16 @@ declare namespace LX {
      */
     'customSource.playRank.enabled'?: boolean
     /**
+     * 汽水版权曲「允许试听」兜底：完整版（账号/脚本/换源）都拿不到时，
+     * 允许投放汽水 30/60s 试听片段而不是报失败。默认 false（保持现行为）。
+     */
+    'soda.allowPreview'?: boolean
+    /**
+     * 试听片段独立缓存（preview/<user>/）的保留时长（小时，默认 168=7 天）。
+     * 与整曲缓存 TTL 完全独立；查找顺序固定「整曲缓存→完整链路→试听缓存→实时试听」。
+     */
+    'soda.previewTtlHours'?: number
+    /**
      * 本地音乐批量指纹识别的并发线程数 (1~4, 默认 2)。
      *
      * 每首都要跑 fpcalc + AcoustID 网络查询, 并发过高会触发上游限流。

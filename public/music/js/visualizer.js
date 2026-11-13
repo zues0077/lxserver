@@ -39,7 +39,12 @@ const musicVisualizer = (function () {
         const isDetailOn = window.settings ? window.settings.showDetailVisualizer : false;
         const isAnyVisualizerWanted = isFooterOn || isDetailOn;
 
-        const hasEffectsAnalyser = window.soundEffects && window.soundEffects.getAnalyser && window.soundEffects.getAnalyser();
+        // [Silent-audio fix] 判据必须是「DSP 图真的建起来了」，而不是「能不能拿到一个 AudioContext」。
+        // 旧实现用 getAnalyser() 判空，但该 getter 在 DSP 图未建时会退回 window._sharedAudioContext / _sharedAudioAnalyser，
+        // 于是 hasEffectsAnalyser 恒为真：既不满足下面的 return，又在 62~64 行拿到 null 节点，
+        // 结果 createMediaElementSource 已执行（原生输出被永久交给 Web Audio）但 graph 建不起来 →
+        // 解码进度照走、扬声器无声；暂停再播触发重新 init 才恢复。详见 P-1471。
+        const hasEffectsAnalyser = !!(window.soundEffects && window.soundEffects.hasGraph && window.soundEffects.hasGraph());
 
         if (!isAnyVisualizerWanted && !hasEffectsAnalyser) {
             console.log('[Visualizer] Visualizer disabled. Skipping AudioContext creation to preserve native playback.');
@@ -56,16 +61,36 @@ const musicVisualizer = (function () {
 
         try {
             console.log('[Visualizer] Initializing AudioContext & Visualizer graph...');
-            audioContext = window._sharedAudioContext || (window.soundEffects && window.soundEffects.getContext && window.soundEffects.getContext()) || (window._sharedAudioContext = new (window.AudioContext || window.webkitAudioContext)());
+            // [Silent-audio fix] 只有 DSP 图真的建成时才复用 SoundEffects 的 context/analyser；
+            // 否则一律自建（并在下面保证 createMediaElementSource 与 connect(destination) 成对完成）。
+            audioContext = (hasEffectsAnalyser && window.soundEffects.getContext && window.soundEffects.getContext()) || window._sharedAudioContext || (window._sharedAudioContext = new (window.AudioContext || window.webkitAudioContext)());
 
             if (hasEffectsAnalyser) {
                 audioAnalyser = window.soundEffects.getAnalyser();
                 audioSource = window.soundEffects.getSourceNode ? window.soundEffects.getSourceNode() : window._sharedAudioSourceNode;
                 console.log('[Visualizer] Using analyser from SoundEffectsManager');
             } else {
-                audioSource = window._sharedAudioSourceNode || (window._sharedAudioSourceNode = audioContext.createMediaElementSource(audio));
                 audioAnalyser = window._sharedAudioAnalyser || (window._sharedAudioAnalyser = audioContext.createAnalyser());
-                
+                // [Silent-audio fix] 关键不变量：只要还没接好 destination，就绝不 createMediaElementSource。
+                // createMediaElementSource 会把 <audio> 的原生输出永久改道到 Web Audio 图，且同一元素只能调用一次；
+                // 一旦后续接不上 destination，就是「进度在走但没有声音」，且没有任何回退手段。
+                if (window._sharedAudioSourceNode) {
+                    audioSource = window._sharedAudioSourceNode;
+                } else if (window._effectsSrcHijacked === false) {
+                    // 该元素此前已被 createMediaElementSource 接管过但节点丢失，无法再次接管，保持原生输出
+                    console.warn('[Visualizer] Audio element already captured but source node lost. Keeping native output.');
+                    return;
+                } else {
+                    try {
+                        audioSource = window._sharedAudioSourceNode = audioContext.createMediaElementSource(audio);
+                    } catch (e) {
+                        window._effectsSrcHijacked = false;
+                        console.warn('[Visualizer] createMediaElementSource failed, keeping native output.', e);
+                        return;
+                    }
+                    window._effectsSrcHijacked = true;
+                }
+
                 try { audioSource.disconnect(); } catch (_) { }
                 try { audioAnalyser.disconnect(); } catch (_) { }
                 audioSource.connect(audioAnalyser);

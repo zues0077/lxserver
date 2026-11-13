@@ -176,6 +176,15 @@ window.soundEffects = (function () {
 
         pitchShifterInitPromise = (async () => {
             try {
+                // [P-1471] 非安全上下文（http:// 直连 IP）下 AudioContext.audioWorklet 不存在，
+                // addModule 会抛 TypeError 且每次开音效都报一遍；变声在该场景下本来就不可能工作。
+                // 其他音效（EQ/混响/3D）的图在本函数之前已建好，不受影响，照常工作。
+                if (!audioContext.audioWorklet) {
+                    if (settings.pitch !== 1.0) {
+                        console.warn('[SoundEffects] audioWorklet unavailable (insecure context, e.g. http://). Pitch shifting disabled; EQ/reverb/3D still active.');
+                    }
+                    return null;
+                }
                 console.log('[SoundEffects] Loading Pitch Shifter Module from /music/js/pitch-shifter/phase-vocoder.js');
                 await audioContext.audioWorklet.addModule('/music/js/pitch-shifter/phase-vocoder.js');
 

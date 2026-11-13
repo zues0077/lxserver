@@ -739,6 +739,12 @@ const resolvePlayableAudio = async (
           failures.push(`${extraLabel}: 未返回播放地址`)
           return null
         }
+        // 「允许试听」开启时汽水匿名通道可能返回 30s 试听候选（via 带 :preview 标记）：
+        // 投送场景只接受整曲，试听片段不允许混入投送链路
+        if (/:preview/i.test(String(extra?.via || ''))) {
+          failures.push(`${extraLabel}: 仅试听片段，不用于投送`)
+          return null
+        }
         probes++
         const extraProbe = await probeAudioCached(extraUrl)
         if (extraProbe.ok) {
@@ -2832,6 +2838,8 @@ const resolveSwitchCandidate = async (candidate: any, quality: string, username:
   if (extraSources.isExtraSource(source)) {
     const extra = await extraSources.getMusicUrl(source, candidate, quality, username)
     if (!extra?.url) throw new Error('额外音源未返回地址')
+    // 试听片段不允许当换源结果（会被当整曲写缓存）：完整版优先，试听只走播放兜底链路
+    if (source === 'soda' && /:preview/i.test(String(extra.via || ''))) throw new Error('汽水仅试听片段，不作为换源结果')
     if (await isEncryptedRemoteStream(extra.url)) throw new Error('返回的是加密流，需先解密')
     return { url: extra.url, quality: extra.type, sourceName: extra.sourceName }
   }
@@ -2949,6 +2957,10 @@ const resolveServerSong = async (
   if (extraSources.isExtraSource(originalSong.source)) {
     try {
       const extra = await extraSources.getMusicUrl(originalSong.source, originalSong, requestedQuality, username)
+      // 试听候选（via 带 :preview）不作为换源/下载结果：会以整曲名义落缓存、误导用户
+      if (originalSong.source === 'soda' && /:preview/i.test(String(extra.via || ''))) {
+        throw new Error('汽水仅试听片段，不作为换源结果')
+      }
       return {
         url: extra.url,
         quality: extra.type,
@@ -6157,6 +6169,37 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         return
       }
 
+      // [P-1471] 前端音频诊断上报：「进度走但无声」这类问题只在浏览器里可观测，
+      // 服务端 access.log/app.log 原本完全看不到。前端 audio-diag.js 采集
+      // （audio error/stalled、ctx suspended-while-playing、静音/零音量、图残缺）并 POST 到这里，
+      // 只写一条 app.log（syncLog.warn），不落库、不回传任何媒体内容。
+      // 去重在前端做（60s 同事件限一条），这里不再限频——诊断通道宁可简单。
+      if (pathname === '/api/music/diag/audio' && req.method === 'POST') {
+        void readBody(req).then(body => {
+          try {
+            const payload = JSON.parse(body || '{}')
+            const ev = typeof payload.ev === 'string' ? payload.ev.slice(0, 64) : 'unknown'
+            const detail = JSON.stringify({
+              data: payload.data ?? null,
+              ctxState: payload.ctxState ?? null,
+              srcNode: payload.srcNode ?? null,
+              hasGraph: payload.hasGraph ?? null,
+              audio: payload.audio ?? null,
+              ua: typeof payload.ua === 'string' ? payload.ua.slice(0, 80) : '',
+            })
+            syncLog.warn(`[audio-diag] ${ev} ${detail.slice(0, 600)}`)
+          } catch {
+            /* 非法 payload 直接忽略：诊断通道不能反过来制造日志噪音 */
+          }
+          res.writeHead(204)
+          res.end()
+        }).catch(() => {
+          res.writeHead(204)
+          res.end()
+        })
+        return
+      }
+
       // Persistent server download queue. These tasks continue after the browser closes.
       if (pathname === '/api/music/cache/queue' && req.method === 'GET') {
         const username = getCacheRequestUsername(req)
@@ -6433,7 +6476,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             username = verified
           }
           const folderParam = urlObj.searchParams.get('folder')
-          const requestedFolder = folderParam === 'cache' || folderParam === 'music' ? folderParam as fileCache.CacheFolder : undefined
+          const requestedFolder = folderParam === 'cache' || folderParam === 'music' || folderParam === 'preview' ? folderParam as fileCache.CacheFolder : undefined
           fileCache.serveCacheFile(req, res, decodeURIComponent(filename), username, requestedFolder)
           return
         }
@@ -10036,6 +10079,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
             let customSourceError: string | null = null
             let attempts: any[] = []
+            // 「允许试听」兜底候选（soda.allowPreview=true 时由 R75-1 preview 判定填充；
+            // 换源全失败后才投放——完整版永远优先）
+            let sodaTrialFallback: { url: string; quality: string; previewDurationSec: number } | null = null
+            // 试听候选被门禁持有时置 true：阻止该候选被当成功转正，改由换源/兜底链路接管
+            let previewHeldForFallback = false
             if (!result && (isSourceSupported(source, verifiedUsername) || accountUsable)) {
               try {
                 console.log(`[歌曲播放] 使用自定义源解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
@@ -10109,13 +10157,32 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     const expectedSec = parseIntervalSeconds(songInfo.interval || (songInfo as any)?.meta?.interval)
                     const gate = await probeRemoteStream(String(candidate.url), expectedSec)
                     if (!gate.ok) {
-                      if (gate.kind === 'preview') noteSodaPreviewVerdict(songInfo, gate.reason || '')
-                      console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
-                      throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
+                      if (gate.kind === 'preview') {
+                        // 「允许试听」兜底（2026-11-13 方案）：完整版永远优先 —— 这里不直接投放，
+                        // 只把试听候选记下来，且**不当成功转正**；换源（五平台+B站）仍照常执行，
+                        // 全都没有时才投试听。记负缓存会挡住后续重试，所以兜底开启时不记。
+                        if (fileCache.previewCacheEnabled()) {
+                          sodaTrialFallback = {
+                            url: String(candidate.url),
+                            quality: String(quality || '128k'),
+                            previewDurationSec: (gate as any).streamDurationSec || 0,
+                          }
+                          console.log(`[歌曲播放] 汽水试听候选已记录（不当成功转正，换源失败后兜底用）: ${songInfo.name} — ${gate.reason}`)
+                          // 不转正：跳过下方 result = candidate，让换源与试听兜底链路接管
+                          previewHeldForFallback = true
+                        } else {
+                          noteSodaPreviewVerdict(songInfo, gate.reason || '')
+                          console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
+                          throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
+                        }
+                      } else {
+                        console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
+                        throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
+                      }
                     }
                   }
-                  // 后处理全部通过：此刻才把候选结果转正
-                  result = candidate
+                  // 后处理全部通过：此刻才把候选结果转正（试听候选被兜底持有时不转正）
+                  if (!previewHeldForFallback) result = candidate
                 } else {
                   // 其余平台无后处理，直接转正
                   result = candidate
@@ -10179,12 +10246,59 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     },
                   }
                   void pushProgress({ name: switched.sourceName, status: 'success' })
+                  // 整曲已可用：清同曲试听缓存，防止试听片段残留误导后续播放
+                  fileCache.clearPreviewCacheForSong(verifiedUsername, String(songInfo?.songmid || songInfo?.id || ''))
                   console.log(`[换源] ${source} 失败后已换到 ${switched.sourceName}：${songInfo.name}`)
                 }
               } catch (switchErr: any) {
                 console.warn(`[换源] ${source} 失败后换源也未命中: ${switchErr?.message || switchErr}`)
               }
+              // 「允许试听」最后兜底（2026-11-13 方案）：完整版全都没有时才投试听片段。
+              // 优先 preview/ 缓存（TTL 内直接复用），否则用本次门禁记下的候选并异步写缓存。
+              // 投放结果显式带 switched 提示，用户不会误以为听到的是完整版。
+              if (!result && sodaTrialFallback && fileCache.previewCacheEnabled()) {
+                const cachedPreview = fileCache.getPreviewCacheItem(verifiedUsername, songInfo, sodaTrialFallback.quality)
+                if (cachedPreview?.filename) {
+                  result = {
+                    // 与 checkCache 同口径：URL 用户段必须用 normalizeUsername 归一（匿名一律 _open，
+                    // 公共免鉴权），否则匿名客户端拿到带自己命名空间的地址会 401
+                    url: `/api/music/cache/file/${encodeURIComponent(fileCache.normalizeUsername(verifiedUsername))}/${encodeURIComponent(cachedPreview.filename)}?folder=preview`,
+                    type: 'local',
+                    sourceName: '汽水试听（缓存）',
+                    sourceId: 'soda-preview-cache',
+                    quality: cachedPreview.quality || sodaTrialFallback.quality,
+                    attempts: [{ name: '汽水试听（缓存）', status: 'success' }],
+                    switched: {
+                      from: sourceDisplayName(source),
+                      to: '汽水试听片段',
+                      reason: '完整版各通道与全平台换源均未命中，已按「允许试听」设置投放试听片段',
+                    },
+                  } as any
+                  void pushProgress({ name: '汽水试听（缓存）', status: 'success' })
+                  console.log(`[试听兜底] 命中试听缓存: ${songInfo.name} (${cachedPreview.previewDurationSec || '?'}s)`)
+                } else {
+                  result = {
+                    url: sodaTrialFallback.url,
+                    type: sodaTrialFallback.quality,
+                    sourceName: '汽水试听',
+                    sourceId: 'soda-preview-live',
+                    quality: sodaTrialFallback.quality,
+                    attempts: [{ name: '汽水试听', status: 'success' }],
+                    switched: {
+                      from: sourceDisplayName(source),
+                      to: '汽水试听片段',
+                      reason: '完整版各通道与全平台换源均未命中，已按「允许试听」设置投放试听片段',
+                    },
+                  } as any
+                  void pushProgress({ name: '汽水试听', status: 'success' })
+                  console.log(`[试听兜底] 投放实时试听流: ${songInfo.name} (${sodaTrialFallback.previewDurationSec || '?'}s)`)
+                  // 异步写试听缓存（不阻塞投放；解码抽检不过就不落盘）
+                  void fileCache.savePreviewCache(songInfo, sodaTrialFallback.url, sodaTrialFallback.quality, verifiedUsername, sodaTrialFallback.previewDurationSec)
+                }
+              }
+
               // 换源也没成，才把失败写进短缓存（避免把「其实能换到」的曲子也一起缓存掉）
+              // 注意：试听兜底已投放（result 非空）时也不写失败缓存——下次播放完整链路照常先试完整版。
               if (!result) rememberMusicUrlFailure(failKey, switchReason)
             }
 
@@ -11524,6 +11638,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'musicAccount.kglite.tokenRefreshMaxDays': musicAccount.getKugouLiteTokenRefreshConfig().maxDays,
             subsonicPortConflict: global.lx.subsonicPortConflict || null,
             localMusicIdentifyThreads: global.lx.config['localMusicIdentifyThreads'] ?? 2,
+            'soda.allowPreview': global.lx.config['soda.allowPreview'] === true,
+            'soda.previewTtlHours': (() => {
+              const raw = global.lx.config['soda.previewTtlHours']
+              const h = parseInt(String(raw ?? ''))
+              return Number.isFinite(h) && h >= 1 ? Math.min(8760, h) : 168
+            })(),
             configFilePath: global.lx.configPath || process.env.CONFIG_PATH || path.join(global.lx.dataPath, 'config.js'),
           }
           res.writeHead(200, {
@@ -11561,6 +11681,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (newConfig['system.allowUnsafeVM'] !== undefined) global.lx.config['system.allowUnsafeVM'] = newConfig['system.allowUnsafeVM']
               // 本地音乐识别并发线程数（1~4，默认 2），对应上游 #462
               if (newConfig['localMusicIdentifyThreads'] !== undefined) global.lx.config['localMusicIdentifyThreads'] = Math.min(4, Math.max(1, parseInt(newConfig['localMusicIdentifyThreads']) || 2))
+              // 汽水试听兜底：开关 + 试听缓存 TTL（小时）
+              if (newConfig['soda.allowPreview'] !== undefined)
+                global.lx.config['soda.allowPreview'] = !!newConfig['soda.allowPreview']
+              if (newConfig['soda.previewTtlHours'] !== undefined)
+                global.lx.config['soda.previewTtlHours'] = Math.min(8760, Math.max(1, parseInt(newConfig['soda.previewTtlHours']) || 168))
 
               // 音源平台可用性巡检
               if (newConfig['customSource.probe.enabled'] !== undefined) {

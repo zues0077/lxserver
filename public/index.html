@@ -1132,7 +1132,7 @@
                                         </div>
                                     </div>
                                 </div>
-
+                                <div class="config-divider"></div>
                                 <div class="config-card glass">
                                     <div class="config-card-header">
                                         <div class="config-card-icon"
@@ -2370,6 +2370,41 @@
                                             <input type="number" name="customSource.trash.retentionDays"
                                                 class="form-input config-input" value="3" min="0" max="3650" />
                                             <small class="config-hint">默认 3 天，填 0 表示永不自动清理。到期条目会被彻底删除（不可恢复）</small>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="config-card glass">
+                                    <div class="config-card-header">
+                                        <div class="config-card-icon"
+                                            style="background: linear-gradient(135deg, #06b6d4, #0891b2);">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="2">
+                                                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                                            </svg>
+                                        </div>
+                                        <div class="config-card-head-text">
+                                            <h3 class="config-card-title">汽水试听兜底</h3>
+                                            <p class="config-card-desc">所有常规通道都没匹配时，是否允许落到汽水匿名 60 秒试听</p>
+                                        </div>
+                                    </div>
+                                    <div class="config-card-body">
+                                        <div class="config-toggle-row">
+                                            <div class="config-toggle-info">
+                                                <span class="config-toggle-label">汽水版权曲允许试听</span>
+                                                <span class="config-toggle-desc">汽水受限曲只有 30/60 秒试听且完整版换源也找不到时，投放试听片段而不是报失败；完整版永远优先。兜底顺序：五平台 → 汽水账号 → B站 →
+                                                    <strong>汽水匿名试听（本开关）</strong>；试听候选不会进下载与小爱投送</span>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" name="soda.allowPreview" />
+                                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                            </label>
+                                        </div>
+                                        <div class="config-field">
+                                            <label class="config-label">试听缓存保留时长（小时）</label>
+                                            <input type="number" name="soda.previewTtlHours"
+                                                class="form-input config-input" value="168" min="1" max="8760" />
+                                            <small class="config-hint">默认 168（7 天）。试听片段存独立 preview 目录，与整曲缓存（6 小时）完全独立，到期自动清理</small>
                                         </div>
                                     </div>
                                 </div>

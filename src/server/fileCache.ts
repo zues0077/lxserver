@@ -189,10 +189,11 @@ type LyricFetcher = (songInfo: any) => Promise<string | null>
 let _lyricFetcher: LyricFetcher | null = null
 export const setLyricFetcher = (fn: LyricFetcher) => { _lyricFetcher = fn }
 
-export const getCacheDir = (username?: string, isOnlyDownload?: boolean, location?: string) => {
+export const getCacheDir = (username?: string, isOnlyDownload?: boolean | 'preview', location?: string) => {
     const userDirName = normalizeUsername(username)
 
-    const folderName = isOnlyDownload ? 'music' : 'cache'
+    // 三目录模式（2026-11-13 汽水试听方案）：cache=整曲缓存 / music=用户下载 / preview=试听片段
+    const folderName = isOnlyDownload === true ? 'music' : isOnlyDownload === 'preview' ? 'preview' : 'cache'
     const loc = location || getUserCacheLocation(userDirName)
     let baseDir = ''
     if (loc === CACHE_ROOTS.DATA) {
@@ -262,9 +263,13 @@ export interface CacheItem {
     // 汽水版权曲 CENC 加密流的解密密钥（32 位十六进制）。落盘时记下，
     // 这样已缓存的加密文件在容器重启后仍能被就地解密（见 checkCache / downloadAndCache）。
     decryptKey?: string
+    /** 试听片段标记（仅 preview/ 目录条目使用；整曲缓存条目永远不会有它） */
+    isPreview?: boolean
+    /** 试听片段实际时长（秒），来自取流时的判定 */
+    previewDurationSec?: number
 }
 
-export type CacheFolder = 'cache' | 'music'
+export type CacheFolder = 'cache' | 'music' | 'preview'
 
 export interface RemoveCacheFileResult {
     deleted: boolean
@@ -282,18 +287,18 @@ export interface DownloadProvenance {
 class CacheIndexManager {
     private indexes: Map<string, Map<string, CacheItem>> = new Map() // "location:username:folder" -> (songId -> CacheItem)
 
-    private getIndexFile(username: string, folder: 'cache' | 'music', location?: string) {
-        const userDir = getCacheDir(username, folder === 'music', location)
-        const fileName = folder === 'music' ? 'music_index.json' : 'cache_index.json'
+    private getIndexFile(username: string, folder: 'cache' | 'music' | 'preview', location?: string) {
+        const userDir = getCacheDir(username, folder === 'music' ? true : folder === 'preview' ? 'preview' : false, location)
+        const fileName = folder === 'music' ? 'music_index.json' : folder === 'preview' ? 'preview_index.json' : 'cache_index.json'
         return path.join(userDir, fileName)
     }
 
-    private getKey(username: string, folder: 'cache' | 'music', location?: string) {
+    private getKey(username: string, folder: 'cache' | 'music' | 'preview', location?: string) {
         const loc = location || getUserCacheLocation(username)
         return `${loc}:${username}:${folder}`
     }
 
-    load(username: string, folder: 'cache' | 'music', location?: string) {
+    load(username: string, folder: 'cache' | 'music' | 'preview', location?: string) {
         const loc = location || getUserCacheLocation(username)
         const key = this.getKey(username, folder, loc)
         const file = this.getIndexFile(username, folder, loc)
@@ -310,7 +315,7 @@ class CacheIndexManager {
         return this.indexes.get(key)!
     }
 
-    save(username: string, folder: 'cache' | 'music', location?: string) {
+    save(username: string, folder: 'cache' | 'music' | 'preview', location?: string) {
         const loc = location || getUserCacheLocation(username)
         const key = this.getKey(username, folder, loc)
         const index = this.indexes.get(key)
@@ -325,7 +330,7 @@ class CacheIndexManager {
         }
     }
 
-    get(username: string, songId: string, folder: 'cache' | 'music', quality?: string, exact: boolean = false, location?: string) {
+    get(username: string, songId: string, folder: 'cache' | 'music' | 'preview', quality?: string, exact: boolean = false, location?: string) {
         const key = this.getKey(username, folder, location)
         const index = this.indexes.get(key) || this.load(username, folder, location)
         if (quality) {
@@ -342,7 +347,7 @@ class CacheIndexManager {
         return undefined
     }
 
-    update(username: string, item: CacheItem, folder: 'cache' | 'music', location?: string) {
+    update(username: string, item: CacheItem, folder: 'cache' | 'music' | 'preview', location?: string) {
         const key = this.getKey(username, folder, location)
         const index = this.indexes.get(key) || this.load(username, folder, location)
         // Use composite key id_quality
@@ -351,7 +356,7 @@ class CacheIndexManager {
         this.save(username, folder, location)
     }
 
-    remove(username: string, songId: string, folder: 'cache' | 'music', quality?: string, location?: string) {
+    remove(username: string, songId: string, folder: 'cache' | 'music' | 'preview', quality?: string, location?: string) {
         const key = this.getKey(username, folder, location)
         const index = this.indexes.get(key) || this.load(username, folder, location)
         if (quality) {
@@ -373,11 +378,11 @@ class CacheIndexManager {
         return deleted
     }
 
-    getAll(username: string, folder: 'cache' | 'music', location?: string) {
+    getAll(username: string, folder: 'cache' | 'music' | 'preview', location?: string) {
         return Array.from((this.indexes.get(this.getKey(username, folder, location)) || this.load(username, folder, location)).values())
     }
 
-    discard(username: string, folder: 'cache' | 'music', location?: string) {
+    discard(username: string, folder: 'cache' | 'music' | 'preview', location?: string) {
         this.indexes.delete(this.getKey(username, folder, location))
     }
 }
@@ -916,7 +921,7 @@ export const getFileName = (songInfo: any, quality?: string, isOnlyDownload?: bo
     // --- Collision Handling ---
     // Only apply suffix logic if we have a username and it's not the standard pattern (which is already unique)
     if (username && pattern !== CACHE_NAMING_PATTERNS.STANDARD) {
-        const folder: 'cache' | 'music' = isOnlyDownload ? 'music' : 'cache'
+        const folder: 'cache' | 'music' | 'preview' = isOnlyDownload ? 'music' : 'cache'
         const normalizedUsername = normalizeUsername(username)
         const existingItems = indexManager.getAll(normalizedUsername, folder)
 
@@ -966,7 +971,7 @@ const sanitize = (str: any) => String(str || '').replace(/[\\/:*?"<>|]/g, '_')
 /**
  * Sync disk files with index database
  */
-export const syncCacheIndex = async (username?: string, roots: Array<'cache' | 'music'> = ['cache', 'music']) => {
+export const syncCacheIndex = async (username?: string, roots: Array<'cache' | 'music' | 'preview'> = ['cache', 'music']) => {
     const normalizedUsername = normalizeUsername(username)
     void cleanupStaleTempFiles(normalizedUsername)
     const extensions = ['.mp3', '.flac', '.m4a', '.ogg', '.wav']
@@ -1331,7 +1336,7 @@ export const getCacheList = async (username?: string) => {
  */
 export const batchRenameCacheFiles = async (username: string | undefined) => {
     const normalizedUsername = normalizeUsername(username)
-    const folders: Array<'cache' | 'music'> = ['cache', 'music']
+    const folders: Array<'cache' | 'music' | 'preview'> = ['cache', 'music']
 
     let successCount = 0
     let failCount = 0
@@ -1508,7 +1513,7 @@ export const batchUpdateMetadata = async (filenames: string[], username: string 
             item.mtime = stats.mtimeMs
             item.size = stats.size
 
-            indexManager.update(normalizedUsername, item, item.folder as 'cache' | 'music')
+            indexManager.update(normalizedUsername, item, item.folder as 'cache' | 'music' | 'preview')
             successCount++
         } catch (e) {
             console.error(`[文件缓存] 更新元数据标签失败 (${filename}):`, e)
@@ -1533,7 +1538,7 @@ export const linkLocalFile = async (oldFilename: string, songInfo: any, username
     const item = allItems.find(i => i.filename === oldFilename)
     if (!item) throw new Error('File not found in index')
 
-    const folder = item.folder as 'cache' | 'music'
+    const folder = item.folder as 'cache' | 'music' | 'preview'
     const dir = getCacheDir(normalizedUsername, folder === 'music')
     const oldPath = path.join(dir, item.filename)
     if (!fs.existsSync(oldPath)) throw new Error('Physical file not found')
@@ -1672,11 +1677,11 @@ export const getCacheCover = async (filename: string, username?: string) => {
         userLoc,
         userLoc === CACHE_ROOTS.DATA ? CACHE_ROOTS.ROOT : CACHE_ROOTS.DATA
     ]
-    const roots: Array<'cache' | 'music'> = ['cache', 'music']
+    const roots: Array<'cache' | 'music' | 'preview'> = ['cache', 'music']
 
     for (const loc of locations) {
         for (const folder of roots) {
-            const dir = getCacheDir(normalizedUsername, folder === 'music', loc)
+            const dir = getCacheDir(normalizedUsername, folder === 'music' ? true : folder === 'preview' ? 'preview' : false, loc)
             const filePath = resolveCacheRelativePath(dir, filename) // [Fix] Allow subfolders safely
 
             if (filePath && fs.existsSync(filePath)) {
@@ -1879,7 +1884,7 @@ export interface CacheAuditFinding {
 export const auditCacheItem = async (
     item: CacheItem,
     username: string,
-    folder: 'cache' | 'music' = 'cache',
+    folder: 'cache' | 'music' | 'preview' = 'cache',
 ): Promise<CacheAuditFinding> => {
     const dir = getCacheDir(username, folder === 'music')
     const filePath = path.join(dir, item.filename || '')
@@ -1940,7 +1945,7 @@ const originVerifyInflight = new Set<string>()
  */
 const scheduleOriginVerify = (
     username: string,
-    folder: 'cache' | 'music',
+    folder: 'cache' | 'music' | 'preview',
     songId: string,
     cached: CacheItem,
     filePath: string,
@@ -1981,7 +1986,7 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
         // exactQuality=true 时：精确匹配，不允许 fallback 到不同音质
         const useExact = !!songInfo.exactQuality
         // 同一音质的下载文件优先于缓存副本；任意音质的兜底仍保持缓存目录优先，避免高音质被降级
-        const lookupOrder: Array<{ folder: 'cache' | 'music'; anyQuality: boolean }> = [
+        const lookupOrder: Array<{ folder: 'cache' | 'music' | 'preview'; anyQuality: boolean }> = [
             { folder: 'music', anyQuality: false },
             { folder: 'cache', anyQuality: false },
             { folder: 'cache', anyQuality: true },
@@ -2102,7 +2107,7 @@ export const checkCache = (songInfo: any, username?: string, isLyricCheck: boole
 
         // 3. Fallback for non-exact (only if requested)
         if (!songInfo.exactQuality && !isLyricCheck) {
-            const folderTypes: Array<'cache' | 'music'> = ['cache', 'music']
+            const folderTypes: Array<'cache' | 'music' | 'preview'> = ['cache', 'music']
             for (const folder of folderTypes) {
                 const cachedAny = indexManager.get(normalizedUsername, id, folder)
                 if (cachedAny) {
@@ -2148,7 +2153,7 @@ export const checkLyricCache = (songInfo: any, username?: string) => {
     const normalizedUsername = normalizeUsername(username)
 
     // Check index first
-    const folderTypes: Array<'cache' | 'music'> = ['cache', 'music']
+    const folderTypes: Array<'cache' | 'music' | 'preview'> = ['cache', 'music']
     for (const folder of folderTypes) {
         const cached = indexManager.get(normalizedUsername, id, folder, songInfo.quality)
         if (cached && cached.hasLyric && cached.lyricFilename) {
@@ -2247,7 +2252,7 @@ export const saveLyricCache = (songInfo: any, lyricsObj: any, username?: string,
 
         const normalizedUsername = normalizeUsername(username)
         const id = normalizeSongId(songInfo)
-        const preferredFolders: Array<'cache' | 'music'> = isOnlyDownload ? ['music', 'cache'] : ['cache', 'music']
+        const preferredFolders: Array<'cache' | 'music' | 'preview'> = isOnlyDownload ? ['music', 'cache'] : ['cache', 'music']
         let audioResult: any = { exists: false }
         for (const folder of preferredFolders) {
             const cached = indexManager.get(normalizedUsername, id, folder, songInfo.quality, false)
@@ -2306,7 +2311,7 @@ export const saveLyricCache = (songInfo: any, lyricsObj: any, username?: string,
         }
 
         // Update index — use normalizeSongId to ensure the ID has source prefix, matching index keys
-        const foldersToUpdate: Array<'cache' | 'music'> = isOnlyDownload ? ['music', 'cache'] : ['cache', 'music']
+        const foldersToUpdate: Array<'cache' | 'music' | 'preview'> = isOnlyDownload ? ['music', 'cache'] : ['cache', 'music']
         for (const folder of foldersToUpdate) {
             const existing = indexManager.get(normalizedUsername, id, folder, quality)
             if (existing) {
@@ -2413,7 +2418,7 @@ const ensureCachedLyrics = async (
     username: string | undefined,
     isOnlyDownload: boolean | undefined,
     audioPath: string,
-    folder: 'cache' | 'music',
+    folder: 'cache' | 'music' | 'preview',
     shouldCacheLyric: boolean,
     shouldEmbedLyric: boolean,
 ) => {
@@ -2533,7 +2538,7 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
 
     const result = checkCache({ ...songInfo, quality, exactQuality: true }, username, false)
     if (result.exists && !result.isCollision) {
-        const targetFolder: 'cache' | 'music' = isOnlyDownload ? 'music' : 'cache'
+        const targetFolder: 'cache' | 'music' | 'preview' = isOnlyDownload ? 'music' : 'cache'
         if (result.folder === targetFolder && result.path) {
             alignOrphanLyric(username, normalizeSongId(songInfo), quality || result.quality, targetFolder)
             await ensureCachedLyrics(songInfo, quality || result.quality, username, isOnlyDownload, result.path, targetFolder, shouldCacheLyric, shouldEmbedLyric)
@@ -2934,7 +2939,7 @@ export const downloadAndCache = async (songInfo: any, url: string, quality?: str
                     const metadata = extractSongMetadata(songInfo)
                     const id = metadata.id || String(songInfo.id || songInfo.songmid)
                     const normalizedUsername = normalizeUsername(username)
-                    const folderType: 'cache' | 'music' = isOnlyDownload ? 'music' : 'cache'
+                    const folderType: 'cache' | 'music' | 'preview' = isOnlyDownload ? 'music' : 'cache'
 
                     indexManager.update(normalizedUsername, {
                         id, songmid: id, name: metadata.name, singer: metadata.singer,
@@ -3329,7 +3334,7 @@ export const serveCacheFile = (req: http.IncomingMessage, res: http.ServerRespon
     let filePath = ''
     for (const loc of locations) {
         for (const folder of roots) {
-            const dir = getCacheDir(normalizedUsername, folder === 'music', loc)
+            const dir = getCacheDir(normalizedUsername, folder === 'music' ? true : folder === 'preview' ? 'preview' : false, loc)
             // 允许子目录，但只读取当前缓存目录内的普通文件（包括目录内的符号链接）。
             const checkPath = path.resolve(dir, filename)
             const relativePath = path.relative(path.resolve(dir), checkPath)
@@ -3576,7 +3581,7 @@ export const deleteOrphanLyrics = (items: Array<{ filename: string; folder?: Cac
 }
 
 export const clearLyricCache = (username?: string) => {
-    const roots: Array<'cache' | 'music'> = ['cache', 'music']
+    const roots: Array<'cache' | 'music' | 'preview'> = ['cache', 'music']
     let deletedCount = 0
     let freedSize = 0
     const normalizedUsername = normalizeUsername(username)
@@ -3607,7 +3612,7 @@ export const clearLyricCache = (username?: string) => {
  */
 export const cleanupStaleTempFiles = async (username?: string, maxAgeMs: number = 10 * 60 * 1000) => {
     const normalizedUsername = normalizeUsername(username)
-    const roots: Array<'cache' | 'music'> = ['cache', 'music']
+    const roots: Array<'cache' | 'music' | 'preview'> = ['cache', 'music']
     const now = Date.now()
     let cleanedCount = 0
 
@@ -3713,7 +3718,7 @@ export const switchFolder = async (filenames: string[], username: string | undef
     const musicDir = getCacheDir(normalizedUsername, true)
 
     for (const filename of filenames) {
-        let sourceFolder: 'cache' | 'music' | null = null
+        let sourceFolder: 'cache' | 'music' | 'preview' | null = null
         let item: CacheItem | null = null
         let inMusic: CacheItem | undefined = undefined
 
@@ -3736,7 +3741,7 @@ export const switchFolder = async (filenames: string[], username: string | undef
             continue
         }
 
-        const targetFolder: 'cache' | 'music' = sourceFolder === 'cache' ? 'music' : 'cache'
+        const targetFolder: 'cache' | 'music' | 'preview' = sourceFolder === 'cache' ? 'music' : 'cache'
 
         // [Constraint] Cannot move from music subfolder to cache
         if (sourceFolder === 'music' && item.subPath && item.subPath !== '') {
@@ -3831,7 +3836,7 @@ export const switchBaseLocation = async (filenames: string[], username: string |
     const sourceLoc = getUserCacheLocation(normalizedUsername)
     const targetLoc = sourceLoc === CACHE_ROOTS.DATA ? CACHE_ROOTS.ROOT : CACHE_ROOTS.DATA
 
-    const folders: Array<'cache' | 'music'> = ['cache', 'music']
+    const folders: Array<'cache' | 'music' | 'preview'> = ['cache', 'music']
 
     // Helper to get dir for a specific location
     const getLocalDir = (folder: string, loc: string) => {
@@ -3842,7 +3847,7 @@ export const switchBaseLocation = async (filenames: string[], username: string |
     }
 
     for (const filename of filenames) {
-        let sourceFolder: 'cache' | 'music' | null = null
+        let sourceFolder: 'cache' | 'music' | 'preview' | null = null
         let item: CacheItem | null = null
 
         // Find folder in SOURCE location
@@ -3918,7 +3923,7 @@ export const switchBaseLocation = async (filenames: string[], username: string |
 /**
  * [New] Get all subdirectories in the music/cache folders
  */
-export const getSubDirectories = (username: string | undefined, folder: 'cache' | 'music') => {
+export const getSubDirectories = (username: string | undefined, folder: 'cache' | 'music' | 'preview') => {
     const normalizedUsername = normalizeUsername(username)
     const root = getCacheDir(normalizedUsername, folder === 'music')
     if (!fs.existsSync(root)) return []
@@ -3949,7 +3954,7 @@ export const getSubDirectories = (username: string | undefined, folder: 'cache' 
 /**
  * [New] Create a subdirectory
  */
-export const createSubDirectory = (username: string | undefined, folder: 'cache' | 'music', subPath: string) => {
+export const createSubDirectory = (username: string | undefined, folder: 'cache' | 'music' | 'preview', subPath: string) => {
     const root = getCacheDir(username, folder === 'music')
     const target = path.join(root, subPath)
     if (!fs.existsSync(target)) {
@@ -4033,7 +4038,7 @@ export const categorizeFiles = async (filenames: string[], targetSubPath: string
 /**
  * [New] Rename a subdirectory and update index entries
  */
-export const renameSubDirectory = (username: string | undefined, folder: 'cache' | 'music', oldSubPath: string, newSubPath: string) => {
+export const renameSubDirectory = (username: string | undefined, folder: 'cache' | 'music' | 'preview', oldSubPath: string, newSubPath: string) => {
     const normalizedUsername = normalizeUsername(username)
     const root = getCacheDir(normalizedUsername, folder === 'music')
     const oldDir = path.join(root, oldSubPath)
@@ -4076,7 +4081,7 @@ export const renameSubDirectory = (username: string | undefined, folder: 'cache'
 /**
  * [New] Delete a subdirectory. If deleteSongs is true, physically remove files and index. If false, move songs to root directory.
  */
-export const deleteSubDirectory = (username: string | undefined, folder: 'cache' | 'music', subPath: string, deleteSongs: boolean) => {
+export const deleteSubDirectory = (username: string | undefined, folder: 'cache' | 'music' | 'preview', subPath: string, deleteSongs: boolean) => {
     const normalizedUsername = normalizeUsername(username)
     const root = getCacheDir(normalizedUsername, folder === 'music')
     const targetDir = path.join(root, subPath)
@@ -4223,5 +4228,137 @@ export const auditCache = async (options: {
         items: findings,
         startedAt: Date.now(),
         finishedAt: Date.now(),
+    }
+}
+
+// ===== 汽水试听独立缓存（preview/<user>/ + preview_index.json，2026-11-13 方案）=====
+// 设计铁律：试听缓存永不提前短路 —— 播放查找顺序固定「整曲缓存→完整链路→试听缓存→实时试听」；
+// 整曲缓存写入时必须清同曲试听记录（见 clearPreviewCacheForSong）。
+// 为什么不复用 downloadAndCache：它内置时长吻合/源侧核验守卫，30s 试听 vs 整曲期望必被拒写入。
+
+const getPreviewTtlMs = (): number => {
+    const hours = Number((global.lx as any)?.config?.['soda.previewTtlHours'])
+    return (Number.isFinite(hours) && hours > 0 ? hours : 168) * 3600 * 1000
+}
+
+export const previewCacheEnabled = (): boolean => {
+    return (global.lx as any)?.config?.['soda.allowPreview'] === true
+}
+
+const previewSongId = (songInfo: any): string => {
+    return String(songInfo?.songmid || songInfo?.id || songInfo?.songId || '')
+}
+
+/** 查找同曲试听缓存；TTL 过期即删文件+索引并返回 null */
+export const getPreviewCacheItem = (username: string | undefined, songInfo: any, quality?: string): CacheItem | null => {
+    const id = previewSongId(songInfo)
+    if (!id) return null
+    const user = normalizeUsername(username)
+    const item = indexManager.get(user, id, 'preview', quality || undefined, false)
+    if (!item?.filename) return null
+    const dir = getCacheDir(user, 'preview')
+    const filePath = path.join(dir, item.filename)
+    if (!fs.existsSync(filePath)) {
+        indexManager.remove(user, id, 'preview')
+        return null
+    }
+    if (Date.now() - (item.mtime || 0) > getPreviewTtlMs()) {
+        try { fs.unlinkSync(filePath) } catch { /* 已被并发清理 */ }
+        indexManager.remove(user, id, 'preview')
+        console.log(`[试听缓存] 条目过期已清理: ${item.name} (TTL=${Math.round(getPreviewTtlMs() / 3600000)}h)`)
+        return null
+    }
+    return item
+}
+
+/** 清掉同曲全部试听记录（整曲缓存写入/换源成功后调用，防止试听残留） */
+export const clearPreviewCacheForSong = (username: string | undefined, songId: string): boolean => {
+    if (!songId) return false
+    const user = normalizeUsername(username)
+    let removed = false
+    for (const item of indexManager.getAll(user, 'preview')) {
+        if (item.id === songId) {
+            try {
+                const filePath = path.join(getCacheDir(user, 'preview'), item.filename)
+                if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+            } catch { /* 并发清理竞争，忽略 */ }
+            removed = true
+        }
+    }
+    if (removed) {
+        indexManager.remove(user, songId, 'preview')
+        console.log(`[试听缓存] 已清理同曲试听记录（整曲已可用）: ${songId}`)
+    }
+    return removed
+}
+
+/**
+ * 下载试听片段到 preview/ 目录并写独立索引。
+ * 只做「可解码性」抽检（复用 r74 的 ffmpeg 解码探针），不做时长吻合校验——
+ * 试听片段时长本来就不等于整曲。解码失败视为取流坏数据，不落盘。
+ */
+export const savePreviewCache = async (songInfo: any, url: string, quality: string, username: string | undefined, previewDurationSec: number): Promise<boolean> => {
+    const id = previewSongId(songInfo)
+    if (!id || !url) return false
+    const user = normalizeUsername(username)
+    const dir = getCacheDir(user, 'preview')
+    const filename = `preview_${id}_${quality}.m4a`
+    const filePath = path.join(dir, filename)
+    const tempPath = filePath + '.tmp'
+
+    // 简化下载（试听片段 ≤ 几 MB，不走 downloadAndCache 的重定向/进度/标签链）
+    const downloadTo = (target: string): Promise<void> => new Promise((resolve, reject) => {
+        const originUrl = url
+        const attempt = (currentUrl: string, redirects: number) => {
+            const protocol = currentUrl.startsWith('https') ? https : http
+            const req = protocol.get(currentUrl, { headers: buildStreamHeaders(currentUrl, {}, originUrl) }, (res) => {
+                const status = res.statusCode || 0
+                if ([301, 302, 303, 307, 308].includes(status)) {
+                    const location = res.headers['location']
+                    res.resume()
+                    if (!location || redirects >= 10) { reject(new Error(`redirect fail ${status}`)); return }
+                    attempt(new URL(location, currentUrl).toString(), redirects + 1)
+                    return
+                }
+                if (status !== 200) { res.resume(); reject(new Error(`HTTP ${status}`)); return }
+                const out = fs.createWriteStream(target)
+                res.pipe(out)
+                out.on('finish', () => out.close(() => resolve()))
+                out.on('error', reject)
+                res.on('error', reject)
+            })
+            req.on('error', reject)
+            req.setTimeout(30000, () => { req.destroy(new Error('preview download timeout')) })
+        }
+        attempt(url, 0)
+    })
+
+    try {
+        await downloadTo(tempPath)
+        // 解码抽检：坏数据（乱序流等）当场丢弃，不进 preview/
+        const probe = probeAudioDecodable(tempPath)
+        if (!probe.ok) {
+            try { fs.unlinkSync(tempPath) } catch { /* 已删 */ }
+            console.warn(`[试听缓存] 试听流解码抽检不通过，放弃缓存: ${songInfo.name} — ${probe.reason}`)
+            return false
+        }
+        fs.renameSync(tempPath, filePath)
+        const stat = fs.statSync(filePath)
+        indexManager.update(user, {
+            id, songmid: id,
+            name: String(songInfo?.name || ''), singer: String(songInfo?.singer || ''),
+            album: String(songInfo?.album || ''), albumId: songInfo?.albumId,
+            img: songInfo?.img, interval: songInfo?.interval,
+            source: String(songInfo?.source || 'soda'), requestedSource: 'soda',
+            downloadSource: 'soda', sourceName: '汽水试听',
+            quality, filename, folder: 'preview', mtime: Date.now(), size: stat.size,
+            ext: 'm4a', isPreview: true, previewDurationSec,
+        }, 'preview')
+        console.log(`[试听缓存] 已保存试听片段: ${songInfo.name} (${quality}, ${Math.round(stat.size / 1024)}KB, ${previewDurationSec}s)`)
+        return true
+    } catch (e: any) {
+        try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath) } catch { /* 忽略 */ }
+        console.warn(`[试听缓存] 保存失败: ${songInfo.name} — ${e?.message || e}`)
+        return false
     }
 }

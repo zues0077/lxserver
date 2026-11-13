@@ -937,7 +937,7 @@ async function tryProxyStream(trackId: string, songInfo: any, quality: string): 
 
 type PlainOutcome =
   | { ok: true; url: string; quality: string; via: string; ext: string; key?: string }
-  | { ok: false; reason: 'preview'; seconds: number; full: number }
+  | { ok: false; reason: 'preview'; seconds: number; full: number; url: string; quality: string; via: string; ext: string; key?: string }
   | { ok: false; reason: 'no-stream' }
 
 /**
@@ -952,7 +952,7 @@ async function resolvePlainStream(trackId: string, cookie: string, quality: stri
     () => fetchH5Track(trackId, cookie),
     () => fetchSeoTrack(trackId, cookie),
   ]
-  let preview: { seconds: number; full: number } | null = null
+  let preview: { seconds: number; full: number; url: string; quality: string; via: string; ext: string; key?: string } | null = null
 
   for (const run of fetchers) {
     const got = await run().catch(() => null)
@@ -960,8 +960,16 @@ async function resolvePlainStream(trackId: string, cookie: string, quality: stri
     const chosen = chooseStream(got.items, quality)
     if (!chosen) continue
     if (isPreviewStream(got)) {
-      // 记住第一条通道看到的试听信息：两条都只给试听时，用它给出准确提示
-      if (!preview) preview = { seconds: Math.round(got.streamDuration), full: Math.round(got.trackDuration) }
+      // 记住第一条通道看到的试听信息（含直链）：两条都只给试听时，用它做「允许试听」候选
+      if (!preview) preview = {
+        seconds: Math.round(got.streamDuration),
+        full: Math.round(got.trackDuration),
+        url: String(chosen.main_url || chosen.backup_url),
+        quality: QUALITY_LABEL[String(chosen.video_meta?.quality || '')] || '320k',
+        via: `${got.tag}:preview(${Math.round(toNumber(chosen.video_meta?.bitrate) / 1000)}k)`,
+        ext: String(chosen.video_meta?.vtype || 'm4a'),
+        key: got.key,
+      }
       continue
     }
     const bitrate = toNumber(chosen.video_meta?.bitrate)
@@ -975,7 +983,7 @@ async function resolvePlainStream(trackId: string, cookie: string, quality: stri
     }
   }
 
-  if (preview) return { ok: false, reason: 'preview', seconds: preview.seconds, full: preview.full }
+  if (preview) return { ok: false, reason: 'preview', seconds: preview.seconds, full: preview.full, url: preview.url, quality: preview.quality, via: preview.via, ext: preview.ext, key: preview.key }
   return { ok: false, reason: 'no-stream' }
 }
 
@@ -1061,6 +1069,28 @@ export async function getAudioUrl(songInfo: any, quality: string, cookie = '', u
   let msg = plain.reason === 'preview'
     ? `汽水电脑端仅提供 ${plain.seconds} 秒试听（该曲完整 ${plain.full} 秒；平台对电脑端不下发整曲密钥，与会员身份无关），${await hintForMissing(cookie)}`
     : '汽水未返回可用音频流（该曲可能已下架或仅支持客户端播放）'
+
+  // 「允许试听」兜底（2026-11-13 方案）：完整版永远优先 —— 整曲的签名/明文/代理通道
+  // 都没命中时，若开关开启，把试听直链**作为候选返回**（via 带 :preview 标记），
+  // 交给上层 R75-1 可播性门禁与「换源失败后才投放」的兜底链路处理，不在本层直接定论。
+  // 开关关闭时保持原行为：按试听失败抛错。
+  if (plain.reason === 'preview') {
+    const allowPreview = (() => {
+      try { return (globalThis as any).lx?.config?.['soda.allowPreview'] === true } catch { return false }
+    })()
+    if (allowPreview && plain.url) {
+      pending.remove(`soda:${trackId}`)
+      previewVerdictByTrack.delete(trackId)
+      console.log(`[汽水取流] 试听兜底开启：整曲各通道未命中，返回 ${plain.seconds}s 试听候选（门禁与换源链路继续把关）: ${trackId}`)
+      return {
+        url: plain.url,
+        quality: plain.quality,
+        via: `${plain.via}:preview`,
+        ext: plain.ext,
+        key: plain.key,
+      }
+    }
+  }
 
   // 配了取链代理就顺手把这首丢到后台预热：慢路径要 60~90 秒，绝不能在这里同步等，
   // 但「等一次、下次秒出」是划算的 —— 用户按提示重试就能拿到整曲。

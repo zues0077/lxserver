@@ -8198,7 +8198,11 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
         }
 
         try {
-            if (settings.enableCrossfade) audio.volume = 0;
+            // [P-1471] 后台（锁屏/切后台）时绝不能把音量置 0：audio.play() 在后台 WebView
+            // 里可能抛错或卡住不返回，导致后面的 fadeVolume 永远没机会执行，音量卡 0 无声。
+            // 后台时不做淡入，直接保持目标音量（fadeVolume 内部也有同款守卫作第二道防线）。
+            const pageHidden = typeof document !== 'undefined' && document.hidden;
+            if (settings.enableCrossfade && !pageHidden) audio.volume = 0;
             else audio.volume = typeof currentVolume !== 'undefined' ? currentVolume : 1;
 
             shouldAutoRecoverPlayback = true;
@@ -8270,6 +8274,9 @@ async function playSong(song, index, forceQuality = null, noPlay = false, isRetr
             const isAutoplayBlocked = playError && playError.name === 'NotAllowedError';
             if (isAutoplayBlocked) {
                 shouldAutoRecoverPlayback = false;
+                // [P-1471] crossfade 曾把音量置 0，播放被拒时必须还原，否则下次手动播放
+                // 若未走 crossfade 分支会继承音量 0（无声）。
+                if (settings.enableCrossfade) audio.volume = typeof currentVolume !== 'undefined' ? currentVolume : 1;
                 console.warn('[Player] Playback blocked by browser autoplay policy:', playError);
                 setPlayerStatus('请点击播放按钮');
             } else if (currentRecoveryState && currentRecoveryState.thisRequestId === thisRequestId) {
@@ -8721,7 +8728,8 @@ async function togglePlay() {
     if (audio.paused) {
         try {
             // [Crossfade] 如果开启了淡入淡出，先将进度置为 0，播放后再淡入
-            if (settings.enableCrossfade) {
+            // [P-1471] 后台时同样不置 0（play() 可能卡住/抛错，fadeVolume 不会执行）
+            if (settings.enableCrossfade && !(typeof document !== 'undefined' && document.hidden)) {
                 audio.volume = 0;
             }
             if (currentPlaybackErrorHandler) {
@@ -8822,10 +8830,35 @@ function playPrev() {
 
 // 音量淡入淡出辅助函数
 let volumeFadeInterval = null;
+// [P-1471] 渐变中途转后台的兜底：interval 被 WebView 冻结时，音量会卡在半路。
+// 记住本次渐变的目标值，页面转后台瞬间直接补齐到目标并终止渐变。
+let fadeTargetVolume = null;
+if (typeof document !== 'undefined' && !window._fadeVisibilityHooked) {
+    window._fadeVisibilityHooked = true;
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden && volumeFadeInterval && fadeTargetVolume !== null) {
+            clearInterval(volumeFadeInterval);
+            volumeFadeInterval = null;
+            audio.volume = fadeTargetVolume;
+        }
+    });
+}
 function fadeVolume(targetVolume, duration = 800) {
     if (volumeFadeInterval) clearInterval(volumeFadeInterval);
+    fadeTargetVolume = targetVolume;
+
+    // [P-1471] 页面不可见（锁屏/切后台）时 WebView 会把 setInterval 降频到近乎冻结，
+    // 600ms 的渐变会永远卡在起点附近——调用方刚把 audio.volume 置 0，于是
+    // 「进度照走但没有声音」，回到前台重新点播放才恢复。后台时渐变没有任何
+    // 感官意义，直接把音量放到目标值，从根上消灭这个竞态。
+    if (typeof document !== 'undefined' && document.hidden) {
+        audio.volume = targetVolume;
+        fadeTargetVolume = null;
+        return Promise.resolve();
+    }
 
     const startVolume = audio.volume;
+    const fadeStartedAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const steps = 20;
     const increment = (targetVolume - startVolume) / steps;
     const stepTime = duration / steps;
@@ -8842,8 +8875,13 @@ function fadeVolume(targetVolume, duration = 800) {
 
             audio.volume = nextVolume;
 
-            if (currentStep >= steps) {
+            // [P-1471] 时间基准兜底：timer 被节流/漂移时，只要实测耗时已超过 duration，
+            // 立即补齐到目标音量并结束，绝不把音量留在半路。
+            const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            if (currentStep >= steps || now - fadeStartedAt >= duration) {
                 clearInterval(volumeFadeInterval);
+                volumeFadeInterval = null;
+                fadeTargetVolume = null;
                 audio.volume = targetVolume;
                 resolve();
             }

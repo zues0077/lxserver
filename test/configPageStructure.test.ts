@@ -35,6 +35,7 @@ const REQUIRED_FIELDS = [
   'admin.path', 'player.path',
   'user.enablePath', 'user.enableRoot',
   'player.name', 'admin.password', 'player.enableAuth', 'player.password',
+  'soda.allowPreview', 'soda.previewTtlHours',
   'user.enablePublicRestriction', 'user.enablePublicNonAdminLocalMusic',
   'user.enablePublicNonAdminBrowserDownload', 'user.enablePublicNonAdminServerCache',
   'user.enablePublicFavorites', 'user.enablePublicNonAdminAccess',
