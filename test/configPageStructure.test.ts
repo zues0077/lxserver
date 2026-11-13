@@ -69,7 +69,6 @@ const REQUIRED_FIELDS = [
   'customSource.probe.autoDisablePlatform', 'customSource.probe.autoRemoveSource',
   'customSource.probe.removeMode',
   'customSource.trash.retentionDays',
-  'customSource.workerOnly.enabled',
   'system.allowUnsafeVM', 'singer.sourcePriority',
 ]
 

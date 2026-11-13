@@ -2781,12 +2781,6 @@ class App {
                     String(config['customSource.trash.retentionDays'] ?? 3);
             }
 
-            // A' 实验开关：默认关，所以用 === true 判断，不能照抄默认开的 !== false 邻居
-            if (form.elements['customSource.workerOnly.enabled']) {
-                form.elements['customSource.workerOnly.enabled'].checked =
-                    config['customSource.workerOnly.enabled'] === true;
-            }
-
             // URL路径配置
             if (form.elements['admin.path']) {
                 form.elements['admin.path'].value = config['admin.path'] ?? '';
@@ -3677,8 +3671,6 @@ class App {
                 const days = parseInt(formData.get('customSource.trash.retentionDays'));
                 return Number.isFinite(days) ? Math.min(3650, Math.max(0, days)) : 30;
             })(),
-            // A' 实验开关：默认关
-            'customSource.workerOnly.enabled': formData.get('customSource.workerOnly.enabled') === 'on',
             'admin.path': adminPath,
             'player.path': playerPath,
             'subsonic.enable': formData.get('subsonic.enable') === 'on',

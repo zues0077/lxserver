@@ -34,7 +34,7 @@ import formidable from 'formidable'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
-import { initUserApis, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, getContractSummary, describeError } from './userApi'
+import { initUserApis, loadPersistedAdaptiveLimits, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, getContractSummary, describeError } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation, listIsolations, ISOLATION_MAX_AUTO_RELEASE } from './sourceGuard'
 import { hasHotSearchItems } from './hotSearchFallback'
@@ -11492,8 +11492,6 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 回收站保留天数：0 是合法值（永不清理），不能用 || 兜底
             'customSource.trash.retentionDays': Number.isFinite(Number(global.lx.config['customSource.trash.retentionDays']))
               ? Number(global.lx.config['customSource.trash.retentionDays']) : 3,
-            // A' 实验开关：默认关，用 === true 判断（不能照抄默认开字段的 !== false）
-            'customSource.workerOnly.enabled': global.lx.config['customSource.workerOnly.enabled'] === true,
             // 快速复检 / 节流 / 单轮预算：0 是合法值（关闭），不能用 || 兜底
             'customSource.probe.restoreIntervalMinutes': Number.isFinite(Number(global.lx.config['customSource.probe.restoreIntervalMinutes']))
               ? Number(global.lx.config['customSource.probe.restoreIntervalMinutes']) : 180,
@@ -11603,10 +11601,6 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 global.lx.config['customSource.trash.retentionDays'] = Number.isFinite(days)
                   ? Math.min(3650, Math.max(0, days))
                   : 30
-              }
-              // A' 实验开关：默认关
-              if (newConfig['customSource.workerOnly.enabled'] !== undefined) {
-                global.lx.config['customSource.workerOnly.enabled'] = !!newConfig['customSource.workerOnly.enabled']
               }
               // 已关闭平台快速复检：间隔 0 = 关闭该功能（下限 0、上限 10080 分钟 = 7 天）
               // 上限放到 7 天是为了跟「巡检间隔」解耦：主巡检可以设很久，复检单独调
@@ -14432,6 +14426,9 @@ export const startServer = async (port: number, ip: string) => {
     // 先读回上次运行的慢源记录：加载完音源后会按它把已知慢源预置进独立线程，
     // 避免重启后第一次搜索又把主线程卡十几秒（246 实测 11934ms）
     loadGovernorState()
+    // 读回已学到的「响应体上限」：否则重启后第一轮健康探测又会拿到 4.26MB 卡 8 秒
+    // （豆包定制[聚合音源] 实测，2026-11-13）。必须在 initUserApis 之前，加载期就可能发请求。
+    loadPersistedAdaptiveLimits()
     // 修改：不传参数，默认加载 open + 所有用户源
     await initUserApis()
     console.log('[服务] 自定义源初始化完成')

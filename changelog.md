@@ -8,7 +8,7 @@
 
 - 停用源复检零成本策略：after-import 源不再主动探测（放音期整轮跳过 + 全局串行化），仅 probe-dead 低频复检；移除 after-import→probe-dead 升级路径。
 - disableReason 标签 hunter 联动：v1.13.6 豁免 after-import 拦截、probe-dead 语义化文案、冻结改写优先于同名 skip、`/api/service/toggle` 透传 reason。
-- A' 开关内置：`customSource.workerOnly.enabled`（默认关，env `CUSTOM_SOURCE_WORKER_ONLY=1`）。
+- A' 开关内置：`customSource.workerOnly.enabled`（默认关，env `CUSTOM_SOURCE_WORKER_ONLY=1`）。**（2026-11-13 已废弃删除：A/B 实测无收益，归档见 docs/archive/worker-only-aprime.md）**
 
 ## v1.5.56 上游移植内容（P2-1/P2-2/P2-4）
 

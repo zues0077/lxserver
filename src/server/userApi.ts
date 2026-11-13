@@ -11,7 +11,7 @@ import {
 import { isProbeQuiet, recordSuppressed } from './probeQuiet'
 import { isHardFailure, reportManualFailure, isPlatformDemoted } from './sourceProbe'
 import { getGovernorConfig, isThrottled as isGovernorThrottled, noteSyncBlock, runWithGovernor, listWorkerPresetCandidates } from './sourceGovernor'
-import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible, getSourceWorker } from './sourceWorkerHost'
+import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerEligible } from './sourceWorkerHost'
 import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue, normalizeQualityList } from './sourceContract'
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
@@ -268,8 +268,14 @@ interface DqTaskProbe {
  * 又白白削弱了那个源。
  */
 const BODY_COST_SUSPECT_MS = 1000
-/** 自适应体积闸有效期：到期自动恢复默认上限，避免一次偶发把源永久阉掉 */
-const ADAPTIVE_LIMIT_TTL_MS = 30 * 60 * 1000
+/**
+ * 自适应体积闸有效期。
+ *
+ * 2026-11-13 从 30 分钟改为 24 小时：30 分钟太短，豆包定制的响应体是上游固定行为
+ * （每次都 4.26MB），半小时后再来一次又得「先卡 8 秒再学」。改为 24 小时 + 每次命中刷新，
+ * 让学到的上限基本常驻；同时保留过期语义，避免一次偶发（比如某接口临时返回巨块）永久阉掉源。
+ */
+const ADAPTIVE_LIMIT_TTL_MS = 24 * 60 * 60 * 1000
 /** 自适应闸门的地板：音乐接口正常响应很少超过 1MB，再低就开始误伤正常请求 */
 const ADAPTIVE_LIMIT_FLOOR_BYTES = 1024 * 1024
 /** 判定为体积问题后，把该源上限压到本次体积的这个比例 */
@@ -283,7 +289,104 @@ interface AdaptiveLimit {
     cost: number
 }
 
+/**
+ * 自适应响应体上限（持久化）。
+ *
+ * 为什么必须落盘（2026-11-13 实测）：豆包定制[聚合音源] 的健康探测返回 4.26MB，
+ * 脚本回调同步处理 8.3 秒，是一类「体积 + 脚本自身重活」的复合卡顿。原实现只在内存里
+ * 降闸 30 分钟：**每次重启都重新从 8MB 默认值学一遍**，第一轮探测必然再卡 8 秒
+ * （05:01:24 加载 → 05:02:30 卡 8387ms）。落盘后重启即可直接拦住。
+ *
+ * 与 governor 降速记录的区别（刻意不同）：
+ *   - governor 的降速记录带 scriptHash，脚本更新后旧账作废（新脚本可能已修好）；
+ *   - 响应体上限**不带 scriptHash**，脚本更新不清除 —— 4.26MB 来自上游服务器，
+ *     换脚本版本不会改变上游返回多大的数据。
+ */
 const adaptiveBodyLimits = new Map<string, AdaptiveLimit>()
+/** 自适应闸门落盘路径（与 governor 状态同目录，便于运维一起备份） */
+const getAdaptiveLimitStorePath = (): string => {
+    const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
+    return path.join(dataPath, 'source-body-limits.json')
+}
+/** 只有走过启动加载才允许写盘：单测会大量调用，不能往仓库目录写文件 */
+let adaptiveLimitPersistEnabled = false
+let adaptiveLimitSaveTimer: any = null
+/**
+ * 把落盘内容还原成内存状态（纯函数，便于单测）。
+ *
+ * 过期条目直接丢弃；`limit` 必须落在 [地板, 默认上限] 内，防止手改文件把源阉死或放开。
+ * until 用「max(落盘 until, 载入时刻 + TTL)」：重启视为一次命中，
+ * 让刚学到的上限至少再活满一个 TTL，否则重启后马上过期等于没落盘。
+ */
+export function parsePersistedAdaptiveLimits(
+    raw: any,
+    now: number,
+    ttlMs: number,
+    floorBytes: number,
+    maxBytes: number,
+): Map<string, AdaptiveLimit> {
+    const out = new Map<string, AdaptiveLimit>()
+    for (const [key, value] of Object.entries<any>(raw || {})) {
+        if (!key || !value || typeof value !== 'object') continue
+        const bytes = Number(value.bytes) || 0
+        const cost = Number(value.cost) || 0
+        let limit = Number(value.limit) || 0
+        if (!Number.isFinite(limit) || limit <= 0) continue
+        limit = Math.min(maxBytes, Math.max(floorBytes, Math.round(limit)))
+        const savedUntil = Number(value.until) || 0
+        if (savedUntil > 0 && now > savedUntil + ttlMs) continue // 过期太久，丢弃
+        out.set(key, { limit, until: Math.max(savedUntil, now + ttlMs), bytes, cost })
+    }
+    return out
+}
+function scheduleAdaptiveLimitSave(): void {
+    if (!adaptiveLimitPersistEnabled) return
+    if (adaptiveLimitSaveTimer) return
+    adaptiveLimitSaveTimer = setTimeout(() => {
+        adaptiveLimitSaveTimer = null
+        try {
+            const obj: Record<string, AdaptiveLimit> = {}
+            const now = Date.now()
+            for (const [key, v] of adaptiveBodyLimits) {
+                if (v.until > now) obj[key] = v
+            }
+            const p = getAdaptiveLimitStorePath()
+            const dir = path.dirname(p)
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+            fs.writeFileSync(p, JSON.stringify(obj, null, 2), 'utf-8')
+        } catch (e: any) {
+            console.warn(`[自适应闸门] 落盘失败: ${e?.message || e}`)
+        }
+    }, 500)
+    if (typeof (adaptiveLimitSaveTimer as any)?.unref === 'function') (adaptiveLimitSaveTimer as any).unref()
+}
+/**
+ * 启动时载入已学到的响应体上限。幂等：重复调用只加载一次。
+ * 在 server 启动路径调用；单测不调用 → persistEnabled 保持 false，不会写盘。
+ */
+export function loadPersistedAdaptiveLimits(): number {
+    if (adaptiveLimitPersistEnabled) return adaptiveBodyLimits.size
+    adaptiveLimitPersistEnabled = true
+    try {
+        const p = getAdaptiveLimitStorePath()
+        if (!fs.existsSync(p)) return 0
+        const raw = JSON.parse(fs.readFileSync(p, 'utf-8'))
+        const restored = parsePersistedAdaptiveLimits(
+            raw, Date.now(), ADAPTIVE_LIMIT_TTL_MS,
+            ADAPTIVE_LIMIT_FLOOR_BYTES, CUSTOM_SOURCE_MAX_BODY_BYTES,
+        )
+        for (const [key, v] of restored) adaptiveBodyLimits.set(key, v)
+        if (restored.size > 0) {
+            console.log(`[自适应闸门] 已恢复 ${restored.size} 条响应体上限记录: `
+                + [...restored.entries()].map(([k, v]) => `${k}=${formatBytes(v.limit)}`).join(', '))
+        }
+        return restored.size
+    } catch (e: any) {
+        console.warn(`[自适应闸门] 载入失败（按无记录继续）: ${e?.message || e}`)
+        return 0
+    }
+}
+
 /** 同一源在窗口内命中「超长同步任务」的次数：用于区分偶发与常态 */
 const slowTaskHits = new Map<string, { count: number; since: number }>()
 const SLOW_TASK_HIT_WINDOW_MS = 30 * 60 * 1000
@@ -390,15 +493,27 @@ export function reportSlowTask(meta: DqTaskMeta | undefined, cost: number, probe
 
     let adapted = ''
     if (bytes > ADAPTIVE_LIMIT_FLOOR_BYTES && meta?.owner && meta?.id) {
-        const shouldShrink = bodyIsBlame
-            ? true
-            : (cost >= SLOW_TASK_HARD_MS && hits.count >= 2)
+        // 2026-11-13：脚本自身重活这一条从「窗口内第 2 次才降闸」改成「单次超硬阈值即降闸」。
+        // 原先的 2 次门槛是为了「别为一次偶发牺牲正常源」，但对 豆包定制 这种上游固定返回
+        // 4.26MB、每次都要同步处理 8 秒的源，代价是「第一次卡 8 秒白卡」+「重启后又卡一次」。
+        // 一次 2 秒以上的同步卡顿已远超正常源（实测正常源 <100ms），单次就降闸不会误伤：
+        // 降闸只是把上限压到本次体积的 0.6 倍并在 24h 后自动过期，源仍可用（超限按失败回调换源）。
+        const shouldShrink = bodyIsBlame || cost >= SLOW_TASK_HARD_MS
         if (shouldShrink) {
             const limit = Math.max(ADAPTIVE_LIMIT_FLOOR_BYTES, Math.round(bytes * ADAPTIVE_LIMIT_SHRINK))
             if (limit < effectiveBodyLimit(meta.owner, meta.id)) {
                 adaptiveBodyLimits.set(key, { limit, until: now + ADAPTIVE_LIMIT_TTL_MS, bytes, cost })
+                scheduleAdaptiveLimitSave()
                 adapted = `；已把该源响应体上限降到 ${formatBytes(limit)}`
-                    + `（${ADAPTIVE_LIMIT_TTL_MS / 60000} 分钟内有效，超限按失败回调，脚本自行换源）`
+                    + `（${Math.round(ADAPTIVE_LIMIT_TTL_MS / 3600000)} 小时内有效并已落盘，超限按失败回调，脚本自行换源）`
+            } else {
+                // 已有更严的上限：续期（每次命中刷新 TTL），并确保落盘记录同步
+                const cur = adaptiveBodyLimits.get(key)
+                if (cur) {
+                    cur.until = now + ADAPTIVE_LIMIT_TTL_MS
+                    adaptiveBodyLimits.set(key, cur)
+                    scheduleAdaptiveLimitSave()
+                }
             }
         }
     }
@@ -645,6 +760,14 @@ const reportSlowTimerCallback = (ref: { owner: string; id: string; name: string 
         at: Date.now(),
     })
     if (recentSlowTimerCallbacks.length > MAX_SLOW_TIMER_RECORDS) recentSlowTimerCallbacks.shift()
+
+    // 定时器里的同步重活也要进 governor 的慢源账本（2026-11-13 补）。
+    // 此前这里只写日志，导致「脚本自排定时器做重活」这一类慢源永远不会被降速/搬进 worker：
+    // 实测 豆包定制[聚合音源] 的 600s 健康探测就是这条路径，卡了主线程却查不到账。
+    // 与 callRequest 的同步块共用同一份窗口计数（noteScriptSyncCost 内部按 owner/id 归并）。
+    if (costMs >= SLOW_TASK_HARD_MS) {
+        try { noteScriptSyncCost(ref.owner, ref.id, ref.name, costMs) } catch { /* 记账失败不得影响业务 */ }
+    }
 
     // 回调自身耗时已达卡顿量级 → 立即归因。
     // 这是精确测量，无需等待（也不受）事件循环延迟监控那套会低估的估算值。
@@ -1261,120 +1384,10 @@ async function createLxRequest(
 }
 
 /**
- * A' 实验开关：让已被 governor 记为慢源的脚本「整实例」只在独立线程 eval，
- * 主线程完全不 eval 脚本 —— 脚本自排的 600s 健康探测定时器及其同步重活
- * 因此不会落在主线程。默认关闭。
- * 开启口径：配置键 `customSource.workerOnly.enabled === true`（管理端可灰度）
- * 或环境变量 `CUSTOM_SOURCE_WORKER_ONLY=1`（测试容器 A/B 用，优先级更高）。
- */
-export function isWorkerOnlyEnabled(): boolean {
-    if (process.env.CUSTOM_SOURCE_WORKER_ONLY === '1') return true
-    try {
-        return (global as any).lx?.config?.['customSource.workerOnly.enabled'] === true
-    } catch {
-        return false
-    }
-}
-
-/** 该源是否在 governor 的慢源记录里（脚本指纹变了就不认旧记录）。 */
-function isWorkerOnlyCandidate(owner: string, id: string): boolean {
-    try {
-        const currentHash = loadedScriptHashes.get(`${owner}/${id}`)
-        return listWorkerPresetCandidates().some(item =>
-            item.owner === owner
-            && item.id === id
-            && (!item.scriptHash || !currentHash || item.scriptHash === currentHash))
-    } catch { return false }
-}
-
-/**
- * 构造一个「只有壳」的实例：脚本本体、定时器、lx.request 全在 worker。
- * sources/契约由 worker 的 ready 消息回填，callRequest 优先转发 worker。
- *
- * ②缺陷修复（2026-11-12）：worker 调用**基础设施故障**（超时/ready 失败/worker 退出/
- * postMessage 失败）且 `fallbackToMain` 开启时，不再是抛「独立线程不可用」，
- * 而是**惰性构建一份主线程 vm2 兜底实例**把本次调用跑完 —— 与普通双路源
- * （loadUserApi 的 callRequest，tryWorkerCall handled=false 时落回 runWithGovernor
- * 主线程路径）的语义对齐。脚本业务失败（fromScript）仍原样抛给上层换源，不回退重跑。
- */
-async function loadWorkerOnlyApi(apiInfo: UserApiInfo, fullApiInfo: any): Promise<any> {
-    const owner = fullApiInfo.owner
-    const id = apiInfo.id
-    const workerInfo = { owner, id, name: fullApiInfo.name, script: fullApiInfo.script }
-
-    markWorkerEligible(owner, id, workerInfo, true)
-    const host = getSourceWorker(workerInfo)
-    await host.ready
-    const sources = host.sources || {}
-    const contractReport = inspectSourceContract(sources)
-
-    let disposed = false
-    /** 主线程兜底实例（惰性）：仅在 worker 基础设施故障且允许回退时构建一次 */
-    let fallbackInstance: any = null
-    let fallbackBuilding: Promise<any> | null = null
-    const buildFallback = async (): Promise<any> => {
-        if (fallbackInstance) return fallbackInstance
-        if (!fallbackBuilding) {
-            fallbackBuilding = buildMainThreadApiInstance(apiInfo, fullApiInfo)
-                .then(inst => {
-                    fallbackInstance = inst
-                    console.warn(`[自定义源-worker-only] ${fullApiInfo.name} 已构建主线程兜底实例（worker 基础设施故障回退）`)
-                    return inst
-                })
-                .catch((e: any) => {
-                    console.error(`[自定义源-worker-only] ${fullApiInfo.name} 主线程兜底实例构建失败: ${e?.message || e}`)
-                    throw e
-                })
-                .finally(() => { fallbackBuilding = null })
-        }
-        return fallbackBuilding
-    }
-    const apiInstance = {
-        info: { ...fullApiInfo, sources, contract: contractReport },
-        handlers: new Map<string, Function>(),
-        timers: new Set<any>(),
-        pendingAborts: new Set<() => void>(),
-        dispose: () => {
-            if (disposed) return
-            disposed = true
-            disposeSourceWorker(owner, id)
-            if (fallbackInstance) {
-                try { fallbackInstance.dispose() } catch { /* 兜底实例释放失败不影响主流程 */ }
-                fallbackInstance = null
-            }
-        },
-        callRequest: async (action: string, source: string, info: any) => {
-            if (disposed) throw new Error(`源 ${fullApiInfo.name} 已被卸载`)
-            const r = await tryWorkerCall(workerInfo, action, source, info)
-            if (r.handled) {
-                if (r.error) throw r.error
-                return r.value
-            }
-            // handled=false = worker 基础设施故障且 fallbackToMain（见 workerFailureDecision）。
-            // 惰性构建主线程兜底实例，把本次调用跑完；构建/执行失败则把原 worker 错误抛上层换源。
-            try {
-                const inst = await buildFallback()
-                return await inst.callRequest(action, source, info)
-            } catch (fbErr: any) {
-                const reason = fbErr?.message || fbErr
-                throw r.error || new Error(`源 ${fullApiInfo.name} 的独立线程不可用（主线程兜底失败: ${reason}）`)
-            }
-        },
-    }
-    loadedApis.set(`${owner}_${id}`, apiInstance)
-    console.log(`[自定义源-worker-only] ✓ ${fullApiInfo.name} 整实例已在独立线程（主线程不再 eval 脚本），支持平台: ${Object.keys(sources).join(', ')}`)
-    return { success: true, apiInstance, error: null }
-}
-
-/**
  * 主线程 vm2/vm 沙箱实例构建器（原 loadUserApi 的 eval 段抽出）。
  *
- * 两个调用方：
- *  1. loadUserApi 正常加载路径；
- *  2. loadWorkerOnlyApi 的②回退路径（worker 基础设施故障时惰性构建，跑完本次调用）。
- *
- * 注意与 loadWorkerOnlyApi 的差异：这里会真正 eval 脚本并注册定时器，
- * 因此只允许在「worker 已经不可用」时构建，不得与 worker-only 实例并存常驻。
+ * 调用方：loadUserApi 正常加载路径。
+ * 这里会真正 eval 脚本并注册定时器，
  *
  * 只做「构建 + eval + inited 等待 + 返回实例」；loadedApis 登记、temp 处置、
  * requireUnsafe 探测留在 loadUserApi 包装层。
@@ -1846,16 +1859,6 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
     // 从脚本中提取元数据
     const metadata = extractMetadata(apiInfo.script)
     const fullApiInfo = { ...apiInfo, ...metadata }
-
-    // A' 分支：慢源整实例进 worker；加载失败自动回退主线程原路径，不阻断音源可用性。
-    if (isWorkerOnlyEnabled() && fullApiInfo.owner !== 'temp' && isWorkerOnlyCandidate(fullApiInfo.owner, apiInfo.id)) {
-        try {
-            return await loadWorkerOnlyApi(apiInfo, fullApiInfo)
-        } catch (e: any) {
-            console.warn(`[自定义源-worker-only] ${fullApiInfo.name} 独立线程加载失败，回退主线程: ${e?.message || e}`)
-            disposeSourceWorker(fullApiInfo.owner, apiInfo.id)
-        }
-    }
 
     try {
         const apiInstance = await buildMainThreadApiInstance(apiInfo, fullApiInfo)
