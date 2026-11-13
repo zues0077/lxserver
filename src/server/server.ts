@@ -739,6 +739,12 @@ const resolvePlayableAudio = async (
           failures.push(`${extraLabel}: 未返回播放地址`)
           return null
         }
+        // 「允许试听」开启时汽水匿名通道可能返回 30s 试听候选（via 带 :preview 标记）：
+        // 投送场景只接受整曲，试听片段不允许混入投送链路
+        if (/:preview/i.test(String(extra?.via || ''))) {
+          failures.push(`${extraLabel}: 仅试听片段，不用于投送`)
+          return null
+        }
         probes++
         const extraProbe = await probeAudioCached(extraUrl)
         if (extraProbe.ok) {
@@ -2832,6 +2838,8 @@ const resolveSwitchCandidate = async (candidate: any, quality: string, username:
   if (extraSources.isExtraSource(source)) {
     const extra = await extraSources.getMusicUrl(source, candidate, quality, username)
     if (!extra?.url) throw new Error('额外音源未返回地址')
+    // 试听片段不允许当换源结果（会被当整曲写缓存）：完整版优先，试听只走播放兜底链路
+    if (source === 'soda' && /:preview/i.test(String(extra.via || ''))) throw new Error('汽水仅试听片段，不作为换源结果')
     if (await isEncryptedRemoteStream(extra.url)) throw new Error('返回的是加密流，需先解密')
     return { url: extra.url, quality: extra.type, sourceName: extra.sourceName }
   }
@@ -2949,6 +2957,10 @@ const resolveServerSong = async (
   if (extraSources.isExtraSource(originalSong.source)) {
     try {
       const extra = await extraSources.getMusicUrl(originalSong.source, originalSong, requestedQuality, username)
+      // 试听候选（via 带 :preview）不作为换源/下载结果：会以整曲名义落缓存、误导用户
+      if (originalSong.source === 'soda' && /:preview/i.test(String(extra.via || ''))) {
+        throw new Error('汽水仅试听片段，不作为换源结果')
+      }
       return {
         url: extra.url,
         quality: extra.type,
@@ -10039,6 +10051,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 「允许试听」兜底候选（soda.allowPreview=true 时由 R75-1 preview 判定填充；
             // 换源全失败后才投放——完整版永远优先）
             let sodaTrialFallback: { url: string; quality: string; previewDurationSec: number } | null = null
+            // 试听候选被门禁持有时置 true：阻止该候选被当成功转正，改由换源/兜底链路接管
+            let previewHeldForFallback = false
             if (!result && (isSourceSupported(source, verifiedUsername) || accountUsable)) {
               try {
                 console.log(`[歌曲播放] 使用自定义源解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
@@ -10113,17 +10127,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     const gate = await probeRemoteStream(String(candidate.url), expectedSec)
                     if (!gate.ok) {
                       if (gate.kind === 'preview') {
-                        noteSodaPreviewVerdict(songInfo, gate.reason || '')
                         // 「允许试听」兜底（2026-11-13 方案）：完整版永远优先 —— 这里不直接投放，
-                        // 只把试听候选记下来；换源（五平台+B站）仍照常执行，全都没有时才投试听。
+                        // 只把试听候选记下来，且**不当成功转正**；换源（五平台+B站）仍照常执行，
+                        // 全都没有时才投试听。记负缓存会挡住后续重试，所以兜底开启时不记。
                         if (fileCache.previewCacheEnabled()) {
                           sodaTrialFallback = {
                             url: String(candidate.url),
                             quality: String(quality || '128k'),
                             previewDurationSec: (gate as any).streamDurationSec || 0,
                           }
-                          console.log(`[歌曲播放] 汽水试听候选已记录（换源失败后兜底用）: ${songInfo.name} — ${gate.reason}`)
+                          console.log(`[歌曲播放] 汽水试听候选已记录（不当成功转正，换源失败后兜底用）: ${songInfo.name} — ${gate.reason}`)
+                          // 不转正：跳过下方 result = candidate，让换源与试听兜底链路接管
+                          previewHeldForFallback = true
                         } else {
+                          noteSodaPreviewVerdict(songInfo, gate.reason || '')
                           console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
                           throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
                         }
@@ -10133,8 +10150,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                       }
                     }
                   }
-                  // 后处理全部通过：此刻才把候选结果转正
-                  result = candidate
+                  // 后处理全部通过：此刻才把候选结果转正（试听候选被兜底持有时不转正）
+                  if (!previewHeldForFallback) result = candidate
                 } else {
                   // 其余平台无后处理，直接转正
                   result = candidate
@@ -11588,6 +11605,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'musicAccount.kglite.tokenRefreshMaxDays': musicAccount.getKugouLiteTokenRefreshConfig().maxDays,
             subsonicPortConflict: global.lx.subsonicPortConflict || null,
             localMusicIdentifyThreads: global.lx.config['localMusicIdentifyThreads'] ?? 2,
+            'soda.allowPreview': global.lx.config['soda.allowPreview'] === true,
+            'soda.previewTtlHours': (() => {
+              const raw = global.lx.config['soda.previewTtlHours']
+              const h = parseInt(String(raw ?? ''))
+              return Number.isFinite(h) && h >= 1 ? Math.min(8760, h) : 168
+            })(),
             configFilePath: global.lx.configPath || process.env.CONFIG_PATH || path.join(global.lx.dataPath, 'config.js'),
           }
           res.writeHead(200, {
@@ -11625,6 +11648,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (newConfig['system.allowUnsafeVM'] !== undefined) global.lx.config['system.allowUnsafeVM'] = newConfig['system.allowUnsafeVM']
               // 本地音乐识别并发线程数（1~4，默认 2），对应上游 #462
               if (newConfig['localMusicIdentifyThreads'] !== undefined) global.lx.config['localMusicIdentifyThreads'] = Math.min(4, Math.max(1, parseInt(newConfig['localMusicIdentifyThreads']) || 2))
+              // 汽水试听兜底：开关 + 试听缓存 TTL（小时）
+              if (newConfig['soda.allowPreview'] !== undefined)
+                global.lx.config['soda.allowPreview'] = !!newConfig['soda.allowPreview']
+              if (newConfig['soda.previewTtlHours'] !== undefined)
+                global.lx.config['soda.previewTtlHours'] = Math.min(8760, Math.max(1, parseInt(newConfig['soda.previewTtlHours']) || 168))
 
               // 音源平台可用性巡检
               if (newConfig['customSource.probe.enabled'] !== undefined) {
