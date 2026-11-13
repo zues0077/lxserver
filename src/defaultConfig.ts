@@ -170,10 +170,6 @@ const config: LX.Config = {
   // 回收站保留天数：只增不减会把 NAS 盘慢慢吃满，而多数人不会回头翻。
   // 0 = 永不自动清理（想长期留档时用）。到期条目被彻底删除，不可恢复。
   'customSource.trash.retentionDays': 3,
-  // A' 实验开关（2026-11-13）：governor 判定的慢源脚本「整实例」（含定时器）只在 worker
-  // 线程 eval，主线程完全不 eval 脚本。默认关；只影响已判定的慢源，不影响 hunter
-  // 灌入/打标与音源启停状态。环境变量 CUSTOM_SOURCE_WORKER_ONLY=1 优先级更高（A/B 用）。
-  'customSource.workerOnly.enabled': false,
   'customSource.probe.probeOnNewSource': true, // 新增音源是否立即巡检
   // 已关闭平台「快速复检」：只探被自动关闭的平台、每平台 1 首，成功即恢复，不做定罪。
   // 全量巡检一轮后，被误关或平台临时故障的源原本要等这么久才能复活；
