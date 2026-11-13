@@ -11492,6 +11492,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             // 回收站保留天数：0 是合法值（永不清理），不能用 || 兜底
             'customSource.trash.retentionDays': Number.isFinite(Number(global.lx.config['customSource.trash.retentionDays']))
               ? Number(global.lx.config['customSource.trash.retentionDays']) : 3,
+            // A' 实验开关：默认关，用 === true 判断（不能照抄默认开字段的 !== false）
+            'customSource.workerOnly.enabled': global.lx.config['customSource.workerOnly.enabled'] === true,
             // 快速复检 / 节流 / 单轮预算：0 是合法值（关闭），不能用 || 兜底
             'customSource.probe.restoreIntervalMinutes': Number.isFinite(Number(global.lx.config['customSource.probe.restoreIntervalMinutes']))
               ? Number(global.lx.config['customSource.probe.restoreIntervalMinutes']) : 180,
@@ -11601,6 +11603,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 global.lx.config['customSource.trash.retentionDays'] = Number.isFinite(days)
                   ? Math.min(3650, Math.max(0, days))
                   : 30
+              }
+              // A' 实验开关：默认关
+              if (newConfig['customSource.workerOnly.enabled'] !== undefined) {
+                global.lx.config['customSource.workerOnly.enabled'] = !!newConfig['customSource.workerOnly.enabled']
               }
               // 已关闭平台快速复检：间隔 0 = 关闭该功能（下限 0、上限 10080 分钟 = 7 天）
               // 上限放到 7 天是为了跟「巡检间隔」解耦：主巡检可以设很久，复检单独调

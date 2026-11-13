@@ -264,6 +264,9 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
             size: Buffer.byteLength(content, 'utf-8'),
             supportedSources, // 保存支持的源
             enabled: false, // 默认禁用
+            // 灌入后停用标签：等「验证后启用」（停用源复检任务）或 hunter 首次启用；
+            // hunter 侧 serverVeto 看到该标签不打标冷冻。手动启用/停用会改写/清除它。
+            disableReason: 'after-import',
             uploadTime: new Date().toISOString(),
             allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM,
             requireUnsafe: !!requireUnsafe
@@ -429,6 +432,8 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
             size: Buffer.byteLength(content, 'utf-8'),
             supportedSources, // 保存支持的源
             enabled: false,
+            // 灌入后停用标签（同 upload，见该处注释）
+            disableReason: 'after-import',
             uploadTime: new Date().toISOString(),
             sourceUrl: url,
             allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM,
@@ -659,7 +664,7 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
 export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
     try {
         const body = await readBody(req)
-        const { id, sourceId, enabled, username, allowUnsafeVM } = JSON.parse(body)
+        const { id, sourceId, enabled, username, allowUnsafeVM, reason } = JSON.parse(body)
         const targetId = id || sourceId
 
         let targetOwner = (username && username !== 'default') ? username : 'open'
@@ -776,6 +781,16 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
         // 修改逻辑：只有当参数明确为 true 时才更新为 true，防止被默认值 false 覆盖
         if (allowUnsafeVM === true) target.allowUnsafeVM = true
         target.enabled = enabled !== undefined ? enabled : !target.enabled
+
+        // 停用原因标签（v1.5.55 停用源复检机制）：
+        // 停用时写标签——调用方显式声明的 after-import 才采纳，其余一律 manual（最安全缺省）；
+        // 启用时清标签（无论之前是谁停的）。hunter 的 serverVeto 只对
+        // manual/probe-dead/无标签的停用源打标，after-import 源可以放心重灌。
+        if (target.enabled) {
+            delete target.disableReason
+        } else {
+            target.disableReason = reason === 'after-import' ? 'after-import' : 'manual'
+        }
 
         fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
 

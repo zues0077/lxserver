@@ -920,7 +920,9 @@ const pickQuality = (target: ProbeTarget, platform: string): string => {
  * 探测单个音源的单个平台。
  * 判定顺序：音源能否返回链接 → 链接本身是否可达（可配置关闭）。
  */
-const probePlatform = async (
+// 导出给 sourceDisabledProbe.ts（整源停用源复检）复用：判定口径必须与主巡检同源，
+// 绝不允许两边各写一套「有效/无效」标准。
+export const probePlatform = async (
   target: ProbeTarget,
   platform: string,
   song: ProbeTestSong,
@@ -1068,6 +1070,15 @@ const pickTestSongs = async (platform: string, deps: ProbeDeps): Promise<ProbeTe
     }
   } catch { /* ignore */ }
   return []
+}
+
+/**
+ * 给「整源停用源复检」（sourceDisabledProbe.ts）挑测试曲目的包装。
+ * 与主巡检共用同一份曲目池、同一个兜底搜索 —— 判定口径同源的另一半。
+ */
+export const pickTestSongsForDisabledProbe = async (platform: string): Promise<ProbeTestSong[]> => {
+  if (!depsRef) return []
+  return pickTestSongs(platform, depsRef)
 }
 
 // ============================ 音源移除 ============================

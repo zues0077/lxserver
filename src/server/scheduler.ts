@@ -5,6 +5,7 @@ import { ScheduledTask, TaskExecutionResult } from './task/types'
 import { createNetworkListTask } from './task/networkListTask'
 import { createSyncDownloadTask, syncDownloadForAllUsers } from './task/syncDownloadTask'
 import { createSourceProbeTask, createSourceProbeRestoreTask } from './sourceProbe'
+import { createDisabledSourceProbeTask } from './sourceDisabledProbe'
 
 export * from './task/types'
 export { parseIntervalMs, checkAllUsersNetworkLists } from './task/networkListTask'
@@ -210,6 +211,12 @@ export const startScheduler = () => {
   // 压到 12 小时（默认 720 分钟）。customSource.probe.restoreIntervalMinutes=0 可关闭。
   const sourceProbeRestoreTask = createSourceProbeRestoreTask()
   registerTask(sourceProbeRestoreTask)
+
+  // 停用源复检（灌入后停用/判死自愈，v1.5.55）：只碰 disableReason 为
+  // after-import/probe-dead 的停用源，有效即自动启用，连续无效升级 probe-dead
+  // 供 hunter 打标冻结。restoreIntervalMinutes=0 时同样不跑。
+  const disabledSourceProbeTask = createDisabledSourceProbeTask()
+  registerTask(disabledSourceProbeTask)
 
   syncLog.info('[任务调度] 后台任务调度器已启动')
 

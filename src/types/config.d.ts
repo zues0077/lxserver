@@ -667,6 +667,11 @@ declare namespace LX {
      */
     'customSource.trash.retentionDays'?: number
     /**
+     * A' 实验开关 (默认 false):governor 判定的慢源脚本「整实例」(含定时器)只在
+     * worker 线程 eval,主线程不再 eval 脚本。环境变量 CUSTOM_SOURCE_WORKER_ONLY=1 优先级更高。
+     */
+    'customSource.workerOnly.enabled'?: boolean
+    /**
      * 新添加(上传/导入)的音源是否立即巡检一次 (默认 true)。
      */
     'customSource.probe.probeOnNewSource'?: boolean

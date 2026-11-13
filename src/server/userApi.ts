@@ -1379,7 +1379,10 @@ async function loadWorkerOnlyApi(apiInfo: UserApiInfo, fullApiInfo: any): Promis
  * 只做「构建 + eval + inited 等待 + 返回实例」；loadedApis 登记、temp 处置、
  * requireUnsafe 探测留在 loadUserApi 包装层。
  */
-async function buildMainThreadApiInstance(apiInfo: UserApiInfo, fullApiInfo: any): Promise<any> {
+// 导出给 sourceDisabledProbe.ts：整源停用源不在 loadedApis（加载层直接跳过），
+// 复检要临时 eval 出实例拿 callRequest，探完立即 dispose。不走 loadUserApi 的
+// 'temp' 路径是因为它会当场 dispose，探测还没开始实例就没了。
+export async function buildMainThreadApiInstance(apiInfo: UserApiInfo, fullApiInfo: any): Promise<any> {
     // 创建事件处理映射
     const eventHandlers = new Map<string, Function>()
     let registeredSources: any = {}
@@ -3555,7 +3558,7 @@ const lastReloadMap = new Map<string, number>() // 记录每个用户的最后�
 const loadedScriptHashes = new Map<string, string>()
 
 /** 当前是否正在往音箱下发音频（正在放音时不能做重载这种重活） */
-const isAudioStreaming = (): boolean => {
+export const isAudioStreaming = (): boolean => {
     try {
         // 延迟 require，避免与 xiaoai 模块产生循环依赖
         // eslint-disable-next-line @typescript-eslint/no-var-requires
