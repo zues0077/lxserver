@@ -1261,11 +1261,20 @@ async function createLxRequest(
 }
 
 /**
- * A' 实验开关（仅测试容器用）：让已被 governor 记为慢源的脚本「整实例」只在
- * 独立线程 eval，主线程完全不 eval 脚本 —— 脚本自排的 600s 健康探测定时器
- * 及其同步重活因此不会落在主线程。默认关闭，实机用环境变量开/关做 A/B 对比。
+ * A' 实验开关：让已被 governor 记为慢源的脚本「整实例」只在独立线程 eval，
+ * 主线程完全不 eval 脚本 —— 脚本自排的 600s 健康探测定时器及其同步重活
+ * 因此不会落在主线程。默认关闭。
+ * 开启口径：配置键 `customSource.workerOnly.enabled === true`（管理端可灰度）
+ * 或环境变量 `CUSTOM_SOURCE_WORKER_ONLY=1`（测试容器 A/B 用，优先级更高）。
  */
-const WORKER_ONLY_ENABLED = process.env.CUSTOM_SOURCE_WORKER_ONLY === '1'
+export function isWorkerOnlyEnabled(): boolean {
+    if (process.env.CUSTOM_SOURCE_WORKER_ONLY === '1') return true
+    try {
+        return (global as any).lx?.config?.['customSource.workerOnly.enabled'] === true
+    } catch {
+        return false
+    }
+}
 
 /** 该源是否在 governor 的慢源记录里（脚本指纹变了就不认旧记录）。 */
 function isWorkerOnlyCandidate(owner: string, id: string): boolean {
@@ -1836,7 +1845,7 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
     const fullApiInfo = { ...apiInfo, ...metadata }
 
     // A' 分支：慢源整实例进 worker；加载失败自动回退主线程原路径，不阻断音源可用性。
-    if (WORKER_ONLY_ENABLED && fullApiInfo.owner !== 'temp' && isWorkerOnlyCandidate(fullApiInfo.owner, apiInfo.id)) {
+    if (isWorkerOnlyEnabled() && fullApiInfo.owner !== 'temp' && isWorkerOnlyCandidate(fullApiInfo.owner, apiInfo.id)) {
         try {
             return await loadWorkerOnlyApi(apiInfo, fullApiInfo)
         } catch (e: any) {
