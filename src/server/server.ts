@@ -6433,7 +6433,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             username = verified
           }
           const folderParam = urlObj.searchParams.get('folder')
-          const requestedFolder = folderParam === 'cache' || folderParam === 'music' ? folderParam as fileCache.CacheFolder : undefined
+          const requestedFolder = folderParam === 'cache' || folderParam === 'music' || folderParam === 'preview' ? folderParam as fileCache.CacheFolder : undefined
           fileCache.serveCacheFile(req, res, decodeURIComponent(filename), username, requestedFolder)
           return
         }
@@ -10036,6 +10036,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
 
             let customSourceError: string | null = null
             let attempts: any[] = []
+            // 「允许试听」兜底候选（soda.allowPreview=true 时由 R75-1 preview 判定填充；
+            // 换源全失败后才投放——完整版永远优先）
+            let sodaTrialFallback: { url: string; quality: string; previewDurationSec: number } | null = null
             if (!result && (isSourceSupported(source, verifiedUsername) || accountUsable)) {
               try {
                 console.log(`[歌曲播放] 使用自定义源解析: ${source} (请求ID: ${reqId || '无'}, 用户: ${verifiedUsername})`)
@@ -10109,9 +10112,25 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     const expectedSec = parseIntervalSeconds(songInfo.interval || (songInfo as any)?.meta?.interval)
                     const gate = await probeRemoteStream(String(candidate.url), expectedSec)
                     if (!gate.ok) {
-                      if (gate.kind === 'preview') noteSodaPreviewVerdict(songInfo, gate.reason || '')
-                      console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
-                      throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
+                      if (gate.kind === 'preview') {
+                        noteSodaPreviewVerdict(songInfo, gate.reason || '')
+                        // 「允许试听」兜底（2026-11-13 方案）：完整版永远优先 —— 这里不直接投放，
+                        // 只把试听候选记下来；换源（五平台+B站）仍照常执行，全都没有时才投试听。
+                        if (fileCache.previewCacheEnabled()) {
+                          sodaTrialFallback = {
+                            url: String(candidate.url),
+                            quality: String(quality || '128k'),
+                            previewDurationSec: (gate as any).streamDurationSec || 0,
+                          }
+                          console.log(`[歌曲播放] 汽水试听候选已记录（换源失败后兜底用）: ${songInfo.name} — ${gate.reason}`)
+                        } else {
+                          console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
+                          throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
+                        }
+                      } else {
+                        console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
+                        throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
+                      }
                     }
                   }
                   // 后处理全部通过：此刻才把候选结果转正
@@ -10179,12 +10198,57 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                     },
                   }
                   void pushProgress({ name: switched.sourceName, status: 'success' })
+                  // 整曲已可用：清同曲试听缓存，防止试听片段残留误导后续播放
+                  fileCache.clearPreviewCacheForSong(verifiedUsername, String(songInfo?.songmid || songInfo?.id || ''))
                   console.log(`[换源] ${source} 失败后已换到 ${switched.sourceName}：${songInfo.name}`)
                 }
               } catch (switchErr: any) {
                 console.warn(`[换源] ${source} 失败后换源也未命中: ${switchErr?.message || switchErr}`)
               }
+              // 「允许试听」最后兜底（2026-11-13 方案）：完整版全都没有时才投试听片段。
+              // 优先 preview/ 缓存（TTL 内直接复用），否则用本次门禁记下的候选并异步写缓存。
+              // 投放结果显式带 switched 提示，用户不会误以为听到的是完整版。
+              if (!result && sodaTrialFallback && fileCache.previewCacheEnabled()) {
+                const cachedPreview = fileCache.getPreviewCacheItem(verifiedUsername, songInfo, sodaTrialFallback.quality)
+                if (cachedPreview?.filename) {
+                  result = {
+                    url: `/api/music/cache/file/${encodeURIComponent(verifiedUsername || '_open')}/${encodeURIComponent(cachedPreview.filename)}?folder=preview`,
+                    type: 'local',
+                    sourceName: '汽水试听（缓存）',
+                    sourceId: 'soda-preview-cache',
+                    quality: cachedPreview.quality || sodaTrialFallback.quality,
+                    attempts: [{ name: '汽水试听（缓存）', status: 'success' }],
+                    switched: {
+                      from: sourceDisplayName(source),
+                      to: '汽水试听片段',
+                      reason: '完整版各通道与全平台换源均未命中，已按「允许试听」设置投放试听片段',
+                    },
+                  } as any
+                  void pushProgress({ name: '汽水试听（缓存）', status: 'success' })
+                  console.log(`[试听兜底] 命中试听缓存: ${songInfo.name} (${cachedPreview.previewDurationSec || '?'}s)`)
+                } else {
+                  result = {
+                    url: sodaTrialFallback.url,
+                    type: sodaTrialFallback.quality,
+                    sourceName: '汽水试听',
+                    sourceId: 'soda-preview-live',
+                    quality: sodaTrialFallback.quality,
+                    attempts: [{ name: '汽水试听', status: 'success' }],
+                    switched: {
+                      from: sourceDisplayName(source),
+                      to: '汽水试听片段',
+                      reason: '完整版各通道与全平台换源均未命中，已按「允许试听」设置投放试听片段',
+                    },
+                  } as any
+                  void pushProgress({ name: '汽水试听', status: 'success' })
+                  console.log(`[试听兜底] 投放实时试听流: ${songInfo.name} (${sodaTrialFallback.previewDurationSec || '?'}s)`)
+                  // 异步写试听缓存（不阻塞投放；解码抽检不过就不落盘）
+                  void fileCache.savePreviewCache(songInfo, sodaTrialFallback.url, sodaTrialFallback.quality, verifiedUsername, sodaTrialFallback.previewDurationSec)
+                }
+              }
+
               // 换源也没成，才把失败写进短缓存（避免把「其实能换到」的曲子也一起缓存掉）
+              // 注意：试听兜底已投放（result 非空）时也不写失败缓存——下次播放完整链路照常先试完整版。
               if (!result) rememberMusicUrlFailure(failKey, switchReason)
             }
 

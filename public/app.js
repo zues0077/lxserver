@@ -2694,6 +2694,14 @@ class App {
                 form.elements['player.enableAuth'].checked = config['player.enableAuth'] === true;
             }
 
+            // 汽水试听兜底
+            if (form.elements['soda.allowPreview']) {
+                form.elements['soda.allowPreview'].checked = config['soda.allowPreview'] === true;
+            }
+            if (form.elements['soda.previewTtlHours']) {
+                form.elements['soda.previewTtlHours'].value = config['soda.previewTtlHours'] || 168;
+            }
+
             // WebDAV 配置
             if (form.elements['webdav.enable']) {
                 form.elements['webdav.enable'].checked = config['webdav.enable'] === true;
@@ -3629,6 +3637,8 @@ class App {
             ...(adminPasswordInput ? { 'admin.password': adminPasswordInput } : {}),
             'player.name': (formData.get('player.name') || '').trim() || 'LX Music Web',
             'player.enableAuth': formData.get('player.enableAuth') === 'on',
+            'soda.allowPreview': formData.get('soda.allowPreview') === 'on',
+            'soda.previewTtlHours': Math.min(8760, Math.max(1, parseInt(formData.get('soda.previewTtlHours')) || 168)),
             ...(playerPasswordInput ? { 'player.password': playerPasswordInput } : {}),
             'webdav.enable': formData.get('webdav.enable') === 'on',
             'webdav.url': formData.get('webdav.url'),

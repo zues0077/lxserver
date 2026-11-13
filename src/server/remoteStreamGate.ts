@@ -37,6 +37,8 @@ export interface RemoteGateVerdict {
     ok: boolean
     kind: 'ok' | 'preview' | 'corrupt'
     reason?: string
+    /** 实际流时长（秒；0/缺省=未知）。preview 判定时携带，供试听兜底缓存标记时长 */
+    streamDurationSec?: number
 }
 
 interface WindowResult {
@@ -83,6 +85,7 @@ export const judgeRemoteGate = (
             ok: false,
             kind: 'preview',
             reason: `汽水返回的是 ${Math.round(streamDurationSec)} 秒片段（该曲完整 ${expectedSec} 秒），按试听拦截`,
+            streamDurationSec,
         }
     }
     for (const w of windows) {

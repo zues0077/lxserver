@@ -1132,6 +1132,24 @@
                                         </div>
                                     </div>
                                 </div>
+                                <div class="config-divider"></div>
+                                <div class="config-toggle-row">
+                                    <div class="config-toggle-info">
+                                        <span class="config-toggle-label">汽水版权曲允许试听</span>
+                                        <span class="config-toggle-desc">汽水受限曲只有 30/60 秒试听且完整版换源也找不到时，投放试听片段而不是报失败；完整版永远优先</span>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" name="soda.allowPreview" />
+                                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                    </label>
+                                </div>
+                                <div class="config-field">
+                                    <label class="config-label">试听缓存保留时长（小时）</label>
+                                    <input type="number" name="soda.previewTtlHours" class="form-input config-input"
+                                        min="1" max="8760" placeholder="168"
+                                        data-requires="soda.allowPreview" />
+                                    <small class="config-hint">试听片段存独立 preview 目录，与整曲缓存（6 小时）完全独立；播放时先试完整版，试听缓存只在「全都没有」时兜底命中</small>
+                                </div>
 
                                 <div class="config-card glass">
                                     <div class="config-card-header">
