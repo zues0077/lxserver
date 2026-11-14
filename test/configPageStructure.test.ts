@@ -259,3 +259,32 @@ test('回收站保留天数：配置字段、默认值、清理入口三处对�
   // 0 是合法值（永不清理），读配置时不能被 || 兜底成默认值
   assert.doesNotMatch(indexTs, /customSource\.trash\.retentionDays'\] \|\| \d+/, '0 不能被 || 吞掉')
 })
+
+test('页内跳转按钮：全部能被 app.js 绑上，且 data-target 指向真实存在的目标', () => {
+  // 背景（2026-11-14 事故，P-1476）：配置分组拆成独立视图（Subsonic / WebDAV）后，
+  // 绑定选择器仍写着 `#view-config .config-jump-btn`，落在新视图里的按钮就选不到、
+  // 静默点不动（无报错、无请求）。这里守住两条不变量，防止换个视图再犯。
+  assert.doesNotMatch(
+    appJs,
+    /querySelectorAll\('#view-config \.config-jump-btn'\)/,
+    '跳转按钮绑定不能限定在 #view-config 内——分组拆分后其他视图里的按钮会绑不上'
+  )
+  assert.match(appJs, /querySelectorAll\('\.config-jump-btn'\)/, '应以全局 .config-jump-btn 绑定')
+
+  const btns = [...html.matchAll(/<button[^>]*class="[^"]*config-jump-btn[^"]*"[^>]*>/g)].map(m => m[0])
+  assert.ok(btns.length >= 2, `跳转按钮太少（${btns.length}），结构可能又变了`)
+
+  const viewIds = new Set([...html.matchAll(/<div id="(view-[a-z]+)" class="view"/g)].map(m => m[1]))
+  const allIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]))
+
+  for (const tag of btns) {
+    const t = tag.match(/data-target="([^"]+)"/)?.[1]
+    assert.ok(t, `跳转按钮缺少 data-target：${tag.slice(0, 100)}`)
+    // 历史别名：cfg-webdav-page 由 app.js 特判切到 webdav 视图
+    if (t === 'cfg-webdav-page') continue
+    const isElement = allIds.has(t)
+    const isView = viewIds.has('view-' + t)
+    assert.ok(isElement || isView,
+      `按钮 data-target="${t}" 既不是页面元素 id，也不是视图名（view-${t}）——点了会没反应`)
+  }
+})

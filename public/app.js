@@ -3060,19 +3060,29 @@ class App {
             }
         }
 
-        // 页内跳转按钮（跨分组 / 跨页面）
-        document.querySelectorAll('#view-config .config-jump-btn').forEach(btn => {
+        // 页内跳转按钮（跨分组 / 跨视图）
+        // 注意：选择器不能限定在 #view-config 内 —— 配置分组拆到独立视图后
+        // （Subsonic / WebDAV），写在那些视图里的跳转按钮会选不到、静默点不动（P-1476）。
+        // 用 data-target 的值决定行为：命中视图名就切视图，命中元素 id 就滚动过去。
+        document.querySelectorAll('.config-jump-btn').forEach(btn => {
             if (btn.dataset.bound) return;
             btn.dataset.bound = '1';
             btn.addEventListener('click', () => {
                 const target = btn.dataset.target;
+                if (!target) return;
+                // 旧写法兼容：cfg-webdav-page 是历史遗留的视图别名
                 if (target === 'cfg-webdav-page') {
                     this.switchView('webdav');
                     return;
                 }
+                const viewEl = document.getElementById('view-' + target);
+                if (viewEl && !document.getElementById(target)) {
+                    this.switchView(target);
+                    return;
+                }
                 const el = document.getElementById(target);
                 if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                if (target) this.setConfigSubnavActive(target);
+                this.setConfigSubnavActive(target);
             });
         });
 
