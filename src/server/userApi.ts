@@ -2120,6 +2120,11 @@ export const partitionByCooldown = (
  *
  * 单平台沉底名单 ≥ `PLATFORM_SINK_CALM_MIN` 个、且占候选 1/3 以上时，判为平台级故障窗口：
  * 此时「谁近期失败过」已不反映单个源的优劣，按单源沉底重排只会把优源压到队尾。
+ *
+ * 2026-11-14 曾尝试收紧到 2/3（依据：kg 10/20 里 7 个源只是 kg 通道坏），但被
+ * `playCooldown.test.ts`「15/39 判为平台级故障（kg 风控窗口实测值）」正面反证：
+ * 风控空返回与该源 kg 通道坏，在「其它平台是否正常」这个信号上完全同形，
+ * 无法用对照组区分。判据维持原样，不改。
  */
 export const isPlatformSinkWindow = (sunkLen: number, totalLen: number): boolean =>
     totalLen > 0 && sunkLen >= PLATFORM_SINK_CALM_MIN && sunkLen * 3 >= totalLen
@@ -2756,10 +2761,14 @@ export async function callUserApiGetMusicUrl(
         // 与窗口过期机制照常洗白，平台恢复后名单自然收敛。
         if (sunk.length && fresh.length && isPlatformSinkWindow(sunk.length, candidates.length)) {
             console.log(`[自定义源] ${source} 平台 ${sunk.length}/${candidates.length} 个源近期失败，` +
-                `疑似平台级故障窗口，本轮不按单源沉底重排（成功即恢复机制不变）`)
+                `疑似平台级故障窗口，本轮不按单源沉底重排（成功即恢复机制不变）：` +
+                sunk.map((a: any) => a.info?.name).join('、'))
         } else if (sunk.length && fresh.length) {
             candidates = [...fresh, ...sunk]
-            console.log(`[自定义源] ${sunk.length} 个近期失败的音源已排到队尾（不禁用、成功即恢复）：` +
+            // 日志必须带平台：沉底账本的 key 是「源 × 平台」（见 playSinkKey），
+            // 只打源名会让读者误以为整个音源被沉底 —— 实测同一音源可以「soda 沉底、mg 正常」。
+            console.log(`[自定义源] ${source} 平台 ${sunk.length}/${candidates.length} 个源近期失败已排到队尾` +
+                `（源×平台粒度，不禁用、成功即恢复）：` +
                 sunk.map((a: any) => a.info?.name).join('、'))
         }
     }

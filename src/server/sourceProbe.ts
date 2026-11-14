@@ -107,9 +107,20 @@ export interface PlatformProbeState {
    *
    * 为什么要有这一档：巡检一次失败就关平台，误判代价是「用户少一个能用的源」；
    * 而第一次失败只降权，代价仅仅是「下次先试别的源」，两者严重不对称。
-   * 降权由成功一次或超过 DEMOTE_TTL_MS 自动失效，不会长期粘住。
+   * 降权由成功一次或超期自动失效，不会长期粘住：硬失败 6 小时（DEMOTE_TTL_MS），
+   * 软失败 30 分钟（DEMOTE_SOFT_TTL_MS，见下面 demoteSoft 字段）。
    */
   demotedAt?: number
+  /**
+   * 本次降权是由**软失败**点亮的（无版权/未找到链接/接口返回空）。
+   *
+   * 只为决定降权有效期：软失败用 `DEMOTE_SOFT_TTL_MS`（30 分钟），硬失败用
+   * `DEMOTE_TTL_MS`（6 小时）。语义不变——软失败照样排到队尾，只是不用一次
+   * 「这首歌没有」压它 6 小时（2026-11-14，依据 17950 实测：tx 上 K×H测试 仅
+   * 2 次软失败、failCount 仍为 0，却被压了整 6 小时队尾）。
+   * 旧数据没有这个字段 → 视为硬失败，行为与升级前一致。
+   */
+  demoteSoft?: boolean
 }
 
 export interface SourceProbeState {
@@ -1272,11 +1283,23 @@ const RESTORE_DEBOUNCE_MS = 30 * 60_000
  * 它会永远排在队尾，而用户完全看不出原因。过期即恢复原位，下一轮巡检失败会重新降权。
  */
 const DEMOTE_TTL_MS = 6 * 60 * 60 * 1000
+/**
+ * 软失败降权的有效期。
+ *
+ * 与硬失败分开的理由：降权是「排到换源队尾」，硬失败（超时/DNS 失败/连接重置/5xx）
+ * 说明这个源此刻真的不能用，6 小时合理；软失败（无版权/未找到链接/接口返回空）
+ * 多数是「这一首没有」，与源健康相关性弱，压 6 小时等于用最弱的证据做最长效的排序惩罚。
+ * 30 分钟与 `customSource.governor.ttlMinutes` 同档，代价仍大于零（照样让位给别的源），
+ * 又不至于因一次偶然空返回长时间压住一个好源。
+ */
+const DEMOTE_SOFT_TTL_MS = 30 * 60 * 1000
 
 /** 某「源 × 平台」当前是否处于降权观察期（纯函数，便于单测；ps 为空视为未降权） */
-export const isDemoteActive = (ps: { demotedAt?: number } | undefined, now: number = Date.now()): boolean => {
+export const isDemoteActive = (ps: { demotedAt?: number; demoteSoft?: boolean } | undefined, now: number = Date.now()): boolean => {
   const at = Number(ps?.demotedAt || 0)
-  return at > 0 && now - at < DEMOTE_TTL_MS
+  if (!(at > 0)) return false
+  const ttl = ps?.demoteSoft ? DEMOTE_SOFT_TTL_MS : DEMOTE_TTL_MS
+  return now - at < ttl
 }
 
 export interface FailureNoteOptions {
@@ -1324,7 +1347,11 @@ export const notePlatformFailure = (
       // 已经关掉的平台不参与降权：它在 states.json 里已不可选，排序层看不到它
       if (ps.autoDisabled) return { demoted: isDemoteActive(ps, now), demoteStarted: false, counted: false }
       const demoteStarted = !isDemoteActive(ps, now)
-      if (demoteStarted) ps.demotedAt = now
+      if (demoteStarted) {
+        ps.demotedAt = now
+        // 软失败降权走 30 分钟短窗口（见 DEMOTE_SOFT_TTL_MS），语义仍是「排到队尾」
+        ps.demoteSoft = true
+      }
       return { demoted: true, demoteStarted, counted: false }
     }
     // 连续软失败到折算线：清软计数，按一次硬证据继续走下面的正常流程
@@ -1340,14 +1367,20 @@ export const notePlatformFailure = (
   if (!threshold || ps.autoDisabled || ps.failCount < threshold) {
     return { demoted: isDemoteActive(ps, now), demoteStarted: false, counted: true }
   }
-  const demoteStarted = !isDemoteActive(ps, now)
-  if (demoteStarted) ps.demotedAt = now
+  const active = isDemoteActive(ps, now)
+  const demoteStarted = !active
+  // 软失败点亮过的降权，遇到硬失败要「升级」成 6 小时长窗口（证据更强，时长理应更长）
+  if (demoteStarted || ps.demoteSoft) {
+    ps.demotedAt = now
+    ps.demoteSoft = false
+  }
   return { demoted: true, demoteStarted, counted: true }
 }
 
 /** 探测成功：立刻撤销降权（与「任意一次成功即恢复原位」的沉底语义保持一致） */
 export const clearPlatformDemote = (ps: PlatformProbeState): void => {
   ps.demotedAt = 0
+  ps.demoteSoft = false
 }
 
 /**
