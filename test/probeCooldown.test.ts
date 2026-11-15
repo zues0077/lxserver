@@ -220,3 +220,42 @@ test('预算-4 按源冷却与整体暂停互不干扰（同源 3 连败只锁�
     assert.strictEqual(planProbeCandidate(cand, 'tx', '320k', NOW)?.api?.info?.id, 'alive.js',
         '整体未暂停，仍应挑别的合格候选')
 })
+
+// ============ 四、判稳口径：尝试数下限 + 成功率（替代旧的「累计成功次数 ≥ 10」）============
+
+test('判稳-1 kg 场景：成功率 80%、但累计成功只有 8 次 → 必须放行（旧口径会卡死）', () => {
+    resetPlayRank(); resetProbeState()
+    // 10 次尝试、8 次成功 = 80%，且最后一次是成功（避免落进「近期失败未恢复」那条）
+    notePlayResult(T('top.js', 'kg'), false, 0, NOW - 60 * MIN)
+    notePlayResult(T('top.js', 'kg'), false, 0, NOW - 59 * MIN)
+    for (let i = 0; i < 8; i++) notePlayResult(T('top.js', 'kg'), true, 400, NOW - 58 * MIN + i)
+    const rec = getPlayRankRecord(T('top.js', 'kg'))
+    assert.strictEqual(rec?.successes, 8, '前置：累计成功 8 次，按旧口径 <10 会被卡')
+    assert.ok(planProbeCandidate([api('top.js'), api('u1.js'), api('u2.js')], 'kg', '320k', NOW)?.api,
+        '成功率 80% 已经算稳，不该因为只成功 8 次就不给试探机会')
+})
+
+test('判稳-2 跑得多但成功率低（10/20 = 50%）→ 必须拦住（旧口径会放行）', () => {
+    resetPlayRank(); resetProbeState()
+    for (let i = 0; i < 10; i++) notePlayResult(T('top.js'), false, 0, NOW - 60 * MIN + i)
+    for (let i = 0; i < 10; i++) notePlayResult(T('top.js'), true, 400, NOW - 50 * MIN + i)
+    const rec = getPlayRankRecord(T('top.js'))
+    assert.strictEqual(rec?.successes, 10, '前置：累计成功 10 次，旧口径正好放行')
+    assert.strictEqual(planProbeCandidate([api('top.js'), api('u1.js'), api('u2.js')], 'tx', '320k', NOW), undefined,
+        '成功率只有 50%，说明队首自己就不稳，不该花预算探别人')
+})
+
+test('判稳-3 证据量不足：4 次尝试 4 次成功（100%）→ 仍要拦（防「1 次成功 = 100%」误判）', () => {
+    resetPlayRank(); resetProbeState()
+    for (let i = 0; i < 4; i++) notePlayResult(T('top.js'), true, 400, NOW - 10 * MIN + i)
+    assert.strictEqual(planProbeCandidate([api('top.js'), api('u1.js'), api('u2.js')], 'tx', '320k', NOW), undefined,
+        '才 4 次样本，成功率再高也不算「稳」')
+})
+
+test('判稳-4 边界：5 次尝试 4 次成功（80%）→ 放行', () => {
+    resetPlayRank(); resetProbeState()
+    notePlayResult(T('top.js'), false, 0, NOW - 20 * MIN)
+    for (let i = 0; i < 4; i++) notePlayResult(T('top.js'), true, 400, NOW - 19 * MIN + i)
+    assert.ok(planProbeCandidate([api('top.js'), api('u1.js'), api('u2.js')], 'tx', '320k', NOW)?.api,
+        '刚好达到 5 次尝试下限、成功率 80%，应放行')
+})

@@ -359,8 +359,25 @@ export const PROBE_PLATFORMS = ['tx', 'kg']
 export const PROBE_INTERVAL_MS = 10 * 60 * 1000
 /** 试探预算（ms）：挂了最多白吃 1.5s，均摊 ~150ms/首；好了省出 200ms+/首 */
 export const PROBE_BUDGET_MS = 1500
-/** 首选源至少成功这么多次才算「稳定」，才值得花一次探索 */
-export const PROBE_MIN_TOP_SUCCESSES = 10
+/**
+ * 队首「证据量」下限：至少跑过这么多次，才允许拿成功率去判它稳不稳。
+ *
+ * 为什么要有下限：只按成功率判的话，「1 次尝试 1 次成功 = 100%」也会被批准去花预算探索别人。
+ * 5 次是「能看出趋势」的最小样本，同时也别设太大 —— 设成 10 就等于回到旧的绝对次数门槛，
+ * 低流量平台（kg）永远攒不到。
+ */
+export const PROBE_MIN_TOP_ATTEMPTS = 5
+/**
+ * 队首成功率下限：低于它就不试探（首选自己都不稳，先顾自己）。
+ *
+ * 2026-11-15 由 `PROBE_MIN_TOP_SUCCESSES = 10`（累计**成功次数**）改成**成功率**口径。
+ * 旧的绝对次数门槛量的是「流量」不是「稳定性」，两个方向都错：
+ *  - 好源被卡：246 实测 kg 的 `K×H测试` 成功率 80%（8/10），只因为差了 2 次没到 10，
+ *    15 轮里 0 次试探；kg 队首命中率只有 40%（每轮攒 0.4 次），攒满 10 次要约 25 轮。
+ *  - 坏源放行：一个跑了 500 次、成功 100 次（20%）的源，因为「成功过 100 次」照样通过门槛。
+ * 70% 的取法：kg 队首 80%、tx 队首 100%，两侧都留了余量；再低会把「一半时间失败」的源当稳定。
+ */
+export const PROBE_MIN_TOP_RATE = 0.7
 /**
  * 首选源「最近一次失败」在这么久以内，就不试探（首选自己都不稳，先顾自己）。
  *
@@ -437,9 +454,10 @@ const logGate = (platform: string, quality: string, msg: string): void => {
  *
  * 资格（三条同时满足）：
  *  1. 平台在 `PROBE_PLATFORMS` 且距上次试探 ≥ `PROBE_INTERVAL_MS`；
- *  2. 队首（调用方排好序后的第一个）稳定成功：successes ≥ `PROBE_MIN_TOP_SUCCESSES`
- *     且**最近一次失败**不在 `PROBE_TOP_RECENT_FAIL_MS`（30min）以内；
- *     —— 2026-11-15 起按时间判，不再看累计失败数（累计口径会永久关停，见 `PROBE_TOP_RECENT_FAIL_MS`）；
+ *  2. 队首（调用方排好序后的第一个）被判「稳」：尝试次数 ≥ `PROBE_MIN_TOP_ATTEMPTS`(5)
+ *     且成功率 ≥ `PROBE_MIN_TOP_RATE`(70%)，且**最近一次失败**不在 `PROBE_TOP_RECENT_FAIL_MS`（30min）
+ *     以内、且那次失败之后没有成功过；
+ *     —— 2026-11-15 起判稳口径由「累计成功次数 ≥ 10」改成「尝试数下限 + 成功率」（见 PROBE_MIN_TOP_RATE）；
  *  3. 候选里有「本平台未证明」的源（Y.11-6 放宽，2026-11-09 用户拍板）：
  *     - 本平台无记录 / 样本不足 MIN_TRUST（从没真正跑过），或
  *     - 失败-only 但已过降级时钟（旧失败证据过期，见 `STALE_FAIL_MS`）。
@@ -487,8 +505,17 @@ export const planProbeCandidate = (
         logGate(platform, quality, '未通过：队首无记录')
         return undefined
     }
-    if (topRec.successes < PROBE_MIN_TOP_SUCCESSES) {
-        logGate(platform, quality, `未通过：队首样本不足（成功 ${topRec.successes} < ${PROBE_MIN_TOP_SUCCESSES}）`)
+    // 判稳口径（2026-11-15 改）：先看证据量够不够，再看成功率。
+    // 旧版是 `successes < 10` —— 那是流量门槛，不是稳定性判据（详见 PROBE_MIN_TOP_RATE 注释）。
+    if (topRec.attempts < PROBE_MIN_TOP_ATTEMPTS) {
+        logGate(platform, quality,
+            `未通过：队首样本不足（尝试 ${topRec.attempts} < ${PROBE_MIN_TOP_ATTEMPTS}）`)
+        return undefined
+    }
+    const topRate = topRec.attempts > 0 ? topRec.successes / topRec.attempts : 0
+    if (topRate < PROBE_MIN_TOP_RATE) {
+        logGate(platform, quality,
+            `未通过：队首成功率偏低（${(topRate * 100).toFixed(0)}% < ${PROBE_MIN_TOP_RATE * 100}%，${topRec.successes}/${topRec.attempts}）`)
         return undefined
     }
     const lastFailAt = Number(topRec.lastFailAt) || 0
