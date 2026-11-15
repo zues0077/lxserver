@@ -388,10 +388,38 @@ export const PROBE_FAIL_STREAK_MAX = 3
  */
 export const PROBE_COOLDOWN_MS = 6 * 60 * 60 * 1000
 
+/**
+ * 连续试探全败多少次后**整体**暂停试探（2026-11-15，用户拍板的方案 B）。
+ *
+ * 为什么不能只靠上面的「按源冷却」：那个机制的效果取决于**可试探源的个数**。
+ * R6 实测只有 3 个候选死源 → 每个约 40min 被挑一次 → 2h 内三个各累计 3 次失败、冷却全触发；
+ * R7 实测 5~6 个候选源轮转 → 失败被摊薄，2.5h 内一个都没到 3 次、冷却一次没触发。
+ * 也就是说「源越多，止损越慢」——方向正好反了。
+ *
+ * 这个计数器**不分源**：它回答的是「现在这个平台/档位试探还值不值得花预算」。
+ * 无论候选有多少，连续 4 次全败就说明当下整个源池都不行，先停 30 分钟不试。
+ */
+export const PROBE_FAIL_BUDGET_MAX = 4
+/** 整体暂停时长：30min，与 `STALE_FAIL_MS` 同口径（软失败证据过期的时间尺度） */
+export const PROBE_PAUSE_MS = 30 * 60 * 1000
+
 const lastProbeAt = new Map<string, number>()
 
+/**
+ * 连续试探失败计数（**进程内，不落盘**）。
+ *
+ * 不持久化是刻意的：它表达的是「此刻试探不划算」这个临时判断，重启后上游可能已经变了，
+ * 把 30 分钟的暂停带到下次启动没有意义（按源冷却 `probeSkipUntil` 才需要落盘，那是 6h 的证据）。
+ */
+let probeFailStreak = 0
+let probePausedUntil = 0
+
 /** 测试用：清空试探节流状态 */
-export const resetProbeState = (): void => { lastProbeAt.clear() }
+export const resetProbeState = (): void => {
+    lastProbeAt.clear()
+    probeFailStreak = 0
+    probePausedUntil = 0
+}
 
 /**
  * 资格判定日志（2026-11-15 新增，格式固定便于 grep）。
@@ -422,6 +450,11 @@ const logGate = (platform: string, quality: string, msg: string): void => {
  *  4. 该源不在试探冷却期（2026-11-15，见 `PROBE_FAIL_STREAK_MAX` / `PROBE_COOLDOWN_MS`）：
  *     连续试探失败达上限的死源，6 小时内不再被挑。不加这条时「挑最久未试」必然反复
  *     挑中永不成功的源，R5 实测试探命中率只有 1/17。
+ *  5. 不在**整体暂停**期（2026-11-15，见 `PROBE_FAIL_BUDGET_MAX`）：连续 4 次试探全败（不分源）
+ *     就停 30 分钟。按源冷却的效果受候选个数支配（R6 三源 2h 全触发、R7 六源 2.5h 零触发），
+ *     这条与候选数无关，是兜底。
+ *
+ * 判定顺序（变了会影响日志含义）：节流 → **整体暂停** → 队首记录/样本/近期失败 → 候选逐个筛。
  *
  * 多个候选时按先验择优：有证据的（samePlatform / anyKey×折扣）排在完全无证据的
  * （按 `NEUTRAL_MS` 计）前面。返回后由调用方把它插到队首，
@@ -437,6 +470,12 @@ export const planProbeCandidate = (
     if (!quality || candidates.length < 3 || !PROBE_PLATFORMS.includes(platform)) return undefined
     const probeKey = `${platform}:${quality}`
     if (now - (lastProbeAt.get(probeKey) || 0) < PROBE_INTERVAL_MS) return undefined
+    // 整体暂停优先于队首判断：连败 4 次说明当下源池整体不行，此时队首稳不稳已经不重要
+    if (now < probePausedUntil) {
+        logGate(platform, quality,
+            `未通过：试探整体暂停（连续 ${PROBE_FAIL_BUDGET_MAX} 次全败，剩 ${((probePausedUntil - now) / 60000).toFixed(1)} 分钟）`)
+        return undefined
+    }
     const top = candidates[0]
     const topRec = stats.get(playRankKey({
         owner: String(top?.info?.owner || ''),
@@ -507,22 +546,32 @@ export const planProbeCandidate = (
  * 那部分由沉底/冷却负责，混进来会让两个机制互相拉偏。
  * 试探成功走 `noteProbeSuccessReset`（整条记录重置，计数自然清零）。
  */
-export const noteProbeFail = (target: PlayRankTarget, now: number = Date.now()): string | undefined => {
-    if (!target || !target.quality) return undefined
+export const noteProbeFail = (
+    target: PlayRankTarget,
+    now: number = Date.now(),
+): { source?: string; budget?: string } => {
+    const out: { source?: string; budget?: string } = {}
+    // 先记整体连败：它不依赖账本，源没有记录也要计（否则新源全败的情况永远触发不了兜底）
+    probeFailStreak += 1
+    if (probeFailStreak >= PROBE_FAIL_BUDGET_MAX) {
+        probePausedUntil = now + PROBE_PAUSE_MS
+        probeFailStreak = 0
+        out.budget = `连续 ${PROBE_FAIL_BUDGET_MAX} 次试探全败，整体暂停 ${PROBE_PAUSE_MS / 60000}min`
+    }
+    if (!target || !target.quality) return out
     const key = playRankKey(target)
     const rec = stats.get(key)
-    if (!rec) return undefined
+    if (!rec) return out
     const fails = (Number(rec.probeFails) || 0) + 1
     rec.probeFails = fails
-    let cooledMsg: string | undefined
     if (fails >= PROBE_FAIL_STREAK_MAX) {
         rec.probeSkipUntil = now + PROBE_COOLDOWN_MS
         rec.probeFails = 0   // 冷却期结束后重新开始计数，不要一解除就再进冷却
-        cooledMsg = `连续试探失败 ${fails} 次，冷却 ${PROBE_COOLDOWN_MS / 3600000}h`
+        out.source = `连续试探失败 ${fails} 次，冷却 ${PROBE_COOLDOWN_MS / 3600000}h`
     }
     stats.set(key, rec)
     try { markLedgerDirty() } catch { /* 落盘标记失败不影响排序 */ }
-    return cooledMsg
+    return out
 }
 
 /**
@@ -537,6 +586,8 @@ export const noteProbeSuccessReset = (
     now: number = Date.now(),
 ): void => {
     if (!target || !target.quality) return
+    // 试探成功说明「现在试探是划算的」→ 整体连败计数清零，别让历史连败继续压着后续试探
+    probeFailStreak = 0
     const raw = Math.max(0, Number(costMs) || 0)
     // attempts 给到 MIN_TRUST：1 次样本会落进「样本不足 → 中性分」分支，
     // 等于没重置（1200 分照样排不进前列）；2 次 = 直接进实测分数分支

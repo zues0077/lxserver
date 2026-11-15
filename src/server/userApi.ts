@@ -3143,8 +3143,9 @@ export async function callUserApiGetMusicUrl(
                 noteQuality(api, false, failMsg)
                 notePlayPerf(api, false)
                 notePlayCooldown(api, source, failMsg)
-                // 试探失败要单独计数（2026-11-15）：连续失败达上限就让这个源进冷却，
-                // 否则「挑最久未试」会永远挑中永不成功的死源（R5 实测命中率 1/17）
+                // 试探失败要单独计数（2026-11-15）：源级连续失败达上限让该源进冷却；
+                // 全局连续 4 次全败则整体暂停 30 分钟（否则「挑最久未试」会永远挑中死源，
+                // 且按源冷却的止损速度随候选数变多而变慢 —— R6 三源 2h 触发、R7 六源 2.5h 零触发）
                 if (api === probeApi) {
                     const cooled = noteProbeFail({
                         owner: String(api?.info?.owner || ''),
@@ -3152,8 +3153,11 @@ export async function callUserApiGetMusicUrl(
                         platform: source,
                         quality,
                     })
-                    if (cooled) {
-                        console.log(`[自定义源] ε-greedy 试探冷却：${api.info.name} ${cooled}，期内不再挑它试探`)
+                    if (cooled.source) {
+                        console.log(`[自定义源] ε-greedy 试探冷却：${api.info.name} ${cooled.source}，期内不再挑它试探`)
+                    }
+                    if (cooled.budget) {
+                        console.log(`[自定义源] 试探预算耗尽：${cooled.budget}（期间不再发起任何试探）`)
                     }
                 }
                 roundFailures.push({ api, message: failMsg })

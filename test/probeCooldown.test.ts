@@ -20,6 +20,7 @@ import {
     noteProbeFail, noteProbeSuccessReset, getPlayRankRecord,
     exportPlayRankState, importPlayRankState,
     PROBE_INTERVAL_MS, PROBE_FAIL_STREAK_MAX, PROBE_COOLDOWN_MS,
+    PROBE_FAIL_BUDGET_MAX, PROBE_PAUSE_MS,
     PROBE_TOP_RECENT_FAIL_MS, STALE_FAIL_MS,
 } from '../src/server/sourcePlayRank'
 
@@ -36,7 +37,7 @@ const seedStableTop = (now = NOW) => {
 }
 
 /** 模拟一次「试探失败」在真实链路里的两步：先记账（建记录），再记试探失败 */
-const probeFailAt = (id: string, t: number): string | undefined => {
+const probeFailAt = (id: string, t: number): { source?: string; budget?: string } => {
     notePlayResult(T(id), false, 0, t)
     return noteProbeFail(T(id), t)
 }
@@ -89,7 +90,7 @@ test('冷却-1 连续试探失败 3 次 → 进冷却，下一轮改挑别人（
     probeFailAt('dead.js', NOW - 50 * MIN)
     probeFailAt('dead.js', NOW - 40 * MIN)
     const cooled = probeFailAt('dead.js', NOW - 30 * MIN)
-    assert.ok(cooled, `第 ${PROBE_FAIL_STREAK_MAX} 次连续失败应触发冷却`)
+    assert.ok(cooled.source, `第 ${PROBE_FAIL_STREAK_MAX} 次连续失败应触发该源冷却`)
 
     const cand = [api('top.js'), api('dead.js'), api('alive.js')]
     const r = planProbeCandidate(cand, 'tx', '320k', NOW)
@@ -128,7 +129,7 @@ test('冷却-4 试探成功会清零连续失败计数（失败 2 次 + 成功 1
     assert.strictEqual(Number(getPlayRankRecord(T('flaky.js'))?.probeFails) || 0, 0, '成功后计数应清零')
     notePlayResult(T('flaky.js'), false, 0, NOW - 20 * MIN)
     const cooled = probeFailAt('flaky.js', NOW - 10 * MIN)
-    assert.strictEqual(cooled, undefined, '清零后要从 1 重新数，不能接着上次的 2')
+    assert.strictEqual(cooled.source, undefined, '清零后要从 1 重新数，不能接着上次的 2')
 })
 
 test('冷却-5 冷却状态必须能落盘往返（否则重启即失效，同 lastFailAt 的教训）', () => {
@@ -165,4 +166,57 @@ test('冷却-7 新鲜失败优先于冷却（刚翻车的源不会因为条件�
     const r = planProbeCandidate([api('top.js'), api('dead.js'), api('alive.js')], 'tx', '320k', NOW)
     assert.strictEqual(r?.api?.info?.id, 'alive.js', '刚失败 5 分钟的源不该被推上队首')
     assert.ok(STALE_FAIL_MS > 5 * MIN)
+})
+
+// ============ 三、整体试探预算：连续全败就停一段时间（与候选数无关）============
+
+test('预算-1 连续 4 次试探失败（**不同源**也累加）→ 整体暂停，即使队首健康、候选充足也不再试探', () => {
+    resetPlayRank(); resetProbeState()
+    seedStableTop()
+    // 四个互不相同的源各失败一次：按源冷却一个都不会触发（各自才 1 次），但整体预算是 4
+    const ids = ['d1.js', 'd2.js', 'd3.js', 'd4.js']
+    let last: { source?: string; budget?: string } = {}
+    ids.forEach((id, i) => { last = probeFailAt(id, NOW - (50 - i * 10) * MIN) })
+    assert.ok(last.budget, `第 ${PROBE_FAIL_BUDGET_MAX} 次连续全败应触发整体暂停`)
+    assert.strictEqual(last.source, undefined, '这四个源各自只失败 1 次，不该触发按源冷却')
+
+    const cand = [api('top.js'), api('u1.js'), api('u2.js')]
+    assert.strictEqual(planProbeCandidate(cand, 'tx', '320k', NOW), undefined,
+        '整体暂停期间不该再花预算试探')
+})
+
+test('预算-2 暂停 30min 后自动恢复（不许退化成永久关停）', () => {
+    resetPlayRank(); resetProbeState()
+    seedStableTop()
+    ;['d1.js', 'd2.js', 'd3.js', 'd4.js'].forEach((id, i) => probeFailAt(id, NOW - (50 - i * 10) * MIN))
+    const cand = [api('top.js'), api('u1.js'), api('u2.js')]
+    assert.strictEqual(planProbeCandidate(cand, 'tx', '320k', NOW), undefined, '前置：应在暂停中')
+    assert.ok(planProbeCandidate(cand, 'tx', '320k', NOW + PROBE_PAUSE_MS + MIN)?.api,
+        '暂停到期后必须重新允许试探')
+})
+
+test('预算-3 中间成功一次就清零连败（3 败 + 1 成 + 2 败 ≠ 5）', () => {
+    resetPlayRank(); resetProbeState()
+    seedStableTop()
+    probeFailAt('d1.js', NOW - 60 * MIN)
+    probeFailAt('d2.js', NOW - 50 * MIN)
+    probeFailAt('d3.js', NOW - 40 * MIN)
+    noteProbeSuccessReset(T('d9.js'), 120, NOW - 30 * MIN)   // 试探成功打断连败
+    probeFailAt('d4.js', NOW - 20 * MIN)
+    const last = probeFailAt('d5.js', NOW - 10 * MIN)        // 累计才 2
+    assert.strictEqual(last.budget, undefined, '成功后应重新计数，不能在 5 次失败时误判')
+})
+
+test('预算-4 按源冷却与整体暂停互不干扰（同源 3 连败只锁该源，不停整体）', () => {
+    resetPlayRank(); resetProbeState()
+    seedStableTop()
+    notePlayResult(T('dead.js'), false, 0, NOW - 2 * HOUR)
+    probeFailAt('dead.js', NOW - 50 * MIN)
+    probeFailAt('dead.js', NOW - 40 * MIN)
+    const third = probeFailAt('dead.js', NOW - 30 * MIN)
+    assert.ok(third.source, '同源第 3 次应锁该源')
+    assert.strictEqual(third.budget, undefined, '才 3 次连败，不该触发整体暂停（阈值是 4）')
+    const cand = [api('top.js'), api('dead.js'), api('alive.js')]
+    assert.strictEqual(planProbeCandidate(cand, 'tx', '320k', NOW)?.api?.info?.id, 'alive.js',
+        '整体未暂停，仍应挑别的合格候选')
 })
