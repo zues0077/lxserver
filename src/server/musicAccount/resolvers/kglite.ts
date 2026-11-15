@@ -576,6 +576,15 @@ export interface ClaimVipResult {
    */
   adDone?: number
   adTotal?: number
+  /**
+   * 今日广告额度确认已到底（平台回了 30002，或上层已标记过）。
+   *
+   * 为什么必须单独回一个标志（2026-11-16）：`adDone` 只在**成功**分支赋值，
+   * 30002 时直接 break，`adDone` 是 undefined —— 上层那句
+   * `adDone >= adTotal` 永远不成立，于是「额度已满」这个结论**从来落不了账**，
+   * 后续每一轮都会重新打 8 次（17950 实测：同一天有两轮各 5 账号全 0 小时）。
+   */
+  adExhausted?: boolean
   error?: string
 }
 
@@ -615,6 +624,15 @@ export interface ClaimVipOptions {
   maxAdTimes?: number
   /** 调用方已知「当天额度已领满」，直接跳过广告那条（不发请求） */
   adExhausted?: boolean
+  /**
+   * 账号显示名，仅用于日志定位（2026-11-16）。
+   *
+   * 为什么必须传：原先「广告领取未成功」这类日志里**没有账号名**，而各账号是串行领取、
+   * 中间还夹着「下一个账号等 N 秒」，一条错误行跟它属于哪个账号只能靠时间顺序猜；
+   * 一旦有并发或用户手动点一次，就完全对不上。17950 日志里 4 条 20028 到底是谁触发的，
+   * 当时只能靠前后行反推。不传则回落到 userid，至少能定位到号。
+   */
+  label?: string
 }
 
 /** 今天是否已领过 VIP（month_vip_record 里是否有今天这条） */
@@ -723,6 +741,9 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
   }
 
   const claimsKey = extractCreds(cookie).userid || 'default'
+  // 日志里的账号定位：优先用显示名（「王姐」），拿不到再退 userid。
+  // 没有它，错误行跟它属于哪个账号只能靠时间顺序猜（见 ClaimVipOptions.label 注释）。
+  const who = String(opts.label || '').trim() || claimsKey
   // 冷却只为挡手动连点；自动连领内部按 32 秒自己控间隔，不能被这道闸挡住。
   if (!opts.internal) {
     const since = Date.now() - (lastClaimAt.get(claimsKey) || 0)
@@ -778,6 +799,8 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
   // 2) 看广告领（主通道，可连领）
   let adDone: number | undefined
   let adTotal: number | undefined
+  // 今日额度是否确认到底。上层拿它落账，后续轮次直接跳过（别再空打 8 次）
+  let adExhausted = Boolean(opts.adExhausted)
   if (opts.adExhausted) {
     steps.push({ name: '看广告领 VIP', ok: true, hours: 0, message: '今日额度已领满，本轮跳过' })
   } else {
@@ -799,16 +822,26 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
         b = r.body || {}
       } catch (e: any) {
         lastMessage = e?.message || String(e)
-        console.log(`[平台账号] 概念版广告领取请求异常：${lastMessage}`)
+        console.log(`[平台账号] 概念版广告领取请求异常｜${who}：${lastMessage}`)
         break
       }
       const ok = Number(b.status) === 1
       if (!ok) {
         const code = Number(b?.error_code) || 0
         lastMessage = claimErrorText(b)
+        // 30002 = 今日额度用光。这是正常终态，而且必须回报给上层落账：
+        // 否则上层那句 `adDone >= adTotal` 永远是 undefined 比较，结论落不了账，
+        // 后续每一轮都会重新打 8 次（17950 实测同一天两轮各 5 账号全 0 小时）。
+        if (code === 30002) adExhausted = true
         // 把具体错误码打进后端日志：否则「某账号被平台风控（如 20028 人机验证）」只能靠前端截图定位。
-        // 30002（次数用光）/ 130012（今日已领）也是正常终态，照打便于核对是否真的领满。
-        console.log(`[平台账号] 概念版广告领取未成功：错误码 ${code}（${lastMessage}）`)
+        // 措辞分两类（2026-11-16）：AD_TERMINAL_CODES 里都是「今天本来就到此为止」的正常终态
+        // （今日已领 / 额度用光 / 登录失效 / 人机验证），打成「未成功」会让用户以为功能坏了；
+        // 集合外的（如 30000 操作频繁）才是真异常，保留「中止」便于巡检发现。
+        if (AD_TERMINAL_CODES.has(code)) {
+          console.log(`[平台账号] 概念版广告领取到终态｜${who}：错误码 ${code}（${lastMessage}）`)
+        } else {
+          console.log(`[平台账号] 概念版广告领取中止｜${who}：错误码 ${code}（${lastMessage}）`)
+        }
         break
       }
       const data = b?.data || {}
@@ -820,7 +853,12 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
       if (Number.isFinite(Number(data.total))) adTotal = Number(data.total)
       // 额度用光就停，别再打第 9 次
       const remain = Number(data.remain)
-      if (Number.isFinite(remain) && remain <= 0) break
+      if (Number.isFinite(remain) && remain <= 0) { adExhausted = true; break }
+      // 领满 done>=total 同样是「今天到底了」：顺手置标志，比只靠上层比较更稳
+      if (adDone !== undefined && adTotal !== undefined && adTotal > 0 && adDone >= adTotal) {
+        adExhausted = true
+        break
+      }
     }
     const quotaText = adDone !== undefined ? `（今日 ${adDone}/${adTotal ?? DAILY_CLAIM_LIMIT}）` : ''
     if (okCount > 0) {
@@ -845,7 +883,7 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
   const { remainHours } = reconciled
   if (reconciled.balanceDelayed) {
     console.log(
-      `[平台账号] 概念版余额查询有延迟（${extractCreds(cookie).userid || 'default'}）：`
+      `[平台账号] 概念版余额查询有延迟｜${who}：`
       + `实测 ${measured} 小时 < 预期 ${remainHours} 小时，本次按预期展示，稍后刷新即追平`,
     )
   }
@@ -861,6 +899,7 @@ export async function claimVip(cookie: string, opts: ClaimVipOptions = {}): Prom
     balanceDelayed: reconciled.balanceDelayed,
     adDone,
     adTotal,
+    adExhausted,
     error: gained > 0 || allSettled ? undefined : '本次没有领到 VIP（多为今日额度已用完或触发频率限制）',
   }
 }

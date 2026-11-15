@@ -22,7 +22,7 @@ import { PLATFORMS, isSupportedSource, getPlatform } from './platforms'
 import { hasLoginKey, parseCookie, withCookieRotation } from './http'
 import { normalizeCookieInput, formatLabel } from './cookieParse'
 import * as store from './store'
-import { recordKugouLiteClaim, getKugouLiteClaimReport } from './kgliteLedger'
+import { recordKugouLiteClaim, getKugouLiteClaimReport, markKugouLiteAdExhausted, isKugouLiteAdExhaustedToday } from './kgliteLedger'
 import type { KugouLiteClaimReport } from './kgliteLedger'
 import { extractAccountIdentity } from './identity'
 import * as qrLogin from './qrLogin'
@@ -1315,6 +1315,9 @@ const vipInflight = new Set<string>()
  * 目的：8 轮定时任务里，第 1 轮就把 8 次额度领完了，后面 7 轮不该再去打平台接口
  * （空转也要 1 次 play_report + 1 次听歌上报，纯属给风控添素材）。
  * 只放内存：重启后忘掉不要紧，下一轮第一次请求返回 30002 会重新记上。
+ * ⚠️ 上面这句在 2026-11-16 被证伪并修正：30002 时 `adDone` 根本没赋值，
+ * `done>=total` 那一路永远不成立，「重新记上」从未发生。现在改为
+ * 「内存 Map（快）+ 账本 adExhausted（准，跨重启）」，见 kgliteLedger。
  */
 const liteAdExhaustedAt = new Map<string, string>()
 
@@ -1343,15 +1346,22 @@ export async function claimKugouLiteVip(
   }
   vipInflight.add(acct.id)
   try {
+    // 今日额度是否已到底：先看进程内 Map，再回落到账本 —— 容器重启后内存会丢，
+    // 只有账本记得住，否则重启后每账号又要空打 8 次（见 kgliteLedger 的 adExhausted 注释）
     const adExhausted = liteAdExhaustedAt.get(acct.id) === liteDayKey()
+      || isKugouLiteAdExhaustedToday(acct.id)
     const res = await kglite.claimVip(acct.cookie, {
       internal: opts.internal,
       maxAdTimes: opts.maxAdTimes,
       adExhausted: opts.internal ? adExhausted : false,
+      // 日志里带上账号名：否则「广告领取中止：错误码 30000」看不出是哪个号
+      label: acct.label,
     })
-    // done >= total 说明今天额度用光，后续轮次直接跳过
-    if (res.adDone !== undefined && res.adTotal !== undefined && res.adTotal > 0 && res.adDone >= res.adTotal) {
+    // 今天领满 / 平台回 30002 → 落账（内存 + 磁盘）。原先只认 adDone>=adTotal，
+    // 而 30002 时 adDone 是 undefined，这条分支永远走不到，等于从没记住过。
+    if (res.adExhausted) {
       liteAdExhaustedAt.set(acct.id, liteDayKey())
+      markKugouLiteAdExhausted({ id: acct.id, label: acct.label, adDone: res.adDone })
     }
     // 记进每日账本：领取发生在凌晨的定时任务里，第二天面板要靠这份记录告诉用户
     // 「昨天一共新增了多少会员时长」，所以这里是唯一的落账点（手动/全部领取/定时都走它）。
@@ -1705,6 +1715,16 @@ export async function runKugouLiteAutoClaim(opts: { force?: boolean } = {}): Pro
       }
     }
 
+    // 今日额度已确认到底就整轮跳过（2026-11-16）：零成本判断，只读账本、不发任何请求。
+    // 原先只在 claimVip 内部跳过「广告」那一段、听歌上报照样发，而且内存 Map 重启即忘
+    // —— 同一天两轮 5 个账号合计 0 小时就是这么来的。
+    // force（手动「全部领取」）照打，尊重用户明确意图。
+    if (!opts.force && isKugouLiteAdExhaustedToday(acct.id)) {
+      console.log(`[平台账号] 概念版自动补领｜${acct.label}：今日额度已领满，本轮跳过（不再请求平台）`)
+      accounts.push({ id: acct.id, label: acct.label, primary: acct.primary, skipped: true, reason: '今日额度已领满' })
+      continue
+    }
+
     const vip = await kglite.getVipInfo(acct.cookie)
     if (!vip.ok) {
       // 查不到会员状态时不动手：盲领可能把额度浪费在已经垫了很多天的情况下
@@ -1721,7 +1741,7 @@ export async function runKugouLiteAutoClaim(opts: { force?: boolean } = {}): Pro
     }
 
     // 一轮内把当天额度领满（平台 8 次 × 3 小时 = 24 小时，刚好覆盖一天）；
-    // 之后的轮次会因为 done>=total 自动空转，只留一行日志，不再打扰平台。
+    // 之后的轮次会被本轮开头的账本判断直接跳过，一个请求都不发。
     const res = await claimKugouLiteVip(acct.id, { internal: true, maxAdTimes: kglite.DAILY_CLAIM_LIMIT })
     const quota = res.adDone !== undefined ? `，今日额度 ${res.adDone}/${res.adTotal ?? kglite.DAILY_CLAIM_LIMIT}` : ''
     console.log(

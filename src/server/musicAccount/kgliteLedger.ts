@@ -28,6 +28,17 @@ export interface LedgerAccountEntry {
     remainHours?: number
     /** 当天成功领取的次数（一次「连领」算一轮） */
     rounds: number
+    /**
+     * 今日广告额度已确认到底（平台回了 30002，或领满 done>=total）。
+     *
+     * 为什么要落盘（2026-11-16）：原先只有一个进程内 Map `liteAdExhaustedAt`，
+     * 重启即忘；而且 30002 时 `adDone` 根本没被赋值，`done>=total` 那一路也永远不成立
+     * → 「今天已经领满了」这个结论**一次都落不了账**，同一天的后续轮次照样每账号再打 8 次。
+     * 17950 实测：同一天三轮里有两轮 5 个账号合计 0 小时，全是这种空打。
+     */
+    adExhausted?: boolean
+    /** 今日已成功领取的广告次数（来自 play_report 的 data.done，实测可信） */
+    adDone?: number
 }
 
 export interface LedgerDay {
@@ -123,6 +134,50 @@ export function recordKugouLiteClaim(input: {
     prune(data)
     writeLedger(data)
     console.log(`[平台账号] 概念版领取账本｜${input.label} 今日累计 +${gained} 小时（今天合计 ${day.totalHours} 小时）`)
+}
+
+/**
+ * 记下「该账号今日广告额度已到底」。
+ *
+ * 与 `recordKugouLiteClaim` 分开，因为后者有 `gained <= 0` 就直接返回的保护
+ * （不能让「昨日新增 0 小时」把有意义的那天挤掉）；而额度到底恰恰是 gained=0 的场景，
+ * 只有单独写入才落得进去。一天最多写一次，开销可忽略。
+ */
+export function markKugouLiteAdExhausted(input: {
+    id: string
+    label: string
+    adDone?: number
+}): void {
+    const data = readLedger()
+    const key = dayKey()
+    const day: LedgerDay = data.days[key] || { date: key, accounts: [], totalHours: 0, updatedAt: 0 }
+    let entry = day.accounts.find(a => a.id === input.id)
+    if (!entry) {
+        entry = { id: input.id, label: input.label, gainedHours: 0, rounds: 0 }
+        day.accounts.push(entry)
+    }
+    entry.adExhausted = true
+    if (typeof input.adDone === 'number' && Number.isFinite(input.adDone)) entry.adDone = input.adDone
+    day.updatedAt = Date.now()
+    data.days[key] = day
+    prune(data)
+    writeLedger(data)
+}
+
+/**
+ * 该账号今天是否已确认领满（跨进程重启有效）。
+ *
+ * 只认「今天」这一天：跨天自动失效，不需要额外清理。
+ * 读失败一律返回 false（宁可多打一轮，也不能因为账本坏了从此不给领）。
+ */
+export function isKugouLiteAdExhaustedToday(id: string): boolean {
+    try {
+        const day = readLedger().days[dayKey()]
+        if (!day || !Array.isArray(day.accounts)) return false
+        return Boolean(day.accounts.find(a => a.id === id)?.adExhausted)
+    } catch {
+        return false
+    }
 }
 
 export interface KugouLiteClaimReport {
