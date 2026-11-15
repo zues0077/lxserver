@@ -128,3 +128,36 @@ test('失败次数上限 99，不会无限累加', () => {
     notePlatformFailure(p, { demoteThreshold: 1, failThreshold: 2 })
     assert.strictEqual(p.failCount, 99)
 })
+
+// ---------------- 软失败降权的短窗口（2026-11-14） ----------------
+// 依据 17950 实测：tx 上 K×H测试 只有 2 次软失败、failCount 仍为 0，却被压了整 6 小时队尾。
+// 语义不变（软失败照样排队尾），只把软失败的惩罚时长收到 30 分钟。
+
+test('软失败降权用 30 分钟短窗口；旧数据无 demoteSoft 仍按 6 小时（向后兼容）', () => {
+    const at = 2_000_000
+    const soft = ps({ demotedAt: at, demoteSoft: true })
+    assert.strictEqual(isDemoteActive(soft, at + 30 * 60_000 - 1), true)
+    assert.strictEqual(isDemoteActive(soft, at + 30 * 60_000), false)
+    assert.strictEqual(isDemoteActive({ demotedAt: at }, at + 3600_000), true, '缺字段视为硬失败')
+})
+
+test('软失败点亮降权时打 demoteSoft；随后硬失败升级为 6 小时长窗口且不重复打日志', () => {
+    const p = ps({ lastError: '403' })
+    notePlatformFailure(p, { demoteThreshold: 1, failThreshold: 2, hard: false, now: 1000 })
+    assert.strictEqual(p.demotedAt, 1000)
+    assert.strictEqual(p.demoteSoft, true)
+    assert.strictEqual(isDemoteActive(p, 1000 + 30 * 60_000), false, '30 分钟后软窗口到期')
+
+    const r = notePlatformFailure(p, { demoteThreshold: 1, failThreshold: 2, hard: true, now: 2000 })
+    assert.strictEqual(r.demoteStarted, false, '已在降权中，不重复打日志')
+    assert.strictEqual(p.demoteSoft, false, '硬失败把软窗口升级为硬窗口')
+    assert.strictEqual(isDemoteActive(p, 2000 + 6 * 3600_000 - 1), true)
+    assert.strictEqual(isDemoteActive(p, 2000 + 6 * 3600_000), false)
+})
+
+test('clearPlatformDemote 同时清掉软失败标记', () => {
+    const p = ps({ demotedAt: 1000, demoteSoft: true })
+    clearPlatformDemote(p)
+    assert.strictEqual(p.demotedAt, 0)
+    assert.strictEqual(p.demoteSoft, false)
+})

@@ -334,7 +334,9 @@ test('ε-greedy 试探：首选稳定成功 + 候选本平台未证明 + 有跨�
     resetProbeState()
     const t0 = Date.now()
     for (let i = 0; i < 11; i++) notePlayResult(T('top', 'tx'), true, 200)
-    notePlayResult(T('top', 'tx'), false) // 12 次里 1 次失败，仍算稳定
+    // 12 次里 1 次失败，仍算稳定 —— 且这次失败必须是**一小时前**：
+    // 2026-11-15 起「队首近期失败（30min 内）」会否决试探，刚刚失败就不再算稳定
+    notePlayResult(T('top', 'tx'), false, 0, t0 - 60 * 60 * 1000)
     notePlayResult(T('a', 'kw'), true, 100)   // a：tx 无记录，kw 有成功史
     notePlayResult(T('a', 'kw'), true, 100)
     notePlayResult(T('b', 'kw'), true, 100)   // b：tx 刚失败 2 次（新鲜 Infinity）

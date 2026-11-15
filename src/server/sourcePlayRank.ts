@@ -42,6 +42,30 @@ export interface PlayRankRecord {
      * 「最近到底成功过没有」—— 而巡检「真实播放数据优先」必须问的就是这句话。
      */
     lastOkAt?: number
+    /**
+     * 最后一次**失败**的时间戳（2026-11-15）。
+     *
+     * 为什么不能再用 `attempts - successes`：那个差值是**累计失败数**，只增不减
+     * （唯一能减小的 noteProbeSuccessReset 只在试探成功时调用），于是「队首累计失败
+     * 超过 2 次 → 不试探」变成**永久关停**：246 A 容器 `收集の聚合接口:tx:320k` 28/24
+     * （差 4）就整整 2 小时 0 次试探，而它最近 24 次全成功。反过来累计 ≤2 时又完全
+     * 不看时间，队首 1 分钟前刚翻车照样拿预算去探别人。判据要回答的是「**现在**稳不稳」，
+     * 所以必须按时间看最后一次失败。
+     */
+    lastFailAt?: number
+    /**
+     * 连续**试探**失败次数（2026-11-15）。
+     *
+     * 只统计「被 ε-greedy 挑到队首后失败」的次数，不统计正常取链失败 —— 后者已经有
+     * 沉底/冷却在管，混在一起会让它们互相干扰。达 `PROBE_FAIL_STREAK_MAX` 次进冷却。
+     *
+     * 为什么需要它：试探选源按「最久未试」+ 先验分择优，而墨澜/裤佬这类死源**永不成功**
+     * → 永远最陈旧、先验又漂亮（241ms）→ 每个 10min 窗口都被挑中。R5 实测 2 小时里
+     * B 侧 4/7、A 侧 3/10 的试探打在这两个死源上，全局命中率只有 1/17 = 5.9%。
+     */
+    probeFails?: number
+    /** 试探冷却截止时间戳：`now < probeSkipUntil` 期间不再被选为试探对象 */
+    probeSkipUntil?: number
 }
 
 /** 没有足够证据时的中性分：不鼓励也不惩罚，靠原有顺序决定 */
@@ -95,6 +119,9 @@ export const notePlayResult = (
         const ms = Math.min(raw, cap)
         if (rec.ewmaMs > 0) rec.ewmaMs = rec.ewmaMs * (1 - ALPHA) + ms * ALPHA
         else rec.ewmaMs = ms
+    } else {
+        // 只在失败时刷新：试探资格要问「队首现在稳不稳」，看的是这一条
+        rec.lastFailAt = now
     }
     stats.set(key, rec)
 }
@@ -334,8 +361,32 @@ export const PROBE_INTERVAL_MS = 10 * 60 * 1000
 export const PROBE_BUDGET_MS = 1500
 /** 首选源至少成功这么多次才算「稳定」，才值得花一次探索 */
 export const PROBE_MIN_TOP_SUCCESSES = 10
-/** 首选源失败超过这个数就不试探（首选自己都不稳，先顾自己） */
-export const PROBE_TOP_MAX_FAILS = 2
+/**
+ * 首选源「最近一次失败」在这么久以内，就不试探（首选自己都不稳，先顾自己）。
+ *
+ * 2026-11-15 由 `PROBE_TOP_MAX_FAILS = 2`（累计失败数）改成时间口径：
+ * 累计差值只增不减 → 「队首累计失败 >2」等于**永久关停**试探（246 A 容器 28/24 实测 2 小时
+ * 0 次）；且累计 ≤2 时又完全不看时间 → 队首刚翻车照样探别人。两头的方向都错。
+ * 30 分钟与 `STALE_FAIL_MS`（软失败降权窗口）同口径：软失败的证据价值本来就只维持这么久。
+ */
+export const PROBE_TOP_RECENT_FAIL_MS = 30 * 60 * 1000
+
+/**
+ * 同一源连续试探失败多少次后进冷却（2026-11-15）。
+ *
+ * 死源的特征是「怎么试都不成」，而试探每 10 分钟就有一次机会挑它 —— 不设上限的话
+ * 一个死源能把整段窗口的试探名额吃光（R5：墨澜/裤佬占 B 侧 4/7、A 侧 3/10）。
+ * 3 次 = 最多白付 3×1.5s 预算，之后有 6 小时不看它，够长也留了翻身余地。
+ */
+export const PROBE_FAIL_STREAK_MAX = 3
+/**
+ * 连续试探失败达上限后的冷却时长（2026-11-15）：6h，与 `PLAY_RANK_STATE_TTL_MS` 同口径。
+ *
+ * 选 6h 而不是更短：死源通常整天坏死，30min~2h 的冷却等于「下个窗口接着试」——R5 里
+ * 墨澜在 2 小时内被试 3 次就是这个原因。也不选永久：上游确实会恢复，长窗口不给机会
+ * 就退化成 2026-11-15 之前那个「永久关停」的老毛病。
+ */
+export const PROBE_COOLDOWN_MS = 6 * 60 * 60 * 1000
 
 const lastProbeAt = new Map<string, number>()
 
@@ -343,12 +394,24 @@ const lastProbeAt = new Map<string, number>()
 export const resetProbeState = (): void => { lastProbeAt.clear() }
 
 /**
+ * 资格判定日志（2026-11-15 新增，格式固定便于 grep）。
+ *
+ * 为什么必须打：246 第四轮 A/B 里 B 每轮试探、A 全程 0 次，光看 CSV 只能靠猜，
+ * 最后是翻代码+读账本才查出「队首累计失败 4 次卡死资格」；有这行以后不必再翻代码。
+ * 频率天然被 `PROBE_INTERVAL_MS` 限制在每「平台:档」10 分钟一行，不会刷屏。
+ */
+const logGate = (platform: string, quality: string, msg: string): void => {
+    try { console.log(`[自定义源] 试探资格 ${platform}/${quality} ${msg}`) } catch { /* 日志失败不影响取链 */ }
+}
+
+/**
  * 选出本次该试探的源（若有的话）。
  *
  * 资格（三条同时满足）：
  *  1. 平台在 `PROBE_PLATFORMS` 且距上次试探 ≥ `PROBE_INTERVAL_MS`；
  *  2. 队首（调用方排好序后的第一个）稳定成功：successes ≥ `PROBE_MIN_TOP_SUCCESSES`
- *     且失败 ≤ `PROBE_TOP_MAX_FAILS`；
+ *     且**最近一次失败**不在 `PROBE_TOP_RECENT_FAIL_MS`（30min）以内；
+ *     —— 2026-11-15 起按时间判，不再看累计失败数（累计口径会永久关停，见 `PROBE_TOP_RECENT_FAIL_MS`）；
  *  3. 候选里有「本平台未证明」的源（Y.11-6 放宽，2026-11-09 用户拍板）：
  *     - 本平台无记录 / 样本不足 MIN_TRUST（从没真正跑过），或
  *     - 失败-only 但已过降级时钟（旧失败证据过期，见 `STALE_FAIL_MS`）。
@@ -356,6 +419,9 @@ export const resetProbeState = (): void => { lastProbeAt.clear() }
  *     原「必须有跨平台成功史」的门槛已移除：被锁源恰恰最缺证据（唯一记录可能已被
  *     TTL 清空），绑证据 = 永远 0 次试探机会——生产 tx 上 84ms 的西瓜聚合源整小时
  *     0 次资格就是这个原因。
+ *  4. 该源不在试探冷却期（2026-11-15，见 `PROBE_FAIL_STREAK_MAX` / `PROBE_COOLDOWN_MS`）：
+ *     连续试探失败达上限的死源，6 小时内不再被挑。不加这条时「挑最久未试」必然反复
+ *     挑中永不成功的源，R5 实测试探命中率只有 1/17。
  *
  * 多个候选时按先验择优：有证据的（samePlatform / anyKey×折扣）排在完全无证据的
  * （按 `NEUTRAL_MS` 计）前面。返回后由调用方把它插到队首，
@@ -378,38 +444,92 @@ export const planProbeCandidate = (
         platform,
         quality,
     }))
-    if (!topRec
-        || topRec.successes < PROBE_MIN_TOP_SUCCESSES
-        || topRec.attempts - topRec.successes > PROBE_TOP_MAX_FAILS) return undefined
+    if (!topRec) {
+        logGate(platform, quality, '未通过：队首无记录')
+        return undefined
+    }
+    if (topRec.successes < PROBE_MIN_TOP_SUCCESSES) {
+        logGate(platform, quality, `未通过：队首样本不足（成功 ${topRec.successes} < ${PROBE_MIN_TOP_SUCCESSES}）`)
+        return undefined
+    }
+    const lastFailAt = Number(topRec.lastFailAt) || 0
+    const lastOkAt = Number(topRec.lastOkAt) || 0
+    // 2026-11-15 补「是否已恢复」：只看 lastFailAt 会把「失败过一次、但之后又连续成功」
+    // 的队首在整整 30 分钟内判成不稳。R5 实测 11 次否决里有 9 次队首当轮其实是成功的
+    // （03:04 失败 → 03:09 起连续 5 轮 success，仍被判 top-fail），2 小时白静默约 50min。
+    // 判据的本意是「队首现在稳不稳」，那就必须是「最后一次失败之后没有成功过」才算不稳。
+    if (lastFailAt > 0 && lastFailAt > lastOkAt && now - lastFailAt < PROBE_TOP_RECENT_FAIL_MS) {
+        logGate(platform, quality,
+            `未通过：队首近期失败且未恢复（${((now - lastFailAt) / 60000).toFixed(1)} 分钟前，阈值 ${PROBE_TOP_RECENT_FAIL_MS / 60000}min）`)
+        return undefined
+    }
     const index = priors || buildPlayRankPriors()
     let best: { api: any; priorMs: number } | undefined
+    let freshFail = 0
+    let proven = 0
+    let cooling = 0
     for (let i = 1; i < candidates.length; i++) {
         const api = candidates[i]
         const owner = String(api?.info?.owner || '')
         const id = String(api?.info?.id || '')
         const rec = stats.get(playRankKey({ owner, id, platform, quality }))
+        // 连续试探失败已达上限 → 冷却期内不再挑它（2026-11-15）。
+        // 放在「新鲜失败」判断之前：冷却本来就是「刚试过还失败」的升级形态。
+        if (rec && Number(rec.probeSkipUntil) > now) { cooling++; continue }
         // 刚失败不久的（失败-only 且未过降级时钟）不试探，哪怕样本数还没到 MIN_TRUST
         // ——最近证据是负的，别把刚翻车的源又推上队首
-        if (rec && rec.successes === 0 && now - rec.lastAt < STALE_FAIL_MS) continue
+        if (rec && rec.successes === 0 && now - rec.lastAt < STALE_FAIL_MS) { freshFail++; continue }
         const unproven = !rec || rec.attempts < MIN_TRUST
         const staleFailOnly = !!rec && rec.successes === 0 && now - rec.lastAt >= STALE_FAIL_MS
-        if (!unproven && !staleFailOnly) continue
+        if (!unproven && !staleFailOnly) { proven++; continue }
         const pf = priorFor(index, owner, id, platform)
         // 完全无证据的源按中性分参与择优：有实测先验的候选天然排它前面
         const priorMs = pf?.samePlatform
             ?? (pf?.anyKey !== undefined ? pf.anyKey * ANYKEY_DISCOUNT : NEUTRAL_MS)
         if (!best || priorMs < best.priorMs) best = { api, priorMs }
     }
-    if (!best) return undefined
+    if (!best) {
+        logGate(platform, quality,
+            `未通过：无合格候选（参与 ${candidates.length - 1}，新鲜失败 ${freshFail}，已证明 ${proven}，冷却中 ${cooling}）`)
+        return undefined
+    }
     lastProbeAt.set(probeKey, now)
+    logGate(platform, quality,
+        `命中：${best.api?.info?.name || best.api?.info?.id || '?'}（先验 ${Math.round(best.priorMs)}ms）`)
     return best
+}
+
+/**
+ * 记一次**试探**失败（2026-11-15）。连续失败达 `PROBE_FAIL_STREAK_MAX` 次后进冷却，
+ * 冷却期内 `planProbeCandidate` 不再挑这个源。
+ *
+ * 只由试探路径调用（`userApi` 里 `api === probeApi` 的那个 catch），正常取链失败不要调 ——
+ * 那部分由沉底/冷却负责，混进来会让两个机制互相拉偏。
+ * 试探成功走 `noteProbeSuccessReset`（整条记录重置，计数自然清零）。
+ */
+export const noteProbeFail = (target: PlayRankTarget, now: number = Date.now()): string | undefined => {
+    if (!target || !target.quality) return undefined
+    const key = playRankKey(target)
+    const rec = stats.get(key)
+    if (!rec) return undefined
+    const fails = (Number(rec.probeFails) || 0) + 1
+    rec.probeFails = fails
+    let cooledMsg: string | undefined
+    if (fails >= PROBE_FAIL_STREAK_MAX) {
+        rec.probeSkipUntil = now + PROBE_COOLDOWN_MS
+        rec.probeFails = 0   // 冷却期结束后重新开始计数，不要一解除就再进冷却
+        cooledMsg = `连续试探失败 ${fails} 次，冷却 ${PROBE_COOLDOWN_MS / 3600000}h`
+    }
+    stats.set(key, rec)
+    try { markLedgerDirty() } catch { /* 落盘标记失败不影响排序 */ }
+    return cooledMsg
 }
 
 /**
  * 试探成功 = 旧惩罚判错了（源其实健康）：把该键记录重置为这一次成功，从零重新竞争。
  * 若只照常记账（attempts=2/successes=1），50% 失败率 × FAIL_PENALTY_MS 会把它压回
  * 队尾，试探就永远白做 —— 生产 tx 实算要 17 次试探才能翻身，不可接受。
- * 试探失败不走这里，照常 notePlayResult 记失败。
+ * 试探失败不走这里，走 `noteProbeFail` + 照常 notePlayResult 记失败。
  */
 export const noteProbeSuccessReset = (
     target: PlayRankTarget,
@@ -425,6 +545,9 @@ export const noteProbeSuccessReset = (
         successes: MIN_TRUST,
         ewmaMs: Math.min(raw, 60000),
         lastAt: now,
+        // 必须写 lastOkAt：队首判据是「最后一次失败之后有没有成功过」，试探成功就是
+        // 一个货真价实的成功证据，不写的话这个源刚被验证健康、下一轮仍可能因旧失败被卡。
+        lastOkAt: now,
     })
     try { markLedgerDirty() } catch { /* 落盘标记失败不影响排序 */ }
 }
@@ -502,7 +625,20 @@ export const importPlayRankState = (state: any, now: number = Date.now()): numbe
         if (!attempts || lastAt <= 0) continue
         if (!(now - lastAt < PLAY_RANK_STATE_TTL_MS)) continue
         if (stats.size >= MAX_ENTRIES) break
-        stats.set(key, { attempts, successes, ewmaMs, lastAt })
+        // lastFailAt 必须跟落盘一起走：不导入的话每次重启都会把「队首刚失败」忘掉，
+        // 新的 30min 判据等于重启即失效（旧账本没有这个字段 → 视为「从未失败」，保守放行）
+        const lastFailAt = Number(rec.lastFailAt) || 0
+        const lastOkAt = Number(rec.lastOkAt) || 0
+        // 试探冷却也要跟落盘走（2026-11-15）：不导入的话每次重启都重新白试一遍死源，
+        // 与 lastFailAt 是同一个教训。旧账本没有这两个字段 → 视为「没在冷却」。
+        const probeSkipUntil = Number(rec.probeSkipUntil) || 0
+        const probeFails = Number(rec.probeFails) || 0
+        const next: PlayRankRecord = { attempts, successes, ewmaMs, lastAt }
+        if (lastFailAt > 0) next.lastFailAt = lastFailAt
+        if (lastOkAt > 0) next.lastOkAt = lastOkAt
+        if (probeSkipUntil > 0) next.probeSkipUntil = probeSkipUntil
+        if (probeFails > 0) next.probeFails = probeFails
+        stats.set(key, next)
         n += 1
     }
     return n
