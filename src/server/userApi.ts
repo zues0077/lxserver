@@ -15,7 +15,7 @@ import { tryWorkerCall, disposeSourceWorker, shouldRouteToWorker, markWorkerElig
 import { inspectSourceContract, summarizeContract, unwrapMusicUrlValue, normalizeQualityList } from './sourceContract'
 import type { ContractReport } from './sourceContract'
 import { applyQualityLedger, clearQualityLedger, noteQualityResult } from './sourceQualityLedger'
-import { notePlayResult, rankCandidatesByHistory, adaptiveTimeoutMs, buildPlayRankPriors, planProbeCandidate, noteProbeSuccessReset, PROBE_BUDGET_MS } from './sourcePlayRank'
+import { notePlayResult, rankCandidatesByHistory, adaptiveTimeoutMs, buildPlayRankPriors, planProbeCandidate, noteProbeSuccessReset, noteProbeFail, PROBE_BUDGET_MS } from './sourcePlayRank'
 import { markLedgerDirty } from './sourceLedgerDirty'
 import { clearRateLimit, clearRateLimitForSource, isRateLimitFailure, isRateLimited, noteRateLimit } from './sourceRateLimit'
 import { syncLog } from '../utils/log4js'
@@ -3143,6 +3143,19 @@ export async function callUserApiGetMusicUrl(
                 noteQuality(api, false, failMsg)
                 notePlayPerf(api, false)
                 notePlayCooldown(api, source, failMsg)
+                // 试探失败要单独计数（2026-11-15）：连续失败达上限就让这个源进冷却，
+                // 否则「挑最久未试」会永远挑中永不成功的死源（R5 实测命中率 1/17）
+                if (api === probeApi) {
+                    const cooled = noteProbeFail({
+                        owner: String(api?.info?.owner || ''),
+                        id: String(api?.info?.id || ''),
+                        platform: source,
+                        quality,
+                    })
+                    if (cooled) {
+                        console.log(`[自定义源] ε-greedy 试探冷却：${api.info.name} ${cooled}，期内不再挑它试探`)
+                    }
+                }
                 roundFailures.push({ api, message: failMsg })
                 const att = { name: api.info.name, status: 'fail', message: `音源日志：${failMsg}` }
                 attempts.push(att)
