@@ -42,6 +42,17 @@ export interface PlayRankRecord {
      * 「最近到底成功过没有」—— 而巡检「真实播放数据优先」必须问的就是这句话。
      */
     lastOkAt?: number
+    /**
+     * 最后一次**失败**的时间戳（2026-11-15）。
+     *
+     * 为什么不能再用 `attempts - successes`：那个差值是**累计失败数**，只增不减
+     * （唯一能减小的 noteProbeSuccessReset 只在试探成功时调用），于是「队首累计失败
+     * 超过 2 次 → 不试探」变成**永久关停**：246 A 容器 `收集の聚合接口:tx:320k` 28/24
+     * （差 4）就整整 2 小时 0 次试探，而它最近 24 次全成功。反过来累计 ≤2 时又完全
+     * 不看时间，队首 1 分钟前刚翻车照样拿预算去探别人。判据要回答的是「**现在**稳不稳」，
+     * 所以必须按时间看最后一次失败。
+     */
+    lastFailAt?: number
 }
 
 /** 没有足够证据时的中性分：不鼓励也不惩罚，靠原有顺序决定 */
@@ -95,6 +106,9 @@ export const notePlayResult = (
         const ms = Math.min(raw, cap)
         if (rec.ewmaMs > 0) rec.ewmaMs = rec.ewmaMs * (1 - ALPHA) + ms * ALPHA
         else rec.ewmaMs = ms
+    } else {
+        // 只在失败时刷新：试探资格要问「队首现在稳不稳」，看的是这一条
+        rec.lastFailAt = now
     }
     stats.set(key, rec)
 }
@@ -334,8 +348,15 @@ export const PROBE_INTERVAL_MS = 10 * 60 * 1000
 export const PROBE_BUDGET_MS = 1500
 /** 首选源至少成功这么多次才算「稳定」，才值得花一次探索 */
 export const PROBE_MIN_TOP_SUCCESSES = 10
-/** 首选源失败超过这个数就不试探（首选自己都不稳，先顾自己） */
-export const PROBE_TOP_MAX_FAILS = 2
+/**
+ * 首选源「最近一次失败」在这么久以内，就不试探（首选自己都不稳，先顾自己）。
+ *
+ * 2026-11-15 由 `PROBE_TOP_MAX_FAILS = 2`（累计失败数）改成时间口径：
+ * 累计差值只增不减 → 「队首累计失败 >2」等于**永久关停**试探（246 A 容器 28/24 实测 2 小时
+ * 0 次）；且累计 ≤2 时又完全不看时间 → 队首刚翻车照样探别人。两头的方向都错。
+ * 30 分钟与 `STALE_FAIL_MS`（软失败降权窗口）同口径：软失败的证据价值本来就只维持这么久。
+ */
+export const PROBE_TOP_RECENT_FAIL_MS = 30 * 60 * 1000
 
 const lastProbeAt = new Map<string, number>()
 
@@ -343,12 +364,24 @@ const lastProbeAt = new Map<string, number>()
 export const resetProbeState = (): void => { lastProbeAt.clear() }
 
 /**
+ * 资格判定日志（2026-11-15 新增，格式固定便于 grep）。
+ *
+ * 为什么必须打：246 第四轮 A/B 里 B 每轮试探、A 全程 0 次，光看 CSV 只能靠猜，
+ * 最后是翻代码+读账本才查出「队首累计失败 4 次卡死资格」；有这行以后不必再翻代码。
+ * 频率天然被 `PROBE_INTERVAL_MS` 限制在每「平台:档」10 分钟一行，不会刷屏。
+ */
+const logGate = (platform: string, quality: string, msg: string): void => {
+    try { console.log(`[自定义源] 试探资格 ${platform}/${quality} ${msg}`) } catch { /* 日志失败不影响取链 */ }
+}
+
+/**
  * 选出本次该试探的源（若有的话）。
  *
  * 资格（三条同时满足）：
  *  1. 平台在 `PROBE_PLATFORMS` 且距上次试探 ≥ `PROBE_INTERVAL_MS`；
  *  2. 队首（调用方排好序后的第一个）稳定成功：successes ≥ `PROBE_MIN_TOP_SUCCESSES`
- *     且失败 ≤ `PROBE_TOP_MAX_FAILS`；
+ *     且**最近一次失败**不在 `PROBE_TOP_RECENT_FAIL_MS`（30min）以内；
+ *     —— 2026-11-15 起按时间判，不再看累计失败数（累计口径会永久关停，见 `PROBE_TOP_RECENT_FAIL_MS`）；
  *  3. 候选里有「本平台未证明」的源（Y.11-6 放宽，2026-11-09 用户拍板）：
  *     - 本平台无记录 / 样本不足 MIN_TRUST（从没真正跑过），或
  *     - 失败-only 但已过降级时钟（旧失败证据过期，见 `STALE_FAIL_MS`）。
@@ -378,11 +411,24 @@ export const planProbeCandidate = (
         platform,
         quality,
     }))
-    if (!topRec
-        || topRec.successes < PROBE_MIN_TOP_SUCCESSES
-        || topRec.attempts - topRec.successes > PROBE_TOP_MAX_FAILS) return undefined
+    if (!topRec) {
+        logGate(platform, quality, '未通过：队首无记录')
+        return undefined
+    }
+    if (topRec.successes < PROBE_MIN_TOP_SUCCESSES) {
+        logGate(platform, quality, `未通过：队首样本不足（成功 ${topRec.successes} < ${PROBE_MIN_TOP_SUCCESSES}）`)
+        return undefined
+    }
+    const lastFailAt = Number(topRec.lastFailAt) || 0
+    if (lastFailAt > 0 && now - lastFailAt < PROBE_TOP_RECENT_FAIL_MS) {
+        logGate(platform, quality,
+            `未通过：队首近期失败（${((now - lastFailAt) / 60000).toFixed(1)} 分钟前，阈值 ${PROBE_TOP_RECENT_FAIL_MS / 60000}min）`)
+        return undefined
+    }
     const index = priors || buildPlayRankPriors()
     let best: { api: any; priorMs: number } | undefined
+    let freshFail = 0
+    let proven = 0
     for (let i = 1; i < candidates.length; i++) {
         const api = candidates[i]
         const owner = String(api?.info?.owner || '')
@@ -390,18 +436,24 @@ export const planProbeCandidate = (
         const rec = stats.get(playRankKey({ owner, id, platform, quality }))
         // 刚失败不久的（失败-only 且未过降级时钟）不试探，哪怕样本数还没到 MIN_TRUST
         // ——最近证据是负的，别把刚翻车的源又推上队首
-        if (rec && rec.successes === 0 && now - rec.lastAt < STALE_FAIL_MS) continue
+        if (rec && rec.successes === 0 && now - rec.lastAt < STALE_FAIL_MS) { freshFail++; continue }
         const unproven = !rec || rec.attempts < MIN_TRUST
         const staleFailOnly = !!rec && rec.successes === 0 && now - rec.lastAt >= STALE_FAIL_MS
-        if (!unproven && !staleFailOnly) continue
+        if (!unproven && !staleFailOnly) { proven++; continue }
         const pf = priorFor(index, owner, id, platform)
         // 完全无证据的源按中性分参与择优：有实测先验的候选天然排它前面
         const priorMs = pf?.samePlatform
             ?? (pf?.anyKey !== undefined ? pf.anyKey * ANYKEY_DISCOUNT : NEUTRAL_MS)
         if (!best || priorMs < best.priorMs) best = { api, priorMs }
     }
-    if (!best) return undefined
+    if (!best) {
+        logGate(platform, quality,
+            `未通过：无合格候选（参与 ${candidates.length - 1}，新鲜失败 ${freshFail}，已证明 ${proven}）`)
+        return undefined
+    }
     lastProbeAt.set(probeKey, now)
+    logGate(platform, quality,
+        `命中：${best.api?.info?.name || best.api?.info?.id || '?'}（先验 ${Math.round(best.priorMs)}ms）`)
     return best
 }
 
@@ -502,7 +554,12 @@ export const importPlayRankState = (state: any, now: number = Date.now()): numbe
         if (!attempts || lastAt <= 0) continue
         if (!(now - lastAt < PLAY_RANK_STATE_TTL_MS)) continue
         if (stats.size >= MAX_ENTRIES) break
-        stats.set(key, { attempts, successes, ewmaMs, lastAt })
+        // lastFailAt 必须跟落盘一起走：不导入的话每次重启都会把「队首刚失败」忘掉，
+        // 新的 30min 判据等于重启即失效（旧账本没有这个字段 → 视为「从未失败」，保守放行）
+        const lastFailAt = Number(rec.lastFailAt) || 0
+        stats.set(key, lastFailAt > 0
+            ? { attempts, successes, ewmaMs, lastAt, lastFailAt }
+            : { attempts, successes, ewmaMs, lastAt })
         n += 1
     }
     return n
