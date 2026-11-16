@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.5.58
+
+- **vm2 加载失败源诊断标识**：加载失败的自定义源新增 `vmHint` 三档判据（`unsafe-capable` / `vm2-incompatible` / 无判据），列表接口透出；设置页失败源三档文案 + 顶部汇总条 + 失败源展示层置顶（拖拽写回不污染 order.json 取链顺序）+ 白名单问号说明弹窗。仅识别与展示，不自动加白/停用/删除，加白仍需管理员确认 + 总闸。
+- **白名单 VM 开关与探测清理**：逐源 `allowUnsafeVM` 开关（按 key 存在性区分未传/显式 false），卡片 VM2/VM 角标可点击切换，启停不再误清白名单；原生 VM 探测加 `owner:'temp'`，探完即 dispose 不登记、不写白名单。
+- **缓存清理保护**（合入 feat/upstream-cache-cleanup-guard）：清理只删媒体文件、保护 .tmp/索引、同组删歌词并同步索引。
+- **自定义目录防慢响应覆盖**（合入 feat/upstream-custom-dir-fetch-gen）：fetchData 加 generation/AbortController 判废，防慢旧响应覆盖新列表。
+- 全套单测 1026/1026；17961 实机端到端验证 vmHint 透传通过。
+
 ## v1.5.57
 
 - **移除 A' 实验开关（workerOnly）**：`customSource.workerOnly.enabled` 相关配置/前端/测试全部删除（A/B 实测无实质收益），方案完整档案见 `docs/archive/worker-only-aprime.md`。
