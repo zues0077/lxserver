@@ -177,6 +177,22 @@ function generateId(name?: string, fallbackFilename?: string): string {
     return `${clean || 'source'}.js`
 }
 
+/**
+ * 同名冲突：用 409 + code:"NAME_EXISTS" 表达「业务冲突」，与「服务器内部错误（500）」区分开。
+ *
+ * 背景（2026-11-16 联动测试）：upload / import 两条路径此前都用 `throw new Error(...)`，
+ * 被外层 catch 统一兜成 500 —— 客户端（如 lx-hunter）只能靠中文文案 `/已存在/` 判断，
+ * 文案一改保护就失效，可能反复重试上传。
+ *
+ * message 文案保持原样不变（外壳仍含「已存在」），确保既有客户端逻辑不受影响，
+ * 只增加 `code` 字段并把状态码改成 409。
+ */
+function nameExistsError(message: string): Error {
+    const err: any = new Error(message)
+    err.code = 'NAME_EXISTS'
+    return err
+}
+
 // 上传脚本
 export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
     try {
@@ -247,7 +263,7 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
         // 检查是否已存在
         const existing = sources.find(s => s.id === id)
         if (existing) {
-            throw new Error(`源 "${metadata.name || filename}" 已存在于 [${targetOwner}]`)
+            throw nameExistsError(`源 "${metadata.name || filename}" 已存在于 [${targetOwner}]`)
         }
 
         // 保存脚本文件
@@ -285,9 +301,10 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))
     } catch (err: any) {
+        const isNameExists = !!(err && err.code === 'NAME_EXISTS')
         console.error('[自定义源] 上传失败:', err)
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ success: false, error: err.message }))
+        res.writeHead(isNameExists ? 409 : 500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: err.message, ...(isNameExists ? { code: 'NAME_EXISTS' } : {}) }))
     }
 }
 
@@ -415,7 +432,7 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
         // 检查是否已存在
         const existing = sources.find(s => s.id === id)
         if (existing) {
-            throw new Error(`源 "${displayName}" 已存在于 [${targetOwner}]`)
+            throw nameExistsError(`源 "${displayName}" 已存在于 [${targetOwner}]`)
         }
 
         // 保存脚本文件
@@ -453,9 +470,10 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: true, filename: displayName, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))
     } catch (err: any) {
+        const isNameExists = !!(err && err.code === 'NAME_EXISTS')
         console.error('[自定义源] 导入失败:', err)
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ success: false, error: err.message }))
+        res.writeHead(isNameExists ? 409 : 500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: err.message, ...(isNameExists ? { code: 'NAME_EXISTS' } : {}) }))
     }
 }
 

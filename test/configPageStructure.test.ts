@@ -381,3 +381,29 @@ test('搜索限流治理：tx 内部重试收敛 + 自动匹配搜结果短缓�
   assert.match(localMusicJs, /lmSearchCache\.set\(cacheKey/,
     '成功返回后必须回填缓存')
 })
+
+test('联动契约：同名冲突返回 409 + code，不再与 500 混淆', () => {
+  const handlers = fs.readFileSync(path.join(ROOT, 'src/server/customSourceHandlers.ts'), 'utf8')
+
+  // 1) 必须有一个可识别的业务错误构造器（code 供客户端判断，不依赖中文文案）
+  assert.match(handlers, /function nameExistsError\(message: string\): Error \{/,
+    '同名冲突必须有专用错误构造器')
+  assert.match(handlers, /err\.code = 'NAME_EXISTS'/,
+    '同名冲突错误必须带 NAME_EXISTS code')
+
+  // 2) upload 与 import 两条路径都要用它（2026-11-16 联动测试：只改一处会漏）
+  assert.match(handlers, /throw nameExistsError\(`源 "\$\{metadata\.name \|\| filename\}" 已存在于/,
+    'upload 路径的同名冲突必须走 nameExistsError')
+  assert.match(handlers, /throw nameExistsError\(`源 "\$\{displayName\}" 已存在于/,
+    'import 路径的同名冲突必须走 nameExistsError（易漏的第二处）')
+
+  // 3) 两处 catch 都要识别 code 并返回 409，而非统一 500
+  const catchBlocks = handlers.match(/const isNameExists = !!\(err && err\.code === 'NAME_EXISTS'\)/g) || []
+  assert.equal(catchBlocks.length, 2, 'upload / import 两处 catch 都必须识别 NAME_EXISTS')
+  const write409 = handlers.match(/res\.writeHead\(isNameExists \? 409 : 500/g) || []
+  assert.equal(write409.length, 2, '两处 catch 都必须按冲突类型返回 409')
+
+  // 4) message 文案必须保持含「已存在」，否则既有客户端（lx-hunter 的 /已存在/ 正则）会失效
+  assert.match(handlers, /已存在于 \[\$\{targetOwner\}\]/,
+    'error 文案必须保留「已存在于」字样，兼容既有客户端判断')
+})
