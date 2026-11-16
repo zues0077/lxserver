@@ -288,3 +288,41 @@ test('页内跳转按钮：全部能被 app.js 绑上，且 data-target 指向�
       `按钮 data-target="${t}" 既不是页面元素 id，也不是视图名（view-${t}）——点了会没反应`)
   }
 })
+
+test('逐源 VM 白名单：全局总闸在字段契约内，且后端可关、卡片有开关（方案甲）', () => {
+  // P-1407：配置页新增/改动字段必须同步登记 REQUIRED_FIELDS，否则「没有多余的新字段混进契约」用例会红。
+  // 本次没有新增表单字段，但逐源白名单依赖全局总闸 system.allowUnsafeVM：
+  // 把它作为显式契约锁住，防止有人从配置页删掉开关，导致所有白名单静默失效（仍走 vm2）。
+  assert.ok(REQUIRED_FIELDS.includes('system.allowUnsafeVM'), 'REQUIRED_FIELDS 未登记 system.allowUnsafeVM')
+  assert.equal(countField(formBlock, 'system.allowUnsafeVM'), 1, '全局 VM 总闸在配置页必须且只能出现一次')
+
+  const handlers = fs.readFileSync(path.join(ROOT, 'src/server/customSourceHandlers.ts'), 'utf8')
+  assert.match(handlers, /hasAllowUnsafeVM/, 'handleToggle 必须用「键是否存在」区分未传与显式 false')
+  assert.match(handlers, /target\.allowUnsafeVM = allowUnsafeVM === true/, 'handleToggle 必须支持显式 false 写回（可开可关）')
+  assert.match(handlers, /const vmOnly = hasAllowUnsafeVM && !hasEnabled/, '仅切白名单不能顺带翻转启用状态')
+
+  const musicAppJs = fs.readFileSync(path.join(ROOT, 'public/music/app.js'), 'utf8')
+  assert.match(musicAppJs, /toggleSourceVm\(/, '音源卡片必须提供逐源 VM 白名单开关入口')
+  assert.match(musicAppJs, /allowUnsafeVM: !currentVm/, '卡片开关必须同时支持加入与移出白名单')
+  assert.match(musicAppJs, /if \(allowUnsafeVM !== undefined\) payload\.allowUnsafeVM = allowUnsafeVM/,
+    '普通启停不能固定带 allowUnsafeVM:false，否则会误清白名单')
+})
+
+test('vm2 失败诊断 vmHint：列表透出 + 前端分档文案 + 问号提示 + 置顶不污染 order', () => {
+  const handlers = fs.readFileSync(path.join(ROOT, 'src/server/customSourceHandlers.ts'), 'utf8')
+  assert.match(handlers, /source\.vmHint = status\.vmHint/, '列表接口必须透出后端诊断字段 vmHint')
+
+  const musicAppJs = fs.readFileSync(path.join(ROOT, 'public/music/app.js'), 'utf8')
+  // 三档文案齐全
+  assert.match(musicAppJs, /可恢复·加白/, 'unsafe-capable 档文案缺失')
+  assert.match(musicAppJs, /疑似兼容问题/, 'vm2-incompatible 档文案缺失')
+  assert.match(musicAppJs, /buildVmFailureSummary\(/, '失败汇总条函数缺失')
+  // 问号提示入口存在
+  assert.match(musicAppJs, /function showVmWhitelistHelp\(/, 'VM 白名单问号提示函数缺失')
+  const indexHtml = fs.readFileSync(path.join(ROOT, 'public/music/index.html'), 'utf8')
+  assert.match(indexHtml, /onclick="showVmWhitelistHelp\(\)"/, '设置页自定义源标题必须挂问号提示入口')
+  // 展示层置顶，但要靠 dataset.vmFailed 在 onEnd 归位，不写进 order.json
+  assert.match(musicAppJs, /div\.dataset\.vmFailed =/, '失败源必须打标记以便拖拽写回时归位')
+  assert.match(musicAppJs, /el\.dataset\.vmFailed === '1'/, 'onEnd 必须识别失败源并排除出置顶顺序')
+  assert.match(musicAppJs, /displayList\.forEach\(/, '卡片渲染必须用置顶后的展示副本，而非原始 list')
+})

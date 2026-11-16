@@ -604,14 +604,34 @@ interface UserApiInfo {
     allowUnsafeVM?: boolean
 }
 
+/** vm2 加载失败的可恢复性诊断档位（只提示、不处置，处置权留给用户）。 */
+export type VmFailureHint = 'unsafe-capable' | 'vm2-incompatible'
+
 export interface ApiStatusInfo {
     status: 'success' | 'failed'
     error?: string
+    // vm2 加载失败时的只读诊断：给前端把「可加白恢复」和「真坏源」区分开。
+    // 只在失败分支计算，成功源不带；不写 sources.json、不触发任何自动处置。
+    vmHint?: VmFailureHint
     updateAlert?: {
         name?: string
         log?: string
         updateUrl?: string
     }
+}
+
+/**
+ * 纯函数：把一次加载失败归类成「能否靠加白恢复」的只读诊断档位。
+ * - unsafe-capable：本次探测已证明换原生 VM 能加载（requireUnsafe=true），或错误就是 REQUIRE_UNSAFE_VM → 高置信，建议加白。
+ * - vm2-incompatible：错误文本是 P-1509 实机确诊的 vm2 阻断点 `Proxy is not a constructor` → 中置信，值得试加白。
+ * - undefined：其余（语法/网络/超时/声明不合规等）→ 无判据，按坏源对待，不自动删。
+ *
+ * 只产标签、不读配置、不改状态、不执行脚本；探测逻辑与 owner:'temp' 契约与此完全解耦。
+ */
+export function classifyVmFailure(error?: string | null, requireUnsafe?: boolean): VmFailureHint | undefined {
+    if (requireUnsafe || error === 'REQUIRE_UNSAFE_VM') return 'unsafe-capable'
+    if (typeof error === 'string' && error.includes('Proxy is not a constructor')) return 'vm2-incompatible'
+    return undefined
 }
 
 // 加载的 API 实例
@@ -1873,12 +1893,19 @@ export async function loadUserApi(apiInfo: UserApiInfo): Promise<any> {
     } catch (error: any) {
         let isRequireUnsafe = !apiInfo.allowUnsafeVM && (error.message === 'REQUIRE_UNSAFE_VM' || error.message.includes('初始化超时') || error.message.includes('timeout'))
 
-        // 如果在 VM2 模式下加载失败，且系统允许 VM 模式，尝试测试原生 VM 模式能否成功加载
+        // 如果在 VM2 模式下加载失败，且系统允许 VM 模式，尝试测试原生 VM 模式能否成功加载。
+        //
+        // 这次递归只用来回答「换成原生 VM 能不能加载」，绝不能把实例留在运行时：
+        // 它是带 allowUnsafeVM=true 跑的无 vm2 隔离脚本，一旦登记进 loadedApis，
+        // 就会被取链候选枚举到（列表显示 failed、实际仍能取链）、并留下定时器与在途请求。
+        // 复用 getScriptInfo 的 owner='temp' 契约：临时实例加载成功后立即 dispose，
+        // 且 loadUserApi 成功分支不会把它写进 loadedApis。requireUnsafe 判定不受影响。
         if (!isRequireUnsafe && !apiInfo.allowUnsafeVM && global.lx.config['system.allowUnsafeVM']) {
             try {
                 const testUnsafeRes = await loadUserApi({
                     ...apiInfo,
                     id: `${apiInfo.id}_test_vm`,
+                    owner: 'temp',
                     allowUnsafeVM: true
                 })
                 if (testUnsafeRes.success) {
@@ -3355,13 +3382,23 @@ async function loadOneSourceInner(
             }
         } else {
             console.error(`[自定义源] [${owner}] 加载 ${metadata.name || source.name} 失败: ${result.error}`)
-            apiStatus.set(apiKey, { status: 'failed', error: result.error, updateAlert: result.updateAlert })
+            apiStatus.set(apiKey, {
+                status: 'failed',
+                error: result.error,
+                vmHint: classifyVmFailure(result.error, result.requireUnsafe),
+                updateAlert: result.updateAlert
+            })
             // 加载失败时清掉旧实例，避免继续使用过期脚本
             unloadLoadedApi(apiKey)
         }
     } catch (error: any) {
         console.error(`[自定义源] [${owner}] 加载 ${source.name} 失败:`, error.message)
-        apiStatus.set(apiKey, { status: 'failed', error: error.message, updateAlert: error.updateAlert })
+        apiStatus.set(apiKey, {
+            status: 'failed',
+            error: error.message,
+            vmHint: classifyVmFailure(error.message),
+            updateAlert: error.updateAlert
+        })
         unloadLoadedApi(apiKey)
     }
     return { needsSave: false }
