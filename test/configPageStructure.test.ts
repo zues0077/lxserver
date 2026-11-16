@@ -360,3 +360,24 @@ test('开总闸即时生效：保存配置时重载已加白但失败的源 + �
   assert.match(outerAppJs, /res\.vmReloaded > 0/,
     '设置页保存后必须把「已重载 N 个音源」告知用户')
 })
+
+test('搜索限流治理：tx 内部重试收敛 + 自动匹配搜结果短缓存', () => {
+  // 1) 后端：外层保持快速失败；真正减少限流的是 tx 内部重试收敛
+  //    （实测 300/1200ms 递增退避跨不过 QQ 限流窗口，只会让用户多等，已回滚）
+  const txSearch = fs.readFileSync(path.join(ROOT, 'src/modules/utils/musicSdk/tx/musicSearch.js'), 'utf8')
+  assert.match(txSearch, /if \(retryNum > 2\) return Promise\.reject/,
+    'tx 内部重试必须收敛到 3 次（原来 6 次瞬间连打会加深限流）')
+  assert.match(txSearch, /setTimeout\(resolve, 250\)/,
+    'tx 重试之间必须有间隔，不能零延迟立即递归')
+  assert.doesNotMatch(txSearch, /^\s*if \(retryNum > 5\) return Promise\.reject/m,
+    '旧的 6 次立即重试不应残留（注释里的历史记录不算）')
+
+  // 2) 前端自动关联：同一 (平台,关键词) 30s 内复用，避免连打造成平台限流
+  const localMusicJs = fs.readFileSync(path.join(ROOT, 'public/music/js/local_music.js'), 'utf8')
+  assert.match(localMusicJs, /LM_SEARCH_CACHE_TTL_MS = 30000/,
+    '自动关联搜索必须有短期缓存 TTL')
+  assert.match(localMusicJs, /async searchSingleSource\(text, source\) \{\s*\n\s*const cacheKey/,
+    'searchSingleSource 必须先查缓存再发请求')
+  assert.match(localMusicJs, /lmSearchCache\.set\(cacheKey/,
+    '成功返回后必须回填缓存')
+})

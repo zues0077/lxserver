@@ -40,6 +40,19 @@ function lmEscapeHtml(value) {
     })[ch]);
 }
 
+/**
+ * 搜索结果短期缓存（2026-11-16）。
+ *
+ * 为什么需要：自动关联（autoLinkAll / autoMatch）会对同一关键词按平台逐个搜索，
+ * 本地歌一多就是「关键词 × 平台数」次连续请求，很容易把平台搜索接口打进限流——
+ * 实测 QQ 音乐搜索 800ms 间隔连打 12 次会失败 3 次，5s 间隔重测 6/6 全过。
+ * 同一 (平台, 关键词) 30 秒内复用结果，从源头把请求量压下来。
+ *
+ * 只缓存成功返回（含空列表）；网络异常不缓存，下次照常重试。
+ */
+const LM_SEARCH_CACHE_TTL_MS = 30000;
+const lmSearchCache = new Map();
+
 window.LocalMusicManager = {
     originalData: [],
     displayData: [],
@@ -3011,6 +3024,10 @@ window.LocalMusicManager = {
     },
 
     async searchSingleSource(text, source) {
+        const cacheKey = `${source}|${text}`;
+        const now = Date.now();
+        const hit = lmSearchCache.get(cacheKey);
+        if (hit && now - hit.at < LM_SEARCH_CACHE_TTL_MS) return hit.list;
         try {
             const res = await fetch(`/api/music/search?name=${encodeURIComponent(text)}&source=${source}&page=1&limit=10`, {
                 headers: window.getUserAuthHeaders ? window.getUserAuthHeaders() : {}
@@ -3018,10 +3035,17 @@ window.LocalMusicManager = {
             const result = await res.json();
 
             // Normalize result format (supporting array or object)
-            if (Array.isArray(result)) return result;
-            if (result.list && Array.isArray(result.list)) return result.list;
-            if (result.data && result.data.list) return result.data.list;
-            return [];
+            let list = [];
+            if (Array.isArray(result)) list = result;
+            else if (result.list && Array.isArray(result.list)) list = result.list;
+            else if (result.data && result.data.list) list = result.data.list;
+
+            lmSearchCache.set(cacheKey, { at: now, list });
+            // 简单剪枝：超过 300 条删掉最早的一半，避免长会话无限增长
+            if (lmSearchCache.size > 300) {
+                for (const k of [...lmSearchCache.keys()].slice(0, 150)) lmSearchCache.delete(k);
+            }
+            return list;
         } catch (e) {
             return [];
         }

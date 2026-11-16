@@ -1226,6 +1226,11 @@ const withHardBudget = async <T>(p: Promise<T>, ms: number, label: string): Prom
 /**
  * 搜索首页请求的重试壳：平台偶发超时（如咪咕 jadeite 在并发下偶发 Request Timeout）
  * 会让整次搜索直接 500。重试一次成本很低，成功率提升明显。
+ *
+ * 2026-11-16 实测：把退避改成 300/1200ms 递增没有效果——QQ 音乐限流窗口远长于 1.5 秒，
+ * 递增重试仍然全失败，只是让用户多等 1.3 秒。所以这里保持「快速失败」，不做过长纠缠；
+ * 真正减少限流的是两件事：一是各平台 musicSearch 内部重试次数收敛（避免瞬间连打），
+ * 二是前端自动关联的搜索结果短缓存（local_music.js 的 lmSearchCache）。
  */
 const searchWithRetry = async <T>(label: string, fn: () => Promise<T>, retries = 1): Promise<T> => {
   let lastErr: any

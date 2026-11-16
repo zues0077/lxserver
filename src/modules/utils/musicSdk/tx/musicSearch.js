@@ -93,7 +93,10 @@ export default {
   //     })
   //   }
   musicSearch(str, page, limit, retryNum = 0) {
-    if (retryNum > 5) return Promise.reject(new Error('搜索失败'))
+    // 2026-11-16：原来 6 次「立即递归」重试——失败时瞬间连打 6 次，叠加外层重试
+    // 最坏 18 个请求同一时刻砸向 QQ 音乐，正好把限流窗口越打越长。
+    // 收敛到 3 次 + 每次 250ms 间隔：总请求量降到 1/2，且给平台侧留出恢复余量。
+    if (retryNum > 2) return Promise.reject(new Error('搜索失败'))
     const searchRequest = signRequest({
       comm: {
         _channelid: '0',
@@ -129,7 +132,9 @@ export default {
       // console.log(body)
       const req = body?.['music.search.SearchCgiService'] ?? body?.req
       if (!req || body.code != this.successCode || req.code != this.successCode) {
-        return this.musicSearch(str, page, limit, ++retryNum)
+        // 重试前先让出 250ms（原来是无延迟立即递归，等同瞬间连打）
+        return new Promise(resolve => setTimeout(resolve, 250))
+          .then(() => this.musicSearch(str, page, limit, ++retryNum))
       }
       return req.data
     })
