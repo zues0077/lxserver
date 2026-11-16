@@ -34,7 +34,7 @@ import formidable from 'formidable'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
-import { initUserApis, loadPersistedAdaptiveLimits, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, getContractSummary, describeError } from './userApi'
+import { initUserApis, loadPersistedAdaptiveLimits, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, getContractSummary, describeError, reloadWhitelistedFailedSources } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation, listIsolations, ISOLATION_MAX_AUTO_RELEASE } from './sourceGuard'
 import { hasHotSearchItems } from './hotSearchFallback'
@@ -11777,6 +11777,10 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           void readBody(req).then(async body => {
             try {
               const newConfig = JSON.parse(body)
+              // 「允许 VM 模式运行脚本」总闸由关转开时，需要重载「已加白但当前失败」的源。
+              // 保存配置本身只改 global.lx.config，不会让已加载的源重新走一次原生VM/vm2 判定，
+              // 否则「先加白（总闸没开 → 仍走 vm2 失败）→ 后开总闸」会一直卡在 failed。
+              let vmGateTurnedOn = false
               if (newConfig.serverName !== undefined) global.lx.config.serverName = newConfig.serverName
               if (newConfig['debug.enabled'] !== undefined) global.lx.config['debug.enabled'] = newConfig['debug.enabled']
               if (newConfig.maxSnapshotNum !== undefined) global.lx.config.maxSnapshotNum = parseInt(newConfig.maxSnapshotNum)
@@ -11797,7 +11801,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               if (newConfig['user.enableCacheSizeLimit'] !== undefined) global.lx.config['user.enableCacheSizeLimit'] = newConfig['user.enableCacheSizeLimit']
               if (newConfig['user.cacheSizeLimit'] !== undefined) global.lx.config['user.cacheSizeLimit'] = parseInt(newConfig['user.cacheSizeLimit']) || 2000
               if (newConfig['cache.maxAgeDays'] !== undefined) global.lx.config['cache.maxAgeDays'] = Math.max(0, parseInt(newConfig['cache.maxAgeDays']) || 0)
-              if (newConfig['system.allowUnsafeVM'] !== undefined) global.lx.config['system.allowUnsafeVM'] = newConfig['system.allowUnsafeVM']
+              if (newConfig['system.allowUnsafeVM'] !== undefined) {
+                const vmWasEnabled = !!global.lx.config['system.allowUnsafeVM']
+                global.lx.config['system.allowUnsafeVM'] = newConfig['system.allowUnsafeVM']
+                vmGateTurnedOn = !vmWasEnabled && !!newConfig['system.allowUnsafeVM']
+              }
               // 本地音乐识别并发线程数（1~4，默认 2），对应上游 #462
               if (newConfig['localMusicIdentifyThreads'] !== undefined) global.lx.config['localMusicIdentifyThreads'] = Math.min(4, Math.max(1, parseInt(newConfig['localMusicIdentifyThreads']) || 2))
               // 汽水试听兜底：开关 + 试听缓存 TTL（小时）
@@ -12264,8 +12272,20 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                 void global.lx.webdavSync.syncChangedFiles()
               }
 
+              // 总闸由关转开：把这之前「已加白但走 vm2 失败」的源重载一遍，让加白即时生效。
+              // 放在响应前 await，保证前端保存成功后拉列表就能看到成功状态。
+              let vmReloaded = 0
+              if (vmGateTurnedOn) {
+                try {
+                  const r = await reloadWhitelistedFailedSources()
+                  vmReloaded = r.reloaded
+                } catch (e: any) {
+                  console.warn('[自定义源] 总闸开启后重载已加白源失败:', e?.message || e)
+                }
+              }
+
               res.writeHead(200)
-              res.end(JSON.stringify({ success: true, warning }))
+              res.end(JSON.stringify({ success: true, warning, vmReloaded }))
             } catch (e) {
               res.writeHead(500)
               res.end('Server Error')

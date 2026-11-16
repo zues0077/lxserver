@@ -3788,6 +3788,9 @@ class App {
             if (!silent) {
                 if (res.warning) {
                     showInfo('配置保存成功！\n\n⚠️ 警告：' + res.warning);
+                } else if (res.vmReloaded > 0) {
+                    // 总闸由关转开：服务端已把「已加白但走 vm2 失败」的源重载成功
+                    showSuccess(`配置保存成功！已重新加载 ${res.vmReloaded} 个已加白但之前加载失败的音源。`);
                 } else {
                     showSuccess('配置保存成功！');
                 }

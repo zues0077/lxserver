@@ -3547,6 +3547,56 @@ export async function reloadSingleSource(owner: string, sourceId: string): Promi
     }
 }
 
+/**
+ * 总闸「允许 VM 模式运行脚本」由关转开时调用：把「已加白但当前未成功加载」的源重载一遍。
+ *
+ * 为什么需要：保存配置只写 global.lx.config['system.allowUnsafeVM']，不会让已加载的源重新
+ * 走一次「原生 VM vs vm2」的判定。所以「先点 VM 角标加白（此时总闸没开，仍走 vm2 失败）→
+ * 后去后台开总闸」这个顺序下，源会一直停在 failed，直到手动点角标或重启才恢复。
+ * 这里补上「开总闸即时生效」：只挑 allowUnsafeVM=true 且当前非 success 的源，
+ * 已经成功的源不动，避免无谓重载打断正在取链的实例。
+ */
+export async function reloadWhitelistedFailedSources(): Promise<{ total: number; reloaded: number }> {
+    const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
+    const sourceRoot = path.join(dataPath, 'users', 'source')
+    const dirs: Array<{ owner: string; dir: string }> = [{ owner: 'open', dir: '_open' }]
+    try {
+        for (const ent of fs.readdirSync(sourceRoot, { withFileTypes: true })) {
+            if (!ent.isDirectory() || ent.name === '_open') continue
+            dirs.push({ owner: ent.name, dir: ent.name })
+        }
+    } catch { /* users/source 不存在时只处理 open */ }
+
+    let total = 0
+    let reloaded = 0
+    for (const { owner, dir } of dirs) {
+        const metaPath = path.join(sourceRoot, dir, 'sources.json')
+        if (!fs.existsSync(metaPath)) continue
+        let sources: any[] = []
+        try {
+            sources = JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+        } catch {
+            continue
+        }
+        if (!Array.isArray(sources)) continue
+        for (const s of sources) {
+            if (!s || !s.id || s.allowUnsafeVM !== true || !s.enabled) continue
+            total++
+            const st = getApiStatus(owner, s.id)
+            // 已经成功加载的直接跳过：重载会重建实例、打断在途取链
+            if (st && st.status === 'success') continue
+            try {
+                await reloadSingleSource(owner, s.id)
+                reloaded++
+            } catch { /* 单个失败不影响其它源 */ }
+        }
+    }
+    if (reloaded > 0) {
+        console.log(`[自定义源] 总闸开启，已重载已加白但未成功的源 ${reloaded}/${total} 个`)
+    }
+    return { total, reloaded }
+}
+
 /** 仅卸载指定音源实例（删除音源后调用，无需重新解析其余音源）。 */
 export function unloadSource(owner: string, sourceId: string) {
     unloadLoadedApi(`${owner}_${sourceId}`)

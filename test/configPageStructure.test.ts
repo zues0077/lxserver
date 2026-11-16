@@ -326,3 +326,37 @@ test('vm2 失败诊断 vmHint：列表透出 + 前端分档文案 + 问号提示
   assert.match(musicAppJs, /el\.dataset\.vmFailed === '1'/, 'onEnd 必须识别失败源并排除出置顶顺序')
   assert.match(musicAppJs, /displayList\.forEach\(/, '卡片渲染必须用置顶后的展示副本，而非原始 list')
 })
+
+test('开总闸即时生效：保存配置时重载已加白但失败的源 + 前端关缓存 + 渲染防竞态', () => {
+  // 1) userApi 必须导出「重载已加白但未成功源」的函数，且只挑 allowUnsafeVM 且非 success
+  const userApi = fs.readFileSync(path.join(ROOT, 'src/server/userApi.ts'), 'utf8')
+  assert.match(userApi, /export async function reloadWhitelistedFailedSources/,
+    '缺少 reloadWhitelistedFailedSources：开总闸后无法让已加白的源恢复')
+  assert.match(userApi, /s\.allowUnsafeVM !== true/,
+    '重载函数必须只挑已加白的源，不能把所有源都重载')
+  assert.match(userApi, /st\.status === 'success'\) continue/,
+    '已成功的源必须跳过重载，避免打断在途取链')
+
+  // 2) server.ts 保存配置：总闸由关转开要触发重载，并在响应里回传重载数
+  const serverTs = fs.readFileSync(path.join(ROOT, 'src/server/server.ts'), 'utf8')
+  assert.match(serverTs, /vmGateTurnedOn = !vmWasEnabled && !!newConfig\['system\.allowUnsafeVM'\]/,
+    '必须识别「总闸由关转开」这一跳变，否则每次保存都会重载')
+  assert.match(serverTs, /await reloadWhitelistedFailedSources\(\)/,
+    '总闸开启后必须 await 重载，保证响应返回时状态已是最终态')
+  assert.match(serverTs, /vmReloaded/,
+    '保存响应必须回传 vmReloaded，供前端提示')
+
+  // 3) music 前端：列表关缓存 + 渲染序号防竞态
+  const musicAppJs = fs.readFileSync(path.join(ROOT, 'public/music/app.js'), 'utf8')
+  assert.match(musicAppJs, /cache: 'no-store'/,
+    '音源列表请求必须关缓存，否则加白后仍可能读到旧状态')
+  assert.match(musicAppJs, /customSourcesRenderSeq/,
+    'renderCustomSources 必须有序号保护，避免旧请求覆盖新渲染')
+  assert.match(musicAppJs, /if \(renderSeq !== customSourcesRenderSeq\) return/,
+    '过期的渲染结果必须直接丢弃')
+
+  // 4) 外层设置页：保存成功时要提示已重载的源数
+  const outerAppJs = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8')
+  assert.match(outerAppJs, /res\.vmReloaded > 0/,
+    '设置页保存后必须把「已重载 N 个音源」告知用户')
+})

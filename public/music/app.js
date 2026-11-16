@@ -15563,7 +15563,10 @@ async function fetchCustomSources() {
         if (adminPass) headers['x-frontend-auth'] = adminPass;
 
         const res = await fetch(`/api/custom-source/list?username=${username}`, {
-            headers: headers
+            headers: headers,
+            // 音源加载状态是实时内存态（加白/启停后立刻变），任何缓存都会让用户看到旧状态：
+            // 典型症状就是「点完加白界面还显示失败，切走再切回才正常」。显式关缓存。
+            cache: 'no-store'
         });
 
         if (res.status === 403) {
@@ -15724,8 +15727,14 @@ async function triggerSourceProbe(btn) {
     }
 }
 
+// 渲染竞态序号：源状态变化很快（加白/启停/巡检），并发 renderCustomSources 时先发的旧请求
+// 可能晚返回，把新渲染覆盖成旧快照。这里只允许「最新一次」的结果落地。
+let customSourcesRenderSeq = 0;
 async function renderCustomSources() {
+    const renderSeq = ++customSourcesRenderSeq;
     let list = await fetchCustomSources();
+    // fetch 期间若又发起了新一轮渲染，本次结果已过期，直接丢弃
+    if (renderSeq !== customSourcesRenderSeq) return;
 
     // 判断当前状态：是否由于权限被拦截
     // list === null 表示后端返回了 403
