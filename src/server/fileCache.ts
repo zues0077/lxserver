@@ -3657,6 +3657,48 @@ export const cleanupStaleTempFiles = async (username?: string, maxAgeMs: number 
 export const getCacheQuotaUsageBytes = (stats: { cache?: { totalSize?: number } }): number =>
     Math.max(0, Number(stats?.cache?.totalSize) || 0)
 
+/**
+ * 清理只认这些媒体后缀。索引 json、下载中的 .tmp、封面缓存等一律不碰。
+ * 本地下载链路本来就是「先写 <name>.tmp，完成后 rename 成最终文件」，排除 .tmp
+ * 就等价于保护正在传输的文件，不需要再引入上游那套 AsyncLocalStorage +
+ * CacheUsageGuard（上游 fileCache 走模块化目录，本地是扁平大文件且没有任何
+ * guard 调用点，硬搬会变成没人 acquire 的死代码）。
+ */
+const CACHE_CLEANUP_EXTENSIONS = new Set(['.mp3', '.flac', '.m4a', '.ogg', '.wav', '.lrc'])
+
+type CacheMediaFile = { path: string, size: number, used: number, ino: number, mtime: number }
+
+/** 异步遍历缓存目录（含 xiaoai/ 子目录），避免大目录扫描阻塞同步热路径 */
+const collectCacheMediaAsync = async (dir: string, depth = 2): Promise<CacheMediaFile[]> => {
+    if (depth <= 0) return []
+    const out: CacheMediaFile[] = []
+    let entries: fs.Dirent[]
+    try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true })
+    } catch (e: any) {
+        if (!['ENOENT', 'ENOTDIR'].includes(e?.code)) console.warn(`[文件缓存] 遍历缓存目录失败 (${dir}):`, e)
+        return out
+    }
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name)
+        if (entry.isSymbolicLink()) continue
+        if (entry.isDirectory()) {
+            out.push(...await collectCacheMediaAsync(fullPath, depth - 1))
+            continue
+        }
+        if (!entry.isFile() || !CACHE_CLEANUP_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue
+        try {
+            const stat = await fs.promises.lstat(fullPath)
+            if (!stat.isFile()) continue
+            // used 取 atime/mtime 较大者：正在播放的缓存文件 atime 会更新，不该被当成最旧文件删掉
+            out.push({ path: fullPath, size: stat.size, used: Math.max(stat.atimeMs, stat.mtimeMs), ino: stat.ino, mtime: stat.mtimeMs })
+        } catch (e: any) {
+            if (!['ENOENT', 'ENOTDIR'].includes(e?.code)) throw e
+        }
+    }
+    return out
+}
+
 export const checkAndCleanupCache = async (username?: string) => {
     void cleanupStaleTempFiles(username)
     const config = (global as any).lx.config
@@ -3668,30 +3710,61 @@ export const checkAndCleanupCache = async (username?: string) => {
     const limitBytes = (config['user.cacheSizeLimit'] || 2000) * 1024 * 1024
     if (usedBytes <= limitBytes) return
     const normalizedUsername = normalizeUsername(username)
-    const allFiles: Array<{ path: string, size: number, mtime: number }> = []
     const dir = getCacheDir(normalizedUsername, false)
-    if (!fs.existsSync(dir)) return
-    for (const file of fs.readdirSync(dir)) {
-        try {
-            const filePath = path.join(dir, file)
-            const fileStats = fs.statSync(filePath)
-            // 子目录（如小爱的 xiaoai/）也要收进来，否则限额清理永远动不到它们
-            if (fileStats.isDirectory()) {
-                collectAudioFiles(filePath, allFiles)
-                continue
-            }
-            allFiles.push({ path: filePath, size: fileStats.size, mtime: fileStats.mtime.getTime() })
-        } catch (e) { }
+    const files = await collectCacheMediaAsync(dir)
+    if (files.length === 0) return
+
+    // 音频与同名 .lrc 视为一组，整组一起删，避免留下孤立歌词 / 删掉歌词留下音频
+    const groups = new Map<string, CacheMediaFile[]>()
+    for (const file of files) {
+        const key = file.path.slice(0, -path.extname(file.path).length)
+        const group = groups.get(key) || []
+        group.push(file)
+        groups.set(key, group)
     }
-    allFiles.sort((a, b) => a.mtime - b.mtime)
-    let currentSize = usedBytes
+    const sortedGroups = [...groups.values()].sort(
+        (a, b) => Math.max(...a.map(f => f.used)) - Math.max(...b.map(f => f.used)),
+    )
+
+    // 清理内部基准用「本次实际收集到的媒体文件总量」，与配额统计口径解耦，避免口径差导致多删/少删
+    let currentSize = files.reduce((sum, file) => sum + file.size, 0)
     const targetSize = limitBytes * 0.95
     let deletedCount = 0
-    for (const file of allFiles) {
+    const deletedPaths: string[] = []
+    for (const group of sortedGroups) {
         if (currentSize <= targetSize) break
-        try { fs.unlinkSync(file.path); currentSize -= file.size; deletedCount++ } catch (e) { }
+        // 删除前二次校验 ino/size/mtime：文件若在扫描后被下载/其它进程替换，整组跳过（上游 #489）
+        const stale = group.some(file => {
+            try {
+                const stat = fs.lstatSync(file.path)
+                return !stat.isFile() || stat.ino !== file.ino || stat.size !== file.size || stat.mtimeMs !== file.mtime
+            } catch { return true }
+        })
+        if (stale) continue
+        // 先删音频、后删歌词
+        const ordered = [...group].sort(
+            (a, b) => Number(path.extname(a.path).toLowerCase() === '.lrc') - Number(path.extname(b.path).toLowerCase() === '.lrc'),
+        )
+        for (const file of ordered) {
+            try {
+                fs.unlinkSync(file.path)
+                currentSize -= file.size
+                deletedCount++
+                deletedPaths.push(file.path)
+            } catch { /* 单个文件删不掉就跳过，不影响其它组 */ }
+        }
     }
-    console.log(`[文件缓存] 用户 ${normalizedUsername} 缓存空间清理完成，已删除 ${deletedCount} 个过期缓存文件（不含已下载文件）`)
+
+    if (deletedCount > 0) {
+        // 磁盘已变，清掉索引里的幽灵条目（本地 save 是同步落盘，按 filename 反查即可，不跑重的 syncCacheIndex）
+        const deletedNames = new Set(deletedPaths.map(p => path.relative(dir, p).replace(/\\/g, '/')))
+        for (const item of indexManager.getAll(normalizedUsername, 'cache')) {
+            if (deletedNames.has(item.filename) || (item.lyricFilename && deletedNames.has(item.lyricFilename))) {
+                indexManager.remove(normalizedUsername, item.id, 'cache', item.quality)
+            }
+        }
+        console.log(`[文件缓存] 用户 ${normalizedUsername} 缓存空间清理完成，已删除 ${deletedCount} 个缓存文件（不含已下载文件 / 索引 / 临时文件）`)
+    }
 }
 
 // 启动 5 秒后自动扫描并清理系统遗留的过期 .tmp 文件
