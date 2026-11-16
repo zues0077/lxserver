@@ -4,6 +4,11 @@
  */
 
 window.CustomDirManager = {
+    // 并发拉取判废：每次 fetchData 递增 generation，只有最新一次的结果允许写回 UI；
+    // 旧的在飞请求用 AbortController 取消，避免慢响应覆盖新数据（上游 #2.2.0 local/customDir.js）。
+    fetchGeneration: 0,
+    pendingFetch: null,
+
     originalData: [],
     displayData: [],
     currentPage: 1,
@@ -504,6 +509,15 @@ window.CustomDirManager = {
     },
 
     async fetchData(silent = false) {
+        const generation = ++this.fetchGeneration;
+        // 取消上一次仍在飞的请求；旧请求的结果一律判废，不再写回列表
+        if (this.pendingFetch) {
+            try { this.pendingFetch.abort(); } catch (e) { /* 已结束的 controller 忽略 */ }
+        }
+        const controller = new AbortController();
+        this.pendingFetch = controller;
+        const isCurrent = () => generation === this.fetchGeneration && this.pendingFetch === controller;
+
         if (!silent) {
             const container = document.getElementById('lm-list-container');
             if (container) {
@@ -518,7 +532,8 @@ window.CustomDirManager = {
         try {
             const res = await fetch('/api/music/custom/list', {
                 headers: this.getAuthHeaders(),
-                cache: 'no-store'
+                cache: 'no-store',
+                signal: controller.signal
             });
 
             if (!res.ok) {
@@ -527,6 +542,9 @@ window.CustomDirManager = {
             }
 
             const result = await res.json();
+            // 慢的旧请求后返回：整份结果判废，连权限标志也不许写（否则按钮可见性会串）
+            if (!isCurrent()) return;
+
             if (result.success) {
                 if (result.allowOperateCustomMusicDir !== undefined) {
                     window.userAllowOperateCustomDir = !!result.allowOperateCustomMusicDir;
@@ -547,6 +565,8 @@ window.CustomDirManager = {
                 throw new Error(result.message || '加载自定义目录失败');
             }
         } catch (err) {
+            // 被取消或已被新请求取代的失败一律不提示、不覆盖错误区
+            if (!isCurrent() || err?.name === 'AbortError') return;
             if (typeof showError === 'function') showError(err.message || '获取自定义目录歌曲失败');
             console.error('[CustomDir] Fetch Error:', err);
             const container = document.getElementById('lm-list-container');
@@ -558,6 +578,8 @@ window.CustomDirManager = {
                         <p class="text-xs t-text-muted">请检查后端该用户的 customMusicDir 配置及目录权限</p>
                     </div>`;
             }
+        } finally {
+            if (this.pendingFetch === controller) this.pendingFetch = null;
         }
     },
 
