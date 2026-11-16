@@ -530,6 +530,11 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
         if (status) {
             source.status = status.status
             source.error = status.error
+            // vm2 加载失败的只读诊断：让前端把「可加白恢复」和「真坏源」区分开。
+            // 与 guard/contract 一样只提示、不处置；无诊断时不写该字段（成功源/无判据源）。
+            if (status.vmHint) {
+                source.vmHint = status.vmHint
+            }
             if (status.updateAlert) {
                 source.updateAlert = status.updateAlert
             }
@@ -664,8 +669,19 @@ export async function handleList(req: IncomingMessage, res: ServerResponse, user
 export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
     try {
         const body = await readBody(req)
-        const { id, sourceId, enabled, username, allowUnsafeVM, reason } = JSON.parse(body)
+        const payload = JSON.parse(body)
+        const { id, sourceId, enabled, username, allowUnsafeVM, reason } = payload
         const targetId = id || sourceId
+
+        // 逐源 VM 白名单（方案甲）：用「键是否存在」而不是值来区分三种调用
+        //   1. 普通启停：带 enabled、不带 allowUnsafeVM —— 保持原有启停语义
+        //   2. 仅设置白名单：带 allowUnsafeVM(true/false)、不带 enabled —— 不翻转启停
+        //   3. 旧调用：两者都带（例如 REQUIRE_UNSAFE_VM 确认后重试）—— 按原逻辑处理
+        // 旧前端启停曾固定带 allowUnsafeVM:false；若按值判断，每次点启用/停用
+        // 都会把已经加白的源悄悄移出白名单（旧注释担心的正是这个覆盖问题）。
+        const hasEnabled = Object.prototype.hasOwnProperty.call(payload, 'enabled')
+        const hasAllowUnsafeVM = Object.prototype.hasOwnProperty.call(payload, 'allowUnsafeVM')
+        const vmOnly = hasAllowUnsafeVM && !hasEnabled
 
         let targetOwner = (username && username !== 'default') ? username : 'open'
 
@@ -768,8 +784,10 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
             }
         }
 
-        // 核心安全校验：如果试图开启 VM 模式（或当前就是 VM 模式），必须要验证管理员密码
-        if (target.allowUnsafeVM || allowUnsafeVM) {
+        // 核心安全校验：涉及 VM 白名单（开启、关闭、或当前已在白名单内）都要管理员密码。
+        // 关闭时 target.allowUnsafeVM 仍为 true，因此同样落在这里；白名单是降隔离路径，
+        // 收紧与放开都不允许匿名操作。
+        if (target.allowUnsafeVM || allowUnsafeVM === true || (hasAllowUnsafeVM && allowUnsafeVM === false)) {
             const auth = req.headers['x-frontend-auth']
             if (auth !== global.lx.config['admin.password']) {
                 res.writeHead(403, { 'Content-Type': 'application/json' })
@@ -778,18 +796,29 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
             }
         }
 
-        // 修改逻辑：只有当参数明确为 true 时才更新为 true，防止被默认值 false 覆盖
-        if (allowUnsafeVM === true) target.allowUnsafeVM = true
-        target.enabled = enabled !== undefined ? enabled : !target.enabled
+        // 逐源白名单可开可关：显式传 false 也写回（方案甲）。
+        // 只认「键存在」，没传就完全不碰，避免普通启停把白名单误清掉。
+        if (hasAllowUnsafeVM) target.allowUnsafeVM = allowUnsafeVM === true
+
+        // 仅设置白名单时不翻转 enabled；普通启停沿用原语义。
+        if (hasEnabled) {
+            target.enabled = enabled
+        } else if (!vmOnly) {
+            target.enabled = !target.enabled
+        }
 
         // 停用原因标签（v1.5.55 停用源复检机制）：
         // 停用时写标签——调用方显式声明的 after-import 才采纳，其余一律 manual（最安全缺省）；
         // 启用时清标签（无论之前是谁停的）。hunter 的 serverVeto 只对
         // manual/probe-dead/无标签的停用源打标，after-import 源可以放心重灌。
-        if (target.enabled) {
-            delete target.disableReason
-        } else {
-            target.disableReason = reason === 'after-import' ? 'after-import' : 'manual'
+        // 「仅设置白名单」没有改启用状态，不能顺手重写 disableReason，
+        // 否则 hunter 灌入后标了 after-import 的停用源会被误改成 manual。
+        if (!vmOnly) {
+            if (target.enabled) {
+                delete target.disableReason
+            } else {
+                target.disableReason = reason === 'after-import' ? 'after-import' : 'manual'
+            }
         }
 
         fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
@@ -798,8 +827,8 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
         try {
             await reloadSingleSource(targetOwner, targetId)
 
-            // 如果是尝试启用，检查启用后的实时状态
-            if (target.enabled) {
+            // 如果是尝试启用，检查启用后的实时状态（仅切白名单不算启用，跳过）
+            if (target.enabled && !vmOnly) {
                 const status = getApiStatus(targetOwner, targetId)
                 const isRequireUnsafe = !allowUnsafeVM && !oldAllowUnsafeVM && !!(status && status.status === 'failed' && status.error && (
                     status.error === 'REQUIRE_UNSAFE_VM' ||
@@ -829,10 +858,18 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
             }
 
             res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ success: true, enabled: target.enabled }))
+            res.end(JSON.stringify(vmOnly
+                ? {
+                    success: true,
+                    enabled: target.enabled,
+                    allowUnsafeVM: !!target.allowUnsafeVM,
+                    // 逐源白名单必须叠加全局总闸才生效，回给前端用于提示「加了也没用」
+                    vmGloballyEnabled: !!global.lx.config['system.allowUnsafeVM'],
+                }
+                : { success: true, enabled: target.enabled }))
         } catch (e: any) {
             // 增量加载失败会记录 status，并通过状态检测与回滚逻辑处理
-            const isRequireUnsafe = !allowUnsafeVM && !oldAllowUnsafeVM && !!(e && e.message && (
+            const isRequireUnsafe = !vmOnly && !allowUnsafeVM && !oldAllowUnsafeVM && !!(e && e.message && (
                 e.message === 'REQUIRE_UNSAFE_VM' ||
                 e.message.includes('初始化超时') ||
                 e.message.includes('timeout')

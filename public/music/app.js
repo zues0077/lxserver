@@ -15609,6 +15609,30 @@ function buildSourceHealthSummary(list) {
     </div>`;
 }
 
+/**
+ * vm2 加载失败汇总条：把「失败源里几个疑似可加白恢复、几个真坏」摆到列表顶部。
+ * 只读统计、不处置；汇总数字来自每个源自己的 vmHint（后端诊断字段）。
+ */
+function buildVmFailureSummary(list) {
+    if (!Array.isArray(list) || !list.length) return '';
+    let capable = 0, incompatible = 0, broken = 0;
+    for (const s of list) {
+        if (!s || s.status !== 'failed') continue;
+        if (s.vmHint === 'unsafe-capable') capable++;
+        else if (s.vmHint === 'vm2-incompatible') incompatible++;
+        else broken++;
+    }
+    const recoverable = capable + incompatible;
+    if (!recoverable && !broken) return '';
+    const parts = [];
+    if (recoverable) parts.push(`<span class="text-amber-600 dark:text-amber-400 font-bold">${recoverable} 个疑似 VM 兼容问题（可试加白）</span>`);
+    if (broken) parts.push(`<span class="text-red-500 dark:text-red-400 font-bold">${broken} 个无法使用（建议删除）</span>`);
+    return `<div id="vm-failure-summary" class="mb-3 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/40 text-[11px] t-text-muted leading-relaxed">
+        <i class="fas fa-triangle-exclamation text-amber-500 mr-1"></i>${recoverable + broken} 个源加载失败：${parts.join(' · ')}
+        <span class="opacity-60">（已置顶，点卡片右侧 VM2 角标处置；坏源请删除或等待更新）</span>
+    </div>`;
+}
+
 function updateSourceScopeUI() {
     const username = getUploadTargetOwner();
     const isPublic = username === 'default';
@@ -15741,6 +15765,19 @@ async function renderCustomSources() {
     // 把结论直接摆出来（数字来自每个源自己上报的 disabledSources，自动禁用会实时反映）
     const healthSummary = buildSourceHealthSummary(list);
 
+    // vm2 失败汇总条 + 展示层置顶（诊断失败源排到卡片列表前排，方便用户处置）。
+    // 注意：只改「渲染顺序」，不改 list 本身、不动 order.json 取链优先级——
+    // Sortable 拖拽写回 order.json 时会用原始 list 顺序（见 onEnd），置顶不会被写进去。
+    const vmFailureSummary = buildVmFailureSummary(list);
+    let displayList = list;
+    if (Array.isArray(list) && vmFailureSummary) {
+        displayList = [...list].sort((a, b) => {
+            const ha = a && a.status === 'failed' ? 1 : 0;
+            const hb = b && b.status === 'failed' ? 1 : 0;
+            return hb - ha; // failed 置顶，组内保持稳定顺序
+        });
+    }
+
     targetIds.forEach(containerId => {
         const container = document.getElementById(containerId);
         if (!container) return;
@@ -15750,6 +15787,8 @@ async function renderCustomSources() {
         if (staleSummary) staleSummary.remove();
         const staleContract = container.querySelector('#contract-summary');
         if (staleContract) staleContract.remove();
+        const staleVmFail = container.querySelector('#vm-failure-summary');
+        if (staleVmFail) staleVmFail.remove();
 
         // 如果开启了公开限制且未通过验证，则显示锁定提示
         if (shouldShowHidden) {
@@ -15788,14 +15827,18 @@ async function renderCustomSources() {
         // 逐个挂「契约 N 提示」看着像满屏故障，实际一条都不影响取链。
         const contractSummary = buildContractSummary(list);
         if (contractSummary) container.insertAdjacentHTML('beforeend', contractSummary);
+        // vm2 失败汇总：置顶在卡片最前，用户一眼看到「几个可救、几个该删」
+        if (vmFailureSummary) container.insertAdjacentHTML('beforeend', vmFailureSummary);
 
-        list.forEach((source, index) => {
+        displayList.forEach((source, index) => {
             const div = document.createElement('div');
             // 设置界面使用稍紧凑的样式，模态框使用标准样式 (这里为了统一先用一样的，微调边距)
             div.className = `t-bg-panel p-3 md:p-4 rounded-xl border t-border-main shadow-sm hover:shadow-md transition-all mb-2.5 md:mb-3 relative group flex items-start source-item`;
             div.dataset.id = source.id;
             div.dataset.enabled = source.enabled;
             div.dataset.index = index;
+            // 诊断失败源只是展示层置顶，不参与 order.json 取链顺序写回。
+            div.dataset.vmFailed = (source.status === 'failed') ? '1' : '';
 
             // 格式化支持的源 (标识出已禁用的平台)
             let supportedBadges = '';
@@ -15866,9 +15909,21 @@ async function renderCustomSources() {
                 if (source.status === 'success') {
                     statusBadge = `<span class="text-[9px] md:text-[10px] bg-emerald-50 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400 dark:border-emerald-500/30 px-1.5 py-0.5 rounded-full border border-emerald-100 flex items-center gap-1 transition-colors whitespace-nowrap"><i class="fas fa-check-circle"></i>正常</span>`;
                 } else if (source.status === 'failed') {
-                    statusBadge = `<span class="text-[9px] md:text-[10px] bg-red-50 text-red-600 dark:bg-red-500/20 dark:text-red-400 dark:border-red-500/30 px-1.5 py-0.5 rounded-full border border-red-100 flex items-center gap-1 cursor-help transition-colors whitespace-nowrap" title="${source.error || '加载失败'}"><i class="fas fa-times-circle"></i>失败</span>`;
+                    // vm2 加载失败的只读诊断（vmHint）：把「可加白恢复」与「真坏源」分开，只提示不处置。
+                    // unsafe-capable=探测已证明换原生VM能跑；vm2-incompatible=错误含 Proxy is not a constructor。
+                    const hint = source.vmHint;
+                    if (hint === 'unsafe-capable') {
+                        statusBadge = `<span class="text-[9px] md:text-[10px] bg-amber-50 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400 dark:border-amber-500/30 px-1.5 py-0.5 rounded-full border border-amber-100 flex items-center gap-1 transition-colors whitespace-nowrap" title="该源在安全沙箱(vm2)加载失败，但已验证原生 VM 能正常运行。点右侧 VM2 角标、确认后即可恢复。"><i class="fas fa-circle-check"></i>可恢复·加白</span>`;
+                    } else if (hint === 'vm2-incompatible') {
+                        statusBadge = `<span class="text-[9px] md:text-[10px] bg-yellow-50 text-yellow-700 dark:bg-yellow-500/20 dark:text-yellow-400 dark:border-yellow-500/30 px-1.5 py-0.5 rounded-full border border-yellow-100 flex items-center gap-1 transition-colors whitespace-nowrap" title="错误提示该源用了安全沙箱不支持的写法。可点右侧 VM2 角标试加白；若加白后仍失败则说明是坏源。"><i class="fas fa-circle-question"></i>疑似兼容问题</span>`;
+                    } else {
+                        statusBadge = `<span class="text-[9px] md:text-[10px] bg-red-50 text-red-600 dark:bg-red-500/20 dark:text-red-400 dark:border-red-500/30 px-1.5 py-0.5 rounded-full border border-red-100 flex items-center gap-1 cursor-help transition-colors whitespace-nowrap" title="${source.error || '加载失败'}"><i class="fas fa-times-circle"></i>失败</span>`;
+                    }
                     if (!source.updateAlert) {
-                        errorMsg = `<div class="text-[9px] md:text-[10px] text-red-500 dark:text-red-400 mt-1 flex items-start gap-1 p-1.5 bg-red-50 dark:bg-red-900/20 rounded transition-colors"><i class="fas fa-info-circle mt-0.5 flex-shrink-0"></i><span class="break-all">${source.error || '未知错误'}</span></div>`;
+                        const failTip = hint
+                            ? `${source.error || '未知错误'}<br><span class="opacity-80">${hint === 'unsafe-capable' ? '已验证：换原生 VM 可正常运行，点右侧 VM2 角标加白即可恢复。' : '该错误是安全沙箱(vm2)不支持的写法；点右侧 VM2 角标试加白，若仍失败则是坏源。'}</span>`
+                            : (source.error || '未知错误');
+                        errorMsg = `<div class="text-[9px] md:text-[10px] text-red-500 dark:text-red-400 mt-1 flex items-start gap-1 p-1.5 bg-red-50 dark:bg-red-900/20 rounded transition-colors"><i class="fas fa-info-circle mt-0.5 flex-shrink-0"></i><span class="break-all">${failTip}</span></div>`;
                     }
                 } else {
                     statusBadge = `<span class="text-[9px] md:text-[10px] bg-blue-50 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400 dark:border-blue-500/30 px-1.5 py-0.5 rounded-full border border-blue-100 flex items-center gap-1 transition-colors whitespace-nowrap"><i class="fas fa-circle-notch fa-spin"></i>加载...</span>`;
@@ -15879,8 +15934,17 @@ async function renderCustomSources() {
                 `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-300 whitespace-nowrap">${source.owner}</span>` :
                 `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold bg-blue-50 text-blue-500 whitespace-nowrap">公开</span>`;
 
-            const vmTag = source.allowUnsafeVM ?
-                `<span class="px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold bg-red-50 text-red-500 border border-red-100 dark:bg-red-500/20 dark:text-red-400 dark:border-red-500/30 whitespace-nowrap">VM</span>` : '';
+            // 逐源 VM 白名单开关（方案甲）：原来只是一个只读的红色 VM 角标，
+            // 现在每个源都有入口——灰色 VM2 = 走 vm2 沙箱，红色 VM = 已加白名单。
+            // 点击只切 allowUnsafeVM，不动启用状态；后端要求管理员密码，且依赖后台全局总闸。
+            const vmOn = !!source.allowUnsafeVM;
+            const vmTag = `<span onclick="toggleSourceVm(${jsArg(source.id)}, ${vmOn})"
+                class="cursor-pointer select-none px-1.5 md:px-2 py-0.5 rounded-md text-[9px] md:text-[10px] font-bold whitespace-nowrap border transition-colors ${vmOn
+                    ? 'bg-red-50 text-red-500 border-red-100 dark:bg-red-500/20 dark:text-red-400 dark:border-red-500/30 hover:bg-red-100'
+                    : 't-text-muted t-border-main hover:text-emerald-500 hover:border-emerald-400'}"
+                title="${vmOn
+                    ? '已加入 VM 白名单（原生 VM，不进 vm2 沙箱）· 点击移出白名单'
+                    : '当前走 vm2 安全沙箱 · 点击加入 VM 白名单（需管理员身份，且后台总闸需开启）'}">${vmOn ? 'VM' : 'VM2'}</span>`;
 
             // 自检护栏的可疑特征角标：只提示不代劳，点开由用户决定信任还是隔离
             const guardTag = source.guard ? (() => {
@@ -16098,7 +16162,26 @@ async function renderCustomSources() {
 
                     // DOM 已由 SortableJS 更新，直接读取新顺序
                     const items = Array.from(container.querySelectorAll('.source-item'));
-                    const finalOrderIds = items.map(el => el.dataset.id);
+
+                    // 诊断失败源是「展示层置顶」的，绝不能把置顶位置写进 order.json（取链优先级）。
+                    // 做法：以原始 list（未置顶）的 id 序列为骨架，失败源留在骨架原位，
+                    // 正常源按用户刚拖出的 DOM 新顺序依次填入骨架中「非失败源」的槽位。
+                    const failedSet = new Set(items.filter(el => el.dataset.vmFailed === '1').map(el => el.dataset.id));
+                    let finalOrderIds;
+                    if (failedSet.size === 0) {
+                        // 没有展示置顶：沿用原逻辑，DOM 顺序即真实顺序
+                        finalOrderIds = items.map(el => el.dataset.id);
+                    } else {
+                        // 有诊断失败源被置顶：以原始 list（未置顶）的 id 序列为骨架，失败源留在骨架原位，
+                        // 正常源按用户刚拖出的 DOM 新顺序依次填入骨架中「非失败源」的槽位。
+                        const normalQueue = items.filter(el => el.dataset.vmFailed !== '1').map(el => el.dataset.id);
+                        finalOrderIds = [];
+                        for (const id of (list || []).map(s => s.id)) {
+                            finalOrderIds.push(failedSet.has(id) ? id : (normalQueue.shift() ?? id));
+                        }
+                        // 拖拽后若出现骨架里没有的源，补到末尾，避免丢失
+                        while (normalQueue.length) finalOrderIds.push(normalQueue.shift());
+                    }
 
                     // 同步另一个容器的 DOM 顺序（保持两者一致）
                     const otherId = containerId === 'custom-sources-list' ? 'settings-custom-sources-list' : 'custom-sources-list';
@@ -16185,8 +16268,11 @@ async function reloadSource(sourceId) {
     }
 }
 
-// 切换状态
-async function toggleSource(sourceId, currentEnabled, allowUnsafeVM = false) {
+// 逐源 VM 白名单开关（方案甲）：只切 allowUnsafeVM，不改启用状态。
+// 不带 enabled，后端 handleToggle 会识别为「仅设置白名单」，重载该源后
+// 由 userApi.ts 的双开关判定决定走原生 VM 还是 vm2 沙箱。
+// 这是降隔离操作，入口由管理员密码保护；且必须后台「允许 VM 模式运行脚本」总闸开启才生效。
+async function toggleSourceVm(sourceId, currentVm, isRetry = false) {
     try {
         const username = resolveSourceOwner(sourceId);
         const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
@@ -16196,7 +16282,55 @@ async function toggleSource(sourceId, currentEnabled, allowUnsafeVM = false) {
         const response = await fetch('/api/custom-source/toggle', {
             method: 'POST',
             headers: headers,
-            body: JSON.stringify({ username, sourceId, enabled: !currentEnabled, allowUnsafeVM }) // Send new state
+            body: JSON.stringify({ username, sourceId, allowUnsafeVM: !currentVm })
+        });
+
+        if (response.status === 403) {
+            const data = await response.json();
+            if (isRetry) {
+                showError(data.error || '权限限制：需要管理员身份。');
+                return;
+            }
+            const authorized = await handleAdminAuth('修改 VM 白名单需要管理员权限');
+            if (authorized) return await toggleSourceVm(sourceId, currentVm, true);
+            return;
+        }
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        if (!result.success) {
+            showError(result.message || result.error || '切换 VM 白名单失败');
+            return;
+        }
+
+        // 总闸没开时逐源白名单写了也不生效，别让用户以为「点完就好了」
+        if (result.allowUnsafeVM && !result.vmGloballyEnabled) {
+            showError('已加入白名单，但后台「允许 VM 模式运行脚本」总闸未开启，该源仍会走 vm2 沙箱。');
+        }
+        await renderCustomSources();
+    } catch (error) {
+        console.error('Toggle VM whitelist failed:', error);
+        showError(`VM 白名单切换失败: ${error.message}`);
+    }
+}
+
+// 切换状态
+// allowUnsafeVM 只在「REQUIRE_UNSAFE_VM 确认后重试」时才传 true；普通启停一律不带，
+// 否则后端会把已加白的源误清掉（方案甲：区分「没传」与「传 false」）。
+async function toggleSource(sourceId, currentEnabled, allowUnsafeVM) {
+    try {
+        const username = resolveSourceOwner(sourceId);
+        const headers = { 'Content-Type': 'application/json', ...getUserAuthHeaders() };
+        const adminPass = localStorage.getItem('lx_admin_password');
+        if (adminPass) headers['x-frontend-auth'] = adminPass;
+
+        const payload = { username, sourceId, enabled: !currentEnabled };
+        if (allowUnsafeVM !== undefined) payload.allowUnsafeVM = allowUnsafeVM;
+
+        const response = await fetch('/api/custom-source/toggle', {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify(payload)
         });
 
         if (response.status === 403) {
@@ -18320,6 +18454,48 @@ function showSelect(title, message, options = {}) {
         modal.querySelector('#confirm-cancel').onclick = () => close(false);
         modal.querySelector('#modal-close-x').onclick = () => close(false);
         modal.querySelector('div:first-child').onclick = () => close(false);
+    });
+}
+
+/**
+ * 「什么是 VM 白名单」说明弹窗（只读，单按钮）。
+ * 复用 showSelect 的视觉，但没有取消按钮——它只是解释，不需要用户做决定。
+ */
+function showVmWhitelistHelp() {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = "fixed inset-0 z-[200] flex items-center justify-center p-4 animate-fade-in";
+        modal.innerHTML = `
+            <div class="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300"></div>
+            <div class="t-bg-panel rounded-2xl shadow-2xl w-full max-w-md overflow-hidden transform transition-all animate-slide-up relative z-10 border t-border-main">
+                <div class="px-5 py-4 border-b border-emerald-100/50 flex justify-between items-center bg-emerald-50/50">
+                    <h3 class="text-sm font-bold t-text-main"><i class="fas fa-circle-question text-emerald-500 mr-1.5"></i>什么是 VM 白名单？</h3>
+                    <button id="vm-help-close-x" class="t-text-muted hover:text-emerald-500 transition-colors"><i class="fas fa-times text-lg"></i></button>
+                </div>
+                <div class="p-5">
+                    <div class="space-y-2.5 text-[12px] t-text-muted leading-relaxed">
+                        <p>音源脚本默认在 <b class="t-text-main">vm2 安全沙箱</b>中运行（隔离、更安全）。少数脚本用了沙箱不支持的写法会加载失败；加白后改用 <b class="t-text-main">Node 原生 VM</b> 运行，能兼容这类脚本，但<b class="text-red-500">失去沙箱隔离</b>，只建议对信任的源使用。</p>
+                        <ul class="list-disc pl-5 space-y-1 opacity-90">
+                            <li>需后台「允许 VM 模式运行脚本」总闸开启才生效</li>
+                            <li>加白需管理员身份确认，只影响这一个源</li>
+                            <li>点灰色 <span class="font-mono font-bold">VM2</span> 角标加入白名单，点红色 <span class="font-mono font-bold text-red-500">VM</span> 移出</li>
+                            <li>加载失败的源里，标「可恢复·加白 / 疑似兼容问题」的才值得试加白；标「失败」的多为脚本或上游问题，加白也无效</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="p-4 t-bg-main/50 border-t t-border-main/50 flex justify-end">
+                    <button id="vm-help-ok" class="px-6 py-2 text-sm font-bold text-white bg-emerald-500 hover:bg-emerald-600 rounded-xl shadow-lg transition-all active:scale-95">知道了</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        const close = () => {
+            modal.classList.add('opacity-0');
+            setTimeout(() => { modal.remove(); resolve(true); }, 200);
+        };
+        modal.querySelector('#vm-help-ok').onclick = close;
+        modal.querySelector('#vm-help-close-x').onclick = close;
+        modal.querySelector('div:first-child').onclick = close;
     });
 }
 
