@@ -511,7 +511,7 @@ const readId3v2TotalSize = (head: Buffer): number => {
  * 其余帧（标题/歌手/专辑/USLT 歌词等）原样保留。成功剥离返回 true。
  * 写临时文件后原子替换，避免并发读取（小爱本地直发流）拿到半截文件。
  */
-const stripOversizedEmbeddedCover = (audioPath: string): boolean => {
+export const stripOversizedEmbeddedCover = (audioPath: string, maxTagBytes: number = EMBED_TAG_SAFE_BYTES): boolean => {
     try {
         const head = Buffer.alloc(10)
         const fd = fs.openSync(audioPath, 'r')
@@ -522,7 +522,7 @@ const stripOversizedEmbeddedCover = (audioPath: string): boolean => {
         }
         if (head[5] & 0x80) return false // unsync 标签重组有风险，不动
         const totalSize = readId3v2TotalSize(head)
-        if (totalSize <= EMBED_TAG_SAFE_BYTES) return false
+        if (totalSize <= maxTagBytes) return false
 
         const ver = head[3]
         const fileStat = fs.statSync(audioPath)

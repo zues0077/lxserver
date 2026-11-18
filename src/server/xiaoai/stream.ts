@@ -360,15 +360,21 @@ const serveLocalFile = (
     /** 已统计但还没计入 streamRounds 的字节（按块累加） */
     let pendingBytes = 0
     try {
+      // 投送前标签体检（P-2026-11-18）：大封面撑起的 ID3 标签会挤出起播缓冲窗，
+      // 让音频首帧晚于设备 12s 守门窗口 → 判死。按本曲码率动态算阈值，超窗先剥封面。
+      // 幂等：剥过一次后标签已变小，下次体检不会再动。
+      ensureXiaoAiTagSafe(filePath, stat.size, durationMs)
       const buf = await fs.promises.readFile(filePath)
       const total = buf.length
-      const start = range ? range.start : 0
-      const end = range ? range.end : total - 1
+      // 体检可能改写了文件（剥封面后变小），Range 必须按新大小重算，否则可能请求到文件尾之后
+      const freshRange = total !== stat.size && req.headers.range ? parseRange(req.headers.range, total) : range
+      const start = freshRange ? freshRange.start : 0
+      const end = freshRange ? freshRange.end : total - 1
       const slice = buf.subarray(start, end + 1)
 
-      res.writeHead(range ? 206 : 200, {
+      res.writeHead(freshRange ? 206 : 200, {
         ...headers,
-        ...(range ? { 'Content-Range': `bytes ${start}-${end}/${total}` } : {}),
+        ...(freshRange ? { 'Content-Range': `bytes ${start}-${end}/${total}` } : {}),
         'Content-Length': String(slice.length),
       })
 
@@ -972,6 +978,93 @@ export const resolvePacingRate = (rawRate: number): number => {
   if (rawRate < 0.001) return 0
   return rawRate
 }
+
+/**
+ * 小爱本地直发「标签体检」动态阈值（P-2026-11-18 实测）。
+ *
+ * 起播瞬间服务端能全速灌进设备的字节 = PACING_LEAD_MS × 码率 × PACING_FACTOR，
+ * 也就是「平滑节流预算」在 t=0 时的上限。ID3v2 标签（主要是内嵌封面 APIC）必须
+ * 在这个窗口内发完，否则音频首帧会被节流推到窗口之外——设备的 12s 起播守门
+ * 只看到封面字节，判「一直没播放」而主动掐断（实测 1.46MB 标签 → 音频首帧 t≈34s）。
+ *
+ * 因此阈值按本曲码率动态算：safeBytes = lead × rate × factor × 安全系数(0.75)。
+ * 128k 曲目约 0.75×30s×16B/ms×1.1 ≈ 396KB，320k 约 792KB；旧的固定 1.5MB
+ * 阈值太宽，1.46MB 封面刚好躲过剥离、又远超实际起播窗，正好落进盲区。
+ * 时长不可信（rate=0）时返回 0，表示体检跳过（维持原行为）。
+ */
+export const resolveEmbedTagSafeBytes = (fileBytes: number, durationMs: number): number => {
+  if (!(fileBytes > 0) || !(durationMs > 0)) return 0
+  const rate = resolvePacingRate(fileBytes / durationMs)
+  if (!rate) return 0
+  return Math.floor(PACING_LEAD_MS * rate * PACING_FACTOR * 0.75)
+}
+
+/** 读 ID3v2 标签总长（含 10 字节头）；v2.4 为 syncsafe，v2.3 为大端 uint32 */
+const readId3TotalSize = (head: Buffer): number => {
+  if (head.length < 10 || head.toString('latin1', 0, 3) !== 'ID3') return 0
+  if (head[3] === 4) {
+    return 10 + (((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f))
+  }
+  if (head[3] === 3) return 10 + head.readUInt32BE(6)
+  return 0
+}
+
+/**
+ * 投送前对本地文件做一次幂等「标签体检」：ID3v2 标签超过动态起播窗就剥掉内嵌封面。
+ * 纯 Buffer 实现（不依赖 fileCache/native tagger，避免循环依赖与模块加载副作用），
+ * 只重写标签、去掉 APIC/PIC 帧，其余帧（标题/歌手/歌词）原样保留，音频部分逐字节不动。
+ * 原子替换（写 .stripping 临时文件再 rename），并发读取不受影响；剥过一次后标签已变小，天然幂等。
+ */
+const ensureXiaoAiTagSafe = (filePath: string, fileBytes: number, durationMs: number): void => {
+  if (!/\.mp3$/i.test(filePath)) return
+  const safeBytes = resolveEmbedTagSafeBytes(fileBytes, durationMs)
+  if (!safeBytes) return
+  try {
+    const head = Buffer.alloc(10)
+    const fd = fs.openSync(filePath, 'r')
+    try { fs.readSync(fd, head, 0, 10, 0) } finally { fs.closeSync(fd) }
+    if (head[5] & 0x80) return // unsync 标签重组有风险，不动
+    const total = readId3TotalSize(head)
+    if (!total || total <= safeBytes) return
+    const ver = head[3]
+    const statSize = fileBytes
+    const audioLen = Math.max(0, statSize - total)
+    const tag = Buffer.alloc(total)
+    const audio = Buffer.alloc(audioLen)
+    const rfd = fs.openSync(filePath, 'r')
+    try {
+      fs.readSync(rfd, tag, 0, total, 0)
+      if (audioLen > 0) fs.readSync(rfd, audio, 0, audioLen, total)
+    } finally { fs.closeSync(rfd) }
+    const ss4 = (o: number) => ((tag[o] & 0x7f) << 21) | ((tag[o + 1] & 0x7f) << 14) | ((tag[o + 2] & 0x7f) << 7) | (tag[o + 3] & 0x7f)
+    const frameSize = (o: number) => (ver === 4 ? ss4(o + 4) : tag.readUInt32BE(o + 4))
+    const encSize = (n: number) => ver === 4
+      ? Buffer.from([(n >> 21) & 0x7f, (n >> 14) & 0x7f, (n >> 7) & 0x7f, n & 0x7f])
+      : (() => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b })()
+    let off = 10
+    const keep: Buffer[] = []
+    let dropped = false
+    while (off + 10 <= total) {
+      const fid = tag.toString('latin1', off, off + 4)
+      if (!/^[A-Z0-9]{4}$/.test(fid)) break
+      const fsz = frameSize(off)
+      if (fsz <= 0 || off + 10 + fsz > total) break
+      if (fid === 'APIC' || fid === 'PIC') dropped = true
+      else keep.push(tag.subarray(off, off + 10 + fsz))
+      off += 10 + fsz
+    }
+    if (!dropped) return // 超大标签不是封面撑的，不动
+    const frames = Buffer.concat(keep)
+    const newHeader = Buffer.concat([Buffer.from('ID3', 'latin1'), Buffer.from([ver, head[4], 0]), encSize(frames.length)])
+    const tmp = filePath + '.stripping'
+    fs.writeFileSync(tmp, Buffer.concat([newHeader, frames, audio]))
+    fs.renameSync(tmp, filePath)
+    syncLog.info(`[XiaoAi] 投送前标签体检：动态阈值 ${(safeBytes / 1024).toFixed(0)}KB，已剥离超大内嵌封面 ${path.basename(filePath)}（${(total / 1024).toFixed(0)}KB→${((10 + frames.length) / 1024).toFixed(0)}KB）`)
+  } catch (e) {
+    try { syncLog.warn(`[XiaoAi] 投送前标签体检跳过（不影响播放）：${(e as Error)?.message}`) } catch (e2) { }
+  }
+}
+
 /** 上限：设备明显跟不上时，允许把垫子抬到这么厚 */
 const PACING_LEAD_MAX_MS = 90000
 /** 队列剩余不足这么多字节，说明我们把音箱饿着了（节流压太狠），需要放宽 */

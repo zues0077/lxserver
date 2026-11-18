@@ -816,6 +816,39 @@ window.LocalMusicManager = {
         }
     },
 
+    // 表头点击排序：与顶部「排序/方向」下拉框共用同一套状态，双向同步
+    // 同一列再点切换升降序；换列则默认升序（与常规表格交互一致）
+    sortByColumn(field) {
+        if (!['mtime', 'name', 'singer', 'album', 'source'].includes(field)) return;
+        if (this.sortBy === field) {
+            this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
+        } else {
+            this.sortBy = field;
+            this.sortOrder = 'asc';
+        }
+        const byEl = document.getElementById('lm-sort-by');
+        if (byEl) byEl.value = this.sortBy;
+        const orderEl = document.getElementById('lm-sort-order');
+        if (orderEl) orderEl.value = this.sortOrder;
+        this._syncSortHeader();
+        this.applyFilters();
+    },
+
+    // 表头排序箭头：跟随当前 sortBy/sortOrder（下拉框改排序时也会同步）
+    _syncSortHeader() {
+        if (!document.querySelectorAll) return;
+        document.querySelectorAll('[data-lm-sort]').forEach(el => {
+            const icon = el.querySelector('.lm-sort-icon');
+            if (!icon) return;
+            const active = el.getAttribute('data-lm-sort') === this.sortBy;
+            const arrow = active ? (this.sortOrder === 'asc' ? 'fa-sort-up' : 'fa-sort-down') : 'fa-sort';
+            icon.className = `fas ${arrow} ml-1 lm-sort-icon ${active ? 'text-emerald-600' : 'text-gray-400'}`;
+            el.title = active
+                ? `当前：${this.sortOrder === 'asc' ? '升序' : '降序'}，点击切换`
+                : '点击按此列排序';
+        });
+    },
+
     isViewingPublicSongs: false,
 
     getCurrentUsername() {
@@ -857,6 +890,8 @@ window.LocalMusicManager = {
 
     init() {
         // Initialization can run when the tab is clicked, or immediately.
+        // 表头排序箭头先按已恢复的排序状态刷一次，不必等列表请求回来
+        this._syncSortHeader();
         // Try reading global cache location to sync the selector.
         this.syncLocationSelector();
         this.loadFilters();
@@ -1327,6 +1362,7 @@ window.LocalMusicManager = {
         this._syncSelectActive('lm-folder-select');
         this._syncSelectActive('lm-sort-by');
         this._syncSelectActive('lm-sort-order');
+        this._syncSortHeader();
 
         const countEl = document.getElementById('lm-total-count');
         if (countEl) countEl.innerText = `共 ${current.length} 首`;
@@ -3967,7 +4003,7 @@ window.toggleLmBatchMode = () => {
 };
 
 // 当处于自定义目录模式时，将通用动作自动转发给 CustomDirManager
-['toggleBatchMode', 'selectAll', 'deselectAll', 'batchDelete', 'batchDownloadToDevice', 'batchAddToPlaylist', 'batchFetchLyrics', 'batchEmbedLyric', 'batchUpdateMetadata', 'applyFilters', 'refresh', 'resetFilters', 'clearFilters', 'toggleFilterTag'].forEach(method => {
+['toggleBatchMode', 'selectAll', 'deselectAll', 'batchDelete', 'batchDownloadToDevice', 'batchAddToPlaylist', 'batchFetchLyrics', 'batchEmbedLyric', 'batchUpdateMetadata', 'applyFilters', 'sortByColumn', 'refresh', 'resetFilters', 'clearFilters', 'toggleFilterTag'].forEach(method => {
     if (window.LocalMusicManager && typeof window.LocalMusicManager[method] === 'function') {
         const orig = window.LocalMusicManager[method];
         window.LocalMusicManager[method] = function (...args) {

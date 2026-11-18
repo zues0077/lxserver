@@ -1748,21 +1748,33 @@
                     <!-- Header Row -->
                     <div
                         class="grid grid-cols-12 gap-2 md:gap-4 p-4 border t-border-main t-bg-main text-gray-500 text-[10px] sm:text-xs font-bold uppercase tracking-wider shrink-0 mt-2 rounded-t-xl">
-                        <div class="col-span-1 text-center font-mono flex items-center justify-center">
-                            <span>#</span>
+                        <div class="col-span-1 text-center font-mono flex items-center justify-center cursor-pointer hover:text-emerald-600"
+                            data-lm-sort="mtime" onclick="window.LocalMusicManager.sortByColumn('mtime')" title="按添加时间排序">
+                            <span>#</span><i class="fas fa-sort ml-1 lm-sort-icon text-gray-400"></i>
                         </div>
-                        <div class="col-span-7 sm:col-span-5 md:col-span-4 lg:col-span-4 flex items-center gap-1.5 md:gap-2 min-w-0">
+                        <div class="col-span-7 sm:col-span-5 md:col-span-4 lg:col-span-4 flex items-center gap-1.5 md:gap-2 min-w-0 cursor-pointer hover:text-emerald-600"
+                            data-lm-sort="name" onclick="window.LocalMusicManager.sortByColumn('name')" title="点击按歌曲名排序">
                             <span class="flex-shrink-0">歌曲</span>
+                            <i class="fas fa-sort ml-1 lm-sort-icon text-gray-400 flex-shrink-0"></i>
                             <div class="flex items-center gap-1 flex-shrink-0">
-                                <button onclick="window.LocalMusicManager.toggleBatchMode()"
+                                <button onclick="event.stopPropagation(); window.LocalMusicManager.toggleBatchMode()"
                                     class="text-[10px] text-emerald-600 hover:text-emerald-700" title="批量操作">
                                     <i class="fas fa-tasks"></i>
                                 </button>
                             </div>
                         </div>
-                        <div class="hidden sm:block sm:col-span-4 md:col-span-3 lg:col-span-2">歌手</div>
-                        <div class="hidden lg:block lg:col-span-2">专辑</div>
-                        <div class="hidden md:block md:col-span-2 lg:col-span-1">来源/信息</div>
+                        <div class="hidden sm:block sm:col-span-4 md:col-span-3 lg:col-span-2 cursor-pointer hover:text-emerald-600"
+                            data-lm-sort="singer" onclick="window.LocalMusicManager.sortByColumn('singer')" title="点击按歌手排序">
+                            歌手<i class="fas fa-sort ml-1 lm-sort-icon text-gray-400"></i>
+                        </div>
+                        <div class="hidden lg:block lg:col-span-2 cursor-pointer hover:text-emerald-600"
+                            data-lm-sort="album" onclick="window.LocalMusicManager.sortByColumn('album')" title="点击按专辑排序">
+                            专辑<i class="fas fa-sort ml-1 lm-sort-icon text-gray-400"></i>
+                        </div>
+                        <div class="hidden md:block md:col-span-2 lg:col-span-1 cursor-pointer hover:text-emerald-600"
+                            data-lm-sort="source" onclick="window.LocalMusicManager.sortByColumn('source')" title="点击按来源排序">
+                            来源/信息<i class="fas fa-sort ml-1 lm-sort-icon text-gray-400"></i>
+                        </div>
                         <div class="col-span-4 sm:col-span-2 md:col-span-2 lg:col-span-2 text-right">操作</div>
                     </div>
 
