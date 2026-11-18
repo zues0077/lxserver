@@ -1189,23 +1189,34 @@ async function createLxRequest(
                     const bodyBytes = typeof body === 'string'
                         ? Buffer.byteLength(body)
                         : (Buffer.isBuffer(body) ? body.length : 0)
-                    if (!err && bodyBytes > effectiveBodyLimit(owner, id)) {
+                    // [PATCH-A] HTML 错误页预判断：content-type=text/html 且正文是 HTML 文档时早退，
+                    // 这类响应不是合法音源数据，交给脚本只会做无意义的 decontextify 深拷贝与同步解析。
+                    // 判据取交集（header 命中 AND body 以 HTML 文档开头），避免误伤用 text/html 返回 JSON 的源。
+                    const respCt = (!err && resp && resp.headers && (resp.headers['content-type'] || resp.headers['Content-Type'])) || ''
+                    const headerIsHtml = /text\/html/i.test(String(respCt))
+                    const bodyStartsHtml = typeof body === 'string' && /^\s*(?:<!doctype\s+html|<html[\s>])/i.test(body.slice(0, 256))
+                    const isHtmlErrorPage = !err && headerIsHtml && bodyStartsHtml
+                    if (!err && (bodyBytes > effectiveBodyLimit(owner, id) || isHtmlErrorPage)) {
                         const bodyLimit = effectiveBodyLimit(owner, id)
                         const limitText = formatBytes(bodyLimit)
                         const key = `${owner}_${id}`
                         const now = Date.now()
                         if (now - (oversizeLoggedAt.get(key) || 0) >= OVERSIZE_LOG_WINDOW_MS) {
                             oversizeLoggedAt.set(key, now)
-                            const msg = `[自定义源-${name || id}] 响应体 ${formatBytes(bodyBytes)} 超过上限 ${limitText}，`
-                                + `已丢弃并回调错误（避免整份深拷贝阻塞事件循环）`
+                            const msg = isHtmlErrorPage
+                                ? `[自定义源-${name || id}] 响应为 HTML 网页（content-type=${String(respCt).slice(0, 40)}），已提前丢弃（PATCH-A 预判断）`
+                                : `[自定义源-${name || id}] 响应体 ${formatBytes(bodyBytes)} 超过上限 ${limitText}，`
+                                    + `已丢弃并回调错误（避免整份深拷贝阻塞事件循环）`
                             console.warn(msg)
                             syncLog.warn(msg)
                         }
                         releaseSlotOnce()
                         try {
                             callback.call(null, Object.assign(
-                                new Error(`响应体过大（${formatBytes(bodyBytes)} > ${limitText}），已按失败处理`),
-                                { code: 'EBODYTOOLARGE' },
+                                new Error(isHtmlErrorPage
+                                    ? `响应为 HTML 网页，非音源数据，已按失败处理（PATCH-A）`
+                                    : `响应体过大（${formatBytes(bodyBytes)} > ${limitText}），已按失败处理`),
+                                { code: isHtmlErrorPage ? 'EHTMLRESPONSE' : 'EBODYTOOLARGE' },
                             ), null, null)
                         } catch { /* 沙箱实例可能已被释放，回调失败不影响主流程 */ }
                         return
