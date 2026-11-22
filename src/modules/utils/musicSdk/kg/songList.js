@@ -3,6 +3,21 @@ import { decodeName, formatPlayTime, sizeFormate, dateFormat, formatPlayCount } 
 import infSign from '@renderer/utils/musicSdk/kg/vendors/infSign.min'
 import { signatureParams } from './util'
 
+/**
+ * 酷狗歌单接口的首字节超时。
+ *
+ * 2026-11-22 实测：`www2.kugou.kugou.com/yueku/v9/special/getSpecial` 偶发挂死，
+ * 原来的 httpFetch 没传 timeout，needle 会一直挂到 TCP 层超时（40s+ 甚至更久），
+ * 表现为「点酷狗/概念版歌单转圈 40 秒」。即便上层路由 12 秒降级返回空，
+ * 这条挂死的连接也会继续占着句柄。这里按单次 8 秒收口：超时直接 reject
+ * （httpFetch 会把 ETIMEDOUT 归一成「请求超时」），不会进入
+ * 「body 为空 → tryNum+1 重试」的循环。
+ * 可用 KG_SONG_LIST_TIMEOUT_MS 覆盖（下限 2000ms）。
+ */
+const KG_SONG_LIST_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.KG_SONG_LIST_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw >= 2000 ? Math.round(raw) : 8000
+})()
 const handleSignature = (id, page, limit) => new Promise((resolve, reject) => {
   infSign({ appid: 1058, type: 0, module: 'playlist', page, pagesize: limit, specialid: id }, null, {
     useH5: !0,
@@ -109,7 +124,7 @@ export default {
   async getListDetailBySpecialId(id, page, tryNum = 0) {
     if (tryNum > 2) throw new Error('try max num')
 
-    const { body } = await httpFetch(this.getSongListDetailUrl(id)).promise
+    const { body } = await httpFetch(this.getSongListDetailUrl(id), { timeout: KG_SONG_LIST_TIMEOUT_MS }).promise
     let listData = body.match(this.regExps.listData)
     let listInfo = body.match(this.regExps.listInfo)
     if (!listData) return this.getListDetailBySpecialId(id, page, ++tryNum)
@@ -207,6 +222,7 @@ export default {
     if (tryNum > 2) return Promise.reject(new Error('try max num'))
     this._requestObj_list = httpFetch(
       this.getSongListUrl(sortId, tagId, page),
+      { timeout: KG_SONG_LIST_TIMEOUT_MS },
     )
     return this._requestObj_list.promise.then(({ body }) => {
       if (!body || body.status !== 1) return this.getSongList(sortId, tagId, page, ++tryNum)
@@ -260,8 +276,15 @@ export default {
     if (retryNum > 2) throw new Error('try max num')
     let result
     try {
-      result = await httpFetch(url, options).promise
+      // 统一兜一层首字节超时：分享码 / 歌单详情这些接口原来没传 timeout，
+      // 上游一挂死就会卡到 TCP 超时；再叠上下面「出错就重试 3 次」= 转圈几十秒。
+      // 显式传了 timeout 的调用方优先。
+      result = await httpFetch(url, { timeout: KG_SONG_LIST_TIMEOUT_MS, ...(options || {}) }).promise
     } catch (err) {
+      // 超时不是「这次运气不好」，重试只会把同一条挂死链路再走两遍，直接抛给上层降级
+      const code = String(err?.code || '')
+      const msg = String(err?.message || '')
+      if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT' || /超时|timed? ?out/i.test(msg)) throw err
       console.log(err)
       return this.createHttp(url, options, ++retryNum)
     }
