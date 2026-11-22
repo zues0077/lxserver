@@ -250,7 +250,7 @@ export async function searchAll(source: string, keyword: string, maxPages = 3, b
         list.push(item)
       }
     }
-    return { list, total: total || list.length, allPage, fetchedPages }
+    return { list, total: Math.max(total || 0, list.length), allPage, fetchedPages }
   }
 
   for (let page = 1; page <= maxPages; page++) {
@@ -271,7 +271,7 @@ export async function searchAll(source: string, keyword: string, maxPages = 3, b
     if (page >= allPage) break
   }
 
-  return { list, total: total || list.length, allPage, fetchedPages }
+  return { list, total: Math.max(total || 0, list.length), allPage, fetchedPages }
 }
 
 /**
