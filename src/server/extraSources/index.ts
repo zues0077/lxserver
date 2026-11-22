@@ -60,6 +60,63 @@ const SEARCHERS: Record<string, (keyword: string, page: number, pageSize: number
   soda: (keyword, page, pageSize, cookie) => soda.searchSongs(keyword, page, pageSize, cookie),
 }
 
+/**
+ * 额外音源搜索缓存：5 分钟，按 source + type + keyword + page + pageSize 做键。
+ *
+ * 汽水歌曲搜索每次都要让签名器签一次，单页约 0.4~0.5s、60 条约 1.3s；
+ * 用户在同一关键词上翻页 / 刷新时完全没必要重复签。这里只缓存“有结果的搜索”，
+ * 空结果不缓存，避免上游一次抖动被钉死 5 分钟。
+ *
+ * 缓存存的是快照副本：调用方（searchAll / 路由层）可能会裁剪/排序 list，
+ * 不能让它把缓存里的原对象改坏。
+ */
+const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000
+const SEARCH_CACHE_MAX_ENTRIES = 300
+const searchCache = new Map<string, { at: number; value: any }>()
+
+function cloneSearchValue<T>(value: T): T {
+  if (typeof structuredClone === 'function') return structuredClone(value)
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function searchCacheKey(
+  source: string,
+  type: string,
+  keyword: string,
+  page: number,
+  pageSize: number,
+  cookie: string,
+): string {
+  // Cookie 只参与“匿名/带账号”这一位，不把真实凭据写进内存键；
+  // 当前汽水搜索已完全匿名，这一位实际恒为 anon。
+  return [source, type, keyword.trim().toLowerCase(), page, pageSize, cookie ? 'auth' : 'anon'].join('|')
+}
+
+async function cachedSearch<T extends { list: any[]; total: number; allPage: number }>(
+  key: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const now = Date.now()
+  const hit = searchCache.get(key)
+  if (hit && now - hit.at < SEARCH_CACHE_TTL_MS) return cloneSearchValue(hit.value)
+
+  const value = await fn()
+  if (value && Array.isArray(value.list) && value.list.length > 0) {
+    if (searchCache.size >= SEARCH_CACHE_MAX_ENTRIES) {
+      // Map 保持插入顺序，直接淘汰最老的一条；搜索缓存不需要严格 LRU。
+      const oldest = searchCache.keys().next().value
+      if (oldest) searchCache.delete(oldest)
+    }
+    searchCache.set(key, { at: now, value: cloneSearchValue(value) })
+  }
+  return value
+}
+
+export function clearSearchCache(): void {
+  searchCache.clear()
+}
+
+
 const RESOLVERS: Record<string, (songInfo: any, quality: string, cookie: string, username?: string) => Promise<{ url: string; quality: string; via: string; ext?: string }>> = {
   bili: bilibili.getAudioUrl,
   soda: soda.getAudioUrl,
@@ -102,9 +159,8 @@ export function displayName(source: string): string {
 /**
  * 搜索额外音源的歌曲。
  *
- * `cookie` 显式控制「这一路搜索用不用账号」：
- *  - 界面搜索 / 歌单 / 排行榜：用账号 Cookie（不受「启用账号取链」影响，账号关着也能读）；
- *  - 换源候选搜索（含汽水匿名兜底）：传 ''，真匿名，避免"账号关着却还在用账号调歌曲"。
+ * `cookie` 参数保留是为了兼容调用方；汽水搜索 2026-11-23 起已完全匿名，
+ * 内部会把 Cookie 丢掉，不再交给签名器。结果按 5 分钟缓存，减少重复签名。
  */
 export async function searchSongs(
   source: string,
@@ -114,9 +170,11 @@ export async function searchSongs(
   cookie: string = readCookie('soda'),
 ) {
   const id = normalizeExtraSourceId(source)
-  const searcher = id ? SEARCHERS[id] : undefined
+  if (!id) throw new Error(`额外音源不支持：${source}`)
+  const searcher = SEARCHERS[id]
   if (!searcher) throw new Error(`额外音源不支持：${source}`)
-  return searcher(keyword, page, pageSize, id === 'soda' ? cookie : '')
+  const cacheKey = searchCacheKey(id, 'song', keyword, page, pageSize, id === 'soda' ? cookie : '')
+  return cachedSearch(cacheKey, () => searcher(keyword, page, pageSize, id === 'soda' ? cookie : ''))
 }
 
 // ---- 歌手 / 专辑维度 ----
@@ -129,14 +187,30 @@ function unsupported(source: string, what: string): never {
 }
 
 export async function searchSingers(source: string, keyword: string, page = 1, pageSize = 20) {
-  if (source === 'soda') return soda.searchSingers(keyword, page, pageSize, readCookie('soda'))
-  if (source === 'bili') return bilibili.searchUsers(keyword, page, pageSize)
+  const id = normalizeExtraSourceId(source)
+  if (id === 'soda') {
+    const cookie = readCookie('soda')
+    return cachedSearch(searchCacheKey('soda', 'singer', keyword, page, pageSize, cookie), () =>
+      soda.searchSingers(keyword, page, pageSize, cookie))
+  }
+  if (id === 'bili') {
+    return cachedSearch(searchCacheKey('bili', 'singer', keyword, page, pageSize, ''), () =>
+      bilibili.searchUsers(keyword, page, pageSize))
+  }
   return unsupported(source, '歌手搜索')
 }
 
 export async function searchAlbums(source: string, keyword: string, page = 1, pageSize = 20) {
-  if (source === 'soda') return soda.searchAlbums(keyword, page, pageSize, readCookie('soda'))
-  if (source === 'bili') return bilibili.searchAlbums(keyword, page, pageSize)
+  const id = normalizeExtraSourceId(source)
+  if (id === 'soda') {
+    const cookie = readCookie('soda')
+    return cachedSearch(searchCacheKey('soda', 'album', keyword, page, pageSize, cookie), () =>
+      soda.searchAlbums(keyword, page, pageSize, cookie))
+  }
+  if (id === 'bili') {
+    return cachedSearch(searchCacheKey('bili', 'album', keyword, page, pageSize, ''), () =>
+      bilibili.searchAlbums(keyword, page, pageSize))
+  }
   return unsupported(source, '专辑搜索')
 }
 
@@ -196,9 +270,17 @@ export async function getSongListDetail(source: string, id: string) {
   throw new Error(`${displayName(source)} 暂不支持歌单详情`)
 }
 
-export async function searchSongList(source: string, text: string, page = 1) {
-  if (source === 'soda') return soda.searchPlaylists(text, page, 20, readCookie('soda'))
-  if (source === 'bili') return bilibili.searchPlaylists(text, page)
+export async function searchSongList(source: string, text: string, page = 1, pageSize = 20) {
+  const id = normalizeExtraSourceId(source)
+  if (id === 'soda') {
+    const cookie = readCookie('soda')
+    return cachedSearch(searchCacheKey('soda', 'playlist', text, page, pageSize, cookie), () =>
+      soda.searchPlaylists(text, page, pageSize, cookie))
+  }
+  if (id === 'bili') {
+    return cachedSearch(searchCacheKey('bili', 'playlist', text, page, pageSize, ''), () =>
+      bilibili.searchPlaylists(text, page))
+  }
   throw new Error(`${displayName(source)} 暂不支持歌单搜索`)
 }
 
