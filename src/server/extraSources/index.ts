@@ -39,10 +39,11 @@ export function normalizeExtraSourceId(source: string): ExtraSourceId | null {
   return SOURCE_ALIASES[String(source || '').trim().toLowerCase()] || null
 }
 
-const SEARCHERS: Record<string, (keyword: string, page: number, pageSize: number) => Promise<{ list: any[]; total: number; allPage: number }>> = {
-  bili: bilibili.searchSongs,
-  // 汽水 2026-11-22 起匿名搜索被判空，必须带登录态 Cookie 才返回结果
-  soda: (keyword, page, pageSize) => soda.searchSongs(keyword, page, pageSize, store.getCookie('soda') || ''),
+const SEARCHERS: Record<string, (keyword: string, page: number, pageSize: number, cookie: string) => Promise<{ list: any[]; total: number; allPage: number }>> = {
+  bili: (keyword, page, pageSize) => bilibili.searchSongs(keyword, page, pageSize),
+  // 汽水 2026-11-22 起匿名搜索被判空，必须带登录态 Cookie 才返回结果。
+  // 但「匿名兜底」这一档必须真的匿名（cookie 传空），否则总开关关着时汽水还是用账号在搜。
+  soda: (keyword, page, pageSize, cookie) => soda.searchSongs(keyword, page, pageSize, cookie),
 }
 
 const RESOLVERS: Record<string, (songInfo: any, quality: string, cookie: string, username?: string) => Promise<{ url: string; quality: string; via: string; ext?: string }>> = {
@@ -84,11 +85,24 @@ export function displayName(source: string): string {
   return DISPLAY_NAME[normalizeExtraSourceId(source) || source] || source
 }
 
-export async function searchSongs(source: string, keyword: string, page = 1, pageSize = 20) {
+/**
+ * 搜索额外音源的歌曲。
+ *
+ * `cookie` 显式控制「这一路搜索用不用账号」：
+ *  - 界面搜索 / 歌单 / 排行榜：用账号 Cookie（不受「启用账号取链」影响，账号关着也能读）；
+ *  - 换源候选搜索（含汽水匿名兜底）：传 ''，真匿名，避免"账号关着却还在用账号调歌曲"。
+ */
+export async function searchSongs(
+  source: string,
+  keyword: string,
+  page = 1,
+  pageSize = 20,
+  cookie: string = store.getCookie('soda') || '',
+) {
   const id = normalizeExtraSourceId(source)
   const searcher = id ? SEARCHERS[id] : undefined
   if (!searcher) throw new Error(`额外音源不支持：${source}`)
-  return searcher(keyword, page, pageSize)
+  return searcher(keyword, page, pageSize, id === 'soda' ? cookie : '')
 }
 
 // ---- 歌手 / 专辑维度 ----

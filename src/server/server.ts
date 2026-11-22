@@ -897,7 +897,7 @@ const resolvePlayableAudio = async (
   deadline = Date.now() + RESOLVE_SWITCH_BUDGET_MS
   probes = 0
   if (matches.length) {
-    console.log(`[自动换源] 原源不可用，换源候选 ${matches.length} 条：${songInfo.name} → ${matches.slice(0, 3).map(m => m.source).join(',')}`)
+    console.log(`[自动换源] 原源不可用，换源候选 ${matches.length} 条：${songInfo.name} → ${[...new Set(matches.map(m => m.source))].join(',')}`)
   }
   for (const quality of qualities) {
     if (suspects.length && rescueExhausted()) break
@@ -2637,6 +2637,14 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
       return []
     }
   })).then(async resultGroups => {
+    // 每个平台这一轮实际搜到多少条（原始结果，未经打分/阈值过滤）。
+    // 之前只打「候选 N 条 + 前三个来源」，容易被读成「只有三个平台参与了搜索」。
+    try {
+      const perSource = switchSearchers
+        .map((task, i) => `${task.source}:${(resultGroups[i] || []).length}`)
+        .join(' ')
+      console.log(`[自动换源] 各平台搜索命中：${perSource}`)
+    } catch { /* 日志失败不影响换源 */ }
     // 会员平台加权：只对「有账号权限」的用户有效（getSourceCapabilities 内部已按白名单过滤），
     // 游客拿到全是 false，排序自然退化成固定平台序。
     let memberSources = new Set<string>()
@@ -2690,7 +2698,8 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
       try {
         const sodaKeyword = `${songInfo.name || ''} ${songInfo.singer || ''}`.trim()
         if (sodaKeyword) {
-          const sodaData = await extraSources.searchSongs('soda', sodaKeyword, 1, 10)
+          // 这一档是「匿名兜底」：显式传空 cookie，别把账号登录态带进来
+          const sodaData = await extraSources.searchSongs('soda', sodaKeyword, 1, 10, '')
           const bestSoda = (Array.isArray(sodaData?.list) ? sodaData.list : [])
             .map((item: any) => ({ candidate: { ...item, source: 'soda' }, score: getSongMatchScore(item, songInfo) }))
             .filter((it: any) => it.score >= 12)
