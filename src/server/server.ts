@@ -34,7 +34,7 @@ import formidable from 'formidable'
 // @ts-ignore
 import musicSdkRaw from '@/modules/utils/musicSdk/index.js'
 const musicSdk = musicSdkRaw as any
-import { initUserApis, loadPersistedAdaptiveLimits, callUserApiGetMusicUrl, isSourceSupported, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, getContractSummary, describeError, reloadWhitelistedFailedSources } from './userApi'
+import { initUserApis, loadPersistedAdaptiveLimits, callUserApiGetMusicUrl, isSourceSupported, hasScriptChannel, getLoadedApis, getLoadedApisCount, getLastReloadDurationMs, getActiveResourceSummary, getTrackedTimerCount, getTrackedTimerDetails, getSourceActivitySnapshot, getContractSummary, describeError, reloadWhitelistedFailedSources } from './userApi'
 import { loadPersistedSessions, persistSessions } from './sessionStore'
 import { getSourceGuardStatus, trustSource, untrustSource, isolateManually, clearIsolation, listIsolations, ISOLATION_MAX_AUTO_RELEASE } from './sourceGuard'
 import { hasHotSearchItems } from './hotSearchFallback'
@@ -2580,8 +2580,9 @@ const findServerSourceMatches = async (songInfo: any, username: string) => {
       },
     })
   }
-  // 汽水：只有**账号**可用才进这一档。匿名通道版权曲只给 60 秒试听，放到 B站 之后的最后一档。
-  if (songInfo.source !== 'soda' && caps?.soda?.account === true) {
+  // 汽水：账号可用，或**有脚本声明了 qs/汽水**（脚本能取链，即使账号总开关关着）；
+  // 两条都不成立时，才留到 B站 之后的匿名最后一档。
+  if (songInfo.source !== 'soda' && (caps?.soda?.account === true || hasScriptChannel('soda', username))) {
     switchSearchers.push({
       source: 'soda',
       run: async () => {
@@ -2844,13 +2845,32 @@ const isPlatformUsableForSwitch = (source: string, username: string, caps?: any)
 }
 
 /**
- * 换源候选取链：常规平台走自定义源 / 账号通道，额外平台（汽水/B站）走 extraSources。
+ * 换源候选取链：常规平台走自定义源 / 账号通道，额外平台（汽水/B站）先走脚本、再落服务端通道。
  * 汽水的 CENC 加密流在这里直接判失败 —— 没有密钥就解不了，别把 DRM 流当可播地址返回。
  */
 const resolveSwitchCandidate = async (candidate: any, quality: string, username: string) => {
   const source = candidate?.source
   if (extraSources.isExtraSource(source)) {
-    const extra = await extraSources.getMusicUrl(source, candidate, quality, username)
+    let extra: any = null
+    // 社区脚本常声明 qs/bilibili/汽水。脚本能取链时优先走脚本 ——
+    // 这条通道不受「启用账号取链」影响，账号总开关关着也应当能用。
+    if (hasScriptChannel(source, username)) {
+      try {
+        const viaScript = await callUserApiGetMusicUrl(source, candidate, quality, username, undefined, true)
+        if (viaScript?.url) {
+          extra = {
+            url: viaScript.url,
+            type: viaScript.type,
+            sourceName: viaScript.sourceName,
+            via: viaScript.via,
+          }
+          console.log(`[自动换源] ${source} 走脚本通道出链：${viaScript.sourceName || '自定义源'}`)
+        }
+      } catch (err: any) {
+        console.warn(`[自动换源] ${source} 脚本通道失败，回落服务端通道: ${err?.message || err}`)
+      }
+    }
+    if (!extra?.url) extra = await extraSources.getMusicUrl(source, candidate, quality, username)
     if (!extra?.url) throw new Error('额外音源未返回地址')
     // 试听片段不允许当换源结果（会被当整曲写缓存）：完整版优先，试听只走播放兜底链路
     if (source === 'soda' && /:preview/i.test(String(extra.via || ''))) throw new Error('汽水仅试听片段，不作为换源结果')

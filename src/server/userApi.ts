@@ -3957,12 +3957,19 @@ export function getLoadedApis() {
     return Array.from(loadedApis.values()).map(api => api.info)
 }
 
-// 检查某个源是否被支持
-// clientUsername: 调用者的用户名。如果未提供，则只能检查 open 源
-export function isSourceSupported(source: string, clientUsername?: string): boolean {
-    // 汽水/B站：服务端通道（extraSources）匿名即可用，恒视为支持；
-    // 脚本通道是否可用由取链编排自己探（脚本声明的 qs/bilibili 等别名按 scriptPlatformKeys 匹配）。
-    if (isExtraSourceId(source)) return true
+/**
+ * 脚本通道里有没有「声明了这个平台」的可用源。
+ *
+ * 与 isSourceSupported 的区别：这个不把汽水/B站的服务端通道算进来，
+ * 只认真实加载的脚本。用于「汽水要不要走脚本取链」这种决策。
+ * 平台 key 按 scriptPlatformKeys 的别名集合匹配（qs/qishui/bilibili…）。
+ */
+export function hasScriptChannel(source: string, clientUsername?: string): boolean {
+    return scanScriptChannel(source, clientUsername)
+}
+
+function scanScriptChannel(source: string, clientUsername?: string): boolean {
+    const sKeys = scriptPlatformKeys(source)
 
     const dataPath = process.env.DATA_PATH || path.join(process.cwd(), 'data')
     let userStates: Record<string, any> = {}
@@ -3983,7 +3990,7 @@ export function isSourceSupported(source: string, clientUsername?: string): bool
     }
 
     for (const [apiId, api] of loadedApis) {
-        if (!api.info.sources || !api.info.sources[source]) {
+        if (!api.info.sources || !sKeys.some(k => api.info.sources[k])) {
             continue
         }
 
@@ -3996,8 +4003,8 @@ export function isSourceSupported(source: string, clientUsername?: string): bool
         }
         if (!isEnabled) continue
 
-        // 检查平台是否被禁用
-        if (Array.isArray(state.disabledSources) && state.disabledSources.includes(source)) {
+        // 检查平台是否被禁用（按脚本声明的 key 判定）
+        if (Array.isArray(state.disabledSources) && sKeys.some(k => state.disabledSources.includes(k))) {
             continue
         }
 
@@ -4007,4 +4014,13 @@ export function isSourceSupported(source: string, clientUsername?: string): bool
         }
     }
     return false
+}
+
+// 检查某个源是否被支持
+// clientUsername: 调用者的用户名。如果未提供，则只能检查 open 源
+export function isSourceSupported(source: string, clientUsername?: string): boolean {
+    // 汽水/B站：服务端通道（extraSources）匿名即可用，恒视为支持；
+    // 脚本通道是否可用由取链编排自己探（脚本声明的 qs/bilibili 等别名按 scriptPlatformKeys 匹配）。
+    if (isExtraSourceId(source)) return true
+    return scanScriptChannel(source, clientUsername)
 }
