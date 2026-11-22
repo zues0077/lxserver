@@ -218,6 +218,8 @@ window.SongListManager = (function () {
                 currentState.list = combined;
                 currentState.total = combined.length;
                 currentState.limit = 30;
+                currentState.dataSourceNote = '';
+                syncDataSourceNote(source, '');
             } else {
                 const url = `${API_BASE}/songList/list?source=${source}&tagId=${encodeURIComponent(tagId)}&sortId=${encodeURIComponent(sortId)}&page=${page}`;
                 const res = await fetch(url);
@@ -226,6 +228,9 @@ window.SongListManager = (function () {
                 currentState.list = data.list || [];
                 currentState.total = data.total || 0;
                 currentState.limit = data.limit || 30;
+                // 后端用响应头标注「这条数据其实是酷狗的」；读不到就按请求 source 展示
+                currentState.dataSourceNote = res.headers.get('x-lx-data-source-note') || '';
+                syncDataSourceNote(source, currentState.dataSourceNote);
             }
 
             renderList();
@@ -373,8 +378,21 @@ window.SongListManager = (function () {
         tx: 'QQ',
         kg: '酷狗',
         kw: '酷我',
-        mg: '咪咕'
+        mg: '咪咕',
+        kglite: '概念版'
     };
+
+    /**
+     * 概念版歌单/榜单的「数据来源」小字。
+     * 概念版没有独立歌单接口，后端把 source 映射成 kg 取酷狗公共数据
+     * （取链仍走概念版账号），所以界面必须标出来，否则会被当成概念版自己的歌单。
+     */
+    function syncDataSourceNote(source, note) {
+        const el = document.getElementById('songlist-data-note');
+        if (!el) return;
+        const show = source === 'kglite' || note === 'kugou-public';
+        el.classList.toggle('hidden', !show);
+    }
 
     function updateViewModeUI() {
         const icon = document.getElementById('songlist-view-mode-icon');
@@ -421,10 +439,11 @@ window.SongListManager = (function () {
             // 行列模式 (自适应多列/单列条形卡片)
             container.innerHTML = currentState.list.map(item => {
                 const itemSource = item.source || currentState.source;
-                const sourceLabel = SOURCE_LABELS[itemSource] || itemSource;
+                const detailSource = currentState.source === 'kglite' ? 'kglite' : itemSource;
+                const sourceLabel = currentState.source === 'kglite' ? '概念版' : (SOURCE_LABELS[itemSource] || itemSource);
                 return `
                 <div class="group cursor-pointer flex items-center gap-3.5 p-3 rounded-2xl t-bg-panel border t-border-main hover:border-emerald-500/40 hover:shadow-md transition-all hover:-translate-y-0.5" 
-                     onclick="window.SongListManager.openDetail('${item.id}', '${itemSource}')">
+                     onclick="window.SongListManager.openDetail('${item.id}', '${detailSource}')">
                     <div class="relative w-16 h-16 md:w-20 md:h-20 flex-shrink-0 overflow-hidden rounded-xl shadow-sm">
                         <img data-src="${item.img || item.picUrl || '/music/assets/logo.svg'}" src="/music/assets/logo.svg" 
                              class="lazy-image w-full h-full object-cover dynamic-logo is-placeholder" 
@@ -451,9 +470,10 @@ window.SongListManager = (function () {
             // 方块 (Grid) 模式
             container.innerHTML = currentState.list.map(item => {
                 const itemSource = item.source || currentState.source;
-                const sourceLabel = SOURCE_LABELS[itemSource] || itemSource;
+                const detailSource = currentState.source === 'kglite' ? 'kglite' : itemSource;
+                const sourceLabel = currentState.source === 'kglite' ? '概念版' : (SOURCE_LABELS[itemSource] || itemSource);
                 return `
-                <div class="group cursor-pointer" onclick="window.SongListManager.openDetail('${item.id}', '${itemSource}')">
+                <div class="group cursor-pointer" onclick="window.SongListManager.openDetail('${item.id}', '${detailSource}')">
                     <div class="relative aspect-square overflow-hidden rounded-2xl shadow-md transition-all group-hover:shadow-xl group-hover:-translate-y-1">
                         <img data-src="${item.img || item.picUrl || '/music/assets/logo.svg'}" src="/music/assets/logo.svg" 
                              class="lazy-image w-full h-full object-cover dynamic-logo is-placeholder" 
@@ -533,8 +553,10 @@ window.SongListManager = (function () {
             if (miniCover) miniCover.src = coverUrl;
         }
 
-        const sourceNames = { kw: '酷我音乐', kg: '酷狗音乐', tx: 'QQ音乐', wy: '网易云音乐', mg: '咪咕音乐' };
-        const sourceLabel = sourceNames[detailState.source] || (detailState.source ? detailState.source.toUpperCase() : '歌单推荐');
+        const sourceNames = { kw: '酷我音乐', kg: '酷狗音乐', tx: 'QQ音乐', wy: '网易云音乐', mg: '咪咕音乐', kglite: '酷狗概念版' };
+        const sourceLabel = detailState.source === 'kglite'
+            ? '酷狗概念版（数据来自酷狗公共歌单）'
+            : (sourceNames[detailState.source] || (detailState.source ? detailState.source.toUpperCase() : '歌单推荐'));
         const sourceTag = document.getElementById('sl-detail-source-tag');
         if (sourceTag) sourceTag.textContent = sourceLabel;
         const miniSourceBadge = document.getElementById('sl-mini-source-badge');

@@ -48,6 +48,9 @@ window.LeaderboardManager = (function () {
         state.currentBangid = null;
         state.songs = [];
         state.localPage = 1;
+        // 概念版没有独立榜单，后端映射到酷狗公共榜单：界面必须标出来
+        const noteEl = document.getElementById('lb-data-note');
+        if (noteEl) noteEl.classList.toggle('hidden', source !== 'kglite');
         renderBoards([]);
         renderSongs([]);
         showBoardsLoading(true);

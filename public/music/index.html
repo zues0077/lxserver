@@ -699,6 +699,11 @@
                                 <i class="fas fa-link"></i>
                             </button>
                         </div>
+
+                        <!-- 概念版歌单没有独立数据源，展示的是酷狗公共歌单；这里如实标注，避免误以为是概念版自己的榜单 -->
+                        <div id="songlist-data-note" class="hidden mt-2 text-[11px] leading-relaxed t-text-muted">
+                            数据来自酷狗公共歌单（酷狗概念版暂无独立歌单），取链按酷狗公共源处理，概念版账号不参与取链
+                        </div>
                     </div>
 
                     <!-- Tags Selector (Hidden Popup) -->
@@ -1132,6 +1137,12 @@
                             <span id="lb-board-title"
                                 class="text-xs md:text-sm font-bold t-text-main truncate">请选择榜单</span>
                             <span id="lb-song-count" class="text-[10px] md:text-xs t-text-muted flex-shrink-0"></span>
+                        </div>
+
+                        <!-- 概念版榜单同样是酷狗公共数据；如实标注，避免误读 -->
+                        <div id="lb-data-note" class="hidden text-[10px] md:text-xs t-text-muted truncate max-w-[220px]"
+                            title="酷狗概念版暂无独立榜单，展示的是酷狗公共榜单">
+                            数据来自酷狗公共榜单
                         </div>
 
                         <!-- 播放全部：手机端仅显示图标或紧凑文本 -->
