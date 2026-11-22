@@ -6,17 +6,16 @@ import { signatureParams } from './util'
 /**
  * 酷狗歌单接口的首字节超时。
  *
- * 2026-11-22 实测：`www2.kugou.kugou.com/yueku/v9/special/getSpecial` 偶发挂死，
- * 原来的 httpFetch 没传 timeout，needle 会一直挂到 TCP 层超时（40s+ 甚至更久），
- * 表现为「点酷狗/概念版歌单转圈 40 秒」。即便上层路由 12 秒降级返回空，
- * 这条挂死的连接也会继续占着句柄。这里按单次 8 秒收口：超时直接 reject
- * （httpFetch 会把 ETIMEDOUT 归一成「请求超时」），不会进入
- * 「body 为空 → tryNum+1 重试」的循环。
+ * 2026-11-22 实测：`www2.kugou.kugou.com` 的 1.2MB HTML 详情页在 NAS 生产网络上
+ * 通常 100~450ms，但上游偶发挂死；原来的 httpFetch 没传 timeout，needle 会一直
+ * 挂到 TCP 层超时（40s+），再叠上「body 为空/非 200 → 重试 3 次」就是「点歌单转圈
+ * 40 秒」。现在详情优先走移动端 JSON API（164KB），HTML 只做兜底，并按单次 6 秒
+ * 收口；超时直接 reject，不再重试。
  * 可用 KG_SONG_LIST_TIMEOUT_MS 覆盖（下限 2000ms）。
  */
 const KG_SONG_LIST_TIMEOUT_MS = (() => {
   const raw = Number(process.env.KG_SONG_LIST_TIMEOUT_MS)
-  return Number.isFinite(raw) && raw >= 2000 ? Math.round(raw) : 8000
+  return Number.isFinite(raw) && raw >= 2000 ? Math.round(raw) : 6000
 })()
 const handleSignature = (id, page, limit) => new Promise((resolve, reject) => {
   infSign({ appid: 1058, type: 0, module: 'playlist', page, pagesize: limit, specialid: id }, null, {
@@ -122,14 +121,22 @@ export default {
     return decodeName(afterStr.substring(0, index))
   },
   async getListDetailBySpecialId(id, page, tryNum = 0) {
-    if (tryNum > 2) throw new Error('try max num')
+    if (tryNum > 1) throw new Error('try max num')
+
+    // 优先走移动端 JSON API：1 个请求拿全部 hash，体积约为 HTML 页的 1/7，
+    // 也没有「1.2MB 页面 + 正则解析」这套脆弱环节。失败再回退老 HTML。
+    try {
+      const detail = await this.getListDetailByMobileApi(id)
+      if (detail.list.length) return detail
+    } catch (err) {
+      console.log(`[kg歌单] 移动端 API 失败，回退 HTML：${err?.message || err}`)
+    }
 
     const { body } = await httpFetch(this.getSongListDetailUrl(id), { timeout: KG_SONG_LIST_TIMEOUT_MS }).promise
     let listData = body.match(this.regExps.listData)
     let listInfo = body.match(this.regExps.listInfo)
     if (!listData) return this.getListDetailBySpecialId(id, page, ++tryNum)
     let list = await this.getMusicInfos(JSON.parse(listData[1]))
-    // listData = this.filterData(JSON.parse(listData[1]))
     let name
     let pic
     if (listInfo) {
@@ -137,7 +144,6 @@ export default {
       pic = listInfo[2]
     }
     let desc = this.parseHtmlDesc(body)
-
 
     return {
       list,
@@ -149,30 +155,47 @@ export default {
         name,
         img: pic,
         desc,
-        // author: body.result.info.userinfo.username,
-        // play_count: formatPlayCount(body.result.listen_num),
       },
     }
-
-    // const globalSpecialId = await this.getGlobalSpecialId(id)
-    // const limit = 100
-    // const listData = await this.getSongListDetailByGlobalSpecialId(globalSpecialId, page, limit)
-    // if (!Array.isArray(listData))
-    // return this.getUserListDetail2(globalSpecialId)
-    // return {
-    //   list: this.filterDatav9(listData),
-    //   page,
-    //   limit,
-    //   total: listInfo.total,
-    //   source: 'kg',
-    //   info: {
-    //     name: listInfo.name,
-    //     img: listInfo.image,
-    //     desc: listInfo.intro,
-    //     author: listInfo.author,
-    //     play_count: formatPlayCount(listInfo.playcount),
-    //   },
-    // }
+  },
+  /**
+   * 移动端公开 API（无需登录、无需 Cookie）：
+   *   info  → http://mobilecdnbj.kugou.com/api/v5/special/info?specialid=
+   *   songs → http://mobilecdn.kugou.com/api/v3/special/song?specialid=&page=&pagesize=
+   * 实测 326 首歌单一次 pagesize=1000 全量返回，164KB / 26ms。
+   */
+  async getListDetailByMobileApi(id) {
+    const info = await this.createHttp(`http://mobilecdnbj.kugou.com/api/v5/special/info?specialid=${id}`)
+    if (!info || !info.songcount) throw new Error('移动端 info 无数据')
+    const total = Math.min(Math.max(Number(info.songcount) || 0, 1), this.listDetailLimit)
+    const pageSize = 1000
+    const pages = Math.min(Math.ceil(total / pageSize), 10)
+    const songs = []
+    for (let p = 1; p <= pages; p++) {
+      const data = await this.createHttp(
+        `http://mobilecdn.kugou.com/api/v3/special/song?specialid=${id}&page=${p}&pagesize=${pageSize}&version=9108`,
+      )
+      if (!Array.isArray(data?.info)) break
+      songs.push(...data.info)
+      if (songs.length >= total || data.info.length < pageSize) break
+    }
+    if (!songs.length) throw new Error('移动端歌曲列表为空')
+    const list = await this.getMusicInfos(songs.map(item => ({ hash: item.hash })).filter(item => item.hash))
+    if (!list.length) throw new Error('移动端歌曲 hash 全部无法解析')
+    return {
+      list,
+      page: 1,
+      limit: pageSize,
+      total: list.length,
+      source: 'kg',
+      info: {
+        name: info.specialname || '',
+        img: (info.imgurl || '').replace('{size}', '400'),
+        desc: info.intro || '',
+        author: info.nickname || '',
+        play_count: formatPlayCount(info.playcount),
+      },
+    }
   },
   getInfoUrl(tagId) {
     return tagId
@@ -219,7 +242,8 @@ export default {
 
   getSongList(sortId, tagId, page, tryNum = 0) {
     if (this._requestObj_list) this._requestObj_list.cancelHttp()
-    if (tryNum > 2) return Promise.reject(new Error('try max num'))
+    // 列表接口只重试一次：上游 status!=1 多为风控/限频，连试 3 次只会拖长时间。
+    if (tryNum > 0) return Promise.reject(new Error('try max num'))
     this._requestObj_list = httpFetch(
       this.getSongListUrl(sortId, tagId, page),
       { timeout: KG_SONG_LIST_TIMEOUT_MS },
@@ -273,34 +297,37 @@ export default {
   },
 
   async createHttp(url, options, retryNum = 0) {
-    if (retryNum > 2) throw new Error('try max num')
+    // 只允许重试一次：老逻辑是 3 次，一条挂死链路 × 6 秒 = 18 秒，
+    // 正是「40 秒转圈」里最难解释的那一段。现在最多 2 次尝试。
+    if (retryNum >= 1) throw new Error('try max num')
     let result
     try {
       // 统一兜一层首字节超时：分享码 / 歌单详情这些接口原来没传 timeout，
-      // 上游一挂死就会卡到 TCP 超时；再叠上下面「出错就重试 3 次」= 转圈几十秒。
+      // 上游一挂死就会卡到 TCP 超时；再叠上重试 = 转圈几十秒。
       // 显式传了 timeout 的调用方优先。
       result = await httpFetch(url, { timeout: KG_SONG_LIST_TIMEOUT_MS, ...(options || {}) }).promise
     } catch (err) {
-      // 超时不是「这次运气不好」，重试只会把同一条挂死链路再走两遍，直接抛给上层降级
+      // 超时不是「这次运气不好」，重试只会把同一条挂死链路再走一遍，直接抛给上层降级
       const code = String(err?.code || '')
       const msg = String(err?.message || '')
       if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT' || /超时|timed? ?out/i.test(msg)) throw err
       console.log(err)
       return this.createHttp(url, options, ++retryNum)
     }
+    const body = result.body || {}
     // console.log(result.statusCode, result.body)
     if (result.statusCode !== 200 ||
       (
-        (result.body.error_code !== undefined
-          ? result.body.error_code
-          : result.body.errcode !== undefined
-            ? result.body.errcode
-            : result.body.err_code
+        (body.error_code !== undefined
+          ? body.error_code
+          : body.errcode !== undefined
+            ? body.errcode
+            : body.err_code
         ) !== 0)
     ) return this.createHttp(url, options, ++retryNum)
-    if (result.body.data) return result.body.data
-    if (Array.isArray(result.body.info)) return result.body
-    return result.body.info
+    if (body.data) return body.data
+    if (Array.isArray(body.info)) return body
+    return body.info
   },
 
   createTask(hashs) {
