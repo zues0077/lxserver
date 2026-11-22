@@ -44,7 +44,8 @@ export function normalizeExtraSourceId(source: string): ExtraSourceId | null {
  *
  * 关键语义：**不看「启用账号取链」总开关**。那个开关只决定「取播放地址」用不用账号；
  * 读列表属于公开数据（与未登录 App 看到的一致），关了账号也应该能读。
- * 历史教训：汽水搜索早期匿名调用，被上游判成 empty_search=1，整个歌单/榜单都空。
+ * 历史教训：汽水搜索早期匿名调用被上游判成 empty_search=1；2026-11-23 起搜索改走 PC Web，
+ * 已完全匿名，不需要这份 Cookie。歌单详情等私有/半私有接口仍按这里取。
  */
 export function readCookie(source: string): string {
   const id = normalizeExtraSourceId(source)
@@ -54,8 +55,8 @@ export function readCookie(source: string): string {
 
 const SEARCHERS: Record<string, (keyword: string, page: number, pageSize: number, cookie: string) => Promise<{ list: any[]; total: number; allPage: number }>> = {
   bili: (keyword, page, pageSize) => bilibili.searchSongs(keyword, page, pageSize),
-  // 汽水 2026-11-22 起匿名搜索被判空，必须带登录态 Cookie 才返回结果。
-  // 但「匿名兜底」这一档必须真的匿名（cookie 传空），否则总开关关着时汽水还是用账号在搜。
+  // 汽水 2026-11-22 起 Android 搜索被判空；2026-11-23 起改走 PC Web（匿名可用）。
+  // 搜索不再依赖账号 Cookie，匿名兜底这一档传空也没有行为差异。
   soda: (keyword, page, pageSize, cookie) => soda.searchSongs(keyword, page, pageSize, cookie),
 }
 

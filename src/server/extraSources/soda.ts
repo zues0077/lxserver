@@ -195,6 +195,8 @@ function warnIfEmptySearch(body: any, what: string): void {
  * 免签名的 PC Web `/luna/pc/search/track` 返回空 body。两条可用通道：
  *   1) 签名器在线：`/luna/pc/search/track` 带 x-helios / x-medusa，稳定 20 首；
  *   2) 签名器离线：退回 `/luna/pc/search/all`，从 tracks 组取 5~7 首兜底。
+ * 搜索本身匿名可用（签名器也不需要账号 Cookie），所以这里**不把 Cookie 送出去**：
+ * 既和「账号取链总开关」彻底解耦，也避免把 session 交给局域网签名器。
  * 签名器只影响「歌曲搜索条数」，歌单/歌手/专辑/榜单都不依赖它。
  */
 export async function searchSongs(keyword: string, page = 1, pageSize = 20, cookie = ''): Promise<{
@@ -202,8 +204,10 @@ export async function searchSongs(keyword: string, page = 1, pageSize = 20, cook
   total: number
   allPage: number
 }> {
+  // 参数保留是为了兼容调用方；搜索结果不随账号/总开关变化，固定匿名。
+  void cookie
   let body: any = null
-  const signed = await signedPcTrackSearch(keyword, page, pageSize, cookie).catch((e: any) => {
+  const signed = await signedPcTrackSearch(keyword, page, pageSize, '').catch((e: any) => {
     console.log(`[汽水] 签名歌曲搜索失败，退回 all：${e?.message || e}`)
     return null
   })
@@ -211,7 +215,7 @@ export async function searchSongs(keyword: string, page = 1, pageSize = 20, cook
     const groups: any[] = Array.isArray(signed.result_groups) ? signed.result_groups : []
     if (groups.some((g: any) => (g?.data || []).some((it: any) => it?.entity?.track?.id))) body = signed
   }
-  if (!body) body = await pcWebSearch('all', keyword, page, pageSize, cookie)
+  if (!body) body = await pcWebSearch('all', keyword, page, pageSize, '')
   const groups: any[] = Array.isArray(body.result_groups) ? body.result_groups : []
   const list: any[] = []
   let hasMore = false
@@ -1614,7 +1618,8 @@ export async function searchSingers(keyword: string, page = 1, pageSize = 20, co
   total: number
   allPage: number
 }> {
-  const group = firstGroup(await pcWebSearch('artist', keyword, page, pageSize, cookie))
+  void cookie
+  const group = firstGroup(await pcWebSearch('artist', keyword, page, pageSize, ''))
   const artists: any[] = (group.data || [])
     .map((item: any) => item?.entity?.artist)
     .filter((a: any) => a?.id)
@@ -1649,7 +1654,8 @@ export async function searchAlbums(keyword: string, page = 1, pageSize = 20, coo
   total: number
   allPage: number
 }> {
-  const group = firstGroup(await pcWebSearch('album', keyword, page, pageSize, cookie))
+  void cookie
+  const group = firstGroup(await pcWebSearch('album', keyword, page, pageSize, ''))
   const albums: any[] = (group.data || [])
     .map((item: any) => item?.entity?.album)
     .filter((a: any) => a?.id)
@@ -1730,13 +1736,14 @@ function mapPlaylistNode(p: any): any {
   }
 }
 
-/** 搜歌单（`/luna/search/playlist`，2026-11-22 起需带登录态 Cookie） */
+/** 搜歌单（PC Web `/luna/pc/search/playlist`，匿名可用，不依赖账号 Cookie） */
 export async function searchPlaylists(keyword: string, page = 1, pageSize = 20, cookie = ''): Promise<{
   list: any[]
   total: number
   allPage: number
 }> {
-  const group = firstGroup(await pcWebSearch('playlist', keyword, page, pageSize, cookie))
+  void cookie
+  const group = firstGroup(await pcWebSearch('playlist', keyword, page, pageSize, ''))
   const items: any[] = (group.data || [])
     .map((item: any) => item?.entity?.playlist)
     .filter((p: any) => p?.id)
