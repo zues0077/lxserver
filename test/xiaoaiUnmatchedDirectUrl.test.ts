@@ -62,7 +62,7 @@ test('按型号智能选择：老配置缺省开启，带屏机型名单有默�
   fs.writeFileSync(configFilePath(), JSON.stringify({ touchscreenLyrics: true }, null, 2), 'utf8')
   const config = loadConfig()
   assert.equal(config.unmatchedDirectByModel, true)
-  assert.deepEqual(config.screenModels, ['LX04', 'X08A', 'X08E', 'X8F'])
+  assert.deepEqual(config.screenModels, ['LX04', 'X08A', 'X08C', 'X08E', 'X8F', 'X6A', 'X10A'])
 })
 
 test('按型号智能选择可以关掉，型号名单写入时统一转大写', () => {
@@ -81,6 +81,11 @@ test('带屏判定：型号命中、名称兜底、无屏机型不命中', () =>
   // 真机：LX04 = 泰禾世家小爱触屏音箱，X08A = 小爱触屏音箱 Pro8
   assert.equal(isScreenDevice('LX04', '泰禾世家小爱触屏音箱'), true)
   assert.equal(isScreenDevice('x08a', '任意名字'), true)
+  // 联网核对补进来的带屏型号：X08C / X08E / X6A / X10A
+  assert.equal(isScreenDevice('X08C', 'Redmi小爱触屏音箱 8'), true)
+  assert.equal(isScreenDevice('X08E', 'Redmi小爱触屏音箱 Pro8'), true)
+  assert.equal(isScreenDevice('X6A', '小米智能家庭屏 6'), true)
+  assert.equal(isScreenDevice('X10A', '小米智能家庭屏 10'), true)
   // 型号名单里没有，但名字带「触屏」也要认
   assert.equal(isScreenDevice('LX99', '小爱触屏音箱'), true)
   // 无屏机型：小米AI音箱 S12 / 万能遥控版 LX05A / 小爱音箱Pro LX06

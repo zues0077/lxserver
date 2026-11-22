@@ -124,13 +124,15 @@ const rememberLive = (sid: string | undefined, res: ServerResponse) => {
   res.once('close', forget)
 }
 
+/** 当前还在传输的流路数（只停部分设备时用来决定「要不要掐全局流」） */
+export const liveStreamCount = (): number => liveStreams.size
+
 /**
  * 投送新歌前调用：作废旧流并收尾它们的连接。
  *
  * 返回被作废的流数量，供日志判断「切歌时是不是真的掐掉了上一首的重拉」。
  */
-export const retireStreams = (keepSid?: string): number => {
-  let killed = 0
+export const retireStreams = (keepSid?: string): number => {  let killed = 0
   for (const [sid, responses] of liveStreams) {
     if (sid === keepSid) continue
     retiredStreams.add(sid)

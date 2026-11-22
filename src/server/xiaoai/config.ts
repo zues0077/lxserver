@@ -123,8 +123,8 @@ const DEFAULT_CONFIG: XiaoAiConfig = {
   defaultCoverAudioId: '1732418460076477549',
   unmatchedDirectUrl: false,
   unmatchedDirectByModel: true,
-  // 真机实测确认带屏的型号：LX04 泰禾世家小爱触屏音箱、X08A 小爱触屏音箱 Pro8。
-  // X08E / X8F 为同代触屏固件代号，先列入；名字含「触屏/屏幕」的仍会兜底命中。
+  // 带屏型号名单（LX04/X08A/X08C/X08E/X8F/X6A/X10A，详见 screen.ts 的依据注释）；
+  // 名字含「触屏/屏幕」的仍会兜底命中，用户自定义名单优先。
   screenModels: DEFAULT_SCREEN_MODELS,
   selectedDeviceIds: [],
   devices: [],

@@ -1,7 +1,7 @@
 import os from 'node:os'
 import { MinaAuth, type LoginResult, type QRPollResult, type TokenInfo } from './auth'
 import { MinaClient, PLAY_STATUS_PAUSED, PLAY_STATUS_PLAYING, type MinaDevice, type PlayOutcome } from './client'
-import { retireStreams } from './stream'
+import { liveStreamCount, retireStreams } from './stream'
 import { isScreenDevice } from './screen'
 import { DEFAULT_MUSIC_AUDIO_ID, needUseMusicApi } from './constants'
 import { isFfmpegAvailable } from './transcode'
@@ -679,7 +679,22 @@ class XiaoAiService {
    * 让「停完再播同一首」不被 10 秒窗口吞掉。
    */
   async stop(deviceIds?: string[]) {
-    const killed = retireStreams()
+    // 停止推送默认按全局处理（前端按钮就是停所有正在播的音箱）。
+    // 但接口允许只传部分 deviceIds：这时不能 retireStreams() 一刀切——同一首歌是
+    // 一条带同一 sid 的流被多台设备共用，掐了流会把还在播的另一台一起断掉。
+    // 判据：本次要停的设备覆盖了配置里选中的全部设备，才作废在途流。
+    const configured = loadConfig().selectedDeviceIds || []
+    const stoppingAll =
+      !Array.isArray(deviceIds) || deviceIds.length === 0 ||
+      (configured.length > 0 && configured.every(id => deviceIds.includes(id)))
+    let killed = 0
+    if (stoppingAll) {
+      killed = retireStreams()
+    } else if (liveStreamCount() > 0) {
+      const line = `[XiaoAi] 只停部分设备（${deviceIds?.length || 0}/${configured.length}），保留在途流不断其他音箱`
+      console.log(line)
+      syncLog.info(line)
+    }
     if (killed) {
       const line = `[XiaoAi] 停止推送：作废在途流 ${killed} 路`
       console.log(line)
