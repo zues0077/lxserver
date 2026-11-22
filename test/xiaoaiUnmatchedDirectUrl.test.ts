@@ -21,6 +21,7 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoai-cfg-'))
 ;(globalThis as any).lx = { dataPath: tmpDir }
 
 import { configFilePath, loadConfig, saveConfig } from '../src/server/xiaoai/config'
+import { isScreenDevice } from '../src/server/xiaoai/screen'
 
 test('缺省不改行为：未配置时 unmatchedDirectUrl 为 false', () => {
   const file = configFilePath()
@@ -55,4 +56,39 @@ test('显式关闭能把开启状态改回来', () => {
 test('只认布尔真值：传字符串不会被误当成开启', () => {
   saveConfig({ unmatchedDirectUrl: 'true' as unknown as boolean })
   assert.equal(loadConfig().unmatchedDirectUrl, false)
+})
+
+test('按型号智能选择：老配置缺省开启，带屏机型名单有默认值', () => {
+  fs.writeFileSync(configFilePath(), JSON.stringify({ touchscreenLyrics: true }, null, 2), 'utf8')
+  const config = loadConfig()
+  assert.equal(config.unmatchedDirectByModel, true)
+  assert.deepEqual(config.screenModels, ['LX04', 'X08A', 'X08E', 'X8F'])
+})
+
+test('按型号智能选择可以关掉，型号名单写入时统一转大写', () => {
+  saveConfig({ unmatchedDirectByModel: false, screenModels: ['lx04', ' X08a '] })
+  const config = loadConfig()
+  assert.equal(config.unmatchedDirectByModel, false)
+  assert.deepEqual(config.screenModels, ['LX04', 'X08A'])
+})
+
+test('只有显式 false 才关：字符串 false 不算关闭', () => {
+  saveConfig({ unmatchedDirectByModel: 'false' as unknown as boolean })
+  assert.equal(loadConfig().unmatchedDirectByModel, true)
+})
+
+test('带屏判定：型号命中、名称兜底、无屏机型不命中', () => {
+  // 真机：LX04 = 泰禾世家小爱触屏音箱，X08A = 小爱触屏音箱 Pro8
+  assert.equal(isScreenDevice('LX04', '泰禾世家小爱触屏音箱'), true)
+  assert.equal(isScreenDevice('x08a', '任意名字'), true)
+  // 型号名单里没有，但名字带「触屏」也要认
+  assert.equal(isScreenDevice('LX99', '小爱触屏音箱'), true)
+  // 无屏机型：小米AI音箱 S12 / 万能遥控版 LX05A / 小爱音箱Pro LX06
+  assert.equal(isScreenDevice('S12', '小米AI音箱'), false)
+  assert.equal(isScreenDevice('LX05A', '小爱音箱万能遥控版'), false)
+  assert.equal(isScreenDevice('LX06', '小爱音箱Pro'), false)
+  // 自定义名单覆盖内置
+  assert.equal(isScreenDevice('LX06', '小爱音箱Pro', ['LX06']), true)
+  // 空型号 + 空名字不炸
+  assert.equal(isScreenDevice('', ''), false)
 })

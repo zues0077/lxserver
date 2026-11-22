@@ -1,6 +1,8 @@
 import os from 'node:os'
 import { MinaAuth, type LoginResult, type QRPollResult, type TokenInfo } from './auth'
-import { MinaClient, PLAY_STATUS_PAUSED, type MinaDevice, type PlayOutcome } from './client'
+import { MinaClient, PLAY_STATUS_PAUSED, PLAY_STATUS_PLAYING, type MinaDevice, type PlayOutcome } from './client'
+import { retireStreams } from './stream'
+import { isScreenDevice } from './screen'
 import { DEFAULT_MUSIC_AUDIO_ID, needUseMusicApi } from './constants'
 import { isFfmpegAvailable } from './transcode'
 import { syncLog } from '../../utils/log4js'
@@ -90,6 +92,10 @@ export interface XiaoAiPublicConfig {
   defaultCoverAudioId: string
   /** 曲库未命中时改走纯直链（不带曲库 audioID，屏幕不会显示别的歌） */
   unmatchedDirectUrl: boolean
+  /** 曲库未命中时按「设备有没有屏幕」自动选择（默认 true） */
+  unmatchedDirectByModel: boolean
+  /** 判定「带屏幕」的型号名单（hardware 代号，大写） */
+  screenModels: string[]
   /** ffmpeg 是否可用（不可用时 mp3 统一自动降级，界面据此提示） */
   ffmpegAvailable: boolean
   disabledModels: string[]
@@ -106,9 +112,12 @@ const AUDIO_ID_CACHE_MAX = 300
  * 同一设备 + 同一首歌的重复投送去重窗口。
  * 前端一次点击会在 200ms 内打出两三个 /play（每次签新地址，所以只能按曲目去重），
  * 重复下发会把音箱刚起的拉流打断（见 recentPushes 注释）。
- * 取 3 秒：足以吞掉并发重复，又不会把「用户手动再点一次重播」误合并。
+ *
+ * 3 秒太短：线上实测同一首 6.3 秒后又被投一次（自动下一首 + 用户点播各命中一次），
+ * 音箱被两次投送来回打断，听感就是「同一首播两遍、下一首又重来」。放宽到 10 秒，
+ * 但保留 env 覆盖，需要「连点两次立刻重播」时可以调回去。
  */
-const PUSH_DEDUPE_MS = 3000
+const PUSH_DEDUPE_MS = Math.max(1000, Number(process.env.XIAOAI_PUSH_DEDUPE_MS) || 10000)
 
 /** 是否私有网段 IPv4（10/8、172.16-31、192.168/16） */
 const isPrivateIPv4 = (ip: string) => {
@@ -240,6 +249,8 @@ class XiaoAiService {
       volume: Number.isFinite(Number(config.volume)) ? Number(config.volume) : 50,
       defaultCoverAudioId: config.defaultCoverAudioId || DEFAULT_MUSIC_AUDIO_ID,
       unmatchedDirectUrl: config.unmatchedDirectUrl === true,
+      unmatchedDirectByModel: config.unmatchedDirectByModel !== false,
+      screenModels: config.screenModels,
       ffmpegAvailable: this.ffmpegReady,
       touchscreenLyrics: config.touchscreenLyrics === true,
       disabledModels: config.disabledModels,
@@ -270,6 +281,8 @@ class XiaoAiService {
       next.defaultCoverAudioId = String(patch.defaultCoverAudioId || '').trim() || DEFAULT_MUSIC_AUDIO_ID
     }
     if (patch.unmatchedDirectUrl !== undefined) next.unmatchedDirectUrl = patch.unmatchedDirectUrl === true
+    if (patch.unmatchedDirectByModel !== undefined) next.unmatchedDirectByModel = patch.unmatchedDirectByModel !== false
+    if (patch.screenModels !== undefined) next.screenModels = Array.isArray(patch.screenModels) ? patch.screenModels.map(String) : []
     if (patch.disabledModels !== undefined) next.disabledModels = Array.isArray(patch.disabledModels) ? patch.disabledModels.map(String) : []
     if (patch.selectedDeviceIds !== undefined) {
       next.selectedDeviceIds = Array.isArray(patch.selectedDeviceIds) ? patch.selectedDeviceIds.map(String) : []
@@ -433,6 +446,13 @@ class XiaoAiService {
     const usedAudioIds: string[] = []
     /** 设备 → 实际下发的曲库 audioID，拉流守门要知道「有没有带曲库 ID」 */
     const audioIds: Record<string, string> = {}
+    /** 设备 → 名称：判断「有没有屏幕」时名字里的「触屏」是 hardware 名单之外的兜底 */
+    const deviceNames = new Map<string, string>()
+    try {
+      for (const target of await this.resolveTargets(params.deviceIds)) deviceNames.set(target.deviceID, target.name)
+    } catch {
+      /* 拿不到名字不影响投送，按 hardware 判定 */
+    }
     const results = await this.fanOut(params.deviceIds, 'play', async (client, deviceId, hardware) => {
       // 同一设备 + 同一首歌 3 秒内重复投送：直接复用上次结果，不再向设备重复下发。
       // 注意 key 不能带 streamUrl——每次 /play 都会签出新的地址，带地址等于永远去重不上。
@@ -459,14 +479,16 @@ class XiaoAiService {
         // 没搜到真实 audioID 时不要把它当"搜到了"传下去，让 client 走「默认封面」分支
         audioId = resolved && resolved !== DEFAULT_MUSIC_AUDIO_ID ? resolved : undefined
       }
-      // 曲库没收录这首歌时的两种取舍：
-      //  - 旧行为（默认）带兜底封面 audioID → 触屏会把那首歌的歌名/封面整屏显示出来，
-      //    用户看到的是「别的歌」，很容易被当成播错歌（音频其实是对的）。
-      //  - unmatchedDirectUrl=true → 不带任何曲库 audioID，直接 player_play_url：
-      //    屏幕不会再出现别人的歌名，代价是没有封面与滚动歌词。
-      const directUrlOnMiss = config.unmatchedDirectUrl === true && lyricsWanted && !audioId
+      // 曲库没收录这首歌时的三种取舍：
+      //  - 带屏机型（默认）：带兜底封面 audioID → 屏幕有封面/歌词，但曲名是占位曲目；
+      //  - 无屏机型（默认）：不带任何曲库 audioID，直接 player_play_url（反正没屏幕可显示）；
+      //  - unmatchedDirectUrl=true：强制所有机型走直链（屏幕不会再出现别人的歌名，代价是没有封面歌词）。
+      const screenDevice = isScreenDevice(hardware, deviceNames.get(deviceId) || '', config.screenModels)
+      const directByModel = config.unmatchedDirectByModel !== false && !screenDevice
+      const directUrlOnMiss = lyricsWanted && !audioId && (config.unmatchedDirectUrl === true || directByModel)
       if (directUrlOnMiss) {
-        const missLine = `[XiaoAi] 曲库未命中，按 unmatchedDirectUrl 改走直链（不做曲库封面）：${songName}${singer ? ` - ${singer}` : ''}`
+        const why = config.unmatchedDirectUrl === true ? 'unmatchedDirectUrl' : '无屏机型'
+        const missLine = `[XiaoAi] 曲库未命中，按 ${why} 改走直链（不做曲库封面）：${songName}${singer ? ` - ${singer}` : ''}（${hardware || '未知型号'}${screenDevice ? '｜带屏' : '｜无屏'}）`
         console.log(missLine)
         syncLog.warn(missLine)
       }
@@ -646,8 +668,49 @@ class XiaoAiService {
     return { results, success: results.some(item => item.ok) }
   }
 
+  /**
+   * 停止推送：掐流 + 下发 stop + 回读校验。
+   *
+   * 旧实现只发一次 playerStop 就返回成功，线上表现为「点了停止，音箱还在放」：
+   *  - 正在拉的那一路流没被作废，音箱缓冲里还有几十秒，stop 之后照样出声；
+   *  - 触屏机型 pause/stop 的状态机经常滞后，云端受理但设备没停。
+   * 现在先 retireStreams() 把所有在途流作废（后续 Range 重拉一律 410），
+   * 再 stop，并回读状态；仍在上报播放就再补一次 stop。同时清掉该设备的去重记录，
+   * 让「停完再播同一首」不被 10 秒窗口吞掉。
+   */
   async stop(deviceIds?: string[]) {
-    const results = await this.fanOut(deviceIds, 'stop', (client, deviceId) => client.playerStop(deviceId))
+    const killed = retireStreams()
+    if (killed) {
+      const line = `[XiaoAi] 停止推送：作废在途流 ${killed} 路`
+      console.log(line)
+      syncLog.info(line)
+    }
+    const results = await this.fanOut(deviceIds, 'stop', async (client, deviceId) => {
+      const first = await client.playerStop(deviceId)
+      let stillPlaying = false
+      for (let i = 0; i < 2; i++) {
+        await new Promise(resolve => setTimeout(resolve, 600))
+        const status = await client.readPlayStatus(deviceId)
+        // -1 = 读不到状态（部分固件不支持），保守认为已停，别把正常停止报成失败
+        if (status === PLAY_STATUS_PLAYING) {
+          stillPlaying = true
+          await client.playerStop(deviceId).catch(() => false)
+          continue
+        }
+        stillPlaying = false
+        break
+      }
+      for (const key of this.recentPushes.keys()) {
+        if (key.startsWith(`${deviceId}|`)) this.recentPushes.delete(key)
+      }
+      if (stillPlaying) {
+        const line = `[XiaoAi] 设备 ${deviceId} 停止后仍在上报播放（已重发 stop 两次）`
+        console.warn(line)
+        syncLog.warn(line)
+        return { ok: false, error: '设备仍在播放' }
+      }
+      return first
+    })
     return { results, success: results.some(item => item.ok) }
   }
 

@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { TokenInfo } from './auth'
+import { DEFAULT_SCREEN_MODELS } from './screen'
 
 /**
  * 小爱同学的配置与登录态持久化。
@@ -87,6 +88,15 @@ export interface XiaoAiConfig {
    * 实际音频是这一路直链（streamBytes 与源文件字节数一致）。
    */
   unmatchedDirectUrl: boolean
+  /**
+   * 曲库未命中时按「设备有没有屏幕」自动选择（2026-11-22 新增，默认 true）：
+   *  - 带屏幕的机型（触屏音箱）：沿用兜底封面（屏幕有封面/歌词，代价是曲名可能是占位曲目）；
+   *  - 无屏机型：改走纯直链（反正不显示封面，避免任何「别人的歌名」被播报）。
+   * `unmatchedDirectUrl=true` 仍然强制所有机型走直链。
+   */
+  unmatchedDirectByModel: boolean
+  /** 判定「带屏幕」的型号名单（hardware 大写代号）；名单外再按设备名里的「触屏/屏幕」兜底 */
+  screenModels: string[]
   /** 选中的设备（支持多选同时播放） */
   selectedDeviceIds: string[]
   /** 上一次拉取到的设备列表 */
@@ -112,6 +122,10 @@ const DEFAULT_CONFIG: XiaoAiConfig = {
   volume: 50,
   defaultCoverAudioId: '1732418460076477549',
   unmatchedDirectUrl: false,
+  unmatchedDirectByModel: true,
+  // 真机实测确认带屏的型号：LX04 泰禾世家小爱触屏音箱、X08A 小爱触屏音箱 Pro8。
+  // X08E / X8F 为同代触屏固件代号，先列入；名字含「触屏/屏幕」的仍会兜底命中。
+  screenModels: DEFAULT_SCREEN_MODELS,
   selectedDeviceIds: [],
   devices: [],
   account: '',
@@ -177,6 +191,11 @@ export const loadConfig = (): XiaoAiConfig => {
       defaultCoverAudioId: String(raw.defaultCoverAudioId || DEFAULT_CONFIG.defaultCoverAudioId).trim(),
       // 曲库未命中时走直链：只认显式 true，缺省（含老配置）保持旧的「兜底封面」行为
       unmatchedDirectUrl: raw.unmatchedDirectUrl === true,
+      // 按型号智能选择：缺省开启（带屏保持兜底封面，无屏走直链）
+      unmatchedDirectByModel: raw.unmatchedDirectByModel !== false,
+      screenModels: Array.isArray(raw.screenModels)
+        ? raw.screenModels.map((item: unknown) => String(item).trim().toUpperCase()).filter(Boolean)
+        : DEFAULT_CONFIG.screenModels,
       disabledModels: Array.isArray(raw.disabledModels)
         ? raw.disabledModels.map((item: unknown) => String(item).trim().toUpperCase()).filter(Boolean)
         : [],
@@ -213,6 +232,11 @@ export const saveConfig = (patch: Partial<XiaoAiConfig>): XiaoAiConfig => {
         : prev.defaultCoverAudioId,
     unmatchedDirectUrl:
       patch.unmatchedDirectUrl !== undefined ? patch.unmatchedDirectUrl === true : prev.unmatchedDirectUrl,
+    unmatchedDirectByModel:
+      patch.unmatchedDirectByModel !== undefined ? patch.unmatchedDirectByModel !== false : prev.unmatchedDirectByModel,
+    screenModels: patch.screenModels
+      ? patch.screenModels.map(item => String(item).trim().toUpperCase()).filter(Boolean)
+      : prev.screenModels,
     disabledModels: patch.disabledModels
       ? patch.disabledModels.map(item => String(item).trim().toUpperCase()).filter(Boolean)
       : prev.disabledModels,

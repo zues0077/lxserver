@@ -45,7 +45,20 @@ const parseRange = (range: string | undefined, size: number) => {
 }
 
 /** 每路流的传输统计：sid → 完整放过几遍（音箱播完会重拉同一 URL） */
-const streamRounds = new Map<string, { full: number; bytes: number; total: number; replay: boolean; complete: boolean }>()
+const streamRounds = new Map<
+  string,
+  { full: number; bytes: number; total: number; replay: boolean; complete: boolean; startedAt?: number }
+>()
+
+/**
+ * 「算播完」的最小存活时间。
+ *
+ * 线上事故（2026-11-22 21:36）：224 秒的歌投送后 0.4 秒就判 complete，
+ * 触发 replay hold → 音箱被按住 4 秒后拿到 410，听感是「放完又停住/回跳」。
+ * 原因是本地文件拿不到时长时 pacedMs=0，泵不限速，整首瞬间发完。
+ * 真实播放不可能在 10 秒内放完一首 200 秒的歌，所以给 complete 与 replay 都加这条底线。
+ */
+const MIN_REPLAY_MS = 10_000
 
 /** 读某一路流被拉过几遍（供 /status 下发给前端做「播完」判定） */
 export const getStreamRounds = (sid?: string) =>
@@ -263,6 +276,7 @@ const beginStreamRound = (sid: string | undefined, total: number, rangeHeader?: 
   // 那样就永远判不出来，前端只能等墙钟，歌会被反复重放一大段。
   if (current.complete || (current.full >= 1 && fromStart)) current.replay = true
   if (total > 0) current.total = total
+  if (!current.startedAt) current.startedAt = Date.now()
   if (streamRounds.size > 300) streamRounds.clear()
   streamRounds.set(sid, current)
 }
@@ -278,6 +292,9 @@ const noteReplayRequest = (sid?: string): boolean => {
   if (!sid) return false
   const current = streamRounds.get(sid)
   if (!current) return false
+  // 刚投送就重拉（< 10 秒）不可能是「播完了」：多半是首帧 Range 探测或重复投送，
+  // 当成 replay 会把音箱按住 4 秒再 410，反而播不下去。
+  if (current.startedAt && Date.now() - current.startedAt < MIN_REPLAY_MS) return false
   if (current.complete === true) {
     current.replay = true
     return true
@@ -299,8 +316,12 @@ const recordStreamRound = (sid: string | undefined, sent: number, total: number,
   current.total = total
   // 只认「从头开始且传够半首」的传输：中途 Range 续传可能也传了半首以上，但那是补片段
   if (fromStart && sent >= total * 0.5) current.full += 1
-  // 整首都送出去了 → 音箱下一次再来拉就是「它觉得歌放完了」
-  if (sent >= total * 0.98) current.complete = true
+  // 整首都送出去了 → 音箱下一次再来拉就是「它觉得歌放完了」。
+  // 但只在「这条流已经活过 10 秒」时才认：本地文件拿不到时长时泵不限速，
+  // 整首会在 1 秒内发完，若不设底线就会把「刚投送」直接判成「已播完」。
+  if (sent >= total * 0.98 && current.startedAt && Date.now() - current.startedAt >= MIN_REPLAY_MS) {
+    current.complete = true
+  }
   if (streamRounds.size > 300) streamRounds.clear()
   streamRounds.set(sid, current)
 }
