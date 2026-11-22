@@ -167,14 +167,16 @@ export async function searchSongs(
   keyword: string,
   page = 1,
   pageSize = 20,
-  cookie: string = readCookie('soda'),
+  cookie: string = '',
 ) {
   const id = normalizeExtraSourceId(source)
   if (!id) throw new Error(`额外音源不支持：${source}`)
   const searcher = SEARCHERS[id]
   if (!searcher) throw new Error(`额外音源不支持：${source}`)
-  const cacheKey = searchCacheKey(id, 'song', keyword, page, pageSize, id === 'soda' ? cookie : '')
-  return cachedSearch(cacheKey, () => searcher(keyword, page, pageSize, id === 'soda' ? cookie : ''))
+  // 搜索已完全匿名：不读 Cookie、不把 Cookie 写进缓存键，避免账号有无导致缓存分叉。
+  void cookie
+  const cacheKey = searchCacheKey(id, 'song', keyword, page, pageSize, '')
+  return cachedSearch(cacheKey, () => searcher(keyword, page, pageSize, ''))
 }
 
 // ---- 歌手 / 专辑维度 ----
@@ -189,9 +191,8 @@ function unsupported(source: string, what: string): never {
 export async function searchSingers(source: string, keyword: string, page = 1, pageSize = 20) {
   const id = normalizeExtraSourceId(source)
   if (id === 'soda') {
-    const cookie = readCookie('soda')
-    return cachedSearch(searchCacheKey('soda', 'singer', keyword, page, pageSize, cookie), () =>
-      soda.searchSingers(keyword, page, pageSize, cookie))
+    return cachedSearch(searchCacheKey('soda', 'singer', keyword, page, pageSize, ''), () =>
+      soda.searchSingers(keyword, page, pageSize, ''))
   }
   if (id === 'bili') {
     return cachedSearch(searchCacheKey('bili', 'singer', keyword, page, pageSize, ''), () =>
@@ -203,9 +204,8 @@ export async function searchSingers(source: string, keyword: string, page = 1, p
 export async function searchAlbums(source: string, keyword: string, page = 1, pageSize = 20) {
   const id = normalizeExtraSourceId(source)
   if (id === 'soda') {
-    const cookie = readCookie('soda')
-    return cachedSearch(searchCacheKey('soda', 'album', keyword, page, pageSize, cookie), () =>
-      soda.searchAlbums(keyword, page, pageSize, cookie))
+    return cachedSearch(searchCacheKey('soda', 'album', keyword, page, pageSize, ''), () =>
+      soda.searchAlbums(keyword, page, pageSize, ''))
   }
   if (id === 'bili') {
     return cachedSearch(searchCacheKey('bili', 'album', keyword, page, pageSize, ''), () =>
@@ -273,9 +273,8 @@ export async function getSongListDetail(source: string, id: string) {
 export async function searchSongList(source: string, text: string, page = 1, pageSize = 20) {
   const id = normalizeExtraSourceId(source)
   if (id === 'soda') {
-    const cookie = readCookie('soda')
-    return cachedSearch(searchCacheKey('soda', 'playlist', text, page, pageSize, cookie), () =>
-      soda.searchPlaylists(text, page, pageSize, cookie))
+    return cachedSearch(searchCacheKey('soda', 'playlist', text, page, pageSize, ''), () =>
+      soda.searchPlaylists(text, page, pageSize, ''))
   }
   if (id === 'bili') {
     return cachedSearch(searchCacheKey('bili', 'playlist', text, page, pageSize, ''), () =>
