@@ -199,12 +199,12 @@ export default {
   },
   getInfoUrl(tagId) {
     return tagId
-      ? `http://www2.kugou.kugou.com/yueku/v9/special/getSpecial?is_smarty=1&cdn=cdn&t=5&c=${tagId}`
+      ? `http://www2.kugou.kugou.com/yueku/v9/special/getSpecial?is_smarty=1&cdn=cdn&t=5&c=${encodeURIComponent(tagId)}`
       : 'http://www2.kugou.kugou.com/yueku/v9/special/getSpecial?is_smarty=1&'
   },
   getSongListUrl(sortId, tagId, page) {
     if (tagId == null) tagId = ''
-    return `http://www2.kugou.kugou.com/yueku/v9/special/getSpecial?is_ajax=1&cdn=cdn&t=${sortId}&c=${tagId}&p=${page}`
+    return `http://www2.kugou.kugou.com/yueku/v9/special/getSpecial?is_ajax=1&cdn=cdn&t=${encodeURIComponent(sortId)}&c=${encodeURIComponent(tagId)}&p=${page}`
   },
   getSongListDetailUrl(id) {
     return `http://www2.kugou.kugou.com/yueku/v9/special/single/${id}-5-9999.html`
@@ -1087,8 +1087,11 @@ export default {
   // 获取列表信息
   getListInfo(tagId, tryNum = 0) {
     if (this._requestObj_listInfo) this._requestObj_listInfo.cancelHttp()
-    if (tryNum > 2) return Promise.reject(new Error('try max num'))
-    this._requestObj_listInfo = httpFetch(this.getInfoUrl(tagId))
+    // 这里原先把 tagId 直接拼进 URL（中文标签变成未编码路径），上游不回包时
+    // httpFetch 没传 timeout 就永久挂起——前端只看到 12s 路由降级。
+    // 编码 + 6s 首字节超时 + 只重试一次，避免中文标签拖死整个 Promise.all。
+    if (tryNum > 0) return Promise.reject(new Error('try max num'))
+    this._requestObj_listInfo = httpFetch(this.getInfoUrl(tagId), { timeout: KG_SONG_LIST_TIMEOUT_MS })
     return this._requestObj_listInfo.promise.then(({ body }) => {
       if (body.status !== 1) return this.getListInfo(tagId, ++tryNum)
       return {
@@ -1126,7 +1129,7 @@ export default {
   getTags(tryNum = 0) {
     if (this._requestObj_tags) this._requestObj_tags.cancelHttp()
     if (tryNum > 2) return Promise.reject(new Error('try max num'))
-    this._requestObj_tags = httpFetch(this.getInfoUrl())
+    this._requestObj_tags = httpFetch(this.getInfoUrl(), { timeout: KG_SONG_LIST_TIMEOUT_MS })
     return this._requestObj_tags.promise.then(({ body }) => {
       if (body.status !== 1) return this.getTags(++tryNum)
       return {
