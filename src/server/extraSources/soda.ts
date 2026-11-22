@@ -6,8 +6,9 @@
  * 1) **搜索：2026-11-22 起 Android 端点失效，改走 PC Web。**
  *    Android `api.qishui.com/luna/search/*` 无论带不带账号 Cookie 都恒回
  *    `{"extra":{"empty_search":1}}`；免签名可用的通道是 `/luna/pc/search/*`
- *    （device_platform=web / channel=pc_web）。playlist/artist/album 各自出 20 条，
- *    track 单独请求为空，歌曲搜索改用 `/luna/pc/search/all` 的 tracks 组。
+ *    （device_platform=web / channel=pc_web）。playlist/artist/album 各自出 20 条；
+ *    track 免签名请求回空 body，签名器在线时走 `/luna/pc/search/track` 拿 20 首，
+ *    签名器离线才退回 `/luna/pc/search/all` 的 tracks 组（5~7 首）。
  *    参考实现：github.com/guohuiyuan/music-lib/soda/search.go。
  *
  * 2) **播放：可播，但分两种曲目（这是第二次实测的关键发现）。**
@@ -191,16 +192,26 @@ function warnIfEmptySearch(body: any, what: string): void {
  * 搜索歌曲。
  *
  * 2026-11-23 实测：Android `/luna/search/track` 连账号 Cookie 都恒 empty_search=1；
- * PC Web 的 `/luna/pc/search/track` 返回空 body。可用的免签名通道是
- * `/luna/pc/search/all`：`result_groups` 里同时有 top_results / tracks 组，
- * 这里按 `entity.track` 过滤，能拿到 5~7 首（够搜索页展示，翻页继续用 cursor）。
+ * 免签名的 PC Web `/luna/pc/search/track` 返回空 body。两条可用通道：
+ *   1) 签名器在线：`/luna/pc/search/track` 带 x-helios / x-medusa，稳定 20 首；
+ *   2) 签名器离线：退回 `/luna/pc/search/all`，从 tracks 组取 5~7 首兜底。
+ * 签名器只影响「歌曲搜索条数」，歌单/歌手/专辑/榜单都不依赖它。
  */
 export async function searchSongs(keyword: string, page = 1, pageSize = 20, cookie = ''): Promise<{
   list: any[]
   total: number
   allPage: number
 }> {
-  const body: any = await pcWebSearch('all', keyword, page, pageSize, cookie)
+  let body: any = null
+  const signed = await signedPcTrackSearch(keyword, page, pageSize, cookie).catch((e: any) => {
+    console.log(`[汽水] 签名歌曲搜索失败，退回 all：${e?.message || e}`)
+    return null
+  })
+  if (signed) {
+    const groups: any[] = Array.isArray(signed.result_groups) ? signed.result_groups : []
+    if (groups.some((g: any) => (g?.data || []).some((it: any) => it?.entity?.track?.id))) body = signed
+  }
+  if (!body) body = await pcWebSearch('all', keyword, page, pageSize, cookie)
   const groups: any[] = Array.isArray(body.result_groups) ? body.result_groups : []
   const list: any[] = []
   let hasMore = false
@@ -1539,8 +1550,57 @@ async function pcWebSearch(searchType: string, keyword: string, page: number, pa
   return body
 }
 
-function firstGroup(body: any): any {
-  const groups: any[] = Array.isArray(body?.result_groups) ? body.result_groups : []
+/**
+ * 签名器通道的 PC 歌曲搜索（2026-11-23 实测 20 首）。
+ *
+ * 为什么需要签名：`/luna/pc/search/track` 不带 x-helios / x-medusa 时上游回 200 + 空 body，
+ * 但同一个 URL 经签名器（官方 Windows 客户端原生组件）签名后能稳定返回 20 条 track。
+ * 签名器离线时返回 null，由 searchSongs 退回免签名的 `/luna/pc/search/all`（5~7 首）。
+ */
+async function signedPcTrackSearch(keyword: string, page: number, pageSize: number, cookie = ''): Promise<any | null> {
+  if (!signer.isConfigured()) return null
+  const st = await signer.status()
+  if (!st.online) return null
+  const dev = await signer.deviceConfig()
+  const profile = resolveAppProfile(dev)
+
+  const params = new URLSearchParams({
+    q: keyword,
+    cursor: String(Math.max(0, (page - 1) * pageSize)),
+    count: String(pageSize),
+    search_id: randomUUID(),
+    search_method: 'input',
+    aid: '386088',
+    app_name: 'luna_pc',
+    device_platform: 'windows',
+    channel: 'official',
+    version_code: profile.buildId,
+    version_name: profile.appVersion,
+  })
+  if (dev?.deviceId) {
+    params.set('device_id', dev.deviceId)
+    params.set('did', dev.deviceId)
+  }
+  if (dev?.iid) {
+    params.set('iid', dev.iid)
+    params.set('install_id', dev.iid)
+  }
+  if (dev?.fp) params.set('fp', dev.fp)
+
+  const url = `https://api.qishui.com/luna/pc/search/track?${params.toString()}`
+  const baseHeaders: Record<string, string> = { 'User-Agent': profile.userAgent }
+  const c = String(cookie || '').trim()
+  if (c) baseHeaders.Cookie = c
+
+  const signedHeaders = await signer.sign({ url, method: 'GET', headers: baseHeaders })
+  const resp = await request<any>(url, {
+    headers: { ...baseHeaders, ...signedHeaders },
+    timeout: 15000,
+  })
+  return parseJsonBody(resp)
+}
+
+function firstGroup(body: any): any {  const groups: any[] = Array.isArray(body?.result_groups) ? body.result_groups : []
   return groups[0] || {}
 }
 
