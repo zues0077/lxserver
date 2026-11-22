@@ -3,9 +3,12 @@
  *
  * 实测事实（2026-10-25，两次实测，第二次修正了第一次的错误结论）：
  *
- * 1) **搜索可用，且不需要登录。**
- *    Android 端 `api.qishui.com/luna/search/track` 带固定设备指纹即可，
- *    返回 `result_groups[].entity.track`，实测「周杰伦 / 民谣」均能出 20 条。
+ * 1) **搜索：2026-11-22 起 Android 端点失效，改走 PC Web。**
+ *    Android `api.qishui.com/luna/search/*` 无论带不带账号 Cookie 都恒回
+ *    `{"extra":{"empty_search":1}}`；免签名可用的通道是 `/luna/pc/search/*`
+ *    （device_platform=web / channel=pc_web）。playlist/artist/album 各自出 20 条，
+ *    track 单独请求为空，歌曲搜索改用 `/luna/pc/search/all` 的 tracks 组。
+ *    参考实现：github.com/guohuiyuan/music-lib/soda/search.go。
  *
  * 2) **播放：可播，但分两种曲目（这是第二次实测的关键发现）。**
  *    - 正确端点是 `/luna/h5/track_v2`（device_platform=web），它返回 `track_player.video_model`，
@@ -39,6 +42,7 @@
  *      而不是把手机端凭证移植进电脑端链路。
  */
 
+import { randomUUID } from 'crypto'
 import { request } from '../musicAccount/http'
 import * as store from '../musicAccount/store'
 import * as pending from './pending'
@@ -157,7 +161,7 @@ export function isSodaId(id: string): boolean {
   return /^\d{10,}$/.test(String(id || '').trim())
 }
 
-/** 搜索请求头。带上登录态 Cookie 后，上游才正常返回结果（2026-11-22 起匿名搜索被判空）。 */
+/** 搜索请求头（Android 通道已失效，保留给对照探测用）。 */
 function searchHeaders(cookie?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'User-Agent': SEARCH_UA,
@@ -172,37 +176,31 @@ function searchHeaders(cookie?: string): Record<string, string> {
  * 上游把搜索结果判空时的留痕。
  *
  * 2026-11-22 起汽水的 `/luna/search/*`（track / playlist / artist / album / all，连 suggest）
- * 对匿名请求统一回 `{"status_info":{…},"extra":{"empty_search":1}}`，没有 result_groups，
- * 于是歌单推荐、榜单、搜索全部变空——不是我们解析坏了，是请求没带登录态。
+ * 对 Android 指纹统一回 `{"status_info":{…},"extra":{"empty_search":1}}`，没有 result_groups，
+ * 带不带账号 Cookie 都一样——不是我们解析坏了，也不是登录态问题，是端点/指纹被上游判匿名。
  * 这里只在真出现空判时打一行，避免正常搜索刷日志。
  */
 function warnIfEmptySearch(body: any, what: string): void {
   if (Number(body?.extra?.empty_search) === 1) {
     const logId = body?.status_info?.log_id ? ` log_id=${body.status_info.log_id}` : ''
-    console.log(`[汽水] ${what} 被判为空（empty_search=1），多为未带登录态 Cookie${logId}`)
+    console.log(`[汽水] ${what} 被判为空（empty_search=1）：该端点/指纹已失效，不是 Cookie 问题${logId}`)
   }
 }
 
-/** 搜索歌曲。2026-11-22 起上游要求登录态，cookie 为空时结果会整体为空。 */
+/**
+ * 搜索歌曲。
+ *
+ * 2026-11-23 实测：Android `/luna/search/track` 连账号 Cookie 都恒 empty_search=1；
+ * PC Web 的 `/luna/pc/search/track` 返回空 body。可用的免签名通道是
+ * `/luna/pc/search/all`：`result_groups` 里同时有 top_results / tracks 组，
+ * 这里按 `entity.track` 过滤，能拿到 5~7 首（够搜索页展示，翻页继续用 cursor）。
+ */
 export async function searchSongs(keyword: string, page = 1, pageSize = 20, cookie = ''): Promise<{
   list: any[]
   total: number
   allPage: number
 }> {
-  const params = new URLSearchParams({
-    ...DEVICE_FINGERPRINT,
-    q: keyword,
-    cursor: String(Math.max(0, (page - 1) * pageSize)),
-    count: String(pageSize),
-    _rticket: String(Date.now()),
-    aid: '386088',
-  })
-  const resp = await request<any>(`https://api.qishui.com/luna/search/track?${params.toString()}`, {
-    headers: searchHeaders(cookie),
-    timeout: 15000,
-  })
-  const body: any = resp.body || {}
-  warnIfEmptySearch(body, '歌曲搜索')
+  const body: any = await pcWebSearch('all', keyword, page, pageSize, cookie)
   const groups: any[] = Array.isArray(body.result_groups) ? body.result_groups : []
   const list: any[] = []
   let hasMore = false
@@ -1479,7 +1477,7 @@ async function pcGet(path: string, extra: Record<string, string> = {}, cookie = 
   return body
 }
 
-/** Android 搜索通道（与 searchSongs 同指纹），type = artist | album | playlist | track */
+/** Android 搜索通道（已失效：2026-11-22 起恒 empty_search=1，保留仅作对照）。 */
 async function androidSearch(searchType: string, keyword: string, page: number, pageSize: number, cookie = ''): Promise<any> {
   const params = new URLSearchParams({
     ...DEVICE_FINGERPRINT,
@@ -1491,6 +1489,49 @@ async function androidSearch(searchType: string, keyword: string, page: number, 
   })
   const resp = await request<any>(`https://api.qishui.com/luna/search/${searchType}?${params.toString()}`, {
     headers: searchHeaders(cookie),
+    timeout: 15000,
+  })
+  const body = resp.body || {}
+  warnIfEmptySearch(body, `${searchType} 搜索`)
+  return body
+}
+
+const PC_WEB_SEARCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+/**
+ * PC Web 搜索通道（2026-11-23 实测）。
+ *
+ * 为什么换掉 Android 通道：`/luna/search/track|playlist|artist|album` 从 11-22 起
+ * 无论带不带账号 Cookie 都恒回 `{"extra":{"empty_search":1}}`（Android 指纹 + 386088
+ * 被风控判成匿名）。PC Web 的 `/luna/pc/search/*` 走 `device_platform=web` /
+ * `channel=pc_web`，不需要 x-helios / x-medusa 签名：
+ *   - playlist / artist / album 各自 20 条；
+ *   - track 单独请求返回空 body，所以歌曲搜索改用 `all`，从 tracks 组取曲目。
+ * 参考实现：github.com/guohuiyuan/music-lib/soda/search.go。
+ */
+async function pcWebSearch(searchType: string, keyword: string, page: number, pageSize: number, cookie = ''): Promise<any> {
+  const params = new URLSearchParams({
+    q: keyword,
+    cursor: String(Math.max(0, (page - 1) * pageSize)),
+    count: String(pageSize),
+    search_id: randomUUID(),
+    search_method: 'input',
+    debug_params: '',
+    from_search_id: '',
+    search_scene: '',
+    aid: '386088',
+    device_platform: 'web',
+    channel: 'pc_web',
+  })
+  const headers: Record<string, string> = {
+    'User-Agent': PC_WEB_SEARCH_UA,
+    Accept: 'application/json',
+    Referer: 'https://www.qishui.com/',
+  }
+  const c = String(cookie || '').trim()
+  if (c) headers.Cookie = c
+  const resp = await request<any>(`https://api.qishui.com/luna/pc/search/${searchType}?${params.toString()}`, {
+    headers,
     timeout: 15000,
   })
   const body = resp.body || {}
@@ -1513,7 +1554,7 @@ export async function searchSingers(keyword: string, page = 1, pageSize = 20, co
   total: number
   allPage: number
 }> {
-  const group = firstGroup(await androidSearch('artist', keyword, page, pageSize, cookie))
+  const group = firstGroup(await pcWebSearch('artist', keyword, page, pageSize, cookie))
   const artists: any[] = (group.data || [])
     .map((item: any) => item?.entity?.artist)
     .filter((a: any) => a?.id)
@@ -1548,7 +1589,7 @@ export async function searchAlbums(keyword: string, page = 1, pageSize = 20, coo
   total: number
   allPage: number
 }> {
-  const group = firstGroup(await androidSearch('album', keyword, page, pageSize, cookie))
+  const group = firstGroup(await pcWebSearch('album', keyword, page, pageSize, cookie))
   const albums: any[] = (group.data || [])
     .map((item: any) => item?.entity?.album)
     .filter((a: any) => a?.id)
@@ -1635,7 +1676,7 @@ export async function searchPlaylists(keyword: string, page = 1, pageSize = 20, 
   total: number
   allPage: number
 }> {
-  const group = firstGroup(await androidSearch('playlist', keyword, page, pageSize, cookie))
+  const group = firstGroup(await pcWebSearch('playlist', keyword, page, pageSize, cookie))
   const items: any[] = (group.data || [])
     .map((item: any) => item?.entity?.playlist)
     .filter((p: any) => p?.id)
