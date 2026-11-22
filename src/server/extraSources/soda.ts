@@ -1754,6 +1754,9 @@ export async function getPlaylistDetail(playlistId: string, cookie = ''): Promis
   if (!info?.id) throw new Error('汽水歌单不存在或为私密歌单')
   const list = mapMediaResources(body)
   const cover = imageOf(info.url_cover)
+  // 汽水 playlist.count_tracks 会把「已下架/无版权」的条目也算进去，实际 medias 少 1~5 条。
+  // 前端按 info.total 显示「共 N 首」，会和列表最后一页对不上；这里以实际返回的曲目数为准。
+  const upstreamTotal = Number(info.count_tracks) || list.length
   return {
     info: {
       id: String(info.id),
@@ -1762,7 +1765,8 @@ export async function getPlaylistDetail(playlistId: string, cookie = ''): Promis
       picUrl: cover,
       desc: String(info.desc || ''),
       author: String(info.owner?.nickname || info.owner?.public_name || ''),
-      total: Number(info.count_tracks) || list.length,
+      total: list.length,
+      upstreamTotal,
       source: 'soda',
     },
     list,

@@ -97,6 +97,11 @@ export interface XiaoAiConfig {
   unmatchedDirectByModel: boolean
   /** 判定「带屏幕」的型号名单（hardware 大写代号）；名单外再按设备名里的「触屏/屏幕」兜底 */
   screenModels: string[]
+  /**
+   * 单台设备的「有没有屏幕」人工覆盖（deviceID → true/false）。
+   * 型号库覆盖不到的新设备，可在设置页按台选择；缺省（无此键）继续走型号库 + 名称判定。
+   */
+  screenOverrides: Record<string, boolean>
   /** 选中的设备（支持多选同时播放） */
   selectedDeviceIds: string[]
   /** 上一次拉取到的设备列表 */
@@ -126,6 +131,7 @@ const DEFAULT_CONFIG: XiaoAiConfig = {
   // 带屏型号名单（LX04/X08A/X08C/X08E/X8F/X6A/X10A，详见 screen.ts 的依据注释）；
   // 名字含「触屏/屏幕」的仍会兜底命中，用户自定义名单优先。
   screenModels: DEFAULT_SCREEN_MODELS,
+  screenOverrides: {},
   selectedDeviceIds: [],
   devices: [],
   account: '',
@@ -196,6 +202,13 @@ export const loadConfig = (): XiaoAiConfig => {
       screenModels: Array.isArray(raw.screenModels)
         ? raw.screenModels.map((item: unknown) => String(item).trim().toUpperCase()).filter(Boolean)
         : DEFAULT_CONFIG.screenModels,
+      screenOverrides: raw.screenOverrides && typeof raw.screenOverrides === 'object' && !Array.isArray(raw.screenOverrides)
+        ? Object.fromEntries(
+          Object.entries(raw.screenOverrides)
+            .map(([key, value]) => [String(key).trim(), value] as const)
+            .filter(([key, value]) => key && typeof value === 'boolean'),
+        ) as Record<string, boolean>
+        : {},
       disabledModels: Array.isArray(raw.disabledModels)
         ? raw.disabledModels.map((item: unknown) => String(item).trim().toUpperCase()).filter(Boolean)
         : [],
@@ -237,6 +250,13 @@ export const saveConfig = (patch: Partial<XiaoAiConfig>): XiaoAiConfig => {
     screenModels: patch.screenModels
       ? patch.screenModels.map(item => String(item).trim().toUpperCase()).filter(Boolean)
       : prev.screenModels,
+    screenOverrides: patch.screenOverrides && typeof patch.screenOverrides === 'object' && !Array.isArray(patch.screenOverrides)
+      ? Object.fromEntries(
+        Object.entries(patch.screenOverrides)
+          .map(([key, value]) => [String(key).trim(), value] as const)
+          .filter(([key, value]) => key && typeof value === 'boolean'),
+      ) as Record<string, boolean>
+      : prev.screenOverrides,
     disabledModels: patch.disabledModels
       ? patch.disabledModels.map(item => String(item).trim().toUpperCase()).filter(Boolean)
       : prev.disabledModels,

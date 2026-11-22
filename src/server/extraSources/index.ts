@@ -228,6 +228,31 @@ export async function searchAll(source: string, keyword: string, maxPages = 3, b
   let allPage = 1
   let fetchedPages = 0
 
+  // 汽水搜索每次都要经签名器签一次，串行翻 3 页约 2.8s；三页互不依赖，并行后实测约 1.3s。
+  // 只有汽水走这条：B站翻页有上游频控，保持原来的串行节奏。
+  if (normalizeExtraSourceId(source) === 'soda') {
+    const pages = Math.max(1, Math.min(3, maxPages))
+    const results = await Promise.all(
+      Array.from({ length: pages }, (_, i) =>
+        searchSongs(source, keyword, i + 1, 20).catch(() => null),
+      ),
+    )
+    for (let i = 0; i < results.length; i++) {
+      const data = results[i]
+      if (!data) continue
+      fetchedPages = i + 1
+      total = Math.max(total, data.total || 0)
+      allPage = Math.max(allPage, data.allPage || i + 1)
+      for (const item of data.list || []) {
+        const key = String(item?.id ?? '')
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        list.push(item)
+      }
+    }
+    return { list, total: total || list.length, allPage, fetchedPages }
+  }
+
   for (let page = 1; page <= maxPages; page++) {
     if (Date.now() - started > budgetMs) break
     const data = await searchSongs(source, keyword, page, 20)

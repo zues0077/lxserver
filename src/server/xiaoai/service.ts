@@ -96,6 +96,8 @@ export interface XiaoAiPublicConfig {
   unmatchedDirectByModel: boolean
   /** 判定「带屏幕」的型号名单（hardware 代号，大写） */
   screenModels: string[]
+  /** 单台设备的人工覆盖（deviceID → 是否有屏幕） */
+  screenOverrides: Record<string, boolean>
   /** ffmpeg 是否可用（不可用时 mp3 统一自动降级，界面据此提示） */
   ffmpegAvailable: boolean
   disabledModels: string[]
@@ -251,6 +253,7 @@ class XiaoAiService {
       unmatchedDirectUrl: config.unmatchedDirectUrl === true,
       unmatchedDirectByModel: config.unmatchedDirectByModel !== false,
       screenModels: config.screenModels,
+      screenOverrides: config.screenOverrides || {},
       ffmpegAvailable: this.ffmpegReady,
       touchscreenLyrics: config.touchscreenLyrics === true,
       disabledModels: config.disabledModels,
@@ -283,6 +286,16 @@ class XiaoAiService {
     if (patch.unmatchedDirectUrl !== undefined) next.unmatchedDirectUrl = patch.unmatchedDirectUrl === true
     if (patch.unmatchedDirectByModel !== undefined) next.unmatchedDirectByModel = patch.unmatchedDirectByModel !== false
     if (patch.screenModels !== undefined) next.screenModels = Array.isArray(patch.screenModels) ? patch.screenModels.map(String) : []
+    if (patch.screenOverrides !== undefined) {
+      const raw = patch.screenOverrides
+      next.screenOverrides = raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? Object.fromEntries(
+          Object.entries(raw as Record<string, unknown>)
+            .map(([key, value]) => [String(key).trim(), value] as const)
+            .filter(([key, value]) => key && typeof value === 'boolean'),
+        ) as Record<string, boolean>
+        : {}
+    }
     if (patch.disabledModels !== undefined) next.disabledModels = Array.isArray(patch.disabledModels) ? patch.disabledModels.map(String) : []
     if (patch.selectedDeviceIds !== undefined) {
       next.selectedDeviceIds = Array.isArray(patch.selectedDeviceIds) ? patch.selectedDeviceIds.map(String) : []
@@ -483,7 +496,11 @@ class XiaoAiService {
       //  - 带屏机型（默认）：带兜底封面 audioID → 屏幕有封面/歌词，但曲名是占位曲目；
       //  - 无屏机型（默认）：不带任何曲库 audioID，直接 player_play_url（反正没屏幕可显示）；
       //  - unmatchedDirectUrl=true：强制所有机型走直链（屏幕不会再出现别人的歌名，代价是没有封面歌词）。
-      const screenDevice = isScreenDevice(hardware, deviceNames.get(deviceId) || '', config.screenModels)
+      // 单台设备的人工覆盖优先：新型号不在库里时，用户在设置页按台选「有屏/无屏」即可。
+      const override = config.screenOverrides?.[deviceId]
+      const screenDevice = typeof override === 'boolean'
+        ? override
+        : isScreenDevice(hardware, deviceNames.get(deviceId) || '', config.screenModels)
       const directByModel = config.unmatchedDirectByModel !== false && !screenDevice
       const directUrlOnMiss = lyricsWanted && !audioId && (config.unmatchedDirectUrl === true || directByModel)
       if (directUrlOnMiss) {

@@ -313,17 +313,28 @@
             return;
         }
         const selected = new Set(selectedDevices());
+        const overrides = state.config?.screenOverrides || {};
         box.innerHTML = devices
             .map(device => {
                 const id = String(device.deviceID);
                 const checked = selected.has(id) ? 'checked' : '';
                 const meta = [device.hardware, device.roomName].filter(Boolean).join(' · ');
-                return `<label class="flex items-center gap-2 py-1 cursor-pointer">
+                const override = overrides[id];
+                const screenValue = typeof override === 'boolean' ? (override ? 'screen' : 'noscreen') : 'auto';
+                const escId = id.replace(/'/g, "\\'");
+                return `<div class="flex items-center gap-2 py-1">
                     <input type="checkbox" class="w-4 h-4 accent-emerald-500" ${checked}
-                        onchange="XiaoAi.toggleDevice('${id.replace(/'/g, "\\'")}', this.checked)">
+                        onchange="XiaoAi.toggleDevice('${escId}', this.checked)">
                     <span class="text-sm t-text-main">${escapeHtml(device.name)}</span>
                     ${meta ? `<span class="text-xs t-text-muted">${escapeHtml(meta)}</span>` : ''}
-                </label>`;
+                    <select class="ml-auto t-bg-panel border t-border-main rounded-lg text-xs px-1.5 py-1 cursor-pointer"
+                        title="这台设备有没有屏幕：自动按型号库判断"
+                        onchange="XiaoAi.setScreenOverride('${escId}', this.value)">
+                        <option value="auto" ${screenValue === 'auto' ? 'selected' : ''}>屏幕：自动</option>
+                        <option value="screen" ${screenValue === 'screen' ? 'selected' : ''}>有屏</option>
+                        <option value="noscreen" ${screenValue === 'noscreen' ? 'selected' : ''}>无屏</option>
+                    </select>
+                </div>`;
             })
             .join('');
     };
@@ -711,6 +722,17 @@
             localStorage.setItem(TARGET_KEY, 'local');
             render();
         }
+    };
+
+    /**
+     * 单台设备的屏幕判定覆盖：型号库没收录的新设备，用户按台选「有屏/无屏」。
+     * auto = 删除覆盖，回到型号库 + 设备名判断。
+     */
+    const setScreenOverride = async (deviceId, value) => {
+        const map = { ...(state.config?.screenOverrides || {}) };
+        if (value === 'auto') delete map[deviceId];
+        else map[deviceId] = value === 'screen';
+        await saveConfig({ screenOverrides: map });
     };
 
     const applyVolume = async () => {
@@ -1928,6 +1950,7 @@
         logout,
         fetchDevices,
         toggleDevice,
+        setScreenOverride,
         applyVolume,
         stop,
         toggleTarget,

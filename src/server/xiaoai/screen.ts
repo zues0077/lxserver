@@ -12,15 +12,23 @@
  *  - X6A / X10A：小米智能家庭屏 6 / 10（淘宝配件页按「机器底部型号」列出，均为带屏）；
  *  - X8F：同代触屏固件代号，先保守列入。
  * 无屏机型核对：LX05A 万能遥控版、LX06 小爱音箱 Pro、S12 小米AI音箱、L15A 小米AI音箱，
- * 均无屏幕。名单外再按设备名里的「触屏/屏幕/智慧屏」兜底，避免漏新型号。
+ * 均无屏幕。名单外再按设备名里的「触屏/屏幕/智慧屏/家庭屏」兜底，避免漏新型号。
+ * 仍判不准的，设置页可以按设备单独覆盖（screenOverrides）。
  * 注意 constants.ts 的 DEFAULT_MUSIC_API_MODELS 是「需要走 music API」的型号，
  * 与「有屏幕」不是同一件事，不能拿来当判据。
  */
 export const DEFAULT_SCREEN_MODELS = ['LX04', 'X08A', 'X08C', 'X08E', 'X8F', 'X6A', 'X10A']
 
+/**
+ * 型号族前缀：同族还有未收录的尾缀（如 X08B/X08D）时，按前缀先判成带屏。
+ * 只收「整族都是触屏/家庭屏」的代号，避免把无屏的 LX06 / S12 误判进来。
+ */
+const SCREEN_MODEL_PREFIXES = ['LX04', 'X08', 'X8F', 'X6', 'X10']
+
 export const isScreenDevice = (hardware: string, name = '', models: string[] = DEFAULT_SCREEN_MODELS): boolean => {
   const hw = String(hardware || '').trim().toUpperCase()
   const list = (Array.isArray(models) ? models : []).map(item => String(item).trim().toUpperCase())
   if (hw && list.includes(hw)) return true
-  return /触屏|屏幕|智慧屏/.test(String(name || ''))
+  if (hw && SCREEN_MODEL_PREFIXES.some(prefix => hw.startsWith(prefix))) return true
+  return /触屏|屏幕|智慧屏|家庭屏/.test(String(name || ''))
 }
