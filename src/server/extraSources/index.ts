@@ -127,7 +127,7 @@ export async function searchAlbums(source: string, keyword: string, page = 1, pa
 }
 
 export async function getArtistDetail(source: string, artistId: string) {
-  if (source === 'soda') return soda.getArtistDetail(artistId)
+  if (source === 'soda') return soda.getArtistDetail(artistId, store.getCookie('soda') || '')
   if (source === 'bili') return bilibili.getUserCard(artistId)
   return unsupported(source, '歌手详情')
 }
@@ -137,20 +137,20 @@ export async function getArtistDetail(source: string, artistId: string) {
  * 必须靠「UP 主名」当关键词去搜视频，再按 mid 过滤。
  */
 export async function getArtistSongs(source: string, artistId: string, page = 1, pageSize = 50, name = '') {
-  if (source === 'soda') return soda.getArtistSongs(artistId, page, pageSize)
+  if (source === 'soda') return soda.getArtistSongs(artistId, page, pageSize, store.getCookie('soda') || '')
   if (source === 'bili') return bilibili.getUserVideos(artistId, name, page, pageSize)
   return unsupported(source, '歌手歌曲列表')
 }
 
 export async function getArtistAlbums(source: string, artistId: string, page = 1, pageSize = 30, name = '') {
-  if (source === 'soda') return soda.getArtistAlbums(artistId, page, pageSize)
+  if (source === 'soda') return soda.getArtistAlbums(artistId, page, pageSize, store.getCookie('soda') || '')
   // B站 UP 主没有「专辑」，但有「合集(season)/系列(series)」，当专辑返回
   if (source === 'bili') return bilibili.getArtistAlbums(artistId, page, name)
   return unsupported(source, '歌手专辑列表')
 }
 
 export async function getAlbumSongs(source: string, albumId: string) {
-  if (source === 'soda') return soda.getAlbumSongs(albumId)
+  if (source === 'soda') return soda.getAlbumSongs(albumId, store.getCookie('soda') || '')
   if (source === 'bili') return bilibili.getAlbumSongs(albumId)
   return unsupported(source, '专辑歌曲列表')
 }

@@ -1778,8 +1778,8 @@ export async function getBoardSongs(boardId: string, cookie = ''): Promise<any> 
 }
 
 /** 艺人详情。对齐 extendDetail.getArtistDetail 的返回结构（前端歌手页头部直接渲染）。 */
-export async function getArtistDetail(artistId: string): Promise<any> {
-  const body = await pcGet(`/luna/pc/artists/${String(artistId).trim()}`)
+export async function getArtistDetail(artistId: string, cookie = ''): Promise<any> {
+  const body = await pcGet(`/luna/pc/artists/${String(artistId).trim()}`, {}, cookie)
   const info = body?.artist_info
   if (!info?.id) throw new Error('汽水艺人不存在或已下架')
   return {
@@ -1794,11 +1794,11 @@ export async function getArtistDetail(artistId: string): Promise<any> {
 }
 
 /** 艺人单曲。平台固定按 50 条/页下发（count 不严格生效），cursor=(page-1)*size 实测可行。 */
-export async function getArtistSongs(artistId: string, page = 1, pageSize = 50): Promise<{ source: string; list: any[]; total: number }> {
+export async function getArtistSongs(artistId: string, page = 1, pageSize = 50, cookie = ''): Promise<{ source: string; list: any[]; total: number }> {
   const body = await pcGet(`/luna/pc/artists/${String(artistId).trim()}/tracks`, {
     cursor: String(Math.max(0, (page - 1) * pageSize)),
     count: String(Math.min(100, Math.max(1, pageSize))),
-  })
+  }, cookie)
   const list = (Array.isArray(body?.tracks) ? body.tracks : [])
     .map(mapTrackNode)
     .filter(Boolean)
@@ -1806,11 +1806,11 @@ export async function getArtistSongs(artistId: string, page = 1, pageSize = 50):
 }
 
 /** 艺人专辑列表 */
-export async function getArtistAlbums(artistId: string, page = 1, pageSize = 30): Promise<{ source: string; list: any[]; total: number }> {
+export async function getArtistAlbums(artistId: string, page = 1, pageSize = 30, cookie = ''): Promise<{ source: string; list: any[]; total: number }> {
   const body = await pcGet(`/luna/pc/artists/${String(artistId).trim()}/albums`, {
     cursor: String(Math.max(0, (page - 1) * pageSize)),
     count: String(Math.min(100, Math.max(1, pageSize))),
-  })
+  }, cookie)
   const list = (Array.isArray(body?.albums) ? body.albums : [])
     .filter((a: any) => a?.id)
     .map((a: any) => ({
@@ -1826,8 +1826,8 @@ export async function getArtistAlbums(artistId: string, page = 1, pageSize = 30)
 }
 
 /** 专辑详情 + 曲目列表（顶层 tracks[]） */
-export async function getAlbumSongs(albumId: string): Promise<any> {
-  const body = await pcGet(`/luna/pc/albums/${String(albumId).trim()}`)
+export async function getAlbumSongs(albumId: string, cookie = ''): Promise<any> {
+  const body = await pcGet(`/luna/pc/albums/${String(albumId).trim()}`, {}, cookie)
   const info = body?.album_info
   if (!info?.id) throw new Error('汽水专辑不存在或已下架')
   const list = (Array.isArray(body?.tracks) ? body.tracks : [])
