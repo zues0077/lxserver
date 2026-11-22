@@ -39,6 +39,19 @@ export function normalizeExtraSourceId(source: string): ExtraSourceId | null {
   return SOURCE_ALIASES[String(source || '').trim().toLowerCase()] || null
 }
 
+/**
+ * 「读取通道」专用 Cookie：搜索 / 歌单 / 榜单 / 歌词一律用它。
+ *
+ * 关键语义：**不看「启用账号取链」总开关**。那个开关只决定「取播放地址」用不用账号；
+ * 读列表属于公开数据（与未登录 App 看到的一致），关了账号也应该能读。
+ * 历史教训：汽水搜索早期匿名调用，被上游判成 empty_search=1，整个歌单/榜单都空。
+ */
+export function readCookie(source: string): string {
+  const id = normalizeExtraSourceId(source)
+  const key = id || String(source || '').trim()
+  return key ? (store.getCookie(key) || '') : ''
+}
+
 const SEARCHERS: Record<string, (keyword: string, page: number, pageSize: number, cookie: string) => Promise<{ list: any[]; total: number; allPage: number }>> = {
   bili: (keyword, page, pageSize) => bilibili.searchSongs(keyword, page, pageSize),
   // 汽水 2026-11-22 起匿名搜索被判空，必须带登录态 Cookie 才返回结果。
@@ -97,7 +110,7 @@ export async function searchSongs(
   keyword: string,
   page = 1,
   pageSize = 20,
-  cookie: string = store.getCookie('soda') || '',
+  cookie: string = readCookie('soda'),
 ) {
   const id = normalizeExtraSourceId(source)
   const searcher = id ? SEARCHERS[id] : undefined
@@ -115,19 +128,19 @@ function unsupported(source: string, what: string): never {
 }
 
 export async function searchSingers(source: string, keyword: string, page = 1, pageSize = 20) {
-  if (source === 'soda') return soda.searchSingers(keyword, page, pageSize, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.searchSingers(keyword, page, pageSize, readCookie('soda'))
   if (source === 'bili') return bilibili.searchUsers(keyword, page, pageSize)
   return unsupported(source, '歌手搜索')
 }
 
 export async function searchAlbums(source: string, keyword: string, page = 1, pageSize = 20) {
-  if (source === 'soda') return soda.searchAlbums(keyword, page, pageSize, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.searchAlbums(keyword, page, pageSize, readCookie('soda'))
   if (source === 'bili') return bilibili.searchAlbums(keyword, page, pageSize)
   return unsupported(source, '专辑搜索')
 }
 
 export async function getArtistDetail(source: string, artistId: string) {
-  if (source === 'soda') return soda.getArtistDetail(artistId, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.getArtistDetail(artistId, readCookie('soda'))
   if (source === 'bili') return bilibili.getUserCard(artistId)
   return unsupported(source, '歌手详情')
 }
@@ -137,20 +150,20 @@ export async function getArtistDetail(source: string, artistId: string) {
  * 必须靠「UP 主名」当关键词去搜视频，再按 mid 过滤。
  */
 export async function getArtistSongs(source: string, artistId: string, page = 1, pageSize = 50, name = '') {
-  if (source === 'soda') return soda.getArtistSongs(artistId, page, pageSize, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.getArtistSongs(artistId, page, pageSize, readCookie('soda'))
   if (source === 'bili') return bilibili.getUserVideos(artistId, name, page, pageSize)
   return unsupported(source, '歌手歌曲列表')
 }
 
 export async function getArtistAlbums(source: string, artistId: string, page = 1, pageSize = 30, name = '') {
-  if (source === 'soda') return soda.getArtistAlbums(artistId, page, pageSize, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.getArtistAlbums(artistId, page, pageSize, readCookie('soda'))
   // B站 UP 主没有「专辑」，但有「合集(season)/系列(series)」，当专辑返回
   if (source === 'bili') return bilibili.getArtistAlbums(artistId, page, name)
   return unsupported(source, '歌手专辑列表')
 }
 
 export async function getAlbumSongs(source: string, albumId: string) {
-  if (source === 'soda') return soda.getAlbumSongs(albumId, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.getAlbumSongs(albumId, readCookie('soda'))
   if (source === 'bili') return bilibili.getAlbumSongs(albumId)
   return unsupported(source, '专辑歌曲列表')
 }
@@ -171,19 +184,19 @@ export async function getSongListTags(source: string) {
 }
 
 export async function getSongListList(source: string, tagId: string, page = 1) {
-  if (source === 'soda') return soda.getPlaylistList(tagId, page, 20, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.getPlaylistList(tagId, page, 20, readCookie('soda'))
   if (source === 'bili') return bilibili.getSongListList(tagId, page)
   throw new Error(`${displayName(source)} 暂不支持歌单列表`)
 }
 
 export async function getSongListDetail(source: string, id: string) {
-  if (source === 'soda') return soda.getPlaylistDetail(id, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.getPlaylistDetail(id, readCookie('soda'))
   if (source === 'bili') return bilibili.getSongListDetail(id)
   throw new Error(`${displayName(source)} 暂不支持歌单详情`)
 }
 
 export async function searchSongList(source: string, text: string, page = 1) {
-  if (source === 'soda') return soda.searchPlaylists(text, page, 20, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.searchPlaylists(text, page, 20, readCookie('soda'))
   if (source === 'bili') return bilibili.searchPlaylists(text, page)
   throw new Error(`${displayName(source)} 暂不支持歌单搜索`)
 }
@@ -195,7 +208,7 @@ export async function getLeaderboardBoards(source: string) {
 }
 
 export async function getLeaderboardList(source: string, bangid: string) {
-  if (source === 'soda') return soda.getBoardSongs(bangid, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.getBoardSongs(bangid, readCookie('soda'))
   if (source === 'bili') return bilibili.getLeaderboardList(bangid)
   throw new Error(`${displayName(source)} 暂不支持排行榜歌曲`)
 }
@@ -295,7 +308,7 @@ export async function getLyric(source: string, songInfo: any): Promise<{ lyric: 
   if (id && typeof id === 'object') id = id.songmid ?? id.id ?? ''
   const trackId = String(id || '').replace(/^soda_/, '').trim()
   if (!trackId) return null
-  return soda.getTrackLyric(trackId, store.getCookie('soda') || '')
+  return soda.getTrackLyric(trackId, readCookie('soda'))
 }
 
 /**
@@ -308,6 +321,6 @@ export function sodaEntitlementVerdict() {
 
 /** 取流诊断：一次说清「拿到的是整曲还是试听、走的哪条通道、还缺什么」 */
 export async function diagnoseStream(source: string, songInfo: any, quality: string) {
-  if (source === 'soda') return soda.diagnoseStream(songInfo, quality, store.getCookie('soda') || '')
+  if (source === 'soda') return soda.diagnoseStream(songInfo, quality, readCookie('soda'))
   throw new Error(`${displayName(source)} 暂不支持取流诊断`)
 }

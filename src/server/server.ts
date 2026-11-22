@@ -1102,6 +1102,30 @@ const MUSIC_SWITCH_CANDIDATE_MS = (() => {
   return Number.isFinite(raw) && raw >= 1000 ? Math.round(raw) : 5000
 })()
 const musicUrlFailures = new Map<string, { at: number; message: string; attempts: any[] }>()
+
+/**
+ * 歌单/排行榜这类「读列表」路由的硬超时。
+ *
+ * 2026-11-22 实测：kg 的公开歌单接口 40 秒不返回，前端一直转圈；
+ * 概念版的歌单页在入口映射到 kg，于是跟着一起卡死。读列表是纯展示，
+ * 不该让一个慢上游拖住整个页面 —— 超时就降级成空列表并带上原因。
+ */
+const SONG_LIST_ROUTE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.SONG_LIST_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw >= 3000 ? Math.round(raw) : 12000
+})()
+const withRouteTimeout = <T>(p: Promise<T> | T, ms: number, label: string): Promise<T> => {
+  const promise = Promise.resolve(p)
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} 超时（${ms}ms）`)), ms)
+    timer.unref?.()
+    promise.then(
+      value => { clearTimeout(timer); resolve(value) },
+      err => { clearTimeout(timer); reject(err) },
+    )
+  })
+}
+const isRouteTimeout = (err: any): boolean => /超时（\d+ms）/.test(String(err?.message || ''))
 /**
  * 同歌并发取链合并（single-flight）：key → 先到请求的最终响应。
  *
@@ -10857,6 +10881,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
         if (songListPaths.includes(pathname)) {
           if (rawSource === 'kglite') {
             urlObj.searchParams.set('source', 'kg')
+            // 概念版没有独立的歌单/榜单接口：数据来自酷狗公共接口。
+            // 用响应头如实标注，前端要展示时可以读；不改 body 里的 source，
+            // 因为歌曲的 source 仍必须是 kg（取链走 kg，概念版只是另一条取链通道）。
+            res.setHeader('x-lx-data-source', 'kg')
+            res.setHeader('x-lx-data-source-note', 'kugou-public')
           } else if (rawSource === 'soda') {
             try {
               let result: any = null
@@ -10954,10 +10983,26 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           if (!musicSdk[source] || !musicSdk[source].songList) {
             throw new Error(`Source ${source} does not support songList`)
           }
-          const result = await musicSdk[source].songList.getList(sortId, tagId, page)
+          const result = await withRouteTimeout(
+            Promise.resolve(musicSdk[source].songList.getList(sortId, tagId, page)),
+            SONG_LIST_ROUTE_TIMEOUT_MS,
+            `歌单列表 ${source}`,
+          )
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err: any) {
+          if (isRouteTimeout(err)) {
+            console.warn(`[歌单服务] 获取歌单列表超时，降级返回空列表:`, err?.message)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              source,
+              list: [],
+              total: 0,
+              degraded: true,
+              message: `歌单列表接口超时（${SONG_LIST_ROUTE_TIMEOUT_MS}ms），已降级返回空列表`,
+            }))
+            return
+          }
           console.error(`[歌单服务] 获取歌单列表失败:`, err)
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: err.message || '获取歌单列表失败' }))
@@ -10978,13 +11023,29 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           if (!musicSdk[source] || !musicSdk[source].songList) {
             throw new Error(`Source ${source} does not support songList`)
           }
-          const result = await musicSdk[source].songList.getListDetail(id, page)
+          const result = await withRouteTimeout(
+            Promise.resolve(musicSdk[source].songList.getListDetail(id, page)),
+            SONG_LIST_ROUTE_TIMEOUT_MS,
+            `歌单详情 ${source}`,
+          )
           if (result && result.list) {
             result.list = result.list.map(normalizeSongInfo)
           }
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err: any) {
+          if (isRouteTimeout(err)) {
+            console.warn(`[歌单服务] 获取歌单详情超时，降级返回空列表:`, err?.message)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              source,
+              list: [],
+              total: 0,
+              degraded: true,
+              message: `歌单详情接口超时（${SONG_LIST_ROUTE_TIMEOUT_MS}ms），已降级返回空列表`,
+            }))
+            return
+          }
           console.error(`[歌单服务] 获取歌单详情失败:`, err)
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: err.message || '获取歌单详情失败' }))
@@ -11005,10 +11066,26 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           if (!musicSdk[source] || !musicSdk[source].songList) {
             throw new Error(`Source ${source} does not support songList`)
           }
-          const result = await musicSdk[source].songList.search(text, page)
+          const result = await withRouteTimeout(
+            Promise.resolve(musicSdk[source].songList.search(text, page)),
+            SONG_LIST_ROUTE_TIMEOUT_MS,
+            `歌单搜索 ${source}`,
+          )
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(result))
         } catch (err: any) {
+          if (isRouteTimeout(err)) {
+            console.warn(`[歌单服务] 搜索歌单超时，降级返回空列表:`, err?.message)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              source,
+              list: [],
+              total: 0,
+              degraded: true,
+              message: `歌单搜索接口超时（${SONG_LIST_ROUTE_TIMEOUT_MS}ms），已降级返回空列表`,
+            }))
+            return
+          }
           console.error(`[歌单服务] 搜索歌单失败:`, err)
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: err.message || '搜索歌单失败' }))
@@ -11074,7 +11151,11 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           if (!musicSdk[source] || !musicSdk[source].leaderboard) {
             throw new Error(`Source ${source} does not support leaderboard`)
           }
-          const result = await musicSdk[source].leaderboard.getList(bangid, page)
+          const result = await withRouteTimeout(
+            Promise.resolve(musicSdk[source].leaderboard.getList(bangid, page)),
+            SONG_LIST_ROUTE_TIMEOUT_MS,
+            `排行榜歌曲 ${source}`,
+          )
           if (result && result.list) {
             result.list = result.list.map(normalizeSongInfo)
           }
@@ -11082,6 +11163,18 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           res.end(JSON.stringify(result))
         } catch (err: any) {
           const message = err?.message || '获取排行榜歌曲失败'
+          if (isRouteTimeout(err)) {
+            console.warn(`[排行榜] 获取榜单歌曲超时，降级返回空列表: source=${source} bangid=${bangid}（${message}）`)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({
+              source,
+              list: [],
+              total: 0,
+              degraded: true,
+              message: `排行榜歌曲接口超时（${SONG_LIST_ROUTE_TIMEOUT_MS}ms），已降级返回空列表`,
+            }))
+            return
+          }
           // 上游 SDK 拿到不认识的 bangid 时会直接读 undefined.total，抛 TypeError。
           // 这是**调用参数**问题（例如把榜单的 id 当成 bangid 传，kg 的 id 是 `kg__8888`
           // 而 bangid 是 `8888`），不是服务故障，没必要报 500 并打整段堆栈。
