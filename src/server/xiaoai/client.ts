@@ -432,9 +432,16 @@ export class MinaClient {
       const first = candidates.find(c => c.audioId)
       if (first) return first.audioId
     }
-    // 未命中会退占位封面（屏幕显示 Theme Of Loft），留一行可对账的日志便于排查命中率
+    // 未命中会退兜底封面，留一行可对账的日志便于排查命中率。
+    // 同时带上前几条候选名：只看「N 条候选」分不清「曲库真没有这首歌」和
+    // 「有、但被判成另一个歌手/版本」，这两类的修法完全不同。
+    const peek = candidates
+      .slice(0, 6)
+      .map(c => `${c.name}${c.artist ? `/${c.artist}` : ''}`)
+      .join('、')
     console.log(
-      `[XiaoAi] 曲库未命中：${songTitle}${songArtist ? ` - ${songArtist}` : ''}（试 ${tried} 个查询 / ${candidates.length} 条候选）`
+      `[XiaoAi] 曲库未命中：${songTitle}${songArtist ? ` - ${songArtist}` : ''}（试 ${tried} 个查询 / ${candidates.length} 条候选）` +
+        (peek ? `候选：${peek}` : '')
     )
     return fallback
   }

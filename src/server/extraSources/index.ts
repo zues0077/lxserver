@@ -41,7 +41,8 @@ export function normalizeExtraSourceId(source: string): ExtraSourceId | null {
 
 const SEARCHERS: Record<string, (keyword: string, page: number, pageSize: number) => Promise<{ list: any[]; total: number; allPage: number }>> = {
   bili: bilibili.searchSongs,
-  soda: soda.searchSongs,
+  // 汽水 2026-11-22 起匿名搜索被判空，必须带登录态 Cookie 才返回结果
+  soda: (keyword, page, pageSize) => soda.searchSongs(keyword, page, pageSize, store.getCookie('soda') || ''),
 }
 
 const RESOLVERS: Record<string, (songInfo: any, quality: string, cookie: string, username?: string) => Promise<{ url: string; quality: string; via: string; ext?: string }>> = {
@@ -100,13 +101,13 @@ function unsupported(source: string, what: string): never {
 }
 
 export async function searchSingers(source: string, keyword: string, page = 1, pageSize = 20) {
-  if (source === 'soda') return soda.searchSingers(keyword, page, pageSize)
+  if (source === 'soda') return soda.searchSingers(keyword, page, pageSize, store.getCookie('soda') || '')
   if (source === 'bili') return bilibili.searchUsers(keyword, page, pageSize)
   return unsupported(source, '歌手搜索')
 }
 
 export async function searchAlbums(source: string, keyword: string, page = 1, pageSize = 20) {
-  if (source === 'soda') return soda.searchAlbums(keyword, page, pageSize)
+  if (source === 'soda') return soda.searchAlbums(keyword, page, pageSize, store.getCookie('soda') || '')
   if (source === 'bili') return bilibili.searchAlbums(keyword, page, pageSize)
   return unsupported(source, '专辑搜索')
 }
@@ -156,19 +157,19 @@ export async function getSongListTags(source: string) {
 }
 
 export async function getSongListList(source: string, tagId: string, page = 1) {
-  if (source === 'soda') return soda.getPlaylistList(tagId, page)
+  if (source === 'soda') return soda.getPlaylistList(tagId, page, 20, store.getCookie('soda') || '')
   if (source === 'bili') return bilibili.getSongListList(tagId, page)
   throw new Error(`${displayName(source)} 暂不支持歌单列表`)
 }
 
 export async function getSongListDetail(source: string, id: string) {
-  if (source === 'soda') return soda.getPlaylistDetail(id)
+  if (source === 'soda') return soda.getPlaylistDetail(id, store.getCookie('soda') || '')
   if (source === 'bili') return bilibili.getSongListDetail(id)
   throw new Error(`${displayName(source)} 暂不支持歌单详情`)
 }
 
 export async function searchSongList(source: string, text: string, page = 1) {
-  if (source === 'soda') return soda.searchPlaylists(text, page)
+  if (source === 'soda') return soda.searchPlaylists(text, page, 20, store.getCookie('soda') || '')
   if (source === 'bili') return bilibili.searchPlaylists(text, page)
   throw new Error(`${displayName(source)} 暂不支持歌单搜索`)
 }
@@ -180,7 +181,7 @@ export async function getLeaderboardBoards(source: string) {
 }
 
 export async function getLeaderboardList(source: string, bangid: string) {
-  if (source === 'soda') return soda.getBoardSongs(bangid)
+  if (source === 'soda') return soda.getBoardSongs(bangid, store.getCookie('soda') || '')
   if (source === 'bili') return bilibili.getLeaderboardList(bangid)
   throw new Error(`${displayName(source)} 暂不支持排行榜歌曲`)
 }

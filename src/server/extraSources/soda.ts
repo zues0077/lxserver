@@ -157,8 +157,34 @@ export function isSodaId(id: string): boolean {
   return /^\d{10,}$/.test(String(id || '').trim())
 }
 
-/** 搜索歌曲。匿名可用，不需要 Cookie。 */
-export async function searchSongs(keyword: string, page = 1, pageSize = 20): Promise<{
+/** 搜索请求头。带上登录态 Cookie 后，上游才正常返回结果（2026-11-22 起匿名搜索被判空）。 */
+function searchHeaders(cookie?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'User-Agent': SEARCH_UA,
+    'content-type': 'application/json; charset=UTF-8',
+  }
+  const c = String(cookie || '').trim()
+  if (c) headers.Cookie = c
+  return headers
+}
+
+/**
+ * 上游把搜索结果判空时的留痕。
+ *
+ * 2026-11-22 起汽水的 `/luna/search/*`（track / playlist / artist / album / all，连 suggest）
+ * 对匿名请求统一回 `{"status_info":{…},"extra":{"empty_search":1}}`，没有 result_groups，
+ * 于是歌单推荐、榜单、搜索全部变空——不是我们解析坏了，是请求没带登录态。
+ * 这里只在真出现空判时打一行，避免正常搜索刷日志。
+ */
+function warnIfEmptySearch(body: any, what: string): void {
+  if (Number(body?.extra?.empty_search) === 1) {
+    const logId = body?.status_info?.log_id ? ` log_id=${body.status_info.log_id}` : ''
+    console.log(`[汽水] ${what} 被判为空（empty_search=1），多为未带登录态 Cookie${logId}`)
+  }
+}
+
+/** 搜索歌曲。2026-11-22 起上游要求登录态，cookie 为空时结果会整体为空。 */
+export async function searchSongs(keyword: string, page = 1, pageSize = 20, cookie = ''): Promise<{
   list: any[]
   total: number
   allPage: number
@@ -172,10 +198,11 @@ export async function searchSongs(keyword: string, page = 1, pageSize = 20): Pro
     aid: '386088',
   })
   const resp = await request<any>(`https://api.qishui.com/luna/search/track?${params.toString()}`, {
-    headers: { 'User-Agent': SEARCH_UA, 'content-type': 'application/json; charset=UTF-8' },
+    headers: searchHeaders(cookie),
     timeout: 15000,
   })
   const body: any = resp.body || {}
+  warnIfEmptySearch(body, '歌曲搜索')
   const groups: any[] = Array.isArray(body.result_groups) ? body.result_groups : []
   const list: any[] = []
   let hasMore = false
@@ -1432,23 +1459,28 @@ function pcCommonParams(): Record<string, string> {
   }
 }
 
-/** PC 端点 GET（免签名）：LunaPC UA + 三个 x-luna-* 头 */
-async function pcGet(path: string, extra: Record<string, string> = {}): Promise<any> {
+/** PC 端点 GET（免签名）：LunaPC UA + 三个 x-luna-* 头；带 cookie 时附登录态 */
+async function pcGet(path: string, extra: Record<string, string> = {}, cookie = ''): Promise<any> {
   const params = new URLSearchParams({ ...pcCommonParams(), ...extra })
+  const headers: Record<string, string> = {
+    'User-Agent': PC_ARTIST_UA,
+    'x-luna-background-type': 'foreground',
+    'x-luna-is-background-req': '0',
+    'x-luna-is-local-user': '1',
+  }
+  const c = String(cookie || '').trim()
+  if (c) headers.Cookie = c
   const resp = await request<any>(`https://api.qishui.com${path}?${params.toString()}`, {
-    headers: {
-      'User-Agent': PC_ARTIST_UA,
-      'x-luna-background-type': 'foreground',
-      'x-luna-is-background-req': '0',
-      'x-luna-is-local-user': '1',
-    },
+    headers,
     timeout: 15000,
   })
-  return resp.body ?? null
+  const body = resp.body ?? null
+  warnIfEmptySearch(body, path)
+  return body
 }
 
-/** Android 搜索通道（与 searchSongs 同指纹），type = artist | album */
-async function androidSearch(searchType: string, keyword: string, page: number, pageSize: number): Promise<any> {
+/** Android 搜索通道（与 searchSongs 同指纹），type = artist | album | playlist | track */
+async function androidSearch(searchType: string, keyword: string, page: number, pageSize: number, cookie = ''): Promise<any> {
   const params = new URLSearchParams({
     ...DEVICE_FINGERPRINT,
     q: keyword,
@@ -1458,10 +1490,12 @@ async function androidSearch(searchType: string, keyword: string, page: number, 
     aid: '386088',
   })
   const resp = await request<any>(`https://api.qishui.com/luna/search/${searchType}?${params.toString()}`, {
-    headers: { 'User-Agent': SEARCH_UA, 'content-type': 'application/json; charset=UTF-8' },
+    headers: searchHeaders(cookie),
     timeout: 15000,
   })
-  return resp.body || {}
+  const body = resp.body || {}
+  warnIfEmptySearch(body, `${searchType} 搜索`)
+  return body
 }
 
 function firstGroup(body: any): any {
@@ -1474,12 +1508,12 @@ function imageOf(node: any): string {
 }
 
 /** 歌手搜索。同名艺人按 count_tracks（真身优先）+ count_collected 加权排序。 */
-export async function searchSingers(keyword: string, page = 1, pageSize = 20): Promise<{
+export async function searchSingers(keyword: string, page = 1, pageSize = 20, cookie = ''): Promise<{
   list: any[]
   total: number
   allPage: number
 }> {
-  const group = firstGroup(await androidSearch('artist', keyword, page, pageSize))
+  const group = firstGroup(await androidSearch('artist', keyword, page, pageSize, cookie))
   const artists: any[] = (group.data || [])
     .map((item: any) => item?.entity?.artist)
     .filter((a: any) => a?.id)
@@ -1509,12 +1543,12 @@ export async function searchSingers(keyword: string, page = 1, pageSize = 20): P
 }
 
 /** 专辑搜索 */
-export async function searchAlbums(keyword: string, page = 1, pageSize = 20): Promise<{
+export async function searchAlbums(keyword: string, page = 1, pageSize = 20, cookie = ''): Promise<{
   list: any[]
   total: number
   allPage: number
 }> {
-  const group = firstGroup(await androidSearch('album', keyword, page, pageSize))
+  const group = firstGroup(await androidSearch('album', keyword, page, pageSize, cookie))
   const albums: any[] = (group.data || [])
     .map((item: any) => item?.entity?.album)
     .filter((a: any) => a?.id)
@@ -1595,13 +1629,13 @@ function mapPlaylistNode(p: any): any {
   }
 }
 
-/** 搜歌单（`/luna/search/playlist`，与 searchSongs 同指纹，匿名可用） */
-export async function searchPlaylists(keyword: string, page = 1, pageSize = 20): Promise<{
+/** 搜歌单（`/luna/search/playlist`，2026-11-22 起需带登录态 Cookie） */
+export async function searchPlaylists(keyword: string, page = 1, pageSize = 20, cookie = ''): Promise<{
   list: any[]
   total: number
   allPage: number
 }> {
-  const group = firstGroup(await androidSearch('playlist', keyword, page, pageSize))
+  const group = firstGroup(await androidSearch('playlist', keyword, page, pageSize, cookie))
   const items: any[] = (group.data || [])
     .map((item: any) => item?.entity?.playlist)
     .filter((p: any) => p?.id)
@@ -1611,10 +1645,10 @@ export async function searchPlaylists(keyword: string, page = 1, pageSize = 20):
 }
 
 /** 歌单详情：元信息 + 歌曲列表 */
-export async function getPlaylistDetail(playlistId: string): Promise<any> {
+export async function getPlaylistDetail(playlistId: string, cookie = ''): Promise<any> {
   const id = String(playlistId || '').trim()
   if (!id) throw new Error('缺少歌单 ID')
-  const body = await pcGet('/luna/pc/playlist/detail', { playlist_id: id })
+  const body = await pcGet('/luna/pc/playlist/detail', { playlist_id: id }, cookie)
   const info = body?.playlist
   if (!info?.id) throw new Error('汽水歌单不存在或为私密歌单')
   const list = mapMediaResources(body)
@@ -1650,9 +1684,9 @@ export async function getPlaylistTags(): Promise<any> {
 }
 
 /** 按标签（关键词）取歌单列表 */
-export async function getPlaylistList(tagId: string, page = 1, pageSize = 20): Promise<any> {
+export async function getPlaylistList(tagId: string, page = 1, pageSize = 20, cookie = ''): Promise<any> {
   const keyword = String(tagId || '').trim() || '热歌'
-  const res = await searchPlaylists(keyword, page, pageSize)
+  const res = await searchPlaylists(keyword, page, pageSize, cookie)
   return { list: res.list, total: res.total }
 }
 
@@ -1699,7 +1733,7 @@ export function pickDistinctBoards(
   return map
 }
 
-async function resolveBoardPlaylists(force = false): Promise<Record<string, string>> {
+async function resolveBoardPlaylists(force = false, cookie = ''): Promise<Record<string, string>> {
   const now = Date.now()
   if (!force && boardResolveCache && now - boardResolveCache.at < BOARD_RESOLVE_TTL) {
     return boardResolveCache.map
@@ -1707,7 +1741,7 @@ async function resolveBoardPlaylists(force = false): Promise<Record<string, stri
   const candidates: Array<{ id: string; list: any[] }> = []
   for (const board of SODA_BOARDS) {
     try {
-      const found = await searchPlaylists(board.keyword, 1, 5)
+      const found = await searchPlaylists(board.keyword, 1, 5, cookie)
       candidates.push({ id: board.id, list: Array.isArray(found?.list) ? found.list : [] })
     } catch (e: any) {
       // 单个榜解析失败不影响其它榜，getBoardSongs 会退回按关键词兜底
@@ -1723,23 +1757,23 @@ export async function getBoards(): Promise<any> {
   return { list: SODA_BOARDS.map(b => ({ bangid: b.id, name: b.name })) }
 }
 
-export async function getBoardSongs(boardId: string): Promise<any> {
+export async function getBoardSongs(boardId: string, cookie = ''): Promise<any> {
   const wanted = String(boardId || '').trim()
   const board = SODA_BOARDS.find(b => b.id === wanted)
   if (board) {
-    const map = await resolveBoardPlaylists()
+    const map = await resolveBoardPlaylists(false, cookie)
     const playlistId = map[board.id]
     if (playlistId) {
-      const detail = await getPlaylistDetail(playlistId)
+      const detail = await getPlaylistDetail(playlistId, cookie)
       return { list: detail.list, total: detail.list.length, boardName: board.name }
     }
   }
   // 未知 bangid（或该榜解析失败）：退回按关键词取第一个歌单
   const keyword = board?.keyword || wanted || '热歌'
-  const found = await searchPlaylists(keyword, 1, 3)
+  const found = await searchPlaylists(keyword, 1, 3, cookie)
   const first = found.list[0]
   if (!first?.id) throw new Error(`汽水榜单「${board?.name || boardId}」暂无可播内容`)
-  const detail = await getPlaylistDetail(first.id)
+  const detail = await getPlaylistDetail(first.id, cookie)
   return { list: detail.list, total: detail.list.length, boardName: board?.name || '' }
 }
 

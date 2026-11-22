@@ -76,6 +76,17 @@ export interface XiaoAiConfig {
    * （UI 提供若干预设；本质是"用哪首曲库歌的封面兜底"，不是上传自定义图）。
    */
   defaultCoverAudioId: string
+  /**
+   * 曲库未命中时怎么投（2026-11-22 新增）：
+   *  - false（默认，沿用旧行为）下发 `defaultCoverAudioId` 那首歌，屏幕会显示它的封面/歌名；
+   *  - true 不带任何曲库 audioID，改走 `player_play_url` 纯直链——屏幕不会再出现
+   *    「另一首歌的歌名」，代价是没有封面与滚动歌词。
+   *
+   * 由来（17950 实机）：`defaultCoverAudioId` 被配成《所念皆星河》后，投送
+   * 《时间线-于冬然》曲库未命中，触屏整屏显示《所念皆星河》，被当成「播错歌」；
+   * 实际音频是这一路直链（streamBytes 与源文件字节数一致）。
+   */
+  unmatchedDirectUrl: boolean
   /** 选中的设备（支持多选同时播放） */
   selectedDeviceIds: string[]
   /** 上一次拉取到的设备列表 */
@@ -100,6 +111,7 @@ const DEFAULT_CONFIG: XiaoAiConfig = {
   fadeOutSec: 1.5,
   volume: 50,
   defaultCoverAudioId: '1732418460076477549',
+  unmatchedDirectUrl: false,
   selectedDeviceIds: [],
   devices: [],
   account: '',
@@ -163,6 +175,8 @@ export const loadConfig = (): XiaoAiConfig => {
       fadeOutSec: clampNumber(raw.fadeOutSec, 0, 6, 1.5),
       volume: Math.round(clampNumber(raw.volume, 0, 100, DEFAULT_CONFIG.volume)),
       defaultCoverAudioId: String(raw.defaultCoverAudioId || DEFAULT_CONFIG.defaultCoverAudioId).trim(),
+      // 曲库未命中时走直链：只认显式 true，缺省（含老配置）保持旧的「兜底封面」行为
+      unmatchedDirectUrl: raw.unmatchedDirectUrl === true,
       disabledModels: Array.isArray(raw.disabledModels)
         ? raw.disabledModels.map((item: unknown) => String(item).trim().toUpperCase()).filter(Boolean)
         : [],
@@ -197,6 +211,8 @@ export const saveConfig = (patch: Partial<XiaoAiConfig>): XiaoAiConfig => {
       patch.defaultCoverAudioId !== undefined
         ? String(patch.defaultCoverAudioId).trim() || prev.defaultCoverAudioId
         : prev.defaultCoverAudioId,
+    unmatchedDirectUrl:
+      patch.unmatchedDirectUrl !== undefined ? patch.unmatchedDirectUrl === true : prev.unmatchedDirectUrl,
     disabledModels: patch.disabledModels
       ? patch.disabledModels.map(item => String(item).trim().toUpperCase()).filter(Boolean)
       : prev.disabledModels,

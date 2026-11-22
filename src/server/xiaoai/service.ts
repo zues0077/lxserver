@@ -88,6 +88,8 @@ export interface XiaoAiPublicConfig {
   volume: number
   /** 兜底封面用的曲库 audioID（曲库没命中时用它那首歌的封面兜底） */
   defaultCoverAudioId: string
+  /** 曲库未命中时改走纯直链（不带曲库 audioID，屏幕不会显示别的歌） */
+  unmatchedDirectUrl: boolean
   /** ffmpeg 是否可用（不可用时 mp3 统一自动降级，界面据此提示） */
   ffmpegAvailable: boolean
   disabledModels: string[]
@@ -237,6 +239,7 @@ class XiaoAiService {
       fadeOutSec: config.fadeOutSec ?? 1.5,
       volume: Number.isFinite(Number(config.volume)) ? Number(config.volume) : 50,
       defaultCoverAudioId: config.defaultCoverAudioId || DEFAULT_MUSIC_AUDIO_ID,
+      unmatchedDirectUrl: config.unmatchedDirectUrl === true,
       ffmpegAvailable: this.ffmpegReady,
       touchscreenLyrics: config.touchscreenLyrics === true,
       disabledModels: config.disabledModels,
@@ -266,6 +269,7 @@ class XiaoAiService {
     if (patch.defaultCoverAudioId !== undefined) {
       next.defaultCoverAudioId = String(patch.defaultCoverAudioId || '').trim() || DEFAULT_MUSIC_AUDIO_ID
     }
+    if (patch.unmatchedDirectUrl !== undefined) next.unmatchedDirectUrl = patch.unmatchedDirectUrl === true
     if (patch.disabledModels !== undefined) next.disabledModels = Array.isArray(patch.disabledModels) ? patch.disabledModels.map(String) : []
     if (patch.selectedDeviceIds !== undefined) {
       next.selectedDeviceIds = Array.isArray(patch.selectedDeviceIds) ? patch.selectedDeviceIds.map(String) : []
@@ -455,11 +459,23 @@ class XiaoAiService {
         // 没搜到真实 audioID 时不要把它当"搜到了"传下去，让 client 走「默认封面」分支
         audioId = resolved && resolved !== DEFAULT_MUSIC_AUDIO_ID ? resolved : undefined
       }
+      // 曲库没收录这首歌时的两种取舍：
+      //  - 旧行为（默认）带兜底封面 audioID → 触屏会把那首歌的歌名/封面整屏显示出来，
+      //    用户看到的是「别的歌」，很容易被当成播错歌（音频其实是对的）。
+      //  - unmatchedDirectUrl=true → 不带任何曲库 audioID，直接 player_play_url：
+      //    屏幕不会再出现别人的歌名，代价是没有封面与滚动歌词。
+      const directUrlOnMiss = config.unmatchedDirectUrl === true && lyricsWanted && !audioId
+      if (directUrlOnMiss) {
+        const missLine = `[XiaoAi] 曲库未命中，按 unmatchedDirectUrl 改走直链（不做曲库封面）：${songName}${singer ? ` - ${singer}` : ''}`
+        console.log(missLine)
+        syncLog.warn(missLine)
+      }
       const outcome = await client.playUrlDetailed(deviceId, streamUrl, hardware, {
         keepLight: config.keepLight !== false,
         disabledModels: config.disabledModels,
-        audioId,
-        lyricsMode: lyricsWanted,
+        audioId: directUrlOnMiss ? undefined : audioId,
+        lyricsMode: lyricsWanted && !directUrlOnMiss,
+        forceUrlMode: directUrlOnMiss,
       })
       if (outcome.ok) {
         usedAudioIds.push(outcome.audioId || '')
@@ -488,10 +504,14 @@ class XiaoAiService {
     // 表现就是播错歌 / 断断续续，这里把它写进日志，免得用户只看到「能播但不对劲」。
     const firstOk = results.find(item => item.ok)
     if (firstOk) {
-      // 曲库没搜到这首歌时下发的是「默认封面占位 audioID」，音箱回报的曲名就是占位曲名
-      // （Theme Of Loft），拿它和真实歌名比必然不一致。这是预期状态，不该报警。
+      // 曲库没搜到这首歌时下发的是「兜底封面 audioID」，音箱回报的曲名就是那首歌的名字，
+      // 拿它和真实歌名比必然不一致，属预期状态，不该报警。
+      // 兜底 ID 有两个来源：内置 DEFAULT_MUSIC_AUDIO_ID，以及用户配置的 defaultCoverAudioId
+      //（17950 上后者被配成《所念皆星河》，只认前者会让每次未命中都白报一条「播错歌」）。
+      const coverAudioId = String(config.defaultCoverAudioId || '').trim() || DEFAULT_MUSIC_AUDIO_ID
       const placeholderOnly =
-        usedAudioIds.length > 0 && usedAudioIds.every(id => !id || id === DEFAULT_MUSIC_AUDIO_ID)
+        usedAudioIds.length > 0 &&
+        usedAudioIds.every(id => !id || id === DEFAULT_MUSIC_AUDIO_ID || id === coverAudioId)
       setTimeout(() => {
         void this.getStatus(firstOk.deviceId)
           .then(status => this.reportPlaybackMismatch(status, songName, placeholderOnly))
