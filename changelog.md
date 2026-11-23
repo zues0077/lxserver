@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.5.69
+
+- **自定义源灌入 VM 门控修正（Q1）**：上传/导入（upload/import）不再因脚本 `requireUnsafe` 而在灌入阶段拦路；落库 `allowUnsafeVM` 只认管理员显式传入的值，不再由 `requireUnsafe` 自动加白。管理员身份校验、以及启用时的「总闸 + 逐源白名单」双钥匙门保持不变——安全边界从「灌入即放行」收紧为「用时显式授权」。
+- **远程导入下载加固（Q3）**：`handleImport` 的无代理下载分支增加 15 秒无活动超时与 5MB 响应体上限，超时/超限分别返回 `DOWNLOAD_TIMEOUT` / `DOWNLOAD_TOO_LARGE` 结构化错误，避免慢响应与超大响应长期占用连接。
+
 ## v1.5.68
 
 - **汽水签名器登记升级为双向凭证**：`/api/music/prefetch/signer` 在管理员密码校验通过后，为登记成功的签名器签发 `qishui.signerToken` 并持久化；`signer.ts` 调 `/health`、`/config`、`/sign` 时统一携带 `Authorization: Bearer <token>`，签名器只接受已登记服务端的签名请求。
