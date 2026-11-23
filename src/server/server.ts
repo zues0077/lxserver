@@ -10378,11 +10378,14 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
               } else if (!result) {
                 // isSourceSupported = false: 无任何自定义源支持此平台，立即通知前端
+                // [PATCH-C2] SSE 文案同步：纯账号源匿名取链点名「平台账号/管理员」，保留「未找到支持」关键词。
                 const why = accountBlockedByPermission
                 ? `${sourceName} 只能通过平台账号取链，但当前用户「${verifiedUsername}」不在使用权限名单内`
-                : musicAccount.isSupportedSource(source)
-                  ? `未找到支持 ${source} 平台的自定义源；如已在「平台账号」里填写 Cookie，请确认总开关已打开`
-                  : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
+                : source === 'kglite' && !accountUsable
+                  ? `未找到支持 ${source} 平台的自定义源（${source} 为纯账号源）；此平台取链需管理员在「平台账号」里配置账号并开启总开关`
+                  : musicAccount.isSupportedSource(source)
+                    ? `未找到支持 ${source} 平台的自定义源；如已在「平台账号」里填写 Cookie，请确认总开关已打开`
+                    : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
               void pushProgress({ name: '系统', status: 'fail', message: why })
             }
 
@@ -10480,11 +10483,17 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             }
 
             if (!result) {
+              // [PATCH-C2] 纯账号源（如 kglite）匿名取链时，原本落到「请在设置中添加或启用相关源」，
+              // 误导用户去装并不存在的自定义源。kglite 无账号时不可播是设计，文案应点名需管理员配置平台账号。
+              // 保留「未找到支持」关键词（前端 app.js 靠它分类换源/降级），不含「请在设置中添加或启用相关源」。
+              const PURE_ACCOUNT_SOURCES = new Set(['kglite'])
               const fallbackMsg = accountUsable
                 ? `自定义源与你配置的账号都未能取到链接（账号见 /health 日志里的 [平台账号] 记录）`
                 : accountBlockedByPermission
                   ? `${sourceName} 只能通过平台账号取链，但当前用户「${verifiedUsername}」不在使用权限名单内；请联系管理员在「平台账号 → 使用权限」里加入该用户`
-                  : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
+                  : PURE_ACCOUNT_SOURCES.has(source)
+                    ? `未找到支持 ${source} 平台的自定义源（${source} 为纯账号源）；此平台取链需管理员在「平台账号」里配置账号并开启总开关`
+                    : `未找到支持 ${source} 平台的自定义源，请在设置中添加或启用相关源`
               const rawMsg = customSourceError || fallbackMsg
               // 缺 ID 的请求必须点名原因：日志里那一排「缺少 songId」不是音源坏了，
               // 而是这首歌没带平台 ID，用户照提示去换音源只会白折腾。

@@ -4457,7 +4457,14 @@ class SubsonicHandler {
         // 只合并"同名同歌手"的跨源重复，不合并不同版本（Live/Remix 等歌名本身不同）。
         if (matchedSongs.length > 1) {
             const rawPriority = global.lx.config['subsonic.source.priority']
-            const priority: string[] = Array.isArray(rawPriority) ? rawPriority : ['kw', 'tx', 'wy', 'mg', 'kg']
+            // [PATCH-C1] 配置全程为逗号字符串，原 Array.isArray 恒 false 导致 UI 调序对去重无效。
+            // 与取链 / 音质共用同一解析语义：数组按 String，字符串按逗号切分 + trim + 去空，空则回退默认。
+            const priority: string[] = (() => {
+                const arr = Array.isArray(rawPriority)
+                    ? rawPriority.map(String)
+                    : String(rawPriority || '').split(',').map((s) => s.trim()).filter(Boolean)
+                return arr.length ? arr : ['kw', 'tx', 'wy', 'mg', 'kg']
+            })()
             const rankOf = (src: string) => {
                 const i = priority.indexOf(src)
                 return i < 0 ? priority.length : i

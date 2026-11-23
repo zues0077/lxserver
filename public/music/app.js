@@ -2701,6 +2701,7 @@ async function doSearch(page = 1, append = false) {
 
             const flat = [];
             let arrived = 0;
+            let failedSources = 0; // [PATCH-C5] 聚合源失败计数，成功数 = arrived - failedSources
             let renderTimer = null;
             let lastPaintAt = 0;
             let lastSorted = [];
@@ -2720,8 +2721,8 @@ async function doSearch(page = 1, append = false) {
                 if (pageInfoEl) {
                     const remain = SOURCES.length - arrived;
                     pageInfoEl.innerText = final
-                        ? `聚合搜索 · ${arrived} 个源 · ${lastSorted.length} 条`
-                        : `聚合搜索 · 已到 ${arrived}/${SOURCES.length} 个源 · ${lastSorted.length} 条，还有 ${remain} 个在搜索…`;
+                        ? `聚合搜索 · ${arrived - failedSources}/${SOURCES.length} 个源成功 · ${lastSorted.length} 条`
+                        : `聚合搜索 · 已到 ${arrived}/${SOURCES.length}，成功 ${arrived - failedSources}，还有 ${lastSorted.length} 条，剩 ${remain} 个在搜索…`; // [PATCH-C5] 成功数/失败数
                 }
                 return lastSorted;
             };
@@ -2757,10 +2758,11 @@ async function doSearch(page = 1, append = false) {
                 return fetch(searchUrl, { headers })
                     .then(res => res.json())
                     .then(data => {
-                        const items = (data.list || []).map(item => ({ ...item, source: s }));
+                        const items = (data.list || []).map(item => ({ ...item, source: item.source || s })); // [PATCH-C5] 保留接口实际返回的源
                         if (items.length) flat.push(...items);
                     })
                     .catch(e => {
+                        failedSources++; // [PATCH-C5] 记录失败源，供 UI 显示成功数/失败数
                         console.warn(`[聚合搜索] ${s} 源失败:`, e);
                     })
                     .finally(() => {
