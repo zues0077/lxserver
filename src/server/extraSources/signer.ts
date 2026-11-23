@@ -5,11 +5,14 @@
  * （bdms.node / metasecml.dll）逐请求生成，linux/amd64、arm64 镜像里既没有也搬不过去。
  * 所以 NAS 侧只做客户端：把「要发的请求」交给一台装得上客户端的机器签，再原样发出去。
  *
- * 配置方式只有一个环境变量（刻意不做进界面，避免把「安装目录 / URL / Token」三件套
- * 摆到普通用户面前 —— go-music-dl 的账号页就是这么变繁琐的）：
+ * 配置方式只有两个：
  *
  *   QISHUI_SIGNER_URL=http://192.168.1.10:18080
- *   QISHUI_SIGNER_TOKEN=可选
+ *   QISHUI_SIGNER_TOKEN=可选；签名器登记时自动签发，一般不用手填
+ *
+ * 签名器在 /api/music/prefetch/signer 完成登记后，会拿到本服务端签发的随机
+ * signerToken；之后 /sign 请求都带 Authorization: Bearer <token>，签名器只接受
+ * 已登记服务端的调用。token 存在 qishui.signerToken，跟着 config.json 持久化。
  *
  * 协议（与 sodam / music-lib 的 signer 兼容，尽量宽容）：
  *   GET  {base}/health              → 任意 2xx 即视为在线
@@ -19,6 +22,7 @@
  * 注意：签名器能看到完整请求头（含 Cookie），只能指向自己信任的机器。
  */
 
+import { randomBytes } from 'crypto'
 import { request } from '../musicAccount/http'
 
 const HEALTH_TIMEOUT = 3000
@@ -56,8 +60,33 @@ export function isConfigured(): boolean {
   return signerUrl().length > 0
 }
 
+/**
+ * 签名器调用凭证。优先读后台登记时签发的配置；环境变量只用于兼容手工部署。
+ * 没有凭证时返回空字符串，调用方不应把空 Authorization 发出去。
+ */
+export function signerToken(): string {
+  const cfg = String((global as any).lx?.config?.['qishui.signerToken'] || '').trim()
+  return cfg || String(process.env.QISHUI_SIGNER_TOKEN || '').trim()
+}
+
+/**
+ * 登记签名器时确保本服务端有一枚 token。
+ * - 已有配置/环境变量 token：原样返回，保证重复登记幂等；
+ * - 没有：生成 256 位随机 token 并写入 qishui.signerToken，随 config.json 持久化。
+ * 返回值只应出现在已通过管理员密码校验的登记响应里。
+ */
+export function ensureSignerToken(): string {
+  const existing = signerToken()
+  if (existing) return existing
+  const token = randomBytes(32).toString('hex')
+  ;(global as any).lx.config['qishui.signerToken'] = token
+  if (typeof (global as any).lx?.saveConfig === 'function') (global as any).lx.saveConfig()
+  statusCache = null
+  return token
+}
+
 function authHeaders(): Record<string, string> {
-  const token = String(process.env.QISHUI_SIGNER_TOKEN || '').trim()
+  const token = signerToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 

@@ -199,7 +199,7 @@
 
 1. **确认客户端版本**：跑 `find-soda-client.bat`（在 [soda-signer 仓库](https://github.com/zues0077/lxserver-soda-signer) 根目录），它会找出 `app.asar.unpacked`、报出客户端版本；加 `-StageTo D:\soda-stage` 还能顺手整理出一个可直接挂载的目录（含 `manifest.json`，签名器就靠它认出客户端版本）。
 2. **起签名器**：方案 A 双击 `start-signer.bat`；方案 B 用该仓库里的 `docker-compose.yml`（把 `bdms.node` / `metasecml.dll` 所在目录挂到 `/soda-client:ro`）。
-3. **在后台登记**：LX 后台 →「平台账号」→ 汽水签名器，填签名器地址并保存，状态变为「签名器在线」即可。
+3. **在后台登记**：LX 后台 →「平台账号」→ 汽水签名器，填签名器地址并保存，状态变为「签名器在线」即可。登记成功时 lxserver 会给签名器下发 `signerToken`，之后签名请求自动带 `Authorization: Bearer`；签名器未授权会返回 `401`。
 
 > 客户端版本**不需要跟着改代码**：签名器把识别到的版本经 `GET /config` 上报，lxserver **1.5.36+** 直接采用它拼 UA；客户端大版本升级后只需替换 `bdms.node` 并重启签名器。完整步骤与排错见 [FAQ 第二节](docs/guide/faq.md)。
 
@@ -223,18 +223,18 @@
 | 标签 | 说明 |
 | :--- | :--- |
 | `latest` | 最新稳定版，跟随 `main` 分支 |
-| `v1.5.58` / `1.5.58` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
+| `v1.5.68` / `1.5.68` | 当前版本（与 `package.json` 的 `version` 一致），**生产环境建议固定到具体版本** |
 | `v*` | 每个已发布版本都会保留，可随时回滚到历史版本 |
 
 ```bash
 # 固定版本（推荐）
-docker pull ghcr.io/zues0077/lxserver:1.5.58
+docker pull ghcr.io/zues0077/lxserver:1.5.68
 
 # 或跟随最新
 docker pull ghcr.io/zues0077/lxserver:latest
 ```
 
-> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.58`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
+> - 镜像标签的来源是 `package.json` 的 `version`，由 `.github/workflows/docker-publish.yml` 在推送 `main` 时自动生成。修改版本号只需执行 `npm run version:set -- 1.5.68`，它会同时同步 `package.json` 与 `public/js/config.js` 两处。
 > - 如果要另外发布到 Docker Hub，可使用备用工作流 `.github/workflows/docker.yml`（需自行配置 `DOCKER_USERNAME` / `DOCKER_PASSWORD` 密钥并手动触发，默认不参与自动发布）。
 
 ## 🔒 访问控制与安全
@@ -289,7 +289,7 @@ Web 播放器针对移动端做了深度优化，手机浏览器访问也能接�
 镜像地址（GitHub Packages / GHCR）：
 
 - 跟随最新：`ghcr.io/zues0077/lxserver:latest`
-- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.58`
+- 固定版本（推荐）：`ghcr.io/zues0077/lxserver:1.5.68`
 - 完整标签说明见上方 [Docker 部署](#-docker-部署)
 
 **Docker Run 示例：**
@@ -303,7 +303,7 @@ docker run -d \
   -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.58
+  ghcr.io/zues0077/lxserver:1.5.68
 ```
 
 > ⚠️ **`--restart` 不要省**：面板里的「重启服务」（`POST /api/restart`）在容器内是通过结束进程实现的，
@@ -336,7 +336,7 @@ docker run -d \
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.58   # 或 :latest
+    image: ghcr.io/zues0077/lxserver:1.5.68   # 或 :latest
     container_name: lx-sync-server
     restart: unless-stopped          # 不要省：面板「重启服务」靠它拉起进程
     ports:

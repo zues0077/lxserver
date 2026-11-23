@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.68
+
+- **汽水签名器登记升级为双向凭证**：`/api/music/prefetch/signer` 在管理员密码校验通过后，为登记成功的签名器签发 `qishui.signerToken` 并持久化；`signer.ts` 调 `/health`、`/config`、`/sign` 时统一携带 `Authorization: Bearer <token>`，签名器只接受已登记服务端的签名请求。
+- **登记响应仅 POST 返回 token**：GET 仍只返回签名器地址与在线状态，避免管理页误读；清空签名器地址时不签发 token。
+- 兼容原有 `QISHUI_SIGNER_TOKEN` 环境变量：配置里没有 token 时回退环境变量，便于手工部署平滑迁移。
+
 ## v1.5.58
 
 - **vm2 加载失败源诊断标识**：加载失败的自定义源新增 `vmHint` 三档判据（`unsafe-capable` / `vm2-incompatible` / 无判据），列表接口透出；设置页失败源三档文案 + 顶部汇总条 + 失败源展示层置顶（拖拽写回不污染 order.json 取链顺序）+ 白名单问号说明弹窗。仅识别与展示，不自动加白/停用/删除，加白仍需管理员确认 + 总闸。

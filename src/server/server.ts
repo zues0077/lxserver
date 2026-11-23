@@ -13303,7 +13303,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
           return
         }
 
-        const reply = async () => {
+        const reply = async (issuedToken = '') => {
           const st = await extraSources.signer.status(true)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({
@@ -13314,6 +13314,8 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               configured: st.configured,
               online: st.online,
               message: st.message,
+              // 只在 POST 登记时回给签名器；GET 不返回，避免管理页顺手把 token 读走
+              ...(issuedToken ? { signerToken: issuedToken } : {}),
             },
           }))
         }
@@ -13331,9 +13333,12 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             }
             // Config 类型里没有这个键（它属于额外音源的可选项），用 any 断言写入即可
             ;(global.lx.config as any)['qishui.signerUrl'] = raw ? raw.replace(/\/+$/, '') : ''
+            // 登记成功才签发 token；清空地址时同时吊销，避免留下无主凭证
+            const issuedToken = raw ? extraSources.signer.ensureSignerToken() : ''
+            if (!raw) (global.lx.config as any)['qishui.signerToken'] = ''
             if (typeof global.lx?.saveConfig === 'function') global.lx.saveConfig()
             extraSources.signer.resetStatusCache()
-            await reply()
+            await reply(issuedToken)
           } catch (e: any) {
             res.writeHead(500, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: false, error: e?.message || String(e) }))
