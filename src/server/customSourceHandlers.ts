@@ -233,23 +233,6 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
             }
         }
 
-        // 如果检测到需要不安全模式
-        if (requireUnsafe) {
-            // 如果系统已禁用 VM 模式
-            if (!global.lx.config['system.allowUnsafeVM']) {
-                res.writeHead(200, { 'Content-Type': 'application/json' })
-                res.end(JSON.stringify({ success: false, disabledVM: true, error: 'VM_DISABLED', message: '已禁用VM。该脚本需要原生 VM 模式运行，但服务器后台已禁用 VM 模式。' }))
-                return
-            }
-
-            // 如果未提供标志，则要求确认
-            if (!allowUnsafeVM) {
-                res.writeHead(200, { 'Content-Type': 'application/json' })
-                res.end(JSON.stringify({ success: false, requireUnsafe: true, message: '该脚本需要原生 VM 模式运行，可能存在安全风险，是否继续？' }))
-                return
-            }
-        }
-
         // 生成唯一ID（可读的文件名）
         const id = generateId(metadata.name, filename)
         const scriptPath = path.join(sourcesDir, id)
@@ -284,7 +267,7 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
             // hunter 侧 serverVeto 看到该标签不打标冷冻。手动启用/停用会改写/清除它。
             disableReason: 'after-import',
             uploadTime: new Date().toISOString(),
-            allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM,
+            allowUnsafeVM: !!allowUnsafeVM,
             requireUnsafe: !!requireUnsafe
         })
 
@@ -299,7 +282,7 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse) {
         try { clearProbeRemoval(targetOwner, id) } catch { /* 清理失败不影响上传本身 */ }
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ success: true, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))
+        res.end(JSON.stringify({ success: true, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!allowUnsafeVM }))
     } catch (err: any) {
         const isNameExists = !!(err && err.code === 'NAME_EXISTS')
         console.error('[自定义源] 上传失败:', err)
@@ -338,11 +321,13 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
             const protocol = targetUrl.startsWith('https') ? require('https') : require('http')
 
             return new Promise((resolve, reject) => {
-                protocol.get(targetUrl, (response: any) => {
+                // [PATCH-Q3] 保留请求句柄，用于限制慢下载
+                const req = protocol.get(targetUrl, (response: any) => {
                     const { statusCode } = response
 
                     // 处理重定向
                     if (statusCode >= 300 && statusCode < 400 && response.headers.location) {
+                        req.destroy()
                         let redirectUrl = response.headers.location
                         if (!redirectUrl.startsWith('http')) {
                             const parsedUrl = new URL(targetUrl)
@@ -352,17 +337,31 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
                     }
 
                     if (statusCode !== 200) {
+                        req.destroy()
                         return reject(new Error(`Failed to download: status code ${statusCode}`))
                     }
 
                     const chunks: any[] = []
-                    response.on('data', (chunk: any) => chunks.push(chunk))
+                    let totalBytes = 0
+                    const maxBytes = 5 * 1024 * 1024
+                    response.on('data', (chunk: any) => {
+                        totalBytes += chunk.length
+                        if (totalBytes > maxBytes) {
+                            // [PATCH-Q3] 限制响应体大小，以 DOWNLOAD_TOO_LARGE 抛出
+                            req.destroy(new Error('DOWNLOAD_TOO_LARGE'))
+                            return
+                        }
+                        chunks.push(chunk)
+                    })
                     response.on('end', () => {
                         const buffer = Buffer.concat(chunks)
                         resolve(buffer.toString('utf-8'))
                     })
                     response.on('error', reject)
-                }).on('error', reject)
+                })
+                // [PATCH-Q3] 15s 无活动超时，以 DOWNLOAD_TIMEOUT 抛出
+                req.setTimeout(15000, () => req.destroy(new Error('DOWNLOAD_TIMEOUT')))
+                req.on('error', reject)
             })
         }
 
@@ -377,23 +376,6 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
             if (auth !== global.lx.config['admin.password']) {
                 res.writeHead(403, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ success: false, error: '允许以 VM 模式运行脚本需要验证管理员身份。' }))
-                return
-            }
-        }
-
-        // 如果检测到需要不安全模式
-        if (requireUnsafe) {
-            // 如果系统已禁用 VM 模式
-            if (!global.lx.config['system.allowUnsafeVM']) {
-                res.writeHead(200, { 'Content-Type': 'application/json' })
-                res.end(JSON.stringify({ success: false, disabledVM: true, error: 'VM_DISABLED', message: '已禁用VM。该脚本需要原生 VM 模式运行，但服务器后台已禁用 VM 模式。' }))
-                return
-            }
-
-            // 如果未提供标志，则要求确认
-            if (!allowUnsafeVM) {
-                res.writeHead(200, { 'Content-Type': 'application/json' })
-                res.end(JSON.stringify({ success: false, requireUnsafe: true, message: '该脚本需要原生 VM 模式运行，可能存在安全风险，是否继续？' }))
                 return
             }
         }
@@ -453,7 +435,7 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
             disableReason: 'after-import',
             uploadTime: new Date().toISOString(),
             sourceUrl: url,
-            allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM,
+            allowUnsafeVM: !!allowUnsafeVM,
             requireUnsafe: !!requireUnsafe
         })
 
@@ -468,7 +450,7 @@ export async function handleImport(req: IncomingMessage, res: ServerResponse) {
         try { clearProbeRemoval(targetOwner, id) } catch { /* 清理失败不影响导入本身 */ }
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ success: true, filename: displayName, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!requireUnsafe || !!allowUnsafeVM }))
+        res.end(JSON.stringify({ success: true, filename: displayName, id, metadata, supportedSources, owner: targetOwner, allowUnsafeVM: !!allowUnsafeVM }))
     } catch (err: any) {
         const isNameExists = !!(err && err.code === 'NAME_EXISTS')
         console.error('[自定义源] 导入失败:', err)
