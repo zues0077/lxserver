@@ -10333,8 +10333,17 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                   if (source === 'soda' && /^https?:\/\//i.test(String(candidate.url || ''))) {
                     const expectedSec = parseIntervalSeconds(songInfo.interval || (songInfo as any)?.meta?.interval)
                     const gate = await probeRemoteStream(String(candidate.url), expectedSec)
-                    if (!gate.ok) {
-                      if (gate.kind === 'preview') {
+                    // [B 修正] via 强标记兜底：ffprobe 探测失败放行（宁可漏杀不误杀）时，
+                    // 只要 via 明确带 :preview（实测版权曲稳定标记），仍按试听拦截，避免 60s 试听
+                    // 被当完整版投放。仅在 viaPreviewGuard 开时生效（默认关=现状不变）；
+                    // 正则严格 /:preview/i，不放宽到 preview/试听，避免误伤 B站 audio:q…(试听)。
+                    const viaIsPreview = /:preview/i.test(String(candidate.via || ''))
+                    const viaGuardOn = (global.lx && global.lx.config as any)?.['customSource.viaPreviewGuard'] === true
+                    const effectiveGate = gate.ok && viaGuardOn && viaIsPreview
+                      ? { ok: false, kind: 'preview' as const, reason: 'via 标记 :preview（ffprobe 探测未捕获）', streamDurationSec: 0 }
+                      : gate
+                    if (!effectiveGate.ok) {
+                      if (effectiveGate.kind === 'preview') {
                         // 「允许试听」兜底（2026-11-13 方案）：完整版永远优先 —— 这里不直接投放，
                         // 只把试听候选记下来，且**不当成功转正**；换源（五平台+B站）仍照常执行，
                         // 全都没有时才投试听。记负缓存会挡住后续重试，所以兜底开启时不记。
@@ -10342,19 +10351,19 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
                           sodaTrialFallback = {
                             url: String(candidate.url),
                             quality: String(quality || '128k'),
-                            previewDurationSec: (gate as any).streamDurationSec || 0,
+                            previewDurationSec: (effectiveGate as any).streamDurationSec || 0,
                           }
-                          console.log(`[歌曲播放] 汽水试听候选已记录（不当成功转正，换源失败后兜底用）: ${songInfo.name} — ${gate.reason}`)
+                          console.log(`[歌曲播放] 汽水试听候选已记录（不当成功转正，换源失败后兜底用）: ${songInfo.name} — ${effectiveGate.reason}`)
                           // 不转正：跳过下方 result = candidate，让换源与试听兜底链路接管
                           previewHeldForFallback = true
                         } else {
-                          noteSodaPreviewVerdict(songInfo, gate.reason || '')
-                          console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
-                          throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
+                          noteSodaPreviewVerdict(songInfo, effectiveGate.reason || '')
+                          console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${effectiveGate.reason}`)
+                          throw new Error(`汽水 ${effectiveGate.reason}，请改用它源或其他平台播放`)
                         }
                       } else {
-                        console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${gate.reason}`)
-                        throw new Error(`汽水 ${gate.reason}，请改用它源或其他平台播放`)
+                        console.warn(`[歌曲播放] 汽水直链可播性门禁拦截: ${songInfo.name} — ${effectiveGate.reason}`)
+                        throw new Error(`汽水 ${effectiveGate.reason}，请改用它源或其他平台播放`)
                       }
                     }
                   }
@@ -11893,6 +11902,7 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
             'musicAccount.kglite.tokenRefreshMaxDays': musicAccount.getKugouLiteTokenRefreshConfig().maxDays,
             subsonicPortConflict: global.lx.subsonicPortConflict || null,
             localMusicIdentifyThreads: global.lx.config['localMusicIdentifyThreads'] ?? 2,
+            'customSource.viaPreviewGuard': global.lx.config['customSource.viaPreviewGuard'] === true,
             'soda.allowPreview': global.lx.config['soda.allowPreview'] === true,
             'soda.previewTtlHours': (() => {
               const raw = global.lx.config['soda.previewTtlHours']
@@ -11944,6 +11954,9 @@ const handleStartServer = async (port = 9527, ip = '0.0.0.0') => await new Promi
               }
               // 本地音乐识别并发线程数（1~4，默认 2），对应上游 #462
               if (newConfig['localMusicIdentifyThreads'] !== undefined) global.lx.config['localMusicIdentifyThreads'] = Math.min(4, Math.max(1, parseInt(newConfig['localMusicIdentifyThreads']) || 2))
+              // [B 修正] via:preview 兜底门禁（默认 false=现状不变）
+              if (newConfig['customSource.viaPreviewGuard'] !== undefined)
+                global.lx.config['customSource.viaPreviewGuard'] = !!newConfig['customSource.viaPreviewGuard']
               // 汽水试听兜底：开关 + 试听缓存 TTL（小时）
               if (newConfig['soda.allowPreview'] !== undefined)
                 global.lx.config['soda.allowPreview'] = !!newConfig['soda.allowPreview']

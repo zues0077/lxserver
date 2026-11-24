@@ -806,6 +806,10 @@ declare namespace LX {
      */
     'customSource.playRank.enabled'?: boolean
     /**
+     * [B 修正] via:preview 强标记兜底门禁：默认 false（现状不变）。
+     */
+    'customSource.viaPreviewGuard'?: boolean
+    /**
      * 汽水版权曲「允许试听」兜底：完整版（账号/脚本/换源）都拿不到时，
      * 允许投放汽水 30/60s 试听片段而不是报失败。默认 false（保持现行为）。
      */

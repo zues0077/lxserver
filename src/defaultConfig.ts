@@ -233,6 +233,10 @@ const config: LX.Config = {
   // 把实测更快的源提到前面。样本不足（<2 次）不动手，从没成功过的垫底。
   'customSource.playRank.enabled': true,
 
+  // [B 修正] via:preview 强标记兜底门禁：ffprobe 探测失败放行时，只要 via 带 :preview 仍按试听
+  // 拦截，避免 60s 试听被当完整版投放。默认 false（现状不变）；正则严格 /:preview/i 不误伤 B站。
+  'customSource.viaPreviewGuard': false,
+
   // ===== 汽水版权曲「允许试听」兜底（2026-11-13 方案定稿）=====
   // 汽水受限曲只有 30/60s 试听时，现状是拦截试听流并换源；换源也找不到完整版就报失败。
   // 开启后：完整版永远优先（账号→脚本→换源），全都没有时才投放试听片段，不再「宁可播不了」。
