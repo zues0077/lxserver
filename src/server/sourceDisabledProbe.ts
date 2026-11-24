@@ -54,7 +54,7 @@ export const DISABLED_PROBE_TASK_ID = 'custom_source_disabled_restore'
 const DISABLED_STATUS_FILE = 'disabled-probe-status.json'
 
 /** 停用原因标签（写在 sources.json 条目的 disableReason 字段） */
-export type DisableReason = 'after-import' | 'probe-dead' | 'manual'
+export type DisableReason = 'after-import' | 'probe-dead' | 'manual' | 'load-failed'
 
 /**
  * 归一化调用方传入的停用原因。
@@ -183,8 +183,11 @@ export async function runDisabledSourceProbe(options: { only?: Array<{ owner: st
         for (const entry of sources) {
             if (!entry || !entry.id) continue
             if (entry.enabled !== false) continue
+            // load-failed（启用失败被回滚的源）也要进探测候选：原来它落进下面的 'manual'
+            // 分支被 continue 跳过，服务端侧就此彻底失去自愈机会。
             const reason: DisableReason = entry.disableReason === 'probe-dead'
-                ? entry.disableReason : 'manual'
+                ? entry.disableReason
+                : (entry.disableReason === 'load-failed' ? 'load-failed' : 'manual')
             // 零成本策略：after-import（灌入后停用）不建状态、不探测 ——
             // 等用户/hunter 显式启用时由 handleToggle 清标签，之后交给主巡检验证。
             // 只有 probe-dead（历史判死态，数量极少）才值得花一次临时 eval 的成本。
