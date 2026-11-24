@@ -10,6 +10,7 @@ import { verifyUser } from './userAuth'
 import { getFlagFor, getIsolationFor, describeIsolationReason, describeGuardReasons, ISOLATION_AUTO_RELEASE_MS } from './sourceGuard'
 import { getThrottle } from './sourceGovernor'
 import { moveScriptToTrash, listTrash, takeFromTrash, purgeTrash, removeTrashCopies } from './sourceTrash'
+import type { DisableReason } from './sourceDisabledProbe'
 import { prioritizeContractIssues, summarizeContractByCode } from './sourceContract'
 
 // 读取请求体
@@ -763,6 +764,10 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
 
         const oldEnabled = target.enabled
         const oldAllowUnsafeVM = !!target.allowUnsafeVM
+        // 回滚要把停用原因标签一起复原，否则启用失败回滚后标签被永久擦除：
+        // hunter 侧 after-import 豁免失效会把它误判成「用户主动停用」并冻结 24h，
+        // lxserver 自己的停用源复检也会把它归一成 manual 而永不重探。
+        const oldDisableReason: DisableReason | undefined = target.disableReason
 
         // 已被护栏隔离的源不会被加载：这里若把 enabled 写成 true，接口照样回 success，
         // 前端还会弹「已启用」，但取链时仍被 shouldSkipSource 拦下 —— 典型的假成功。
@@ -840,6 +845,11 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
                     // 回滚状态
                     target.enabled = oldEnabled
                     target.allowUnsafeVM = oldAllowUnsafeVM
+                    // 保守复原停用原因标签：原本有标签就还原原标签（回到灌入后停用/判死的原状，
+                    // 语义自洽），原本无标签才落 load-failed（新值，让停用源复检能重新探测它）。
+                    // 绝不能无条件写 load-failed —— 那会把用户 manual 的意图覆盖掉，
+                    // 精确制造「用户主动停用被误判成加载失败」的风险。
+                    target.disableReason = oldDisableReason !== undefined ? oldDisableReason : 'load-failed'
                     fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
                     unloadSource(targetOwner, targetId)
                     await reloadSingleSource(targetOwner, targetId)
@@ -874,6 +884,31 @@ export async function handleToggle(req: IncomingMessage, res: ServerResponse) {
                 e.message.includes('初始化超时') ||
                 e.message.includes('timeout')
             ))
+            // 走到这里说明 reloadSingleSource 抛了异常：上面第 824 行已经落过盘
+            // （enabled 已改、启用时 disableReason 已被 delete），这里若不恢复，落库状态就停在
+            // 「enabled=true 但标签没了」的半成品上 —— 标签擦除的第二条路径。
+            // 保守口径与主回滚一致：原本有标签复原原标签；原本无标签且这次是在启用才落
+            // load-failed（停用路径原本就无标签，不能凭空造一个 load-failed）。
+            // 注意：必须在改 target.enabled 之前先记下「这次操作想把它改成什么」，
+            // 否则恢复后 target.enabled 已回到旧值，判断会错位。
+            // 只恢复状态，不改异常语义：仍然 throw e，交给外层 500 分支把错误回给前端。
+            const turningOn = !vmOnly && target.enabled === true
+            target.enabled = oldEnabled
+            target.allowUnsafeVM = oldAllowUnsafeVM
+            if (oldDisableReason !== undefined) {
+                target.disableReason = oldDisableReason
+            } else if (turningOn) {
+                target.disableReason = 'load-failed'
+            } else {
+                // 操作前本就没有标签（例如原本启用、这次是想停用）：完整复原 = 连停用时写下的
+                // manual 一起去掉，否则回滚后凭空多出一个 manual，与操作前状态不符。
+                delete target.disableReason
+            }
+            try {
+                fs.writeFileSync(metaPath, JSON.stringify(sources, null, 2))
+            } catch (writeErr: any) {
+                console.error('[自定义源] 回滚落盘失败:', writeErr && writeErr.message ? writeErr.message : writeErr)
+            }
             if (isRequireUnsafe) {
                 res.writeHead(200, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify({ success: false, requireUnsafe: true, message: '该脚本需要原生 VM 模式运行，可能存在安全风险，是否继续？' }))
