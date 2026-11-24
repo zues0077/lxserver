@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.70
+
+- **汽水试听 via:preview 兜底门禁（线索B）**：新增 `customSource.viaPreviewGuard` 开关（默认关，现状不变）；开启后，ffprobe 探测失败放行时只要 `via` 明确带 `:preview` 仍按试听拦截，避免 60s 试听被当完整版投放。正则严格 `/:preview/i`，不误伤 B站 `audio:q…(试听)`。
+
 ## v1.5.69
 
 - **自定义源灌入 VM 门控修正（Q1）**：上传/导入（upload/import）不再因脚本 `requireUnsafe` 而在灌入阶段拦路；落库 `allowUnsafeVM` 只认管理员显式传入的值，不再由 `requireUnsafe` 自动加白。管理员身份校验、以及启用时的「总闸 + 逐源白名单」双钥匙门保持不变——安全边界从「灌入即放行」收紧为「用时显式授权」。

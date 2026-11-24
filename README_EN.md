@@ -248,12 +248,12 @@ Images are published to **GitHub Packages (GHCR)**. **Every update also gets a v
 | Tag | Meaning |
 | :--- | :--- |
 | `latest` | Latest stable, tracking the `main` branch |
-| `v1.5.69` / `1.5.69` | Current version (matches `version` in `package.json`) — **pin to a concrete version in production** |
+| `v1.5.70` / `1.5.70` | Current version (matches `version` in `package.json`) — **pin to a concrete version in production** |
 | `v*` | Every published version is kept, so you can roll back at any time |
 
 ```bash
 # Pin a version (recommended)
-docker pull ghcr.io/zues0077/lxserver:1.5.69
+docker pull ghcr.io/zues0077/lxserver:1.5.70
 
 # Or follow the latest
 docker pull ghcr.io/zues0077/lxserver:latest
@@ -270,7 +270,7 @@ docker run -d \
   -v $(pwd)/cover_cache:/server/cover_cache \
   --name lx-sync-server \
   --restart unless-stopped \
-  ghcr.io/zues0077/lxserver:1.5.69
+  ghcr.io/zues0077/lxserver:1.5.70
 ```
 
 > ⚠️ **Do not omit `--restart`**: the panel's "Restart Service" (`POST /api/restart`) works by terminating the
@@ -307,7 +307,7 @@ Create a `docker-compose.yml` file:
 ```yaml
 services:
   lx-sync-server:
-    image: ghcr.io/zues0077/lxserver:1.5.69   # or :latest
+    image: ghcr.io/zues0077/lxserver:1.5.70   # or :latest
     container_name: lx-sync-server
     restart: unless-stopped      # don't omit: the panel's "Restart Service" needs it to bring the process back
     ports:
