@@ -234,8 +234,8 @@ const config: LX.Config = {
   'customSource.playRank.enabled': true,
 
   // [B 修正] via:preview 强标记兜底门禁：ffprobe 探测失败放行时，只要 via 带 :preview 仍按试听
-  // 拦截，避免 60s 试听被当完整版投放。默认 false（现状不变）；正则严格 /:preview/i 不误伤 B站。
-  'customSource.viaPreviewGuard': false,
+  // 拦截，避免 60s 试听被当完整版投放。默认开启（与 allowPreview 配套，试听兜底必须垫底）；正则严格 /:preview/i 不误伤 B站。
+  'customSource.viaPreviewGuard': true,
 
   // ===== 汽水版权曲「允许试听」兜底（2026-11-13 方案定稿）=====
   // 汽水受限曲只有 30/60s 试听时，现状是拦截试听流并换源；换源也找不到完整版就报失败。
